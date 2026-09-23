@@ -1,0 +1,33 @@
+{
+  "contract_version": "research-framework-boundary-v2",
+  "forbidden_import_prefixes": [
+    "research_pipeline.project_extensions",
+    "research_pipeline.research_packages",
+    "research_pipeline.retirement_migration",
+    "project_extensions",
+    "research_packages",
+    "retirement_migration"
+  ],
+  "forbidden_tokens": [
+    "e004",
+    "c4_ag2406_frozen_window",
+    "derived_causal_plan",
+    "next_calendar_month_last_session"
+  ],
+  "scan_paths": ["."],
+  "exclude_paths": ["catalog/default_lock"],
+  "structural_rules": {
+    "graph_loader_calls": ["_load_graph_plan", "load_graph_plan", "load_operator_graph_plan"],
+    "sibling_node_lookup_calls": ["_node", "find_node", "require_node"],
+    "fixed_identity_fields": ["package_id", "research_id", "result_id", "reference_id"],
+    "project_stage_agnostic_calls": ["require_futures_d0_receipt"]
+  },
+  "structural_exemptions": [
+    {
+      "path": "application/grid_data.py",
+      "rules": ["business_full_admitted_plan_access"],
+      "reason": "列式物化调度节点执行完整已准入请求集，并生成全体请求的正式证据"
+    }
+  ],
+  "exemptions": []
+}

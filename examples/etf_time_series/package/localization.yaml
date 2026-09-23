@@ -1,0 +1,8 @@
+decisions:
+  - decision_id: synthetic_etf_scope
+    original_assumption: 真实 ETF 行情和市场规则可以直接用于公开快速入门
+    local_market: cn_etf
+    local_adaptation: 使用两只虚构基金，只验证单标的时间序列 warm-up、PIT 信号和项目扩展边界
+    evidence_source_ids: [quantwitness_synthetic_etf]
+    status: proxy
+    claim_effect: downgrade_to_research_observation

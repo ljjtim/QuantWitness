@@ -1,0 +1,37 @@
+{
+  "contract_version": "research-dependency-distribution-lock-v1",
+  "platform": "windows",
+  "python_cache_tag": "cpython-310",
+  "distributions": [
+    {
+      "name": "pandas",
+      "version": "2.3.1",
+      "distribution_digest": "52325aeab3c396937b10cbcd95ec1ad9a6cfeee80d77ffa89734f96c6a97dbaf"
+    },
+    {
+      "name": "numpy",
+      "version": "2.2.6",
+      "distribution_digest": "c0dfebe1b5b8fd369305ae627b9fcaaba8c686e94c77310c236d3a8c20e8eeed"
+    },
+    {
+      "name": "duckdb",
+      "version": "1.5.5",
+      "distribution_digest": "474b594c4fb1d1526d16a8d4b6068d8b364101cdc385bceb1803d3a2d42549d2"
+    },
+    {
+      "name": "PyYAML",
+      "version": "6.0.3",
+      "distribution_digest": "d8dd9d6a48776e5ba2655ef2f142254f616525c9c66d24626b3ebd7176e0805a"
+    },
+    {
+      "name": "psutil",
+      "version": "7.0.0",
+      "distribution_digest": "fc48f9650d82ec68e95f33058fe0e99994d1ac0b22e295caa6dddd3b2001dcb0"
+    },
+    {
+      "name": "pyarrow",
+      "version": "21.0.0",
+      "distribution_digest": "5d3a0ac921947eae4afc39db2e729bb3f66355fd8b6471e9363152978c27764d"
+    }
+  ]
+}

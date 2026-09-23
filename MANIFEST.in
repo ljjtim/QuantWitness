@@ -1,0 +1,14 @@
+include LICENSE
+include MANIFEST.in
+include NOTICE
+include README.md
+include pyproject.toml
+recursive-include src *.json *.py *.yaml
+prune .github
+prune docs
+prune examples
+prune project_extensions
+prune release
+prune scripts
+prune tests
+prune tools

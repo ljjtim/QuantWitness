@@ -1,0 +1,59 @@
+{
+  "schema_version": "minute-reference-inventory-v3",
+  "observed_at": "2026-08-27T00:00:00+08:00",
+  "range_inventory_sha256": "bf45069407494a58ab6eac462a589ad0378b06370467aafd8bd05d84cf0e357e",
+  "database_read_only": true,
+  "database_stat_unchanged": true,
+  "source_contract_evidence": [
+    {
+      "path": "jq_collector_v2/collectors/api_tables.py",
+      "sha256": "d28fc3b87dae6caa041a43ebcb9cfe8482e1819997ac5c98d043e12b4e38fdc5",
+      "facts": {
+        "min1_stock": {"fq": "raw", "fields": ["open", "close", "high", "low", "volume", "money", "avg"]},
+        "min1_fund": {"fq": "raw", "fields": ["open", "close", "high", "low", "volume", "money", "avg"]},
+        "min1_index": {"fq": "raw", "fields": ["open", "close", "high", "low", "volume", "money", "avg"]},
+        "min1_futures": {"fq": "raw", "fields": ["open", "close", "high", "low", "volume", "money", "open_interest"]}
+      }
+    },
+    {
+      "path": "tools/price_adjustment_views.py",
+      "sha256": "a77c95585beff4c5aa3db194490ef535b845db9a26a54e67c9c2c1ab8b42b701",
+      "facts": {
+        "min1_stock_forward_adjusted": "dynamic_full_history_scale",
+        "min1_stock_backward_adjusted": "dynamic_latest_factor_anchor"
+      }
+    },
+    {
+      "path": "jq_collector_v2/schema_utils.py",
+      "sha256": "94dd6e920c6f44073b3129a29681ec72898ed4c8cf9360a63920cc2d5c6fd414",
+      "facts": {
+        "minute_primary_key": ["code", "dt"],
+        "futures_extra_field": "open_interest"
+      }
+    }
+  ],
+  "physical_schema_revisions": {
+    "min1_stock": "081cbdfc9da7bc9510a11b426c4f7f2ddfc36d9b782f425e2fc9a285f37e57d6",
+    "min1_stock_forward_adjusted": "667a7ffb5bdcfc76fd9e5d9eecda6dd3308af62eadf5fadccf52cdc8589f1671",
+    "min1_stock_backward_adjusted": "ce29dccc76fc4114fcd0f90323d1919dd9fb42ba89b32255ee963f2ace2d57a1",
+    "min1_fund": "d1e4062120333f26c9f0e7924bf18dab465c6ce03fcb156a69e21bac6f2f6ec8",
+    "min1_index": "8976be8236f20d84b5ece63afcfeff503e233e3ce85e06c82270cfeded2a9cce",
+    "min1_futures": "7e086f50f3718e21bb2240544a139f3db13971654eb7aeeb1381bdee30647666"
+  },
+  "timestamp_contract": {
+    "storage": "naive_local_wall_clock",
+    "timezone": "Asia/Shanghai",
+    "role": "completed_bar_end"
+  },
+  "source_admission": {
+    "cn_equity.minute_bar": "raw_collected_completed_bar_pit_eligible",
+    "cn_fund.minute_bar": "raw_collected_completed_bar_pit_eligible",
+    "cn_index.minute_bar": "raw_benchmark_only",
+    "cn_futures.minute_bar": "raw_actual_contract"
+  },
+  "quality_findings": {
+    "futures_avg": "recent_partition_all_null_requires_quality_gate",
+    "futures_open_interest": "nullable_requires_quality_gate"
+  },
+  "claim_ceiling": "source_semantics_observation"
+}

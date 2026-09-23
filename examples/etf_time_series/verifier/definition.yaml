@@ -1,0 +1,8 @@
+project_id: quantwitness-etf-time-series
+verifier_id: etf-time-series-check
+metric_id: project.quantwitness.etf_time_series.signal_return
+artifact_type: project.quantwitness.etf-time-series.v1
+metric_schema_id: project.quantwitness.etf-time-series.metrics.v1
+observation_schema_id: project.quantwitness.etf-time-series.observations.v1
+unit: decimal_return
+direction: higher_is_better

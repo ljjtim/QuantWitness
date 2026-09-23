@@ -1,0 +1,130 @@
+{
+  "bundle_id": "futures-session-close-policies-v2",
+  "source_artifact_ref": "release/reference-policy-sources/jqdata-futures-trade-time-20260905.json",
+  "source_acquired_at": "2026-09-05T10:45:44+08:00",
+  "supplier_semantics": "supplier_replication_not_exchange_proof",
+  "calendar_bindings": [
+    {
+      "session_policy_id": "session.cn_futures.daily-close.ag.v1",
+      "session_policy_revision": 1,
+      "calendar_bundle_ref": "research_pipeline.domain.session_policies/minute_reference_sessions.v4.json",
+      "calendar_bundle_hash": "ae4be8044e5c8bfdc07aed7d7a8b19d1066ea0eb1038e777b1b6f76fb439bac2",
+      "calendar_policy_id": "session.cn_futures.minute.v1",
+      "calendar_policy_revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "timezone": "Asia/Shanghai",
+      "trading_dates": [
+        "2024-01-03",
+        "2024-01-04"
+      ]
+    }
+  ],
+  "catalog_policy_bindings": [
+    {
+      "availability_policy_id": "available.futures.daily.session-close.v1",
+      "session_policy_id": "session.cn_futures.daily-close.ag.v1",
+      "session_policy_revision": 1
+    },
+    {
+      "availability_policy_id": "available.futures.session_close.v1",
+      "session_policy_id": "session.cn_futures.daily-close.ag.v1",
+      "session_policy_revision": 1
+    }
+  ],
+  "policies": [
+    {
+      "policy_id": "session.cn_futures.daily-close.ag.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "AG2406.XSGE",
+        "asset_class": "cn_future",
+        "instrument_class": "future_contract",
+        "exchange": "XSGE",
+        "product_class": "silver",
+        "role": "tradable",
+        "metadata_hash": "e8e186fc0cd0ec0df5b21244bdcb251574f8af0cdff74c5425b1b86fbed50cd5",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2023-06-16",
+      "effective_to": "2024-06-17",
+      "trading_dates": [
+        "2024-01-03",
+        "2024-01-04"
+      ],
+      "segments": [
+        {
+          "segment_id": "night",
+          "start_day_offset": -1,
+          "start_time": "21:00:00",
+          "end_day_offset": 0,
+          "end_time": "02:30:00",
+          "phase": "night",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": -1,
+          "bucket_anchor_time": "21:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_morning_1",
+          "start_day_offset": 0,
+          "start_time": "09:00:00",
+          "end_day_offset": 0,
+          "end_time": "10:15:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_morning_2",
+          "start_day_offset": 0,
+          "start_time": "10:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "10:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:30:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.futures_calendar_store.v1",
+          "content_hash": "265410d81d848a7c05c1534ec42eb580e3dae7b782ed55c2aa09f5ab00507d5c"
+        },
+        {
+          "source_id": "jqdata.futures_trade_time.20260905",
+          "content_hash": "e41c96b3f6fb32c16ffa0c88f15ff996e2bb1b98d25f0b149d030bc409825d04"
+        },
+        {
+          "source_id": "jqdata.futures_trade_time_guide.v1",
+          "content_hash": "08db948126301bf605b801ed34c6e6d544264e0484c1ed1082da80012a1d6dd5"
+        },
+        {
+          "source_id": "minute.reference.session.bundle.v4",
+          "content_hash": "ae4be8044e5c8bfdc07aed7d7a8b19d1066ea0eb1038e777b1b6f76fb439bac2"
+        }
+      ],
+      "auction_bar_policy": "not_in_reference_scope",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    }
+  ],
+  "contract_version": "futures-session-close-bundle-v2",
+  "bundle_hash": "9ce81277b9d4b62e7a1404d134d031e75e378fb87007b034900e9c7117bb21e4"
+}

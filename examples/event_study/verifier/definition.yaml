@@ -1,0 +1,8 @@
+project_id: quantwitness-event-study
+verifier_id: event-study-check
+metric_id: project.quantwitness.event_study.mean_window_return
+artifact_type: project.quantwitness.event-study.v1
+metric_schema_id: project.quantwitness.event-study.metrics.v1
+observation_schema_id: project.quantwitness.event-study.observations.v1
+unit: decimal_return
+direction: neutral

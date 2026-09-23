@@ -1,0 +1,13 @@
+# 复制为 .github/CODEOWNERS 时，将占位符替换为仓库所有者账号。
+/src/research_pipeline/ @__QUANTWITNESS_OWNER__
+/src/factor_contracts/ @__QUANTWITNESS_OWNER__
+/release/framework-boundary/ @__QUANTWITNESS_OWNER__
+/tests/test_framework_intrusion_gate.py @__QUANTWITNESS_OWNER__
+/tests/test_mainline_architecture_boundary.py @__QUANTWITNESS_OWNER__
+/tools/release_allowlist.py @__QUANTWITNESS_OWNER__
+/tools/public_source_inventory.py @__QUANTWITNESS_OWNER__
+/.github/workflows/ @__QUANTWITNESS_OWNER__
+/.github/CODEOWNERS @__QUANTWITNESS_OWNER__
+/pyproject.toml @__QUANTWITNESS_OWNER__
+/LICENSE @__QUANTWITNESS_OWNER__
+/NOTICE @__QUANTWITNESS_OWNER__

@@ -1,0 +1,21 @@
+contract_version: project-operator-declaration-v2
+project_id: quantwitness-event-study
+project_artifact_types: [project.quantwitness.event-study.v1]
+operator:
+  contract_version: research-operator-contract-v1
+  operator_id: project.quantwitness.event-study
+  operator_version: 1.0.0
+  input_ports: [{port: data, artifact_type: data.columnar-bundle.v1}]
+  output_ports: [{port: result, artifact_type: project.quantwitness.event-study.v1}]
+  parameters:
+    - {name: data_request_id, value_type: string, required: true, allowed_values: []}
+    - {name: fixed_clock, value_type: string, required: true, allowed_values: []}
+    - {name: minimum_gap_days, value_type: integer, required: true, allowed_values: []}
+  strategy_roles: []
+  resource_profile: {memory_bytes: 268435456, cpu_slots: 1, temp_bytes: 67108864, wall_seconds: 60}
+  determinism_mode: deterministic
+  seed_policy: none
+  pit_capabilities: [pit.as_of.v1]
+entry: {module: operator, function: run}
+dependency_lock: {pyarrow: 21.0.0}
+permissions: {artifact_write_scope: output_only}

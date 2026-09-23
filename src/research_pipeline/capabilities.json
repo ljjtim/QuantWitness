@@ -1,0 +1,370 @@
+{
+  "contract_version": "research-capability-manifest-v1",
+  "states": {
+    "planned": "已有明确方案，但当前命令面尚不能把它作为可用能力执行。",
+    "local_only": "已有实现和本地测试或本地验收，但没有覆盖当前能力边界的独立发布验收。",
+    "sealed": "实现、命令和独立验收记录闭合，可在记录声明的输入与信任边界内使用。"
+  },
+  "capabilities": [
+    {
+      "id": "catalog.lock",
+      "state": "local_only",
+      "commands": [
+        "catalog"
+      ],
+      "required_inputs": [
+        "Catalog 定义与审批",
+        "显式只读数据源",
+        "profile 与 environment"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/catalog/compiler.py::compile_catalog",
+        "research_pipeline/src/research_pipeline/cli/parser.py::_add_catalog"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_catalog_cli.py::test_catalog_cli_end_to_end_is_read_only_and_deterministic"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "Catalog 编译、锁定和漂移检查由显式来源文件驱动；公开仓库不附带个人 Catalog 或独立发布验收记录。"
+    },
+    {
+      "id": "research_package.plan",
+      "state": "local_only",
+      "commands": [
+        "package lint",
+        "package admit"
+      ],
+      "required_inputs": [
+        "ResearchPackage",
+        "lint 可选 Catalog Lock",
+        "admit 必须提供 Catalog Lock、显式只读数据源、固定时钟与 seed"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/packages/compilation.py::compile_research_package",
+        "research_pipeline/src/research_pipeline/packages/lint.py::build_lint_report",
+        "research_pipeline/src/research_pipeline/cli/commands/research_plan.py::admit_package"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_mainline_research_package.py::test_package_init_load_compile_is_immutable_and_deterministic",
+        "research_pipeline/tests/test_cli_mainline.py::test_package_lint_reports_single_current_admission_command",
+        "research_pipeline/tests/test_zero_to_result_workflow.py::test_package_admit_observes_drift_from_explicit_read_only_database",
+        "research_pipeline/tests/test_session_close_temporal.py::test_admission_records_each_selected_policy_and_coverage",
+        "research_pipeline/tests/test_mainline_architecture_boundary.py::test_package_modules_have_no_ast_import_cycle"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "ResearchPackage 只能声明受控合同，不接受自由 SQL、动态模块或项目 runner。lint 一次返回声明、算子、指标、结果和准入缺口；admit 从显式只读数据源生成漂移/PIT 闭包并在发布/加载时校验准入事实。"
+    },
+    {
+      "id": "runtime.recovery",
+      "state": "local_only",
+      "commands": [
+        "resume",
+        "retry-node",
+        "inspect",
+        "rerun-from"
+      ],
+      "required_inputs": [
+        "首次 run 保存并绑定的当前 invocation",
+        "计划内已准入的核心与项目算子闭包",
+        "显式 run root"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/data_plane/verification_lifecycle.py::RunScopedArtifactVerification",
+        "research_pipeline/src/research_pipeline/application/grid_data.py::_materialize_or_load_data",
+        "research_pipeline/src/research_pipeline/runtime/recovery.py::plan_resume",
+        "research_pipeline/src/research_pipeline/cli/parser.py::_add_runtime"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_artifact_verification_lifecycle.py::test_new_run_revalidates_and_rejects_changed_content",
+        "research_pipeline/tests/test_request_level_recovery.py::test_resume_after_third_request_failure_does_not_rescan_first_two",
+        "research_pipeline/tests/test_runtime_operator_dag.py::test_operator_dag_resume_reconciles_committed_running_attempt",
+        "research_pipeline/tests/test_runtime_operator_dag.py::test_formal_rerun_imports_verified_upstream_into_independent_child"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "resume、retry-node、inspect 和 rerun-from 只消费当前 invocation、计划内算子闭包和已验证 checkpoint；同一次 execute 复用 Supervisor 已冻结的工件验证结果，新的 resume 进程、rerun child 或新 run 必须重新完整验证。多请求 data 节点另以 run 内 partial index 逐项复验已提交 DatasetArtifactRef，只重做失效 request；partial 不进入正式输出。身份变化必须重新 admit 并新建 run。该边界仍为 local_only。"
+    },
+    {
+      "id": "evidence.consume",
+      "state": "local_only",
+      "commands": [
+        "verify",
+        "report",
+        "export-result",
+        "compare"
+      ],
+      "required_inputs": [
+        "结构化 VerificationResult",
+        "自包含 ResultStore"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/evidence/verification_result.py::load_verified_result_context",
+        "research_pipeline/src/research_pipeline/evidence/verification_result.py::compare_verification_results",
+        "research_pipeline/src/research_pipeline/packages/delivery.py::compare_research_package_results",
+        "research_pipeline/src/research_pipeline/cli/parser.py::_add_evidence"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_generic_lifecycle.py::test_verification_result_survives_run_root_removal",
+        "research_pipeline/tests/test_cli_mainline.py::test_structured_cli_consumers_work_without_run_root",
+        "research_pipeline/tests/test_verification_result_comparison.py::test_different_plans_with_same_metric_contract_are_comparable",
+        "research_pipeline/tests/test_cli_mainline.py::test_package_compare_delegates_once_to_delivery_and_reports_package_scope"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "verify 直接从自包含 Result 生成结构化 VerificationResult；report、compare、export-result 和 Dashboard 只消费 VerificationResult 与 ResultStore，不依赖 run-root。直接 compare 只比较已验证指标事实并明示未检查 package 合同；package compare 由 delivery 唯一检查 metric/claim 合同。不同 plan 只作说明，口径不一致时整次拒绝且不输出部分 delta。export-result 仅复制并复核已验证 Result，不重新执行研究。该合同尚未通过独立发布验收，因此保持 local_only。"
+    },
+    {
+      "id": "evidence.validity_recompute",
+      "state": "local_only",
+      "commands": [
+        "verify"
+      ],
+      "required_inputs": [
+        "ResultBundle 中闭合的 canonical 六表、TCA 四表、policy 与 lineage",
+        "显式自包含 ResultStore",
+        "当前真实 ETF 与 AG2406 有界窗口验收收据"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/evidence/result_financial_oracle.py::verify_result_financial_oracle",
+        "research_pipeline/src/research_pipeline/results/artifact_reader.py::ExternalArtifactReader"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_result_financial_oracle.py",
+        "research_pipeline/tests/financial_oracle_probe.py",
+        "research_pipeline/tests/test_package_dependency_scc.py",
+        "research_pipeline/release/financial-validity-real-acceptance/acceptance.json"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "当前主链已在四只真实 ETF 和 AG2406 冻结窗口生成 research-result-v2、canonical 六表与 Bar TCA 四表，并由独立 verifier 复算通过；金融 oracle v5 使用有界 Arrow 批次和可使用临时盘的 DuckDB 扫描，固定 586,133,815 字节 Result 已在全新进程内完成验证，单行错误与资源不足均明确失败。该能力只到 local_only，只证明模拟账本内部一致和费用口径可追溯，不代表策略盈利、实盘成交或可交易性。"
+    },
+    {
+      "id": "operator_graph.generic_run",
+      "state": "local_only",
+      "commands": [
+        "run",
+        "resume",
+        "retry-node",
+        "inspect"
+      ],
+      "required_inputs": [
+        "operator_graph_plan_v1 计划",
+        "通过加载校验的不可变计划",
+        "绑定的只读数据库快照",
+        "显式输出目录、时钟与 seed",
+        "恢复时使用首次 run 保存并哈希绑定的 invocation",
+        "verify 使用自包含 ResultStore 生成结构化 VerificationResult"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/packages/operator_graph.py::compile_operator_graph_package",
+        "research_pipeline/src/research_pipeline/runtime/execution_service.py::RuntimeExecutionService",
+        "research_pipeline/src/research_pipeline/data_plane/verification_lifecycle.py::RunScopedArtifactVerification",
+        "research_pipeline/src/research_pipeline/runtime/external_artifact.py::ExternalArtifactCommit",
+        "research_pipeline/src/research_pipeline/results/assembler.py::ResultAssembler",
+        "research_pipeline/src/research_pipeline/evidence/verification_result.py::verify_result",
+        "research_pipeline/src/research_pipeline/cli/research_plan_store.py::load_operator_graph_research_plan"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_artifact_verification_lifecycle.py::test_same_run_validates_each_artifact_content_once",
+        "research_pipeline/tests/test_artifact_verification_lifecycle.py::test_two_real_project_workers_share_supervisor_validation_without_rehash",
+        "research_pipeline/tests/test_generic_run_admission.py::test_first_generic_run_without_project_fixture",
+        "research_pipeline/tests/test_runtime_operator_dag.py::test_operator_dag_failure_retry_resume_and_external_artifact",
+        "research_pipeline/tests/test_runtime_shadow_equivalence.py::test_generic_shadow_is_exact_within_financial_tolerances",
+        "research_pipeline/tests/test_result_bundle.py::test_result_survives_run_root_deletion_and_reads_each_parquet_once",
+        "research_pipeline/tests/test_cli_mainline.py::test_structured_cli_consumers_work_without_run_root"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "正式 run 由 Runtime v2 调度，节点返回按端口索引的 typed refs，checkpoint 绑定全部端口；成功后唯一 finalize 自包含 Result，再由独立 verify 生成 VerificationResult。该边界尚缺独立发布验收，因此仍是 local_only。"
+    },
+    {
+      "id": "research.walk_forward_model",
+      "state": "local_only",
+      "commands": [
+        "package admit",
+        "run"
+      ],
+      "required_inputs": [
+        "日频 Feature/Label 正式工件与真实标签区间",
+        "冻结的时间日历、Walk-forward 窗口、embargo、SearchManifest 与 root seed",
+        "锁定 holdout 的研究身份、选择身份、依赖版本和一次性访问账本"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/runtime/walk_forward_model_execution.py::execute_model_selection_artifact",
+        "research_pipeline/src/research_pipeline/research/modeling/walk_forward.py::evaluate_locked_holdout",
+        "research_pipeline/src/research_pipeline/runtime/walk_forward_model_execution.py::execute_model_split_artifact",
+        "research_pipeline/src/research_pipeline/runtime/walk_forward_model_execution.py::execute_model_locked_holdout_artifact"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_walk_forward_model_mainline.py::test_model_split_rejects_mixed_label_row_group_before_target_scan",
+        "research_pipeline/tests/test_walk_forward_model_mainline.py::test_same_input_and_seed_produce_identical_predictions_and_hashes",
+        "research_pipeline/tests/test_walk_forward_model_mainline.py::test_locked_holdout_is_reserved_once_and_cannot_be_reused",
+        "research_pipeline/tests/test_walk_forward_model_mainline.py::test_model_split_adapter_verifies_label_before_starting_split"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "公共模型七阶段保留 purge/embargo、fold 内预处理、validation 选模、test 与唯一候选 locked holdout；输入 Feature/Label 必须由当前研究包提供。split 先检查 Label row group 与时间可见性，再读取开发目标；holdout 打开后失败仍消耗访问资格。本地验证不代表真实策略、可交易性或已发布模型结论。"
+    },
+    {
+      "id": "minute_line.complete",
+      "state": "local_only",
+      "commands": [
+        "run"
+      ],
+      "required_inputs": [
+        "四资产 1m Catalog 合同",
+        "分钟 session 与市场规则快照",
+        "PIT 复权快照",
+        "冻结 scope revision 5",
+        "适用资产的 PIT 复权快照、完整历史交易规则与正式仿真账本"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/data_plane/minute_scan.py::build_minute_scan_plan",
+        "research_pipeline/src/research_pipeline/data_plane/minute_resampling.py::execute_minute_resample",
+        "research_pipeline/src/research_pipeline/research/minute_operators.py::build_intraday_features",
+        "research_pipeline/src/research_pipeline/simulation/minute_execution.py::run_minute_event_simulation",
+        "research_pipeline/src/research_pipeline/research/statistics/minute_profile.py::build_minute_statistics_artifact",
+        "research_pipeline/src/research_pipeline/evidence/minute_validity.py::recompute_minute_validity_issues"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_and_intervals",
+        "research_pipeline/tests/test_minute_cli_contract.py::test_all_modes_parse_seed_workers_and_bind_them_to_identity",
+        "research_pipeline/tests/test_minute_event_simulation.py::test_futures_same_session_round_trip_keeps_terminal_position_snapshot",
+        "research_pipeline/tests/test_result_financial_oracle.py::test_futures_minute_context_recomputes_settlement_and_margin",
+        "research_pipeline/release/minute-reference-acceptance/real-data-smoke.md"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "股票 raw 分钟已完成 2012-12 至 2023-05 全样本正式 run；ETF/指数和期货 raw 分钟也完成 Scope revision 5 有界只读闭环。股票与 ETF 的 PIT 复权快照已闭合；510300 ETF 和 AG2406 均已在冻结窗口按历史规则生成公共六表与 Bar TCA 四表，并通过独立 verify、report、export-result。AG2406 正式结果含 65 个目标、32 笔开平成交；固定信号在两日收盘前均回到空仓，因此真实 Result 的结算事件为空，非零持仓逐日结算由独立最小 fixture/oracle 验收。该能力只提升为有界本地 `local_only`，不代表全历史、全品种、Tick/LOB、供应商历史版本精确重放或实盘可交易。"
+    },
+    {
+      "id": "minute_line.real_data_smoke",
+      "state": "local_only",
+      "commands": [
+        "run"
+      ],
+      "required_inputs": [
+        "Scope revision 5 冻结的股票、ETF、指数和期货 raw completed-bar 分钟当前快照",
+        "指数仅作非交易 diagnostic，交易资产不在规则不足时进入仿真",
+        "自包含 ResultStore 与通过的 VerificationResult",
+        "结论上限固定为 research_observation"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/data_plane/minute_scan.py::build_minute_scan_plan",
+        "research_pipeline/src/research_pipeline/data_plane/minute_resampling.py::execute_minute_resample",
+        "research_pipeline/src/research_pipeline/evidence/verification_result.py::verify_result"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_and_intervals",
+        "research_pipeline/tests/test_minute_runtime_adapters.py::test_formal_minute_observation_chain_publishes_result_metric",
+        "research_pipeline/release/minute-reference-acceptance/real-data-smoke.md"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "股票 raw 分钟当前快照已完成 2012-12 至 2023-05 全样本正式 run；ETF/指数 7/7 节点、期货 6/6 节点的有界只读观察也已形成自包含 Result，并通过独立 VerificationResult、report 与 export-result。该状态只证明本机四资产 raw 分钟观察路径，不覆盖 PIT 复权、供应商历史版本精确重放或分钟交易仿真。"
+    },
+    {
+      "id": "simulation.bar_tca",
+      "state": "local_only",
+      "commands": [
+        "package admit",
+        "run"
+      ],
+      "required_inputs": [
+        "正式 Simulation 的 orders、fills/trades 与 ledger 身份",
+        "决策时可见的价格基准、正式费用与规则快照",
+        "流动性归因只有在容量当时可见时才可计算",
+        "缺少逐笔正式 fill 的分钟结果必须失败关闭",
+        "正式结果必须进入唯一 Result 与 VerificationResult"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/simulation/bar_tca.py::run_bar_tca",
+        "research_pipeline/src/research_pipeline/simulation/minute_execution.py::run_minute_event_simulation",
+        "research_pipeline/src/research_pipeline/runtime/bar_tca_adapter.py::execute_simulation_result_bar_tca"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_bar_tca.py::test_tca_attributes_each_formal_fill_without_generating_another_fill",
+        "research_pipeline/tests/test_bar_tca.py::test_artifact_and_independent_oracle_bind_formal_fill_set",
+        "research_pipeline/tests/test_simulation_result_contract.py::test_tca_consumes_only_canonical_orders_fills_and_visible_benchmark",
+        "research_pipeline/tools/bar_tca_oracle.py"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "Bar TCA 只读取统一 SimulationResult 的正式 orders/fills 和账本身份，不按股票、ETF 或期货模拟器分支，也不生成第二套成交。510300 ETF 与 AG2406 分钟路径均逐笔绑定决策基准、已完成执行 bar、可见容量和正式 fill，独立 oracle 可重建实现差额并检查正式 fill 集合；缺少这些事实、逐日规则或决策时可见价格参考时仍失败关闭。能力保持 local_only，不得作为已发布 TCA、可交易性或实盘成本证据。"
+    },
+    {
+      "id": "capability.discovery",
+      "state": "local_only",
+      "commands": [
+        "capabilities --format json",
+        "operator list/describe/scaffold/validate/build",
+        "artifact describe",
+        "recipe list/describe/scaffold",
+        "catalog dataset/field search",
+        "package lint"
+      ],
+      "required_inputs": [
+        "本清单",
+        "OperatorDefinition 与 Recipe registry",
+        "Catalog Lock（可省略时使用内置默认 Lock）",
+        "package lint 使用的 ResearchPackage"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/operations/capabilities.py::load_capability_manifest",
+        "research_pipeline/src/research_pipeline/cli/discovery.py::_payload",
+        "research_pipeline/src/research_pipeline/operations/ai_gate.py::score_gate_ia_trials",
+        "research_pipeline/src/research_pipeline/cli/commands/machine_discovery.py::execute"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_capability_discovery.py::test_capabilities_json_is_exact_manifest_projection",
+        "research_pipeline/tests/test_capability_discovery.py::test_planned_capability_is_discoverable_but_not_selectable",
+        "research_pipeline/tests/test_ai_discovery_cli.py::test_gate_ia_three_public_cli_trials_pass_without_internal_ids",
+        "research_pipeline/tests/test_executable_recipes.py::test_public_recipe_inventory_is_empty_until_formal_promotion",
+        "research_pipeline/tests/test_executable_recipes.py::test_removed_project_recipe_cannot_be_described_or_scaffolded",
+        "research_pipeline/tests/test_project_operator_scaffold.py::test_scaffold_round_trips_validate_build_and_refuses_overwrite",
+        "research_pipeline/tests/test_project_operator_scaffold.py::test_scaffold_bundle_enters_package_lint_and_admit",
+        "research_pipeline/tests/test_project_causal_service.py::test_runtime_causal_node_uses_real_snapshot_and_bounded_key_batches"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "capabilities 命令逐字段读取本清单；operator、artifact、catalog 和 package lint 的发现结果来自正式 registry、schema、Catalog Lock 或 package compiler。当前没有获准的公共 recipe，使用 package init 创建通用起点；项目完整拓扑由 ResearchPackage 声明。operator scaffold 生成可验证的最小项目算子；正式 Feature/Label 需必填 causal_plan，且来源必须可由已准入请求证明。validate/build 只复验显式源码闭包，不扫描目录或自动安装。"
+    },
+    {
+      "id": "resource.governance",
+      "state": "local_only",
+      "commands": [
+        "run --resource-state-dir"
+      ],
+      "required_inputs": [
+        "仓库外的显式资源状态目录",
+        "memory、CPU、scratch/temp 与 process slots 总额度",
+        "显式 FIFO timeout 与 stale heartbeat 时限",
+        "数据节点至少 256 MiB 的已校准 provider 进程包络",
+        "项目 Worker 和完整矩阵消费者的节点总资源预算"
+      ],
+      "implementation_anchors": [
+        "research_pipeline/src/research_pipeline/data_plane/execution_budget.py::build_provider_execution_plan",
+        "research_pipeline/src/research_pipeline/runtime/project_table_input.py::ProjectTableInput",
+        "research_pipeline/src/research_pipeline/runtime/resource_governor.py::ResourceGovernor",
+        "research_pipeline/src/research_pipeline/runtime/execution_service.py::RuntimeExecutionService",
+        "research_pipeline/src/research_pipeline/runtime/project_table_input.py::ProjectTableInput"
+      ],
+      "verification_anchors": [
+        "research_pipeline/tests/test_data_plane_execution_budget.py::test_provider_budget_is_not_reported_as_total_runtime_bound",
+        "research_pipeline/tests/test_data_plane_execution_budget.py::test_fresh_process_real_duckdb_queries_stay_within_approved_process_tree_envelope",
+        "research_pipeline/tests/test_data_plane_execution_admission.py::test_unsupported_query_shape_is_rejected_before_provider_scan",
+        "research_pipeline/tests/test_partitioned_consumer_memory.py::test_full_matrix_consumer_rejects_before_materialization",
+        "research_pipeline/tests/test_runtime_operator_dag.py::test_worker_count_uses_only_shared_runtime_capacity",
+        "research_pipeline/tests/test_resource_governor.py::test_cross_process_fifo_and_no_oversell",
+        "research_pipeline/tests/test_resource_governor.py::test_parent_child_conservation_and_idempotent_release",
+        "research_pipeline/tests/test_resource_governor.py::test_calibration_19_20_and_49_50_boundaries_use_real_success_only",
+        "research_pipeline/tests/test_resource_governor.py::test_runtime_uses_parent_lease_records_actual_and_releases_on_failure"
+      ],
+      "evidence_level": "local_acceptance",
+      "trust_level": "local_only",
+      "notes": "数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。合成探针不进入正式运行校准总体。"
+    }
+  ]
+}

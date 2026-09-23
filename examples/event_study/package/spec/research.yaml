@@ -1,0 +1,40 @@
+contract_version: research-operator-graph-package-v2
+research_id: quantwitness.event_study
+reproduction: {study_proof_required: false}
+as_of: '2024-01-08'
+root_seed: 1703
+fixed_clock: '2024-01-09T00:00:00+08:00'
+requests:
+  - request_id: synthetic_event_records
+    dataset_id: quantwitness.synthetic_event_records
+    dataset_version: 1
+    field_ids: [fld_qw_event_row_id, fld_qw_event_time, fld_qw_event_kind, fld_qw_event_id, fld_qw_event_instrument, fld_qw_event_day, fld_qw_event_revision, fld_qw_event_decision_at, fld_qw_event_surprise, fld_qw_event_session, fld_qw_event_close, fld_qw_event_available_at]
+    purpose: feature
+    time_range: {start: '2024-01-03', end: '2024-01-05'}
+    universe: {instruments: [SYN.A, SYN.B], snapshot_id: null}
+    filters: []
+    sort:
+      - {field_id: fld_qw_event_time, descending: false}
+      - {field_id: fld_qw_event_kind, descending: false}
+      - {field_id: fld_qw_event_instrument, descending: false}
+      - {field_id: fld_qw_event_row_id, descending: false}
+    budget: {max_rows: 32, max_bytes: 1048576, batch_size: 32}
+    adjustment: unadjusted
+    limit: 32
+result:
+  contract_version: research-result-spec-v1
+  tables:
+    - {table_id: event_study_metric, role: primary, source_node_id: project_analysis, source_port: result, artifact_type: project.quantwitness.event-study.v1, schema_id: project.quantwitness.event-study.metrics.v1, path_prefix: result/metrics}
+    - {table_id: event_study_observations, role: diagnostic, source_node_id: project_analysis, source_port: result, artifact_type: project.quantwitness.event-study.v1, schema_id: project.quantwitness.event-study.observations.v1, path_prefix: result/observations}
+graph:
+  contract_version: research-operator-graph-recipe-v1
+  graph_id: quantwitness.event_study
+  nodes:
+    - {node_id: data_plane, operator_id: data.columnar.materialize, operator_version: 1.0.0, inputs: [], parameters: {}, strategies: []}
+    - node_id: project_analysis
+      operator_id: project.quantwitness.event-study
+      operator_version: 1.0.0
+      inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}]
+      parameters: {data_request_id: synthetic_event_records, fixed_clock: '2024-01-09T00:00:00+08:00', minimum_gap_days: 2}
+      strategies: []
+    - {node_id: validity, operator_id: research.validity.data-observation, operator_version: 1.0.0, inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}], parameters: {}, strategies: []}

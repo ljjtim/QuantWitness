@@ -1,0 +1,24 @@
+contract_version: project-operator-declaration-v2
+project_id: quantwitness-equity-cross-section
+project_artifact_types: [project.quantwitness.equity-cross-section.v1]
+operator:
+  contract_version: research-operator-contract-v1
+  operator_id: project.quantwitness.equity-cross-section
+  operator_version: 1.0.0
+  input_ports:
+    - {port: data, artifact_type: data.columnar-bundle.v1}
+  output_ports:
+    - {port: result, artifact_type: project.quantwitness.equity-cross-section.v1}
+  parameters:
+    - {name: data_request_id, value_type: string, required: true, allowed_values: []}
+    - {name: decision_at, value_type: string, required: true, allowed_values: []}
+    - {name: observation_sessions, value_type: string_list, required: true, allowed_values: []}
+    - {name: outcome_session, value_type: string, required: true, allowed_values: []}
+  strategy_roles: []
+  resource_profile: {memory_bytes: 268435456, cpu_slots: 1, temp_bytes: 67108864, wall_seconds: 60}
+  determinism_mode: deterministic
+  seed_policy: none
+  pit_capabilities: [pit.as_of.v1]
+entry: {module: operator, function: run}
+dependency_lock: {pyarrow: 21.0.0}
+permissions: {artifact_write_scope: output_only}

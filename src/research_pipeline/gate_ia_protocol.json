@@ -1,0 +1,55 @@
+{
+  "contract_version": "research-gate-ia-protocol-v1",
+  "protocol_id": "gate-i-a.machine-discovery.foundation.v1",
+  "model_id": "deterministic.discovery-agent.v1",
+  "initial_prompt": "仅使用公开文档和 JSON CLI，确认当前公共 recipe 状态，初始化一个中性 ResearchPackage 草稿，发现字段，执行一次 lint 获取当前阻断字段并修复一次未知 ID。不得读取源码；初始提示不提供任何内部 operator、recipe、artifact 或 field ID。",
+  "visible_materials": [
+    "docs/getting-started.md",
+    "capabilities --format json",
+    "公开 CLI --help",
+    "调用方提供的持久 Catalog Lock",
+    "调用方提供的新 ResearchPackage 目录"
+  ],
+  "allowed_command_prefixes": [
+    "capabilities --format json",
+    "operator list --format json",
+    "operator describe",
+    "artifact describe",
+    "recipe list --format json",
+    "package init",
+    "catalog dataset search",
+    "catalog field search",
+    "package lint"
+  ],
+  "forbidden_command_fragments": [
+    "research_pipeline/src",
+    "research_pipeline\\src",
+    "research_pipeline/tests",
+    "research_pipeline\\tests",
+    ".py",
+    "rg ",
+    "grep ",
+    "Get-Content",
+    "cat "
+  ],
+  "budget": {
+    "max_turns": 16,
+    "max_wall_seconds": 120,
+    "max_output_tokens": 50000,
+    "max_human_help_events": 0
+  },
+  "required_events": [
+    "recipe_inventory_checked",
+    "no_public_recipe_observed",
+    "field_discovered",
+    "package_initialized",
+    "package_draft_diagnosed",
+    "missing_requirements_explained",
+    "unknown_id_repaired"
+  ],
+  "acceptance": {
+    "minimum_trials": 3,
+    "minimum_success_rate": 1.0,
+    "minimum_mean_step_score": 1.0
+  }
+}

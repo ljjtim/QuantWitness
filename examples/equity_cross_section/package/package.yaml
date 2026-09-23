@@ -1,0 +1,13 @@
+package_slug: quantwitness_equity_cross_section
+display_name: QuantWitness 合成股票横截面
+package_version: 1.0.0
+builder_id: operator_graph_plan_v1
+metric_contract:
+  contract_id: quantwitness_equity_cross_section_metrics
+  version: 1.0.0
+  metrics: [project.quantwitness.equity_cross_section.spread@1.0.0]
+  semantics:
+    project.quantwitness.equity_cross_section.spread@1.0.0: 决策时点冻结排序后，最高与最低信号证券的下一交易日收益差
+claim_contract:
+  allowed_claim_levels: [research_observation]
+  max_claim_level: research_observation

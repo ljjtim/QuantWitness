@@ -1,0 +1,241 @@
+"""walk-forward 模型阶段算子定义。"""
+
+from __future__ import annotations
+
+from research_pipeline.extensions import OperatorDefinition, ParameterType
+
+from ..operator_definition_factory import (
+    _GIB,
+    _choice_parameter,
+    _definition,
+    _parameter,
+    _walk_forward_model_parameters,
+)
+
+
+def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
+    return (
+        _definition(
+            "research.model.split-manifest",
+            "research.model.split-manifest.v1",
+            inputs=(
+                ("features", "research.feature-set.v1"),
+                ("labels", "research.label.v1"),
+            ),
+            outputs=(("splits", "research.model-split-manifest.v1"),),
+            parameters=(
+                _parameter("horizon_sessions", ParameterType.INTEGER),
+                _parameter("target_field", ParameterType.STRING),
+                _parameter("holdout_start", ParameterType.STRING),
+                _parameter("calendar_sessions", ParameterType.STRING_LIST),
+                _parameter("train_sessions", ParameterType.INTEGER),
+                _parameter("validation_sessions", ParameterType.INTEGER),
+                _parameter("test_sessions", ParameterType.INTEGER),
+                _parameter("step_sessions", ParameterType.INTEGER),
+                _parameter("embargo_sessions", ParameterType.INTEGER),
+                _parameter("expanding", ParameterType.BOOLEAN),
+            ),
+            resource_profile={
+                "memory_bytes": 4 * _GIB,
+                "cpu_slots": 2,
+                "temp_bytes": 8 * _GIB,
+                "wall_seconds": 7_200,
+            },
+            code_fingerprint="purged-walk-forward-split-manifest-v1",
+            capability="research.model-split-manifest.v1",
+            module_name="research_pipeline.runtime.walk_forward_model_execution",
+            symbol_name="execute_model_split_artifact",
+            implementation_scope="core",
+            dependency_modules=(
+                "research_pipeline.research.modeling.walk_forward",
+                "research_pipeline.research.validation.splits",
+            ),
+            partition_keys=("fold_id",),
+        ),
+        _definition(
+            "research.model.preprocess-fit",
+            "research.model.preprocess-fit.v1",
+            inputs=(("splits", "research.model-split-manifest.v1"),),
+            outputs=(("preprocessed", "research.model-preprocessed-folds.v1"),),
+            parameters=(
+                _choice_parameter(
+                    "preprocessing",
+                    ParameterType.STRING,
+                    ("median_standardize_v1", "median_only_v1"),
+                ),
+                _parameter("feature_selection_k", ParameterType.INTEGER),
+                _parameter("research_identity_hash", ParameterType.STRING),
+            ),
+            resource_profile={
+                "memory_bytes": 4 * _GIB,
+                "cpu_slots": 2,
+                "temp_bytes": 8 * _GIB,
+                "wall_seconds": 7_200,
+            },
+            code_fingerprint="fold-local-preprocessor-fit-scope-v1",
+            capability="research.model-preprocessed-folds.v1",
+            module_name="research_pipeline.runtime.walk_forward_model_execution",
+            symbol_name="execute_model_preprocess_artifact",
+            implementation_scope="core",
+            dependency_modules=("research_pipeline.research.modeling.walk_forward",),
+            partition_keys=("fold_id",),
+            seeded=True,
+            cache_compatibility_mode="numerical",
+        ),
+        _definition(
+            "research.model.fit",
+            "research.model.fit.v1",
+            inputs=(("preprocessed", "research.model-preprocessed-folds.v1"),),
+            outputs=(("models", "research.model-fits.v1"),),
+            parameters=_walk_forward_model_parameters(),
+            resource_profile={
+                "memory_bytes": 8 * _GIB,
+                "cpu_slots": 1,
+                "temp_bytes": 8 * _GIB,
+                "wall_seconds": 14_400,
+            },
+            code_fingerprint="static-linear-model-fit-v1",
+            capability="research.model-fits.v1",
+            module_name="research_pipeline.runtime.walk_forward_model_execution",
+            symbol_name="execute_model_fit_artifact",
+            implementation_scope="core",
+            dependency_modules=("research_pipeline.research.modeling.walk_forward",),
+            partition_keys=("candidate_id", "fold_id"),
+            seeded=True,
+            cache_compatibility_mode="numerical",
+        ),
+        _definition(
+            "research.model.predict",
+            "research.model.predict.v1",
+            inputs=(
+                ("preprocessed", "research.model-preprocessed-folds.v1"),
+                ("models", "research.model-fits.v1"),
+            ),
+            outputs=(("predictions", "research.model-validation-predictions.v1"),),
+            parameters=(),
+            resource_profile={
+                "memory_bytes": 4 * _GIB,
+                "cpu_slots": 1,
+                "temp_bytes": 4 * _GIB,
+                "wall_seconds": 7_200,
+            },
+            code_fingerprint="static-model-validation-predict-v1",
+            capability="research.model-validation-predictions.v1",
+            module_name="research_pipeline.runtime.walk_forward_model_execution",
+            symbol_name="execute_model_predict_artifact",
+            implementation_scope="core",
+            dependency_modules=("research_pipeline.research.modeling.walk_forward",),
+            partition_keys=("candidate_id", "fold_id"),
+            cache_compatibility_mode="numerical",
+        ),
+        _definition(
+            "research.model.fold-metrics",
+            "research.model.fold-metrics.v1",
+            inputs=(
+                ("predictions", "research.model-validation-predictions.v1"),
+                ("models", "research.model-fits.v1"),
+            ),
+            outputs=(("metrics", "research.model-fold-metrics.v1"),),
+            parameters=(
+                _choice_parameter(
+                    "target_kind",
+                    ParameterType.STRING,
+                    ("regression", "classification"),
+                ),
+                _choice_parameter(
+                    "objective",
+                    ParameterType.STRING,
+                    ("neg_mean_squared_error", "neg_mean_absolute_error", "accuracy"),
+                ),
+            ),
+            resource_profile={
+                "memory_bytes": 2 * _GIB,
+                "cpu_slots": 1,
+                "temp_bytes": 2 * _GIB,
+                "wall_seconds": 3_600,
+            },
+            code_fingerprint="validation-only-fold-metrics-v1",
+            capability="research.model-fold-metrics.v1",
+            module_name="research_pipeline.runtime.walk_forward_model_execution",
+            symbol_name="execute_model_fold_metrics_artifact",
+            implementation_scope="core",
+            dependency_modules=("research_pipeline.research.validation.trial_ledger",),
+            partition_keys=("candidate_id", "fold_id"),
+            cache_compatibility_mode="numerical",
+        ),
+        _definition(
+            "research.model.selection",
+            "research.model.selection.v1",
+            inputs=(
+                ("metrics", "research.model-fold-metrics.v1"),
+                ("preprocessed", "research.model-preprocessed-folds.v1"),
+                ("models", "research.model-fits.v1"),
+            ),
+            outputs=(("selection", "research.model-selection.v1"),),
+            parameters=(
+                _choice_parameter(
+                    "target_kind",
+                    ParameterType.STRING,
+                    ("regression", "classification"),
+                ),
+                _choice_parameter(
+                    "objective",
+                    ParameterType.STRING,
+                    ("neg_mean_squared_error", "neg_mean_absolute_error", "accuracy"),
+                ),
+                _choice_parameter(
+                    "direction", ParameterType.STRING, ("maximize", "minimize")
+                ),
+            ),
+            resource_profile={
+                "memory_bytes": 2 * _GIB,
+                "cpu_slots": 1,
+                "temp_bytes": 2 * _GIB,
+                "wall_seconds": 3_600,
+            },
+            code_fingerprint="validation-only-selection-then-test-v1",
+            capability="research.model-selection.v1",
+            module_name="research_pipeline.runtime.walk_forward_model_execution",
+            symbol_name="execute_model_selection_artifact",
+            implementation_scope="core",
+            dependency_modules=("research_pipeline.research.validation.selection",),
+            cache_compatibility_mode="numerical",
+        ),
+        _definition(
+            "research.model.locked-holdout",
+            "research.model.locked-holdout.v1",
+            inputs=(
+                ("features", "research.feature-set.v1"),
+                ("labels", "research.label.v1"),
+                ("selection", "research.model-selection.v1"),
+                ("splits", "research.model-split-manifest.v1"),
+            ),
+            outputs=(("holdout", "research.model-locked-holdout.v1"),),
+            parameters=_walk_forward_model_parameters()
+            + (
+                _parameter("package_hash", ParameterType.STRING),
+                _parameter("implementation_hash", ParameterType.STRING),
+                _parameter("holdout_actor", ParameterType.STRING),
+                _parameter("holdout_reason", ParameterType.STRING),
+                _parameter("holdout_unlock_at", ParameterType.STRING),
+                _parameter("fixed_clock", ParameterType.STRING),
+            ),
+            resource_profile={
+                "memory_bytes": 8 * _GIB,
+                "cpu_slots": 1,
+                "temp_bytes": 8 * _GIB,
+                "wall_seconds": 14_400,
+            },
+            code_fingerprint="single-access-locked-holdout-v1",
+            capability="research.model-locked-holdout.v1",
+            module_name="research_pipeline.runtime.walk_forward_model_execution",
+            symbol_name="execute_model_locked_holdout_artifact",
+            implementation_scope="core",
+            dependency_modules=(
+                "research_pipeline.research.modeling.walk_forward",
+                "research_pipeline.research.validation.holdout",
+            ),
+            seeded=True,
+            cache_compatibility_mode="numerical",
+        ),
+    )

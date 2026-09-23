@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantwitness"
+version = "1.0.0"
+description = "PIT-safe quantitative research orchestration with independently verifiable results"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+  "pandas",
+  "numpy",
+  "duckdb",
+  "PyYAML",
+  "psutil",
+  "pyarrow>=14",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8,<9",
+  "setuptools>=68",
+  "build>=1,<2",
+  "wheel>=0.45,<1",
+  "tomli>=2; python_version < '3.11'",
+]
+dev = [
+  "pytest>=8,<9",
+  "setuptools>=68",
+  "build>=1,<2",
+  "wheel>=0.45,<1",
+  "ruff>=0.12,<1",
+  "tomli>=2; python_version < '3.11'",
+]
+ml = ["scikit-learn"]
+ml-lightgbm = ["lightgbm"]
+
+[project.scripts]
+quantwitness = "research_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"research_pipeline" = ["capabilities.json", "gate_ia_protocol.json"]
+"research_pipeline.packages" = [
+  "templates/*.yaml",
+  "templates/sources/*.yaml",
+  "templates/spec/*.yaml",
+]
+"research_pipeline.platform" = ["minute_capabilities/*.json"]
+"research_pipeline.domain" = [
+  "session_policies/*.json",
+  "rule_snapshots/minute_reference_rules.json",
+]
+"research_pipeline.evidence" = ["result_dispositions.v1.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "duckdb: 需要 DuckDB 运行时或 DuckDB fixture 的测试",
+  "external_factor: 需要 monorepo 中 factor_calc 的外部集成边界测试",
+  "archive_acceptance: 只复核历史 release/验收材料的归档测试",
+]

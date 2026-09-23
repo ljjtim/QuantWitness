@@ -1,0 +1,13 @@
+package_slug: quantwitness_futures_term_structure
+display_name: QuantWitness 合成期货期限结构
+package_version: 1.0.0
+builder_id: operator_graph_plan_v1
+metric_contract:
+  contract_id: quantwitness_futures_term_structure_metrics
+  version: 1.0.0
+  metrics: [project.quantwitness.futures_term_structure.annualized_slope@1.0.0]
+  semantics:
+    project.quantwitness.futures_term_structure.annualized_slope@1.0.0: 决策时点已可见且满足期限和流动性条件的近端两个合约年化价差斜率
+claim_contract:
+  allowed_claim_levels: [research_observation]
+  max_claim_level: research_observation
