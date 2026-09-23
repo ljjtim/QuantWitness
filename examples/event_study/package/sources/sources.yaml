@@ -1,0 +1,11 @@
+sources:
+  - source_id: quantwitness_synthetic_events
+    source_type: dataset
+    title: QuantWitness 确定性合成公告与行情数据
+    url: https://github.com/quantwitness/quantwitness
+    accessed_at: '2026-09-22'
+    content_hash: ad74b5259ef15377b79888c86f0eb71b938e89eca6cd65ae3ad8ab770111522b
+    license_id: Apache-2.0
+    status: available
+    limitation: 正文是同目录 synthetic.py；首次公开前远端仓库地址尚未生效
+    provenance: {mode: citation_only, content_digest: null, media_type: null, snapshot_artifact_id: null, snapshot_manifest_hash: null, importer_id: null, imported_at: null, contract_version: research-source-provenance-v1}

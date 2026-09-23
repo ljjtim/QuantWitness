@@ -1,0 +1,19 @@
+{
+  "contract_version": "research-result-disposition-registry-v1",
+  "dispositions": [
+    {
+      "result_id": "eacb22cc90155fb57733cd47d9a2f30edb8e6a4f116daf6ffb7cc9ddd39587d1",
+      "action": "rerun_required",
+      "reason": "该 Result 的分组成员变动率漏算新增和退出证券；旧指标必须撤回并在修复后重跑。IC、分组收益和覆盖率不因这一项错误自动失效，但当前正式消费者不能从同一 Result 中排除错误指标。",
+      "claim_ceiling": "research_observation",
+      "affected_metrics": [
+        "membership_turnover"
+      ],
+      "blocked_consumers": [
+        "compare",
+        "export",
+        "report"
+      ]
+    }
+  ]
+}

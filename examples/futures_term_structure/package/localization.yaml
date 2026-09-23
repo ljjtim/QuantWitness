@@ -1,0 +1,8 @@
+decisions:
+  - decision_id: synthetic_futures_scope
+    original_assumption: 真实期货合约和结算规则可以直接用于公开快速入门
+    local_market: cn_future
+    local_adaptation: 使用虚构合约、显式到期日和结算价可见时间，只验证合约选择与期限结构项目边界
+    evidence_source_ids: [quantwitness_synthetic_futures]
+    status: proxy
+    claim_effect: downgrade_to_research_observation

@@ -1,0 +1,8 @@
+decisions:
+  - decision_id: synthetic_equity_scope
+    original_assumption: 真实股票截面可以直接用于公开快速入门
+    local_market: cn_stock
+    local_adaptation: 使用四只虚构证券和确定性价格，只验证横截面组织、PIT 排序与项目扩展边界
+    evidence_source_ids: [quantwitness_synthetic_equity]
+    status: proxy
+    claim_effect: downgrade_to_research_observation

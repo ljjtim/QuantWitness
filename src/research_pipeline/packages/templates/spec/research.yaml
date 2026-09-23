@@ -1,0 +1,14 @@
+# 研究身份、数据请求、结果表和算子图由项目明确填写。
+contract_version: research-operator-graph-package-v2
+research_id: null
+as_of: null
+root_seed: null
+fixed_clock: null
+requests: []
+result:
+  contract_version: research-result-spec-v1
+  tables: []
+graph:
+  contract_version: research-operator-graph-recipe-v1
+  graph_id: null
+  nodes: []

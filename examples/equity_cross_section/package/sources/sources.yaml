@@ -1,0 +1,19 @@
+sources:
+  - source_id: quantwitness_synthetic_equity
+    source_type: dataset
+    title: QuantWitness 确定性合成股票横截面数据
+    url: https://github.com/quantwitness/quantwitness
+    accessed_at: '2026-09-22'
+    content_hash: 0054ed9d96a12a91f56a52e2efb4d05747a142a23866c7faf73adafff9213bd5
+    license_id: Apache-2.0
+    status: available
+    limitation: 正文是同目录 synthetic.py；首次公开前远端仓库地址尚未生效
+    provenance:
+      mode: citation_only
+      content_digest: null
+      media_type: null
+      snapshot_artifact_id: null
+      snapshot_manifest_hash: null
+      importer_id: null
+      imported_at: null
+      contract_version: research-source-provenance-v1

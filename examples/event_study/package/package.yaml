@@ -1,0 +1,13 @@
+package_slug: quantwitness_event_study
+display_name: QuantWitness 合成公告事件研究
+package_version: 1.0.0
+builder_id: operator_graph_plan_v1
+metric_contract:
+  contract_id: quantwitness_event_study_metrics
+  version: 1.0.0
+  metrics: [project.quantwitness.event_study.mean_window_return@1.0.0]
+  semantics:
+    project.quantwitness.event_study.mean_window_return@1.0.0: 当时可见版本且通过重叠控制的事件，其下一交易日窗口收益均值
+claim_contract:
+  allowed_claim_levels: [research_observation]
+  max_claim_level: research_observation

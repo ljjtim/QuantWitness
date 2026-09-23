@@ -1,0 +1,8 @@
+decisions:
+  - decision_id: synthetic_event_scope
+    original_assumption: 真实公告及其历史修订可以直接用于公开快速入门
+    local_market: cn_stock
+    local_adaptation: 使用虚构公告、显式首次可见时间和确定性行情，只验证事件版本、重叠控制与 PIT 窗口
+    evidence_source_ids: [quantwitness_synthetic_events]
+    status: proxy
+    claim_effect: downgrade_to_research_observation

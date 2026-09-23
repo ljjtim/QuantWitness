@@ -1,0 +1,373 @@
+{
+  "manifest_id": "minute.capability.cn_market",
+  "revision": 1,
+  "previous_manifest_hash": null,
+  "inventory_evidence_hash": "0e35e70b0ffe0e755573ed5f91737ffc3c929861d9017782f315c249d30494d1",
+  "required_consumers": [
+    "catalog.minute.contracts",
+    "domain.minute.market_rule_snapshots",
+    "domain.minute.session_calendar",
+    "reference.minute.acceptance"
+  ],
+  "required_asset_classes": [
+    "cn_etf",
+    "cn_future",
+    "cn_index",
+    "cn_stock"
+  ],
+  "coverages": [
+    {
+      "coverage_id": "cn_etf.510300_xshg.raw",
+      "instrument": {
+        "instrument_id": "510300.XSHG",
+        "asset_class": "cn_etf",
+        "asset_subtype": "etf",
+        "dataset_id": "cn_fund.minute_bar",
+        "role": "tradable",
+        "adjustment_mode": "raw",
+        "observation": {
+          "dataset_id": "cn_fund.minute_bar",
+          "instrument_id": "510300.XSHG",
+          "start_at": "2024-01-02T09:31:00+08:00",
+          "end_at": "2024-01-05T15:01:00+08:00",
+          "trading_date_start": "2024-01-02",
+          "trading_date_end": "2024-01-05",
+          "observed_row_count": 960,
+          "bars_per_trading_date": [
+            {
+              "trading_date": "2024-01-02",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-03",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-04",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-05",
+              "count": 240
+            }
+          ],
+          "observed_features": [
+            "day_session",
+            "dual_dataset_timestamp_alignment",
+            "midday_break",
+            "no_duplicate_timestamp"
+          ]
+        },
+        "source_adjustment_mode": "raw",
+        "source_usage": "pit_eligible",
+        "source_semantics_version": "minute-source-semantics-v1"
+      },
+      "required_intervals": [
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "60m",
+        "120m"
+      ],
+      "session_features": [
+        "day_session",
+        "dual_dataset_alignment",
+        "midday_break",
+        "segment_anchored_resampling"
+      ],
+      "adjustment_requirement": "pit_raw_only_v1",
+      "required_rule_ids": [
+        "rule.cn_fund.adjustment_factor_snapshot.v1",
+        "rule.cn_fund.instrument_lifecycle.v1",
+        "rule.cn_fund.lot_size.v1",
+        "rule.cn_fund.price_limit.v1",
+        "rule.cn_fund.session.v1",
+        "rule.cn_fund.settlement.v1",
+        "rule.cn_fund.suspension.v1",
+        "rule.cn_fund.trading_fee.v1"
+      ],
+      "quality_expectations": [
+        "expect.dual_dataset_timestamp_alignment.v1",
+        "expect.fund_source_raw.v1",
+        "expect.index_non_tradable.v1",
+        "expect.index_source_raw.v1",
+        "expect.no_duplicate_timestamp.v1",
+        "expect.no_midday_break_bar.v1",
+        "expect.ohlc_money_volume_avg_present.v1",
+        "expect.raw_bar_only.v1"
+      ],
+      "claim_ceiling": "research_observation",
+      "unsupported_boundaries": [
+        "unsupported.adjusted_signal_without_pit_factor",
+        "unsupported.index_execution",
+        "unsupported.level2",
+        "unsupported.realtime",
+        "unsupported.tick"
+      ],
+      "selection_reason": "按同一四日窗口中 ETF 与指数 960 个时间戳完全对齐、指数仅作基准且 ETF 为实际可交易标的选择；未读取价格收益、标签、策略结果或显著性。物理来源审计确认基金为直接采集 raw，在 completed bar、当前 Catalog、实际 schema 和读取身份闭合后允许研究使用；指数仍只作 raw benchmark。"
+    },
+    {
+      "coverage_id": "cn_future.ag2406_xsge.raw",
+      "instrument": {
+        "instrument_id": "AG2406.XSGE",
+        "asset_class": "cn_future",
+        "asset_subtype": "future_contract",
+        "dataset_id": "cn_futures.minute_bar",
+        "role": "tradable",
+        "adjustment_mode": "raw",
+        "observation": {
+          "dataset_id": "cn_futures.minute_bar",
+          "instrument_id": "AG2406.XSGE",
+          "start_at": "2024-01-02T21:01:00+08:00",
+          "end_at": "2024-01-04T15:01:00+08:00",
+          "trading_date_start": "2024-01-03",
+          "trading_date_end": "2024-01-04",
+          "observed_row_count": 1110,
+          "bars_per_trading_date": [
+            {
+              "trading_date": "2024-01-03",
+              "count": 555
+            },
+            {
+              "trading_date": "2024-01-04",
+              "count": 555
+            }
+          ],
+          "observed_features": [
+            "day_session",
+            "night_cross_midnight",
+            "night_previous_calendar_day",
+            "no_duplicate_timestamp",
+            "open_interest_present"
+          ]
+        },
+        "source_adjustment_mode": "raw",
+        "source_usage": "pit_eligible",
+        "source_semantics_version": "minute-source-semantics-v1"
+      },
+      "required_intervals": [
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "60m",
+        "120m"
+      ],
+      "session_features": [
+        "day_breaks",
+        "day_session",
+        "explicit_trading_date",
+        "night_cross_midnight",
+        "night_previous_calendar_day",
+        "segment_anchored_resampling"
+      ],
+      "adjustment_requirement": "pit_raw_only_v1",
+      "required_rule_ids": [
+        "rule.cn_futures.actual_contract_mapping.v1",
+        "rule.cn_futures.contract_lifecycle.v1",
+        "rule.cn_futures.contract_multiplier.v1",
+        "rule.cn_futures.delivery_expiry.v1",
+        "rule.cn_futures.fee_schedule.v1",
+        "rule.cn_futures.margin.v1",
+        "rule.cn_futures.price_limit.v1",
+        "rule.cn_futures.price_tick.v1",
+        "rule.cn_futures.session.v1",
+        "rule.cn_futures.settlement.v1"
+      ],
+      "quality_expectations": [
+        "expect.actual_contract_not_continuous_alias.v1",
+        "expect.futures_source_raw.v1",
+        "expect.no_duplicate_timestamp.v1",
+        "expect.ohlc_money_volume_avg_present.v1",
+        "expect.open_interest_present.v1",
+        "expect.raw_bar_only.v1",
+        "expect.silver_555_completed_bars_per_trading_date.v1"
+      ],
+      "claim_ceiling": "research_observation",
+      "unsupported_boundaries": [
+        "unsupported.continuous_contract_execution",
+        "unsupported.current_rule_historical_backfill",
+        "unsupported.future_dominant_contract_mapping",
+        "unsupported.intraday_rule_without_available_time",
+        "unsupported.realtime",
+        "unsupported.tick"
+      ],
+      "selection_reason": "按实际白银合约、前一自然日夜盘、跨午夜至 02:30、日盘分段、两个完整交易日和 open_interest 覆盖选择；未读取价格收益、成交量排名、标签、策略结果或显著性。"
+    },
+    {
+      "coverage_id": "cn_index.000300_xshg.raw",
+      "instrument": {
+        "instrument_id": "000300.XSHG",
+        "asset_class": "cn_index",
+        "asset_subtype": "index",
+        "dataset_id": "cn_index.minute_bar",
+        "role": "benchmark",
+        "adjustment_mode": "raw",
+        "observation": {
+          "dataset_id": "cn_index.minute_bar",
+          "instrument_id": "000300.XSHG",
+          "start_at": "2024-01-02T09:31:00+08:00",
+          "end_at": "2024-01-05T15:01:00+08:00",
+          "trading_date_start": "2024-01-02",
+          "trading_date_end": "2024-01-05",
+          "observed_row_count": 960,
+          "bars_per_trading_date": [
+            {
+              "trading_date": "2024-01-02",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-03",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-04",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-05",
+              "count": 240
+            }
+          ],
+          "observed_features": [
+            "day_session",
+            "dual_dataset_timestamp_alignment",
+            "midday_break",
+            "no_duplicate_timestamp"
+          ]
+        },
+        "source_adjustment_mode": "raw",
+        "source_usage": "pit_eligible",
+        "source_semantics_version": "minute-source-semantics-v1"
+      },
+      "required_intervals": [
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "60m",
+        "120m"
+      ],
+      "session_features": [
+        "day_session",
+        "dual_dataset_alignment",
+        "midday_break",
+        "segment_anchored_resampling"
+      ],
+      "adjustment_requirement": "pit_raw_only_v1",
+      "required_rule_ids": [
+        "rule.cn_index.non_tradable.v1",
+        "rule.cn_index.session.v1"
+      ],
+      "quality_expectations": [
+        "expect.dual_dataset_timestamp_alignment.v1",
+        "expect.fund_source_raw.v1",
+        "expect.index_non_tradable.v1",
+        "expect.index_source_raw.v1",
+        "expect.no_duplicate_timestamp.v1",
+        "expect.no_midday_break_bar.v1",
+        "expect.ohlc_money_volume_avg_present.v1",
+        "expect.raw_bar_only.v1"
+      ],
+      "claim_ceiling": "research_observation",
+      "unsupported_boundaries": [
+        "unsupported.adjusted_signal_without_pit_factor",
+        "unsupported.index_execution",
+        "unsupported.level2",
+        "unsupported.realtime",
+        "unsupported.tick"
+      ],
+      "selection_reason": "按同一四日窗口中 ETF 与指数 960 个时间戳完全对齐、指数仅作基准且 ETF 为实际可交易标的选择；未读取价格收益、标签、策略结果或显著性。物理来源审计确认基金为直接采集 raw，在 completed bar、当前 Catalog、实际 schema 和读取身份闭合后允许研究使用；指数仍只作 raw benchmark。"
+    },
+    {
+      "coverage_id": "cn_stock.000001_xshe.raw",
+      "instrument": {
+        "instrument_id": "000001.XSHE",
+        "asset_class": "cn_stock",
+        "asset_subtype": "stock",
+        "dataset_id": "cn_equity.minute_bar",
+        "role": "tradable",
+        "adjustment_mode": "raw",
+        "observation": {
+          "dataset_id": "cn_equity.minute_bar",
+          "instrument_id": "000001.XSHE",
+          "start_at": "2024-01-02T09:31:00+08:00",
+          "end_at": "2024-01-05T15:01:00+08:00",
+          "trading_date_start": "2024-01-02",
+          "trading_date_end": "2024-01-05",
+          "observed_row_count": 960,
+          "bars_per_trading_date": [
+            {
+              "trading_date": "2024-01-02",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-03",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-04",
+              "count": 240
+            },
+            {
+              "trading_date": "2024-01-05",
+              "count": 240
+            }
+          ],
+          "observed_features": [
+            "day_session",
+            "midday_break",
+            "no_duplicate_timestamp"
+          ]
+        },
+        "source_adjustment_mode": "raw",
+        "source_usage": "pit_eligible",
+        "source_semantics_version": "minute-source-semantics-v1"
+      },
+      "required_intervals": [
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "60m",
+        "120m"
+      ],
+      "session_features": [
+        "day_session",
+        "midday_break",
+        "segment_anchored_resampling"
+      ],
+      "adjustment_requirement": "pit_raw_only_v1",
+      "required_rule_ids": [
+        "rule.cn_stock.adjustment_factor_snapshot.v1",
+        "rule.cn_stock.instrument_lifecycle.v1",
+        "rule.cn_stock.lot_size.v1",
+        "rule.cn_stock.price_limit.v1",
+        "rule.cn_stock.session.v1",
+        "rule.cn_stock.settlement.v1",
+        "rule.cn_stock.suspension.v1",
+        "rule.cn_stock.trading_fee.v1"
+      ],
+      "quality_expectations": [
+        "expect.no_duplicate_timestamp.v1",
+        "expect.no_midday_break_bar.v1",
+        "expect.ohlc_money_volume_avg_present.v1",
+        "expect.raw_bar_only.v1",
+        "expect.stock_240_completed_bars_per_day.v1",
+        "expect.stock_source_raw.v1"
+      ],
+      "claim_ceiling": "research_observation",
+      "unsupported_boundaries": [
+        "unsupported.adjusted_signal_without_pit_factor",
+        "unsupported.auction_bar",
+        "unsupported.level2",
+        "unsupported.realtime",
+        "unsupported.tick"
+      ],
+      "selection_reason": "按日间连续竞价、午休边界、四个完整交易日和长期实际股票身份选择；未读取价格收益、标签、策略结果或显著性。当前采集合同确认 min1_stock 为直接采集 raw，正式研究仍受 completed-bar、Catalog 漂移和实际读取内容身份约束。"
+    }
+  ],
+  "contract_version": "minute-capability-manifest-v1",
+  "manifest_hash": "73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033"
+}

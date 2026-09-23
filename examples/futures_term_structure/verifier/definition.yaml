@@ -1,0 +1,8 @@
+project_id: quantwitness-futures-term-structure
+verifier_id: futures-term-structure-check
+metric_id: project.quantwitness.futures_term_structure.annualized_slope
+artifact_type: project.quantwitness.futures-term-structure.v1
+metric_schema_id: project.quantwitness.futures-term-structure.metrics.v1
+observation_schema_id: project.quantwitness.futures-term-structure.observations.v1
+unit: annualized_decimal_slope
+direction: neutral

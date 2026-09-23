@@ -1,0 +1,38 @@
+contract_version: research-operator-graph-package-v2
+research_id: quantwitness.futures_term_structure
+reproduction: {study_proof_required: false}
+as_of: '2024-01-05'
+root_seed: 1704
+fixed_clock: '2024-01-06T00:00:00+08:00'
+requests:
+  - request_id: synthetic_futures_curve
+    dataset_id: quantwitness.synthetic_futures_curve
+    dataset_version: 1
+    field_ids: [fld_qw_fut_observation_day, fld_qw_fut_contract, fld_qw_fut_expiry, fld_qw_fut_settlement, fld_qw_fut_volume, fld_qw_fut_available_at]
+    purpose: feature
+    time_range: {start: '2024-01-04', end: '2024-01-04'}
+    universe: {instruments: [SYN2402, SYN2403, SYN2404], snapshot_id: null}
+    filters: []
+    sort:
+      - {field_id: fld_qw_fut_observation_day, descending: false}
+      - {field_id: fld_qw_fut_contract, descending: false}
+    budget: {max_rows: 8, max_bytes: 1048576, batch_size: 8}
+    adjustment: unadjusted
+    limit: 8
+result:
+  contract_version: research-result-spec-v1
+  tables:
+    - {table_id: futures_term_structure_metric, role: primary, source_node_id: project_analysis, source_port: result, artifact_type: project.quantwitness.futures-term-structure.v1, schema_id: project.quantwitness.futures-term-structure.metrics.v1, path_prefix: result/metrics}
+    - {table_id: futures_term_structure_observations, role: diagnostic, source_node_id: project_analysis, source_port: result, artifact_type: project.quantwitness.futures-term-structure.v1, schema_id: project.quantwitness.futures-term-structure.observations.v1, path_prefix: result/observations}
+graph:
+  contract_version: research-operator-graph-recipe-v1
+  graph_id: quantwitness.futures_term_structure
+  nodes:
+    - {node_id: data_plane, operator_id: data.columnar.materialize, operator_version: 1.0.0, inputs: [], parameters: {}, strategies: []}
+    - node_id: project_analysis
+      operator_id: project.quantwitness.futures-term-structure
+      operator_version: 1.0.0
+      inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}]
+      parameters: {data_request_id: synthetic_futures_curve, decision_at: '2024-01-05T09:00:00+08:00', minimum_days_to_expiry: 20, minimum_volume: 1000}
+      strategies: []
+    - {node_id: validity, operator_id: research.validity.data-observation, operator_version: 1.0.0, inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}], parameters: {}, strategies: []}

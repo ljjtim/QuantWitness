@@ -1,0 +1,13 @@
+# 填写项目身份、正式指标与结论上限后，再运行 package lint。
+package_slug: null
+display_name: null
+package_version: v1
+builder_id: operator_graph_plan_v1
+metric_contract:
+  contract_id: null
+  version: v1
+  metrics: []
+  semantics: {}
+claim_contract:
+  allowed_claim_levels: []
+  max_claim_level: null

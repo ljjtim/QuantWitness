@@ -1,0 +1,829 @@
+{
+  "bundle_id": "minute-reference-market-rules",
+  "sources": [
+    {
+      "source_id": "official.shfe.national_day_risk_notice.2023",
+      "source_kind": "official_citation",
+      "locator": "https://www.shfe.com.cn/publicnotice/notice/202309/t20230922_800810.html",
+      "published_on": "2023-09-22",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    },
+    {
+      "source_id": "official.shfe.new_year_risk_notice.2023",
+      "source_kind": "official_citation",
+      "locator": "https://www.shfe.com.cn/publicnotice/notice/202312/t20231227_801169.html",
+      "published_on": "2023-12-27",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    },
+    {
+      "source_id": "official.shfe.silver_contract.2023",
+      "source_kind": "official_citation",
+      "locator": "https://www.shfe.com.cn/products/futures/metal/ferrousandpreciousmetal/ag_f/standard_ag_f/202312/t20231205_327323.html",
+      "published_on": "2023-03-29",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    },
+    {
+      "source_id": "official.sse.trading_rules.2023",
+      "source_kind": "official_citation",
+      "locator": "https://www.sse.com.cn/lawandrules/sselawsrules2025/repeal/rules/c/c_20250612_10824490.shtml",
+      "published_on": "2023-02-17",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    },
+    {
+      "source_id": "official.szse.trading_rules.2023",
+      "source_kind": "official_citation",
+      "locator": "https://docs.static.szse.cn/www/lawrules/rule/trade/W020230217564423808793.pdf",
+      "published_on": "2023-02-17",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    },
+    {
+      "source_id": "platform.minute.capability.v1",
+      "source_kind": "platform_capability",
+      "locator": "research_pipeline/src/research_pipeline/platform/minute_capabilities/minute_capability_manifest.v1.json#73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033",
+      "published_on": "2026-08-27",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    },
+    {
+      "source_id": "repository.ag2406.minute.reference.evidence.2026-08-28",
+      "source_kind": "repository_evidence",
+      "locator": "docs/minute_rule_provenance.md#ag2406-reference-boundary",
+      "published_on": "2026-08-28",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    },
+    {
+      "source_id": "repository.etf.minute.reference.evidence.2026-08-27",
+      "source_kind": "repository_evidence",
+      "locator": "docs/minute_rule_provenance.md#etf-reference-boundary",
+      "published_on": "2026-08-27",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    },
+    {
+      "source_id": "repository.minute.session_bundle.v1",
+      "source_kind": "repository_snapshot",
+      "locator": "research_pipeline/src/research_pipeline/domain/session_policies/minute_reference_sessions.v4.json#ae4be8044e5c8bfdc07aed7d7a8b19d1066ea0eb1038e777b1b6f76fb439bac2",
+      "published_on": "2026-08-27",
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-rule-source-v1"
+    }
+  ],
+  "instruments": [
+    {
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "instrument_class": "stock",
+      "exchange": "XSHE",
+      "product_class": "a_share",
+      "role": "tradable",
+      "metadata_hash": "0d6fe168e64842d51caf51b54c6d4cc53fe451a49fdc4f6277ce34f2b807717a",
+      "contract_version": "minute-session-instrument-v1"
+    },
+    {
+      "instrument_id": "000300.XSHG",
+      "asset_class": "cn_index",
+      "instrument_class": "index",
+      "exchange": "XSHG",
+      "product_class": "broad_market_index",
+      "role": "benchmark",
+      "metadata_hash": "72035fb4bbb6f7d1ac4ef6ba8163fcab99f28bf90160c0011df52ab953b28f55",
+      "contract_version": "minute-session-instrument-v1"
+    },
+    {
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "instrument_class": "etf",
+      "exchange": "XSHG",
+      "product_class": "exchange_traded_fund",
+      "role": "tradable",
+      "metadata_hash": "ac3e35f36d187575cc02e7fd874f7cac3aff92904ba8c0d86e553389e9f49a01",
+      "contract_version": "minute-session-instrument-v1"
+    },
+    {
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "instrument_class": "future_contract",
+      "exchange": "XSGE",
+      "product_class": "silver",
+      "role": "tradable",
+      "metadata_hash": "e8e186fc0cd0ec0df5b21244bdcb251574f8af0cdff74c5425b1b86fbed50cd5",
+      "contract_version": "minute-session-instrument-v1"
+    }
+  ],
+  "rules": [
+    {
+      "rule_id": "rule.cn_stock.adjustment_factor_snapshot.v1",
+      "revision": 1,
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "status": "unsupported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": null,
+      "source_ids": [
+        "platform.minute.capability.v1"
+      ],
+      "parameters": {},
+      "unsupported_reason": "pit_adjustment_factor_snapshot_not_archived",
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_stock.instrument_lifecycle.v1",
+      "revision": 1,
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "status": "unsupported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": null,
+      "source_ids": [],
+      "parameters": {},
+      "unsupported_reason": "historical_lifecycle_availability_not_proven",
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_stock.lot_size.v1",
+      "revision": 1,
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2023-02-18T00:00:00+08:00",
+      "source_ids": [
+        "official.szse.trading_rules.2023"
+      ],
+      "parameters": {
+        "buy_lot_shares": 100,
+        "sell_remainder_allowed": true
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_stock.price_limit.v1",
+      "revision": 1,
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "status": "unsupported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": null,
+      "source_ids": [],
+      "parameters": {},
+      "unsupported_reason": "daily_limit_value_not_proven_visible_before_minute_decision",
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_stock.session.v1",
+      "revision": 1,
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2024-01-02T09:31:00+08:00",
+      "source_ids": [
+        "platform.minute.capability.v1",
+        "repository.minute.session_bundle.v1"
+      ],
+      "parameters": {
+        "session_policy_id": "session.cn_stock.minute.v1",
+        "session_policy_revision": 1
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_stock.settlement.v1",
+      "revision": 1,
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "status": "unsupported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": null,
+      "source_ids": [],
+      "parameters": {},
+      "unsupported_reason": "settlement_rule_source_not_archived",
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_stock.suspension.v1",
+      "revision": 1,
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "status": "unsupported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": null,
+      "source_ids": [],
+      "parameters": {},
+      "unsupported_reason": "daily_suspension_flag_not_proven_visible_before_minute_decision",
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_stock.trading_fee.v1",
+      "revision": 1,
+      "instrument_id": "000001.XSHE",
+      "asset_class": "cn_stock",
+      "status": "unsupported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": null,
+      "source_ids": [],
+      "parameters": {},
+      "unsupported_reason": "broker_fee_schedule_not_part_of_market_data",
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_index.non_tradable.v1",
+      "revision": 1,
+      "instrument_id": "000300.XSHG",
+      "asset_class": "cn_index",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2024-01-02T09:31:00+08:00",
+      "source_ids": [
+        "platform.minute.capability.v1"
+      ],
+      "parameters": {
+        "role": "benchmark",
+        "tradable": false
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_index.session.v1",
+      "revision": 1,
+      "instrument_id": "000300.XSHG",
+      "asset_class": "cn_index",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2024-01-02T09:31:00+08:00",
+      "source_ids": [
+        "platform.minute.capability.v1",
+        "repository.minute.session_bundle.v1"
+      ],
+      "parameters": {
+        "session_policy_id": "session.cn_index.minute.v1",
+        "session_policy_revision": 1
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.adjustment_factor_snapshot.v1",
+      "revision": 1,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "unsupported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": null,
+      "source_ids": [
+        "platform.minute.capability.v1"
+      ],
+      "parameters": {},
+      "unsupported_reason": "pit_adjustment_factor_snapshot_not_archived",
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.instrument_lifecycle.v1",
+      "revision": 1,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2012-05-28T09:30:00+08:00",
+      "source_ids": [
+        "repository.etf.minute.reference.evidence.2026-08-27"
+      ],
+      "parameters": {
+        "delisted_date": "2200-01-01",
+        "listed_date": "2012-05-28",
+        "product_class": "equity_etf"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.lot_size.v1",
+      "revision": 1,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2023-02-18T00:00:00+08:00",
+      "source_ids": [
+        "official.sse.trading_rules.2023"
+      ],
+      "parameters": {
+        "buy_lot_units": 100,
+        "sell_remainder_allowed": true
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.price_limit.v1",
+      "revision": 1,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-02",
+      "available_at": "2023-12-29T15:00:00+08:00",
+      "source_ids": [
+        "official.sse.trading_rules.2023",
+        "repository.etf.minute.reference.evidence.2026-08-27"
+      ],
+      "parameters": {
+        "high_limit_units": 3849,
+        "low_limit_units": 3149,
+        "price_limit_ratio_ppm": 100000,
+        "price_scale": 3,
+        "reference_previous_close_units": 3499,
+        "reference_price_available_at": "2023-12-29T15:00:00+08:00"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.price_limit.v1",
+      "revision": 2,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-03",
+      "available_at": "2024-01-02T15:00:00+08:00",
+      "source_ids": [
+        "official.sse.trading_rules.2023",
+        "repository.etf.minute.reference.evidence.2026-08-27"
+      ],
+      "parameters": {
+        "high_limit_units": 3798,
+        "low_limit_units": 3108,
+        "price_limit_ratio_ppm": 100000,
+        "price_scale": 3,
+        "reference_previous_close_units": 3453,
+        "reference_price_available_at": "2024-01-02T15:00:00+08:00"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.price_limit.v1",
+      "revision": 3,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-04",
+      "effective_to": "2024-01-04",
+      "available_at": "2024-01-03T15:00:00+08:00",
+      "source_ids": [
+        "official.sse.trading_rules.2023",
+        "repository.etf.minute.reference.evidence.2026-08-27"
+      ],
+      "parameters": {
+        "high_limit_units": 3787,
+        "low_limit_units": 3099,
+        "price_limit_ratio_ppm": 100000,
+        "price_scale": 3,
+        "reference_previous_close_units": 3443,
+        "reference_price_available_at": "2024-01-03T15:00:00+08:00"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.price_limit.v1",
+      "revision": 4,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-05",
+      "effective_to": "2024-01-05",
+      "available_at": "2024-01-04T15:00:00+08:00",
+      "source_ids": [
+        "official.sse.trading_rules.2023",
+        "repository.etf.minute.reference.evidence.2026-08-27"
+      ],
+      "parameters": {
+        "high_limit_units": 3754,
+        "low_limit_units": 3072,
+        "price_limit_ratio_ppm": 100000,
+        "price_scale": 3,
+        "reference_previous_close_units": 3413,
+        "reference_price_available_at": "2024-01-04T15:00:00+08:00"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.session.v1",
+      "revision": 1,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2024-01-02T09:31:00+08:00",
+      "source_ids": [
+        "platform.minute.capability.v1",
+        "repository.minute.session_bundle.v1"
+      ],
+      "parameters": {
+        "session_policy_id": "session.cn_fund.minute.v1",
+        "session_policy_revision": 1
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.settlement.v1",
+      "revision": 1,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2023-02-18T00:00:00+08:00",
+      "source_ids": [
+        "official.sse.trading_rules.2023",
+        "repository.etf.minute.reference.evidence.2026-08-27"
+      ],
+      "parameters": {
+        "settlement_days": 1
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.suspension.v1",
+      "revision": 1,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "unsupported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": null,
+      "source_ids": [],
+      "parameters": {},
+      "unsupported_reason": "daily_suspension_flag_not_proven_visible_before_minute_decision",
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_fund.trading_fee.v1",
+      "revision": 1,
+      "instrument_id": "510300.XSHG",
+      "asset_class": "cn_etf",
+      "status": "supported",
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "available_at": "2024-01-01T00:00:00+08:00",
+      "source_ids": [
+        "repository.etf.minute.reference.evidence.2026-08-27"
+      ],
+      "parameters": {
+        "commission_ppm": 300,
+        "cost_model_scope": "research_assumption",
+        "min_commission_units": 5000,
+        "sell_tax_ppm": 0,
+        "transfer_fee_ppm": 0
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.actual_contract_mapping.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "available_at": "2024-01-02T21:01:00+08:00",
+      "source_ids": [
+        "platform.minute.capability.v1"
+      ],
+      "parameters": {
+        "actual_contract_id": "AG2406.XSGE",
+        "mapping_kind": "actual_identity_only"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.contract_lifecycle.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "available_at": "2024-01-02T21:01:00+08:00",
+      "source_ids": [
+        "platform.minute.capability.v1",
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "last_trade_date": "2024-06-17",
+        "listed_date": "2023-06-16"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.contract_multiplier.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "available_at": "2023-03-30T00:00:00+08:00",
+      "source_ids": [
+        "official.shfe.silver_contract.2023"
+      ],
+      "parameters": {
+        "contract_unit_kg": 15,
+        "quote_unit": "CNY/kg"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.delivery_expiry.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "available_at": "2023-03-30T00:00:00+08:00",
+      "source_ids": [
+        "official.shfe.silver_contract.2023"
+      ],
+      "parameters": {
+        "delivery_after_last_trade_workdays": 2,
+        "last_trade_day": "contract_month_day_15_holiday_adjusted"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.fee_schedule.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-03",
+      "available_at": "2024-01-02T16:00:43+08:00",
+      "source_ids": [
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "close_fee_ppm": 50,
+        "close_today_fee_ppm": 50,
+        "fee_unit": "notional_permyriad",
+        "open_fee_ppm": 50,
+        "opening_charge_null_semantics": "use_common_clearance_charge",
+        "source_clearance_charge_permyriad": "0.5",
+        "source_opening_charge": null,
+        "source_short_clearance_charge_permyriad": "0.5"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.fee_schedule.v1",
+      "revision": 2,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-04",
+      "effective_to": "2024-01-04",
+      "available_at": "2024-01-03T16:00:36+08:00",
+      "source_ids": [
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "close_fee_ppm": 50,
+        "close_today_fee_ppm": 50,
+        "fee_unit": "notional_permyriad",
+        "open_fee_ppm": 50,
+        "opening_charge_null_semantics": "use_common_clearance_charge",
+        "source_clearance_charge_permyriad": "0.5",
+        "source_opening_charge": null,
+        "source_short_clearance_charge_permyriad": "0.5"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.margin.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-03",
+      "available_at": "2024-01-02T16:00:43+08:00",
+      "source_ids": [
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "hedge_margin_ppm": 80000,
+        "margin_account_role": "speculative",
+        "margin_policy_id": "ag2406-exchange-speculative-margin",
+        "speculative_initial_margin_ppm": 90000
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.margin.v1",
+      "revision": 2,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-04",
+      "effective_to": "2024-01-04",
+      "available_at": "2024-01-03T16:00:36+08:00",
+      "source_ids": [
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "hedge_margin_ppm": 80000,
+        "margin_account_role": "speculative",
+        "margin_policy_id": "ag2406-exchange-speculative-margin",
+        "speculative_initial_margin_ppm": 90000
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.price_limit.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-03",
+      "available_at": "2024-01-02T15:01:00+08:00",
+      "source_ids": [
+        "official.shfe.national_day_risk_notice.2023",
+        "official.shfe.new_year_risk_notice.2023",
+        "official.shfe.silver_contract.2023",
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "high_limit_units": 645200,
+        "limit_rounding": "floor_to_price_tick",
+        "low_limit_units": 560700,
+        "previous_session_single_sided": false,
+        "price_limit_ratio_ppm": 70000,
+        "price_scale": 2,
+        "price_tick_units": 100,
+        "reference_previous_settlement_units": 603000,
+        "reference_price_available_at": "2024-01-02T15:01:00+08:00"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.price_limit.v1",
+      "revision": 2,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-04",
+      "effective_to": "2024-01-04",
+      "available_at": "2024-01-03T15:01:00+08:00",
+      "source_ids": [
+        "official.shfe.national_day_risk_notice.2023",
+        "official.shfe.new_year_risk_notice.2023",
+        "official.shfe.silver_contract.2023",
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "high_limit_units": 644200,
+        "limit_rounding": "floor_to_price_tick",
+        "low_limit_units": 559900,
+        "previous_session_single_sided": false,
+        "price_limit_ratio_ppm": 70000,
+        "price_scale": 2,
+        "price_tick_units": 100,
+        "reference_previous_settlement_units": 602100,
+        "reference_price_available_at": "2024-01-03T15:01:00+08:00"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.price_tick.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "available_at": "2023-03-30T00:00:00+08:00",
+      "source_ids": [
+        "official.shfe.silver_contract.2023"
+      ],
+      "parameters": {
+        "price_scale": 2,
+        "price_tick": 1,
+        "price_tick_units": 100,
+        "quote_unit": "CNY/kg"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.session.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "available_at": "2024-01-02T21:01:00+08:00",
+      "source_ids": [
+        "official.shfe.silver_contract.2023",
+        "platform.minute.capability.v1",
+        "repository.minute.session_bundle.v1"
+      ],
+      "parameters": {
+        "session_policy_id": "session.cn_futures.minute.v1",
+        "session_policy_revision": 1,
+        "settlement_policy": "daily_mark_to_market_after_session_close"
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.settlement.v1",
+      "revision": 1,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-03",
+      "available_at": "2024-01-03T15:01:00+08:00",
+      "source_ids": [
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "price_scale": 2,
+        "settlement_availability_semantics": "session_close_event_not_supplier_timestamp",
+        "settlement_price_units": 602100
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    },
+    {
+      "rule_id": "rule.cn_futures.settlement.v1",
+      "revision": 2,
+      "instrument_id": "AG2406.XSGE",
+      "asset_class": "cn_future",
+      "status": "supported",
+      "effective_from": "2024-01-04",
+      "effective_to": "2024-01-04",
+      "available_at": "2024-01-04T15:01:00+08:00",
+      "source_ids": [
+        "repository.ag2406.minute.reference.evidence.2026-08-28"
+      ],
+      "parameters": {
+        "price_scale": 2,
+        "settlement_availability_semantics": "session_close_event_not_supplier_timestamp",
+        "settlement_price_units": 590000
+      },
+      "unsupported_reason": null,
+      "contract_version": "minute-rule-snapshot-v1"
+    }
+  ],
+  "contract_version": "minute-rule-snapshot-bundle-v1",
+  "bundle_hash": "781d7dde9d15aa003ee23ebf6d49f3371ab966e9eb3d56c8f48a63203dd70051",
+  "capability_binding": {
+    "consumer_id": "domain.minute.market_rule_snapshots",
+    "minute_capability_manifest_hash": "73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033",
+    "contract_version": "minute-capability-binding-v1",
+    "binding_hash": "fe65de0ca5e19bad32e1dd6f50d7d3a51c10447ec50aa50fe5f73a06015d103c"
+  }
+}

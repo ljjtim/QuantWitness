@@ -1,0 +1,13 @@
+package_slug: quantwitness_etf_time_series
+display_name: QuantWitness 合成 ETF 时间序列
+package_version: 1.0.0
+builder_id: operator_graph_plan_v1
+metric_contract:
+  contract_id: quantwitness_etf_time_series_metrics
+  version: 1.0.0
+  metrics: [project.quantwitness.etf_time_series.signal_return@1.0.0]
+  semantics:
+    project.quantwitness.etf_time_series.signal_return@1.0.0: 各标的独立动量信号乘下一交易日日内收益后的等权均值
+claim_contract:
+  allowed_claim_levels: [research_observation]
+  max_claim_level: research_observation

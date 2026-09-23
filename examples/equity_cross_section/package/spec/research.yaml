@@ -1,0 +1,59 @@
+contract_version: research-operator-graph-package-v2
+research_id: quantwitness.equity_cross_section
+reproduction: {study_proof_required: false}
+as_of: '2024-01-08'
+root_seed: 1701
+fixed_clock: '2024-01-09T00:00:00+08:00'
+requests:
+  - request_id: synthetic_equity_daily
+    dataset_id: quantwitness.synthetic_equity_daily
+    dataset_version: 1
+    field_ids: [fld_qw_eq_session, fld_qw_eq_instrument, fld_qw_eq_close, fld_qw_eq_available_at]
+    purpose: feature
+    time_range: {start: '2024-01-02', end: '2024-01-05'}
+    universe: {instruments: [SYN.A, SYN.B, SYN.C, SYN.D], snapshot_id: null}
+    filters: []
+    sort:
+      - {field_id: fld_qw_eq_session, descending: false}
+      - {field_id: fld_qw_eq_instrument, descending: false}
+    budget: {max_rows: 32, max_bytes: 1048576, batch_size: 32}
+    adjustment: unadjusted
+    limit: 32
+result:
+  contract_version: research-result-spec-v1
+  tables:
+    - table_id: equity_cross_section_metric
+      role: primary
+      source_node_id: project_analysis
+      source_port: result
+      artifact_type: project.quantwitness.equity-cross-section.v1
+      schema_id: project.quantwitness.equity-cross-section.metrics.v1
+      path_prefix: result/metrics
+    - table_id: equity_cross_section_observations
+      role: diagnostic
+      source_node_id: project_analysis
+      source_port: result
+      artifact_type: project.quantwitness.equity-cross-section.v1
+      schema_id: project.quantwitness.equity-cross-section.observations.v1
+      path_prefix: result/observations
+graph:
+  contract_version: research-operator-graph-recipe-v1
+  graph_id: quantwitness.equity_cross_section
+  nodes:
+    - {node_id: data_plane, operator_id: data.columnar.materialize, operator_version: 1.0.0, inputs: [], parameters: {}, strategies: []}
+    - node_id: project_analysis
+      operator_id: project.quantwitness.equity-cross-section
+      operator_version: 1.0.0
+      inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}]
+      parameters:
+        data_request_id: synthetic_equity_daily
+        decision_at: '2024-01-05T09:30:00+08:00'
+        observation_sessions: ['2024-01-03', '2024-01-04']
+        outcome_session: '2024-01-05'
+      strategies: []
+    - node_id: validity
+      operator_id: research.validity.data-observation
+      operator_version: 1.0.0
+      inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}]
+      parameters: {}
+      strategies: []

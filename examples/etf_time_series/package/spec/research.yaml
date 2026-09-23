@@ -1,0 +1,42 @@
+contract_version: research-operator-graph-package-v2
+research_id: quantwitness.etf_time_series
+reproduction: {study_proof_required: false}
+as_of: '2024-01-08'
+root_seed: 1702
+fixed_clock: '2024-01-09T00:00:00+08:00'
+requests:
+  - request_id: synthetic_etf_daily
+    dataset_id: quantwitness.synthetic_etf_daily
+    dataset_version: 1
+    field_ids: [fld_qw_etf_session, fld_qw_etf_instrument, fld_qw_etf_open, fld_qw_etf_close, fld_qw_etf_available_at]
+    purpose: feature
+    time_range: {start: '2024-01-02', end: '2024-01-05'}
+    universe: {instruments: [SYN.ETF.A, SYN.ETF.B], snapshot_id: null}
+    filters: []
+    sort:
+      - {field_id: fld_qw_etf_session, descending: false}
+      - {field_id: fld_qw_etf_instrument, descending: false}
+    budget: {max_rows: 16, max_bytes: 1048576, batch_size: 16}
+    adjustment: unadjusted
+    limit: 16
+result:
+  contract_version: research-result-spec-v1
+  tables:
+    - {table_id: etf_time_series_metric, role: primary, source_node_id: project_analysis, source_port: result, artifact_type: project.quantwitness.etf-time-series.v1, schema_id: project.quantwitness.etf-time-series.metrics.v1, path_prefix: result/metrics}
+    - {table_id: etf_time_series_observations, role: diagnostic, source_node_id: project_analysis, source_port: result, artifact_type: project.quantwitness.etf-time-series.v1, schema_id: project.quantwitness.etf-time-series.observations.v1, path_prefix: result/observations}
+graph:
+  contract_version: research-operator-graph-recipe-v1
+  graph_id: quantwitness.etf_time_series
+  nodes:
+    - {node_id: data_plane, operator_id: data.columnar.materialize, operator_version: 1.0.0, inputs: [], parameters: {}, strategies: []}
+    - node_id: project_analysis
+      operator_id: project.quantwitness.etf-time-series
+      operator_version: 1.0.0
+      inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}]
+      parameters:
+        data_request_id: synthetic_etf_daily
+        decision_at: '2024-01-05T09:30:00+08:00'
+        history_sessions: ['2024-01-02', '2024-01-03', '2024-01-04']
+        outcome_session: '2024-01-05'
+      strategies: []
+    - {node_id: validity, operator_id: research.validity.data-observation, operator_version: 1.0.0, inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}], parameters: {}, strategies: []}

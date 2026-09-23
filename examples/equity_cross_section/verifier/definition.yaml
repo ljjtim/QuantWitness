@@ -1,0 +1,8 @@
+project_id: quantwitness-equity-cross-section
+verifier_id: equity-cross-section-check
+metric_id: project.quantwitness.equity_cross_section.spread
+artifact_type: project.quantwitness.equity-cross-section.v1
+metric_schema_id: project.quantwitness.equity-cross-section.metrics.v1
+observation_schema_id: project.quantwitness.equity-cross-section.observations.v1
+unit: decimal_return
+direction: higher_is_better
