@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  public-boundary:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install ".[test]" "pyarrow==21.0.0"
+          python -m pip check
+      - name: Check public source inventory
+        run: python tools/public_source_inventory.py --project . --check
+      - name: Run public example algorithms
+        run: >-
+          python -m pytest -q
+          examples/equity_cross_section/test_operator.py
+          examples/etf_time_series/test_operator.py
+          examples/event_study/test_operator.py
+          examples/futures_term_structure/test_operator.py
+      - name: Run public framework gates
+        run: >-
+          python -m pytest -q
+          tests/test_current_documentation.py
+          tests/test_public_source_inventory.py
+          tests/test_mainline_architecture_boundary.py
+          tests/test_framework_intrusion_gate.py
+          tests/test_public_operator_governance.py
+          tests/test_public_release_gates.py
+      - name: Build release wheel
+        id: release
+        shell: bash
+        run: |
+          python tools/build_release_artifacts.py --project . --output "$RUNNER_TEMP/quantwitness-release" > "$RUNNER_TEMP/quantwitness-build.json"
+          python -c 'import json, pathlib, sys; receipt=json.loads(pathlib.Path(sys.argv[1]).read_text()); names=("wheel", "sdist", "source_archive"); paths=[pathlib.Path(receipt[name]).resolve(strict=True) for name in names]; assert receipt["status"] == "pass" and set(paths) == set(paths[0].parent.iterdir()); print("wheel=" + str(paths[0]))' "$RUNNER_TEMP/quantwitness-build.json" >> "$GITHUB_OUTPUT"
+      - name: Test isolated wheel and four formal example workflows
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/quantwitness-wheel-env"
+          wheel="${{ steps.release.outputs.wheel }}"
+          "$RUNNER_TEMP/quantwitness-wheel-env/bin/python" -m pip install "${wheel}[test]" "pyarrow==21.0.0"
+          "$RUNNER_TEMP/quantwitness-wheel-env/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$GITHUB_WORKSPACE" "$RUNNER_TEMP/quantwitness-wheel-env/bin/python" -c 'import importlib.metadata as m, pathlib, research_pipeline, sys; assert pathlib.Path(research_pipeline.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()); assert m.version("pyarrow") == "21.0.0"'
+          PYTHONPATH="$GITHUB_WORKSPACE" "$RUNNER_TEMP/quantwitness-wheel-env/bin/python" -m pytest -o pythonpath= -q "$GITHUB_WORKSPACE/tests/test_public_examples.py"
