@@ -15,7 +15,7 @@ publication、compute run、Catalog、实现记录、整表内容身份和覆盖
 
 因子准入只短暂取得共享读租约。物化时由`data_plane.service`持有完整租约，依次完成发布身份
 复验、只读Arrow查询、提交前源与发布复验、不可变工件提交、引用验证和最终复验，再释放租约。
-研究端不导入`FactorPublisher`，也不写`data_factor.duckdb`；锁侧文件是发布协议的一部分。
+研究端不导入因子 Publisher，也不写因子数据库；锁侧文件是发布协议的一部分。
 旧v4计划明确拒绝，必须重新admit并建立新run，不修改旧checkpoint或历史Result。
 
 数据平面是研究主链唯一打开数据库的层。它只接受已经通过 Catalog/PIT 准入的 QueryIR，并把查询结果写成带来源身份的 Arrow/Parquet 工件。

@@ -85,6 +85,8 @@ revision、hash、时区和覆盖写入计划；provider 与项目期货算法�
 固定收盘时间。同一 bundle 可以发布多个互不冲突的合约或规则时段；缺覆盖、同日重复匹配和
 revision 漂移都在准入或计划复核时失败。当前正式发布范围仅为 `AG2406.XSGE` 的
 2024-01-03—04；其他合约或日期因缺少同源期货日历证据而拒绝准入。
+期货分钟分区还绑定当前发布的 session bundle 身份；项目 Worker 不接受缺失或不同身份的
+分区规则。其他规则 bundle 尚未进入当前平台能力清单，不能用替换本地文件的方式扩大覆盖。
 
 实际参数以 `python -m research_pipeline <命令> --help` 为准。
 
@@ -154,11 +156,11 @@ FeatureSetArtifact、LabelArtifact 以及 Runtime 的旧 v1 合同不再兼容�
 - 模型候选只有显式 `CandidateFitRejected` 这类稳定领域拒绝可以记入 TrialLedger 后继续；
   `NameError`、`KeyError`、依赖 API 变化和其他未知错误必须使 fit 节点失败，不能缩小冻结候选族后仍发布。
 - 真实研究归档也必须同时保留 ResultStore 中的结果本体和对应 VerificationResult；验收摘要、报告文本或任务状态都不能替代二者。当前 `gc` 只处理 `staging/cache`，不自动判断或删除 ResultStore 与完成态 run-root。
-- `data_factor.duckdb` 默认只读，研究主链不导入 `FactorPublisher`；正式因子库仍只能由 `factor_calc.publish` 写入，因子发布必须走独立授权流程。
+- 研究主链只读消费已正式发布的因子，不导入因子 Publisher，也不承担因子发布或数据库写入；发布由项目侧独立授权执行。
 - 框架保留项目无关的 Catalog/PIT、typed ports、Runtime、Result/VerificationResult envelope 和已准入的通用因子原语；具体模型、关系表组合和研究画像归项目侧，不能作为公共内建能力调用。
 
 - 项目 Verifier 与 Operator bundle 分开冻结身份、版本、源码摘要和授权输入。`package lint/admit --verifier-bundle` 冻结身份，`verify --verifier-bundle` 显式提供同一 bundle；Verifier 只能读取 Result 已封存且显式授权的表和支持工件，不能读取完整 ResultStore、运行目录或未授权兄弟工件；项目结论以统一 VerificationResult envelope 返回。
-- 真实项目源码、声明、ResearchPackage、历史 Result/VerificationResult 和顶层 `factor_calc/` 不因 core 净化而删除；项目暂时不能运行属于边界迁移期间的允许状态。
+- 项目源码、ResearchPackage、因子定义和历史验收材料保留在项目侧，不进入公开 core 包。
 - ResearchPackage 不会根据出现的日频、模型、因子或事件算子自动补齐或强制完整整图。
   当前只执行 typed ports、DAG、Feature/Label 祖先、ResearchSemantics、时间、PIT、seed、
   资源和金融规则等通用不变量。由于没有满足两个异构正式项目复用条件的完整流程，当前不提供
@@ -180,12 +182,12 @@ FeatureSetArtifact、LabelArtifact 以及 Runtime 的旧 v1 合同不再兼容�
 | `research_package.plan` | `local_only` | `package lint`<br>`package admit` | `local_acceptance` / `local_only` | ResearchPackage 只能声明受控合同，不接受自由 SQL、动态模块或项目 runner。lint 一次返回声明、算子、指标、结果和准入缺口；admit 从显式只读数据源生成漂移/PIT 闭包并在发布/加载时校验准入事实。 |
 | `runtime.recovery` | `local_only` | `resume`<br>`retry-node`<br>`inspect`<br>`rerun-from` | `local_acceptance` / `local_only` | resume、retry-node、inspect 和 rerun-from 只消费当前 invocation、计划内算子闭包和已验证 checkpoint；同一次 execute 复用 Supervisor 已冻结的工件验证结果，新的 resume 进程、rerun child 或新 run 必须重新完整验证。多请求 data 节点另以 run 内 partial index 逐项复验已提交 DatasetArtifactRef，只重做失效 request；partial 不进入正式输出。身份变化必须重新 admit 并新建 run。该边界仍为 local_only。 |
 | `evidence.consume` | `local_only` | `verify`<br>`report`<br>`export-result`<br>`compare` | `local_acceptance` / `local_only` | verify 直接从自包含 Result 生成结构化 VerificationResult；report、compare、export-result 和 Dashboard 只消费 VerificationResult 与 ResultStore，不依赖 run-root。直接 compare 只比较已验证指标事实并明示未检查 package 合同；package compare 由 delivery 唯一检查 metric/claim 合同。不同 plan 只作说明，口径不一致时整次拒绝且不输出部分 delta。export-result 仅复制并复核已验证 Result，不重新执行研究。该合同尚未通过独立发布验收，因此保持 local_only。 |
-| `evidence.validity_recompute` | `local_only` | `verify` | `local_acceptance` / `local_only` | 当前主链已在四只真实 ETF 和 AG2406 冻结窗口生成 research-result-v2、canonical 六表与 Bar TCA 四表，并由独立 verifier 复算通过；金融 oracle v5 使用有界 Arrow 批次和可使用临时盘的 DuckDB 扫描，固定 586,133,815 字节 Result 已在全新进程内完成验证，单行错误与资源不足均明确失败。该能力只到 local_only，只证明模拟账本内部一致和费用口径可追溯，不代表策略盈利、实盘成交或可交易性。 |
+| `evidence.validity_recompute` | `local_only` | `verify` | `local_acceptance` / `local_only` | 独立 verify 从已封存的 canonical 六表与 Bar TCA 四表复核金融守恒、费用与 lineage；金融 oracle 使用有界 Arrow 批次和受配额 DuckDB 扫描，篡改或资源不足均阻止生成 VerificationResult。公开源码提供合同测试，不附带个人真实数据 Result 或独立发布验收；能力保持 local_only，不代表策略盈利、实盘成交或可交易性。 |
 | `operator_graph.generic_run` | `local_only` | `run`<br>`resume`<br>`retry-node`<br>`inspect` | `local_acceptance` / `local_only` | 正式 run 由 Runtime v2 调度，节点返回按端口索引的 typed refs，checkpoint 绑定全部端口；成功后唯一 finalize 自包含 Result，再由独立 verify 生成 VerificationResult。该边界尚缺独立发布验收，因此仍是 local_only。 |
 | `research.walk_forward_model` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | 公共模型七阶段保留 purge/embargo、fold 内预处理、validation 选模、test 与唯一候选 locked holdout；输入 Feature/Label 必须由当前研究包提供。split 先检查 Label row group 与时间可见性，再读取开发目标；holdout 打开后失败仍消耗访问资格。本地验证不代表真实策略、可交易性或已发布模型结论。 |
-| `minute_line.complete` | `local_only` | `run` | `local_acceptance` / `local_only` | 股票 raw 分钟已完成 2012-12 至 2023-05 全样本正式 run；ETF/指数和期货 raw 分钟也完成 Scope revision 5 有界只读闭环。股票与 ETF 的 PIT 复权快照已闭合；510300 ETF 和 AG2406 均已在冻结窗口按历史规则生成公共六表与 Bar TCA 四表，并通过独立 verify、report、export-result。AG2406 正式结果含 65 个目标、32 笔开平成交；固定信号在两日收盘前均回到空仓，因此真实 Result 的结算事件为空，非零持仓逐日结算由独立最小 fixture/oracle 验收。该能力只提升为有界本地 `local_only`，不代表全历史、全品种、Tick/LOB、供应商历史版本精确重放或实盘可交易。 |
-| `minute_line.real_data_smoke` | `local_only` | `run` | `local_acceptance` / `local_only` | 股票 raw 分钟当前快照已完成 2012-12 至 2023-05 全样本正式 run；ETF/指数 7/7 节点、期货 6/6 节点的有界只读观察也已形成自包含 Result，并通过独立 VerificationResult、report 与 export-result。该状态只证明本机四资产 raw 分钟观察路径，不覆盖 PIT 复权、供应商历史版本精确重放或分钟交易仿真。 |
-| `simulation.bar_tca` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Bar TCA 只读取统一 SimulationResult 的正式 orders/fills 和账本身份，不按股票、ETF 或期货模拟器分支，也不生成第二套成交。510300 ETF 与 AG2406 分钟路径均逐笔绑定决策基准、已完成执行 bar、可见容量和正式 fill，独立 oracle 可重建实现差额并检查正式 fill 集合；缺少这些事实、逐日规则或决策时可见价格参考时仍失败关闭。能力保持 local_only，不得作为已发布 TCA、可交易性或实盘成本证据。 |
+| `minute_line.complete` | `local_only` | `run` | `local_acceptance` / `local_only` | 四类中国市场资产可按当前 Catalog、已完成分钟 bar、PIT 快照与历史规则进入同一研究主链；随包规则仅覆盖文档列明的参考标的及窗口，范围外无默认规则。公开源码提供合同与合成示例，不附带真实分钟数据或研究结果；能力保持 local_only，不代表全历史、全品种或实盘可交易。 |
+| `minute_line.real_data_smoke` | `local_only` | `run` | `local_acceptance` / `local_only` | 公开包提供四资产分钟输入和只读 Result/VerificationResult 合同，不附带供应商原始数据或个人真实运行收据。真实数据观察须由使用者在自己的来源、窗口和规则下重新执行并独立验证；当前能力只到 local_only，不宣称供应商历史版本精确重放或分钟交易仿真。 |
+| `simulation.bar_tca` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Bar TCA 只消费统一 SimulationResult 的正式订单与成交和账本身份，不二次撮合。分钟路径要求决策时可见基准、已完成执行 bar、可见容量与正式 fill，缺任何必要事实均失败关闭。随包参考规则只有有界中国市场标的窗口；公开源码不包含个人真实研究结果，能力保持 local_only。 |
 | `capability.discovery` | `local_only` | `capabilities --format json`<br>`operator list/describe/scaffold/validate/build`<br>`artifact describe`<br>`recipe list/describe/scaffold`<br>`catalog dataset/field search`<br>`package lint` | `local_acceptance` / `local_only` | capabilities 命令逐字段读取本清单；operator、artifact、catalog 和 package lint 的发现结果来自正式 registry、schema、Catalog Lock 或 package compiler。当前没有获准的公共 recipe，使用 package init 创建通用起点；项目完整拓扑由 ResearchPackage 声明。operator scaffold 生成可验证的最小项目算子；正式 Feature/Label 需必填 causal_plan，且来源必须可由已准入请求证明。validate/build 只复验显式源码闭包，不扫描目录或自动安装。 |
 | `resource.governance` | `local_only` | `run --resource-state-dir` | `local_acceptance` / `local_only` | 数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。合成探针不进入正式运行校准总体。 |
 <!-- CAPABILITIES_TABLE:END -->

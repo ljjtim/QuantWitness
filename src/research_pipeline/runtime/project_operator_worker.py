@@ -611,7 +611,7 @@ def _load_input(
         or not isinstance(session_policy_ref, str)
     ):
         raise ValueError("project_partition_minute_lineage_invalid")
-    bundle = load_session_policy_bundle() if asset_class == "cn_future" else None
+    bundle = _session_bundle_for_partition(asset_class, lineage)
     instruments = ()
     if bundle is not None:
         by_id = {
@@ -638,6 +638,15 @@ def _load_input(
         source_identity=dataset.reference_id,
         _stream=stream,
     )
+
+
+def _session_bundle_for_partition(asset_class: str, lineage: Mapping[str, object]):
+    if asset_class != "cn_future":
+        return None
+    bundle = load_session_policy_bundle()
+    if lineage.get("minute_session_bundle_hash") != bundle.bundle_hash:
+        raise ValueError("project_partition_session_bundle_mismatch")
+    return bundle
 
 
 def _verify_file_input(

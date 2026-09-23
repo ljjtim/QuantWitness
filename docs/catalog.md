@@ -33,30 +33,15 @@ field 上复制 binding。blocked dataset 的 `bindings` 为空，也不会生�
 6. 完成准入校验后原子发布不可变计划。
 7. 核对数据库 size/mtime 前后不变。
 
-正式因子数据还会在准入时取得短共享租约，按请求表的`factor_storage_state`反查当前
-published publication，核对validated计算运行、不可变Catalog正文、配方关系表、质量记录和
-数值异常记录，并把类型化发布事实写入`AdmittedQueryPlan v5`。Alpha101、Alpha191、价量、
-财务、风格、FF3及其组合/形成期快照使用重建后的真实宽表；旧`factor.generic.daily`与
-`factor_values`长表绑定已退役。价值与动量等权自定义配方和本地CNE5十风格风险模型的
-金融定义已经批准，纯计算合同已有贴身验证；C已由受控Publisher完成历史回填和正式发布。
-本地CNE5风险四表也已由publication `risk-incremental-5bf99876945498c5`正式供数：暴露按
-`trade_date`当日开盘可见，因子收益、协方差和特异风险按对应日期的下一实际交易日开盘可见；
-四表均绑定`revision.factor_publication.v1`并生成可执行只读binding。
-三项分析师预测没有历史一致预期来源，不属于当前支持范围，也不会生成近似数据集。
+正式因子数据还会在准入时取得短共享租约，按请求表的 `factor_storage_state` 反查当前
+published publication，核对 validated 计算运行、不可变 Catalog 正文、配方关系表、
+质量记录和数值异常记录，并把类型化发布事实写入已准入计划。因子发布和研究读取相互隔离，
+框架不计算或发布具体因子。旧 `factor.generic.daily` 与 `factor_values` 长表绑定已退役。
 
-`factor.custom.daily`已经通过正式publication供数并开放只读准入：物理键为
-`trade_date + stock_code + factor_id`，数值列为`value`，发布修订绑定
-`revision.factor_publication.v1`。当前价值与动量配方的两项输入同日且都按
-`available.daily.v1`在下一实际交易日开盘可见，因此无需新增逐行时间列；核心时态选择从
-交易日历重建该时刻。其他混合可见政策的自定义配方不能自动沿用这个结论。
-
-本地CNE5风险估计通过 `local_cne5_risk_formal` 项目 extension 显式消费风格、开盘状态和
-交易会话三个已准入请求；不在公共 Runtime 注册 CNE5 专用算子。该扩展提交风险快照和
-validity facts，Result verifier 独立复核工件。四张正式风险表已经供数的依据是上述
-publication，不是项目扩展的静态构建或本次迁移。`cn_market.trading_sessions` 把只读
-`trade_days` 作为研究观察来源，来源快照不声称历史公告版本；风格原观测日必须早于收益
-起点，按原观测日的下一真实交易日开盘核对可见性。缺少上游历史上市状态、复权/公司行动
-或开盘收益证据时，不能凭算子本身宣称历史风险值已合格。
+`factor.custom.daily` 使用 `trade_date + stock_code + factor_id` 物理键和 `value` 数值列；
+只读准入仍须有当前 publication、修订及可见性规则。`available.daily.v1` 的
+`next_session_open` 必须按真实交易日历计算；混合可见时点的配方不能套用单一日频政策。
+具体因子定义、风险模型、publication 身份和项目验证结果均由项目侧声明及保存。
 
 调用方不传内部 drift 文件，也不在研究图中手工填写 Catalog/PIT hash。
 

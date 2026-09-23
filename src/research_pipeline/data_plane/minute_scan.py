@@ -9,6 +9,7 @@ import re
 from typing import Any, Iterator
 
 from research_pipeline.platform.canonical import typed_canonical_hash
+from research_pipeline.domain.session_calendar import CURRENT_SESSION_POLICY_BUNDLE_HASH
 
 from .admission import AdmittedQueryPlan
 from .errors import ProviderExecutionError, QueryIRInvalidError
@@ -314,6 +315,8 @@ def build_minute_partitioned_dataset(plan: MinuteScanPlan) -> PartitionedDataset
         "minute_quality_policy_refs": list(plan.minute_quality_policy_refs),
         "minute_capability_manifest_hash": plan.minute_capability_manifest_hash,
     }
+    if plan.minute_asset_class == "cn_future":
+        lineage["minute_session_bundle_hash"] = CURRENT_SESSION_POLICY_BUNDLE_HASH
     partitions = []
     for source in plan.partitions:
         match = _PARTITION_PATH.fullmatch(source.relative_path)

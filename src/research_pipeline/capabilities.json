@@ -46,7 +46,7 @@
         "research_pipeline/src/research_pipeline/cli/commands/research_plan.py::admit_package"
       ],
       "verification_anchors": [
-        "research_pipeline/tests/test_mainline_research_package.py::test_package_init_load_compile_is_immutable_and_deterministic",
+        "research_pipeline/tests/test_mainline_research_package.py::test_explicit_package_load_compile_is_immutable_and_deterministic",
         "research_pipeline/tests/test_cli_mainline.py::test_package_lint_reports_single_current_admission_command",
         "research_pipeline/tests/test_zero_to_result_workflow.py::test_package_admit_observes_drift_from_explicit_read_only_database",
         "research_pipeline/tests/test_session_close_temporal.py::test_admission_records_each_selected_policy_and_coverage",
@@ -123,8 +123,7 @@
       ],
       "required_inputs": [
         "ResultBundle 中闭合的 canonical 六表、TCA 四表、policy 与 lineage",
-        "显式自包含 ResultStore",
-        "当前真实 ETF 与 AG2406 有界窗口验收收据"
+        "显式自包含 ResultStore"
       ],
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/evidence/result_financial_oracle.py::verify_result_financial_oracle",
@@ -138,7 +137,7 @@
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "当前主链已在四只真实 ETF 和 AG2406 冻结窗口生成 research-result-v2、canonical 六表与 Bar TCA 四表，并由独立 verifier 复算通过；金融 oracle v5 使用有界 Arrow 批次和可使用临时盘的 DuckDB 扫描，固定 586,133,815 字节 Result 已在全新进程内完成验证，单行错误与资源不足均明确失败。该能力只到 local_only，只证明模拟账本内部一致和费用口径可追溯，不代表策略盈利、实盘成交或可交易性。"
+      "notes": "独立 verify 从已封存的 canonical 六表与 Bar TCA 四表复核金融守恒、费用与 lineage；金融 oracle 使用有界 Arrow 批次和受配额 DuckDB 扫描，篡改或资源不足均阻止生成 VerificationResult。公开源码提供合同测试，不附带个人真实数据 Result 或独立发布验收；能力保持 local_only，不代表策略盈利、实盘成交或可交易性。"
     },
     {
       "id": "operator_graph.generic_run",
@@ -169,7 +168,7 @@
       "verification_anchors": [
         "research_pipeline/tests/test_artifact_verification_lifecycle.py::test_same_run_validates_each_artifact_content_once",
         "research_pipeline/tests/test_artifact_verification_lifecycle.py::test_two_real_project_workers_share_supervisor_validation_without_rehash",
-        "research_pipeline/tests/test_generic_run_admission.py::test_first_generic_run_without_project_fixture",
+        "research_pipeline/tests/test_generic_run_admission.py::test_generic_run_with_explicit_observation_package",
         "research_pipeline/tests/test_runtime_operator_dag.py::test_operator_dag_failure_retry_resume_and_external_artifact",
         "research_pipeline/tests/test_runtime_shadow_equivalence.py::test_generic_shadow_is_exact_within_financial_tolerances",
         "research_pipeline/tests/test_result_bundle.py::test_result_survives_run_root_deletion_and_reads_each_parquet_once",
@@ -216,8 +215,7 @@
       "required_inputs": [
         "四资产 1m Catalog 合同",
         "分钟 session 与市场规则快照",
-        "PIT 复权快照",
-        "冻结 scope revision 5",
+        "准入时冻结研究范围和来源修订",
         "适用资产的 PIT 复权快照、完整历史交易规则与正式仿真账本"
       ],
       "implementation_anchors": [
@@ -237,7 +235,7 @@
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "股票 raw 分钟已完成 2012-12 至 2023-05 全样本正式 run；ETF/指数和期货 raw 分钟也完成 Scope revision 5 有界只读闭环。股票与 ETF 的 PIT 复权快照已闭合；510300 ETF 和 AG2406 均已在冻结窗口按历史规则生成公共六表与 Bar TCA 四表，并通过独立 verify、report、export-result。AG2406 正式结果含 65 个目标、32 笔开平成交；固定信号在两日收盘前均回到空仓，因此真实 Result 的结算事件为空，非零持仓逐日结算由独立最小 fixture/oracle 验收。该能力只提升为有界本地 `local_only`，不代表全历史、全品种、Tick/LOB、供应商历史版本精确重放或实盘可交易。"
+      "notes": "四类中国市场资产可按当前 Catalog、已完成分钟 bar、PIT 快照与历史规则进入同一研究主链；随包规则仅覆盖文档列明的参考标的及窗口，范围外无默认规则。公开源码提供合同与合成示例，不附带真实分钟数据或研究结果；能力保持 local_only，不代表全历史、全品种或实盘可交易。"
     },
     {
       "id": "minute_line.real_data_smoke",
@@ -246,7 +244,7 @@
         "run"
       ],
       "required_inputs": [
-        "Scope revision 5 冻结的股票、ETF、指数和期货 raw completed-bar 分钟当前快照",
+        "显式只读来源的股票、ETF、指数和期货 raw completed-bar 分钟数据",
         "指数仅作非交易 diagnostic，交易资产不在规则不足时进入仿真",
         "自包含 ResultStore 与通过的 VerificationResult",
         "结论上限固定为 research_observation"
@@ -263,7 +261,7 @@
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "股票 raw 分钟当前快照已完成 2012-12 至 2023-05 全样本正式 run；ETF/指数 7/7 节点、期货 6/6 节点的有界只读观察也已形成自包含 Result，并通过独立 VerificationResult、report 与 export-result。该状态只证明本机四资产 raw 分钟观察路径，不覆盖 PIT 复权、供应商历史版本精确重放或分钟交易仿真。"
+      "notes": "公开包提供四资产分钟输入和只读 Result/VerificationResult 合同，不附带供应商原始数据或个人真实运行收据。真实数据观察须由使用者在自己的来源、窗口和规则下重新执行并独立验证；当前能力只到 local_only，不宣称供应商历史版本精确重放或分钟交易仿真。"
     },
     {
       "id": "simulation.bar_tca",
@@ -292,7 +290,7 @@
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "Bar TCA 只读取统一 SimulationResult 的正式 orders/fills 和账本身份，不按股票、ETF 或期货模拟器分支，也不生成第二套成交。510300 ETF 与 AG2406 分钟路径均逐笔绑定决策基准、已完成执行 bar、可见容量和正式 fill，独立 oracle 可重建实现差额并检查正式 fill 集合；缺少这些事实、逐日规则或决策时可见价格参考时仍失败关闭。能力保持 local_only，不得作为已发布 TCA、可交易性或实盘成本证据。"
+      "notes": "Bar TCA 只消费统一 SimulationResult 的正式订单与成交和账本身份，不二次撮合。分钟路径要求决策时可见基准、已完成执行 bar、可见容量与正式 fill，缺任何必要事实均失败关闭。随包参考规则只有有界中国市场标的窗口；公开源码不包含个人真实研究结果，能力保持 local_only。"
     },
     {
       "id": "capability.discovery",

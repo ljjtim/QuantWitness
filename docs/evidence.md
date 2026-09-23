@@ -59,8 +59,7 @@ S-04 的固定资源验收为 2,000 万键、4 个 Parquet 分区；独立 probe
 声明实际读取的 Result 表和支持工件；Package 准入冻结 verifier identity、版本、源码摘要和
 授权输入，`verify` 只向 worker 提供本次 Result 中已封存且显式授权的内容。项目 verifier 的
 状态、findings 和 outcome hash 进入通用 VerificationResult，executor 自报成功不能替代独立
-复核。CNE5、随机稳定性等历史项目是否迁移到当前 Verifier bundle ABI，由各项目任务决定，
-不属于当前 core 的内建能力。
+复核。具体项目是否迁移到当前 Verifier bundle ABI，由项目自行决定，不属于 core 内建能力。
 
 门禁按 ResearchPackage、算子图和 claim 触发。真正不适用时记录稳定 `N/A` 原因；缺材料、未执行或不认识的原因不能冒充 `N/A`。
 
