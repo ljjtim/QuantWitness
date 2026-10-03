@@ -75,7 +75,7 @@ def gate_inputs(tmp_path_factory):
         assert process.returncode == 0, process.stdout + process.stderr
         result = Path(json.loads(process.stdout)["data"]["result_directory"])
         verification = target / "verification-result.json"
-        _cli("verify", "--result", str(result), "--result-store", str(store), "--output", str(verification))
+        _cli("verify", "--verification-process-slots", "3" if os.name == "nt" else "2", "--result", str(result), "--result-store", str(store), "--output", str(verification))
         verified = _json(verification)
         assert verified["status"] == "pass"
         after = {"size_bytes": database.stat().st_size, "mtime_ns": database.stat().st_mtime_ns}

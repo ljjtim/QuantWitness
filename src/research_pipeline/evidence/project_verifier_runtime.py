@@ -274,8 +274,10 @@ def execute_project_verifier(
         guard.check()
         process = subprocess.Popen(
             [
-                sys.executable, "-B", "-m",
-                "research_pipeline.evidence.project_verifier_worker",
+                sys.executable, "-B", "-c",
+                "import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); "
+                "runpy.run_module('research_pipeline.evidence.project_verifier_worker', run_name='__main__')",
+                str(Path(__file__).resolve().parents[2]),
                 str(Path(bundle_path).resolve()), str(context_path),
                 str(input_root), str(output_path),
             ],

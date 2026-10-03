@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 import hashlib
 import json
@@ -262,7 +263,7 @@ def project_cash_daily_result(
     fill_rows = []
     cost_rows = []
     for row in fills.itertuples(index=False):
-        price_units = int(row.notional_units) // int(row.quantity)
+        price_units = int(row.execution_price_units)
         source_hash = str(row.fill_hash)
         fill_rows.append({
             "portfolio_id": "default",
@@ -276,7 +277,7 @@ def project_cash_daily_result(
             "quantity": int(row.quantity),
             "fill_time": row.fill_time,
             "execution_price_units": price_units,
-            "price_scale": 2,
+            "price_scale": int(row.price_scale),
             "contract_multiplier": 1,
             "notional_units": int(row.notional_units),
             "fee_units": int(row.fee_units),
@@ -382,7 +383,7 @@ def project_cash_daily_result(
         decision_time_convention="declared_portfolio_target_time",
         execution_time_convention="next_exchange_session_open",
         valuation_time_convention="exchange_session_close",
-        price_convention="integer_cny_cent",
+        price_convention="raw_price_explicit_scale_cash_cny_cent",
         fee_model_version=fee_model_version,
         calendar_id=calendar_id,
         settlement_policy_id=settlement_policy_id,
@@ -650,7 +651,7 @@ def verify_simulation_result_contract(result: SimulationResultContract) -> None:
     }
     if declared_assets and declared_assets != {result.semantics.asset_class}:
         raise SimulationContractError("规范表资产类别与 SimulationSemantics 不一致")
-    _verify_orders_and_fills(tables["orders"], tables["fills"])
+    _verify_orders_and_fills(tables["orders"], tables["fills"], frequency=result.semantics.frequency)
     _verify_costs(tables["fills"], tables["costs"])
     _verify_currencies(tables["costs"], tables["cash"], tables["valuations"])
     _verify_snapshots(
@@ -899,7 +900,7 @@ def verify_simulation_result_artifact(
     return result
 
 
-def _verify_orders_and_fills(orders: pd.DataFrame, fills: pd.DataFrame) -> None:
+def _verify_orders_and_fills(orders: pd.DataFrame, fills: pd.DataFrame, *, frequency: str) -> None:
     order_index = {
         (str(row.portfolio_id), str(row.order_id)): row
         for row in orders.itertuples(index=False)
@@ -956,6 +957,8 @@ def _verify_orders_and_fills(orders: pd.DataFrame, fills: pd.DataFrame) -> None:
         scale = _nonnegative_int(row.price_scale, "price_scale")
         multiplier = _positive_int(row.contract_multiplier, "contract_multiplier")
         expected_notional = price * quantity * multiplier
+        if frequency == "daily":
+            expected_notional = int(Decimal(expected_notional).scaleb(2 - scale).quantize(Decimal(1), rounding=ROUND_HALF_UP))
         if int(row.notional_units) != expected_notional:
             raise SimulationContractError("成交额与价格、数量、合约乘数不一致")
         if scale > 9:

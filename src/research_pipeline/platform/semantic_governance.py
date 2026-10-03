@@ -38,13 +38,12 @@ APPROVED_BUILTIN_SEMANTIC_IDENTITIES = MappingProxyType({
         "research.minute-simulation.v1",
         "research.minute-statistics.v1",
         "research.minute-targets.v1",
-        "research.model-fits.v1",
-        "research.model-fold-metrics.v1",
-        "research.model-locked-holdout.v1",
-        "research.model-preprocessed-folds.v1",
-        "research.model-selection.v1",
-        "research.model-split-manifest.v1",
-        "research.model-validation-predictions.v1",
+        "research.model-fits.v2",
+        "research.model-fold-metrics.v2",
+        "research.model-locked-holdout.v2",
+        "research.model-selection.v2",
+        "research.model-split-manifest.v2",
+        "research.model-validation-predictions.v2",
         "research.validity-facts.v1",
     }),
     "metric": frozenset({
@@ -53,6 +52,7 @@ APPROVED_BUILTIN_SEMANTIC_IDENTITIES = MappingProxyType({
         "statistics.adjusted_p@1.0.0",
     }),
     "result_schema": frozenset({
+        "research.qlib-model-inventory.v1",
         "data.adjustment-factor-snapshot.payload.v1",
         "data.columnar-bundle.metrics.v1",
         "research.bar-tca.daily.v1",
@@ -101,6 +101,11 @@ APPROVED_BUILTIN_SEMANTIC_IDENTITIES = MappingProxyType({
         "default:label.split:verifier.label-split.v2",
         "default:search.holdout:verifier.search-holdout.v1",
         "default:statistics:verifier.statistics.v2",
+        "model:data.pit:verifier.data-pit.v1",
+        "model:label.split:verifier.model-label-split.v1",
+        "model:search.holdout:verifier.model-search-holdout.v1",
+        "model:statistics:verifier.model-statistics.v1",
+        "model:financial.tradability:verifier.model-prediction-scope.v1",
         "minute:data.pit:verifier.minute-data-pit.v2",
         "minute:financial.tradability:verifier.minute-financial.v2",
         "minute:label.split:verifier.minute-label-split.v2",
@@ -119,6 +124,13 @@ class SemanticGovernanceError(ValueError):
 
 # 晋级记录只能经评审后显式加入；能力 baseline 和发现快照不能生成该授权。
 MAINLINE_SEMANTIC_PROMOTION_REVIEWS: tuple["SemanticPromotionReview", ...] = ()
+
+# 2026-10-03 维护者批准日频现金接口有界接入，通用语义晋级仍按原合同。
+DAILY_CASH_LOCAL_ARTIFACT_IDENTITIES = frozenset({
+    "data.daily-market.v1",
+    "research.portfolio-targets.v1",
+    "research.daily-simulation.v1",
+})
 
 
 @dataclass(frozen=True)
@@ -152,6 +164,17 @@ class BuiltinSemanticRevision:
 
 
 MAINLINE_BUILTIN_SEMANTIC_REVISIONS = (
+    BuiltinSemanticRevision(
+        semantic_kind="verifier",
+        previous_identity="model:financial.tradability:verifier.model-prediction-scope.v1",
+        replacement_identity="model:financial.tradability:verifier.model-financial-scope.v2",
+        reason="模型组合金融事实绑定正式 Result 的独立日频现金及 TCA 复核",
+        regression_test_ids=(
+            "test_model_financial_gate_consumes_independent_oracle",
+            "test_portfolio_cannot_hide_simulation_as_prediction_only",
+            "test_portfolio_cannot_pass_with_only_self_reported_facts",
+        ),
+    ),
     BuiltinSemanticRevision(
         semantic_kind="verifier",
         previous_identity=(
@@ -280,6 +303,8 @@ def validate_public_semantic_inventory(
     if len(review_by_identity) != len(review_items):
         raise SemanticGovernanceError("公共语义晋级记录重复")
     for identity in sorted(set(actual) - set(builtins)):
+        if semantic_kind == "artifact_type" and identity in DAILY_CASH_LOCAL_ARTIFACT_IDENTITIES:
+            continue
         review = review_by_identity.get(identity)
         if review is None:
             raise SemanticGovernanceError(

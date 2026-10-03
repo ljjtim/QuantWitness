@@ -1,0 +1,25 @@
+name: 扩展提议
+description: 说明研究需要、修改边界和验收方法
+title: "[扩展] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的研究问题
+      description: 给出已有流程无法满足的具体例子和预期使用者。
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 计划修改范围
+      description: 指明项目扩展、可选集成或框架机制；涉及金融口径和可见时间时说明影响。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 可复现验收
+      description: 提供可手算正确样本、预期失败样本和不依赖私有数据的验收步骤。
+    validations:
+      required: true

@@ -23,7 +23,7 @@ class ResearchRunEnvironment:
     plan_root: Path
     manifest: Mapping[str, object]
     admitted_plans: Mapping[str, object]
-    database: Path
+    database: Path | None
     source_databases: Mapping[str, Path]
     minute_data_root: Path | None
     holdout_ledger_anchor: Path

@@ -1,0 +1,29 @@
+contract_version: project-operator-declaration-v2
+project_id: volume-concentration
+reuse_scope: cross_run
+project_artifact_types: [project.volume-concentration.evidence.v1]
+operator:
+  contract_version: research-operator-contract-v1
+  operator_id: project.volume-concentration.formula
+  operator_version: 1.0.0
+  input_ports:
+  - {port: bars, artifact_type: data.minute-bars.v1}
+  output_ports:
+  - {port: bars, artifact_type: project.volume-concentration.evidence.v1}
+  - {port: calendar, artifact_type: project.volume-concentration.evidence.v1}
+  - {port: coverage, artifact_type: project.volume-concentration.evidence.v1}
+  - {port: daily, artifact_type: project.volume-concentration.evidence.v1}
+  parameters:
+  - {name: calendar_json, value_type: string, required: true, allowed_values: []}
+  - {name: entities_json, value_type: string, required: true, allowed_values: []}
+  - {name: decision_time, value_type: string, required: true, allowed_values: []}
+  - {name: window_sessions, value_type: integer, required: false, allowed_values: [1, 2, 3, 4, 5]}
+  strategy_roles: []
+  resource_profile: {memory_bytes: 536870912, cpu_slots: 1, process_slots: 4, temp_bytes: 1073741824, wall_seconds: 300}
+  determinism_mode: deterministic
+  seed_policy: none
+  pit_capabilities: [pit.as_of.v1]
+entry: {module: adapter, function: run}
+parameter_preflight: {module: adapter, function: preflight}
+dependency_lock: {pyarrow: 21.0.0}
+permissions: {artifact_write_scope: output_only}

@@ -107,3 +107,15 @@ Artifact 类型、相对路径、内容 hash、schema hash 和字节数一致的
 ## 校验运行原则
 
 运行任何检查前先回答：它会发现什么具体失败；失败后下一步会改什么。答不上来就不运行。相同事实只校验一次并让下游直接消费，不用评分表替代明确判断。
+
+## RD-Agent 可选集成
+
+`integrations/rdagent` 使用 RD-Agent LoopBase 调度研究，公式编码使用 CoSTEER。普通 RP 命令不加载 RD-Agent 或模型客户端。模型身份、代理和凭据从显式仓库外 `.env` 读取。
+
+公式复现固定已经确认的定义，最多三次编码尝试。候选代码经项目 bundle 执行，同一主链产生 Result 与 VerificationResult；修复反馈只包含技术与公式正确性，不以收益奖励改写原公式。
+
+`campaign-run`、`campaign-inspect` 与 `campaign-resume` 管理多轮开发研究。预测校准模式消费已经验证的开发预测；研究包模式为允许的参数变体展开普通 ResearchPackage，每轮实际运行、独立验证和报告。预算、父候选、停止条件和过程记录共用同一实现。
+
+研究包循环拒绝最终 holdout 节点，输入和评价限冻结开发范围。反馈只投影指定表的指定指标，验证失败不能进入有效选优；最终研究须在开发选择完成后单独声明和执行。研究过程的最佳开发值不能继承任何旧 holdout 成绩，也不能视为未经样本外验证的策略收益。
+
+候选标识写入 Workspace allocation.label，中断后找回同一 execution。已封存 Result 只续验或续报，已完成轮次不重新运行；RD 快照回退不撤销 RP 执行事实。用法与公开教学例见[开发研究循环](../integrations/rdagent/docs/research-campaign.md)。

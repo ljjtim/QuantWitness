@@ -4,7 +4,7 @@
 
 开发安装使用 `python -m pip install ".[dev]"`；测试环境使用 `python -m pip install ".[test]"`。
 两者同时准备`setuptools>=68`、`build`和`wheel`，满足无隔离发行测试的本机构建依赖。
-这些 extras 不包括可选机器学习模型，按研究需求另装 `ml` 或 `ml-lightgbm`。
+这些 extras 不包括可选机器学习模型，按研究需求另装 `ml`（Qlib、XGBoost 与 Plotly）。
 
 ## 分发内容与命令适用范围
 
@@ -13,6 +13,8 @@ sdist 和源码 zip 均按显式清单附带当前公开操作文档、文档链
 本文的发布构建、最低版本验收、干净 wheel 验收及公开 CI 命令从独立公开源码仓库的根目录执行，也可在完整单仓的 `research_pipeline/` 下执行发布构建和验收。发布工具、`tests/test_release_metadata_ssot.py` 及可执行合成示例随独立公开源码仓库提供，不包含在 sdist 和源码 zip 中；压缩包中的示例说明用于查阅，执行示例须使用独立公开源码仓库。
 
 文档由 `tools/release_allowlist.py` 的 `CORE_DOC_FILES` 与 `MANIFEST.in` 显式列入，不递归收录历史文档。个人研究项目源码、真实研究数据、私有 Catalog 声明和 Lock、内部整改基线及维护脚本均不进入三类发行产物。需要 Catalog 的命令由调用方提供自己的持久 Lock。
+
+公开示例与可选集成的使用说明随核心文档一起分发，保持本地文档链接可读；对应示例脚本和可选集成代码仍需完整公开源码。日频现金节点的本地准入说明单独列入文档清单，内部发布证据不随包分发。
 
 ## 正式构建
 
@@ -34,6 +36,8 @@ python tools/build_release_artifacts.py --project . --output <不存在的仓库
 ```
 
 直接在完整工作树运行标准构建不承担正式 allowlist 筛选；正式交付使用上面的 staging 工具。历史 release 证据不随当前构建覆盖，工作树未提交时也不能把测试构建称为干净发布候选。BuildManifest 的源码检查支持不含私有 Catalog 的独立公开仓库，并继续拒绝未提交的包文件删除或修改。收据复验器从显式传入的 wheel METADATA 读取版本，与安装后的 CLI 版本精确比较；中性草稿 lint 记录必须为预期失败且 exit=1。
+
+完整交付还需按[独立使用验收](external-acceptance.md)保留同版本 Linux、远端 CI 和首次使用记录。
 
 ## 最低版本验收
 

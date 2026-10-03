@@ -94,6 +94,11 @@ def execute_simulation_result_bar_tca(
         observation = observation_by_fill.get(str(row.fill_id))
         if execution_observations is not None and observation is None:
             raise ValueError("TCA 正式 fill 缺少对应成交时观察")
+        price_numerator = int(row.execution_price_units) * 10 ** policy.price_scale
+        price_denominator = 10 ** int(row.price_scale)
+        execution_price, remainder = divmod(price_numerator, price_denominator)
+        if remainder:
+            raise ValueError("TCA policy 价格精度不足以表示正式成交价")
         formal_fills.append(BarTcaFormalFill(
             source_fill_id=str(row.fill_id),
             order_id=str(row.order_id),
@@ -102,7 +107,7 @@ def execute_simulation_result_bar_tca(
             side=str(row.side),
             fill_time=_aware(row.fill_time, "fill_time"),
             quantity=int(row.quantity),
-            execution_price_units=int(row.execution_price_units),
+            execution_price_units=execution_price,
             formal_fee_units=int(row.fee_units),
             source_fill_hash=str(row.source_fill_hash),
             source_ledger_hash=source_ledger_hash,

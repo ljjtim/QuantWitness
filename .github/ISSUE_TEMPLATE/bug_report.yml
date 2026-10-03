@@ -1,0 +1,31 @@
+name: 缺陷报告
+description: 提供可运行的最小复现和实际验证状态
+title: "[缺陷] "
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 预期与实际行为
+      description: 说明具体入口、预期结果和实际结果；命令成功与独立验证通过分开描述。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 最小复现命令
+      description: 优先使用公开合成示例；不要粘贴数据库、凭据或私有行情。
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境和版本
+      description: 操作系统、Python、安装方式、QuantWitness版本及相关可选依赖。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 诊断与验证状态
+      description: 提供脱敏后的诊断、失败节点和 VerificationResult 状态；不必上传完整运行目录。

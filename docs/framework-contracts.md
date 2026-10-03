@@ -223,3 +223,12 @@ FeatureSetArtifact、LabelArtifact 以及 Runtime 的旧 v1 合同不再兼容�
 - [现行文档索引](index.md)
 
 历史验收和退役设计可以留在仓库中取证，但不属于当前操作入口。
+
+Qlib 模型链采用六节点；模型与处理器是同一候选/fold 的文件工件。ResultSpec 选定模型 inventory 时封存其明确引用文件，恢复不依赖训练工作目录。HTML 研究报告使用 Qlib 诊断算法，并保留来源、方法和验证状态。
+
+## 归档来源身份
+
+封存来源使用 CLI plan v6，冻结完整 input_snapshot_manifest；对应 invocation v14 保存显式
+清单路径并在恢复时与计划内容核对。原数据库来源继续使用原合同，历史运行不自动迁移。
+归档来源准入证据包含原工件引用和当前归档物理绑定，进入原有 admission/DAG 身份链；
+节点缓存不能跨来源变更复用。数据和分钟适配器的源码身份包含 archived_inputs 实现。

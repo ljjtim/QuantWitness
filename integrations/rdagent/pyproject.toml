@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quantwitness-rdagent"
+version = "0.1.0"
+description = "QuantWitness 的可选 RD-Agent 公式复现场景"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+materials = ["pypdf==6.10.0"]
+live = ["httpx==0.28.1", "python-dotenv==1.2.4"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -19,6 +19,7 @@ from research_pipeline.platform.operator_contracts import operator_dag_runtime_h
 from .artifact_reader import ExternalArtifactReader, RuntimeArtifactReference
 from .contracts import (
     RESULT_EMBEDDED_VERIFIER_CLOSURE_VERSION,
+    QLIB_MODEL_INVENTORY_SCHEMA_ID,
     ResultBundle,
     ResultInputRevision,
     ResultReference,
@@ -214,6 +215,11 @@ class ResultAssembler:
             commits,
             external=external,
             validity_support=validity_support,
+            tables=tuple(tables),
+            include_model_ledger=(
+                isinstance(validity_facts.get("model_diagnostics"), Mapping)
+                and validity_facts["model_diagnostics"].get("mode") == "walk_forward_prediction_v1"
+            ),
         )
         audit_environment = record.get("audit_environment")
         if not isinstance(audit_environment, Mapping):
@@ -425,15 +431,41 @@ class ResultAssembler:
         *,
         external: ExternalArtifactReader,
         validity_support: ResultSupportFile,
+        tables: tuple[ResultTableManifest, ...] = (),
+        include_model_ledger: bool = False,
     ) -> tuple[ResultSupportFile, ...]:
-        """封装 validity facts，以及按 ResultSpec 条件触发的金融控制文件。"""
+        """按正式表声明封存验证材料、金融控制及模型状态。"""
 
         from .contracts import BAR_TCA_SCHEMA_IDS
 
         declared = {item.schema_id for item in result_spec.tables}
-        if not declared & set(BAR_TCA_SCHEMA_IDS.values()):
-            return (validity_support,)
         selected = [validity_support]
+        selected.extend(ResultAssembler._model_support_files(
+            tables, commits, external=external,
+        ))
+        if include_model_ledger:
+            holdout_keys = {
+                item.artifact_key for item in tables
+                if item.artifact_type == "research.model-locked-holdout.v2"
+            }
+            if len(holdout_keys) != 1:
+                raise ResultContractError("模型有效性要求唯一正式 holdout 工件")
+            commit = commits[next(iter(holdout_keys))]
+            for name in ("plan", "prepared", "opened", "terminal"):
+                source_path = f"holdout-ledger/{name}.json"
+                if source_path not in commit.files:
+                    raise ResultContractError("模型 Result 缺少完整 holdout 账本")
+                selected.append(ResultSupportFile(
+                    artifact_key=commit.semantic_hash,
+                    artifact_type="research.model-locked-holdout.v2",
+                    source_path=source_path,
+                    relative_path=f"support/{commit.semantic_hash}/{source_path}",
+                    content_hash=commit.files[source_path],
+                ))
+        if not declared & set(BAR_TCA_SCHEMA_IDS.values()):
+            return tuple(sorted(
+                selected, key=lambda item: (item.artifact_key, item.source_path)
+            ))
         financial_commits: dict[str, object] = {}
         for source_path in _BAR_TCA_SUPPORT_PATHS:
             matches = tuple(commit for commit in commits.values() if source_path in commit.files)
@@ -504,6 +536,59 @@ class ResultAssembler:
         return tuple(sorted(
             selected, key=lambda item: (item.artifact_key, item.source_path)
         ))
+
+    @staticmethod
+    def _model_support_files(
+        tables: tuple[ResultTableManifest, ...],
+        commits: Mapping[str, object],
+        *,
+        external: ExternalArtifactReader,
+    ) -> tuple[ResultSupportFile, ...]:
+        """只封存 ResultSpec 选中清单里成功模型明确引用的文件。"""
+
+        selected: dict[tuple[str, str], ResultSupportFile] = {}
+        for table in tables:
+            if table.schema_id != QLIB_MODEL_INVENTORY_SCHEMA_ID:
+                continue
+            commit = commits[table.artifact_key]
+            source_prefix = f"{table.path_prefix}/"
+            for source_path in sorted(commit.files):
+                if not source_path.startswith(source_prefix) or not source_path.endswith(".parquet"):
+                    continue
+                inventory = external.read_parquet(commit, source_path)
+                required = {"status", "config_path", "model_path"}
+                if not required.issubset(inventory.column_names):
+                    raise ResultContractError("Qlib 模型清单缺少状态或文件路径")
+                for row in inventory.to_pylist():
+                    if row["status"] != "fitted":
+                        continue
+                    config_path = row["config_path"]
+                    try:
+                        config = json.loads(external.read_bytes(commit, config_path))
+                    except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+                        raise ResultContractError("Qlib 模型配置无法读取") from exc
+                    if not isinstance(config, dict) or config.get("model_path") != row["model_path"]:
+                        raise ResultContractError("Qlib 模型清单与配置的模型路径不一致")
+                    processor_files = config.get("processor_files")
+                    if not isinstance(processor_files, dict) or set(processor_files) != {"infer", "learn"}:
+                        raise ResultContractError("Qlib 模型配置缺少 Processor 文件清单")
+                    paths = [config_path, row["model_path"]]
+                    for role in ("infer", "learn"):
+                        if not isinstance(processor_files[role], list):
+                            raise ResultContractError("Qlib Processor 文件清单必须为列表")
+                        paths.extend(processor_files[role])
+                    for path in paths:
+                        if not isinstance(path, str) or path not in commit.files:
+                            raise ResultContractError(f"Qlib 模型引用未提交文件: {path}")
+                        key = (commit.semantic_hash, path)
+                        selected[key] = ResultSupportFile(
+                            artifact_key=commit.semantic_hash,
+                            artifact_type=table.artifact_type,
+                            source_path=path,
+                            relative_path=f"support/{commit.semantic_hash}/{path}",
+                            content_hash=commit.files[path],
+                        )
+        return tuple(selected[key] for key in sorted(selected))
 
     @staticmethod
     def _write_reference(root: Path, reference: ResultReference) -> None:

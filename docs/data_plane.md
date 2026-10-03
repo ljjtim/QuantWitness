@@ -97,3 +97,39 @@ schema、来源、PIT 或路径身份失败时停止生成工件并返回到 pac
 普通数据 provider/compiler 使用 v2，分钟数据使用 v3；这些版本进入逻辑快照身份。旧实现若已在源筛选阶段丢弃修订事实，不能通过新读取器恢复缺失版本，必须重新物化。旧 request partial 不作为当前执行的复用证据；正式节点仍按实现身份、计划和输入闭包判断是否可复用，不修改既有 Result。
 
 普通 as-of 与逐决策查询的扫描内存都按 `required_scan_fields` 计量，包括选择版本、判断区间和业务筛选所需的隐藏列。输出列较少不会降低这些扫描成本。
+
+## 封存输入
+
+`package admit`、`run`、`workspace run/execute` 支持 `--input-snapshot-manifest`，与
+`--data-db/--source-db` 互斥。归档清单按 request_id 引用原 AdmittedQueryPlan、已提交的
+DatasetArtifactRef 或 raw 分钟 PartitionedDatasetRef、明确允许根以及当前批准的 binding_id。
+研报正文的 `--source-archive-root` 与行情归档是不同输入。
+
+清单格式为 `archived-input-manifest-v1`，路径相对于清单文件解析，准入时转为绝对路径并内联原计划：
+
+```json
+{
+  "contract_version": "archived-input-manifest-v1",
+  "requests": {
+    "daily_bar": {
+      "kind": "dataset",
+      "original_plan": "old-plan/queries/daily_bar.json",
+      "root": "old-artifacts/data",
+      "reference": {"...": "完整 DatasetArtifactRef 内容"},
+      "binding_id": "approved_archive_daily"
+    }
+  }
+}
+```
+
+`reference` 必须是原工件完整引用对象；示例省略其字段。raw 分钟使用 `kind=minute`，
+`reference` 为完整 PartitionedDatasetRef，`root` 为明确分钟根。清单本身不批准物理绑定。
+
+归档来源只支持逻辑查询等同重用，不能扩大列、证券或日期。当前 Catalog 必须为快照真实字段
+声明独立物理绑定并完成审批；投影快照不能证明原数据库整表 schema。来源原有可见性、修订
+政策和 claim 上限继续适用，不因离线文件存在而获得新的 PIT 保证。
+
+普通快照通过 Arrow 在节点预算内按主键排序，再发布绑定新准入的正式快照；超预算拒绝。
+分钟沿用现有文件引用扫描，并与冻结清单的文件、范围和股票池核对。该分支不连接 DuckDB
+或 SQLite，结果报告 `input_source=archived_snapshot`、`database_opened=false`，不报告
+未经执行的 `database_unchanged`。清单内容冻结进正式计划；恢复使用同一来源，清单变化须重新准入。

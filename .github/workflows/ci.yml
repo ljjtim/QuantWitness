@@ -80,9 +80,87 @@ jobs:
           PYTHONPATH="$GITHUB_WORKSPACE" "$RUNNER_TEMP/quantwitness-wheel-env/bin/python" -c 'import importlib.metadata as m, pathlib, research_pipeline, sys; assert pathlib.Path(research_pipeline.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()); assert m.version("pyarrow") == "21.0.0"'
           PYTHONPATH="$GITHUB_WORKSPACE" "$RUNNER_TEMP/quantwitness-wheel-env/bin/python" -m pytest -o pythonpath= -q "$GITHUB_WORKSPACE/tests/test_public_examples.py" "$GITHUB_WORKSPACE/tests/test_workspace.py" "$GITHUB_WORKSPACE/tests/test_workspace_flow.py" "$GITHUB_WORKSPACE/tests/test_package_diagnostics.py" "$GITHUB_WORKSPACE/tests/test_cli_summary.py" "$GITHUB_WORKSPACE/tests/test_process_budget_advice.py" "$GITHUB_WORKSPACE/tests/test_verifier_resource_diagnostics.py" "$GITHUB_WORKSPACE/tests/test_dsr_formula.py" "$GITHUB_WORKSPACE/tests/test_cli_failure_details.py" "$GITHUB_WORKSPACE/tests/test_dependency_distribution_identity.py" "$GITHUB_WORKSPACE/tests/test_dependency_identity_recovery.py"
 
+  rdagent-distribution:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distribution: [wheel, sdist]
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 准备 Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 构建核心与可选集成发行文件
+        run: |
+          python -m pip install build 'setuptools>=68' wheel
+          python tools/build_release_artifacts.py --project . --output "$RUNNER_TEMP/core-dist"
+          python -m build --no-isolation --wheel --sdist --outdir "$RUNNER_TEMP/rdagent-dist" integrations/rdagent
+      - name: 从空环境安装并完成公开公式验收
+        env:
+          DISTRIBUTION: ${{ matrix.distribution }}
+        run: |
+          python -m venv "$RUNNER_TEMP/installed-env"
+          if [ "$DISTRIBUTION" = wheel ]; then
+            "$RUNNER_TEMP/installed-env/bin/python" -m pip install "$RUNNER_TEMP"/core-dist/*.whl "$RUNNER_TEMP"/rdagent-dist/*.whl "pyarrow==21.0.0" "pypdf==6.10.0"
+          else
+            "$RUNNER_TEMP/installed-env/bin/python" -m pip install "$RUNNER_TEMP"/core-dist/*.tar.gz "$RUNNER_TEMP"/rdagent-dist/*.tar.gz "pyarrow==21.0.0" "pypdf==6.10.0"
+          fi
+          "$RUNNER_TEMP/installed-env/bin/python" -I tools/verify_rdagent_install.py --project . --output "$RUNNER_TEMP/installed-acceptance"
+      - name: 回归公开请求与多轮研究边界
+        run: |
+          "$RUNNER_TEMP/installed-env/bin/python" -m pip install 'pytest>=8,<10'
+          "$RUNNER_TEMP/installed-env/bin/python" -m pytest -o pythonpath= -q --basetemp "$RUNNER_TEMP/rdagent-tests" integrations/rdagent/tests/test_request_builder.py integrations/rdagent/tests/test_formula_spec.py integrations/rdagent/tests/test_source_materials.py integrations/rdagent/tests/test_campaign.py integrations/rdagent/tests/test_campaign_data.py integrations/rdagent/tests/test_package_campaign.py integrations/rdagent/tests/test_package_campaign_execution.py
+
+  ml-distribution:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 准备 Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 构建核心发行文件
+        shell: python {0}
+        run: |
+          import os, pathlib, subprocess, sys
+          output = pathlib.Path(os.environ["RUNNER_TEMP"]) / "ml-core-dist"
+          subprocess.run([sys.executable, "-m", "pip", "install", "build", "setuptools>=68", "wheel"], check=True)
+          subprocess.run([sys.executable, "tools/build_release_artifacts.py", "--project", ".", "--output", str(output)], check=True)
+      - name: 从空环境验收三模型训练与跨进程恢复
+        shell: python {0}
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          venv = root / "ml-installed-env"
+          subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+          python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+          wheel, = (root / "ml-core-dist").glob("*.whl")
+          subprocess.run([str(python), "-m", "pip", "install", str(wheel) + "[ml]", "pyarrow==21.0.0"], check=True)
+          subprocess.run([str(python), "-I", "tools/verify_ml_install.py", "--output", str(root / "ml-acceptance")], check=True)
+      - name: 验收预测到组合和独立金融报告
+        shell: python {0}
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ["RUNNER_TEMP"])
+          python = root / "ml-installed-env" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+          subprocess.run([str(python), "examples/qlib_portfolio/run.py", "--mode", "portfolio", "--output", str(root / "qlib-portfolio")], check=True)
   release-request:
     name: Record version change after CI
-    needs: public-boundary
+    needs: [public-boundary, rdagent-distribution, ml-distribution]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:

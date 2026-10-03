@@ -18,7 +18,7 @@ from research_pipeline.evidence import (
 
 from ..result import execute_guarded
 from ..command_suggestion import command_suggestion
-from ..report_output import write_verification_report
+from ..report_output import prepare_qlib_request, report_table_ids, write_qlib_report, write_verification_report
 
 
 def execute(args) -> int:
@@ -115,25 +115,33 @@ def _execute(args) -> dict[str, object]:
         roles,
         read_only_roles=("verification_input", "result_store_input"),
     )
+    request = prepare_qlib_request(args) if args.command == "report" else None
     context = load_verified_result_context(
         args.verification_result,
         result_store=args.result_store,
+        additional_table_ids=report_table_ids(request),
     )
     if args.command == "report":
         markdown = render_verification_report(context)
         if args.output is None:
             return {"report": markdown}
-        output = write_verification_report(
-            args.output,
-            output_format=args.format,
-            markdown=markdown,
-            report=asdict(build_verification_report(context)),
-        )
+        if request is not None:
+            output = write_qlib_report(args.output, context=context, request=request, markdown=markdown)
+        else:
+            output = write_verification_report(
+                args.output,
+                output_format=args.format,
+                markdown=markdown,
+                report=asdict(build_verification_report(context)),
+            )
         return {
             "output": str(output),
             "format": args.format,
             "result_id": context.snapshot.bundle.result_id,
             "verification_hash": context.verification.verification_hash,
+            "verification_status": context.verification.status,
+            "validity_status": context.verification.validity_status,
+            "claim_level": context.verification.claim_level,
         }
     return {"output": str(export_verified_result(context, args.output))}
 

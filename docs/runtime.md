@@ -28,6 +28,8 @@ ExternalArtifact提交时，staging内部的链接项会先复制为普通内容
 
 `run --reuse-failed-run-root <失败run>` 用于修正 ResultSpec 等不改变计算 DAG 的计划后继续执行。来源必须是失败终态；新旧 DAG、节点身份环境、clock 和 seed 必须完全一致。Runtime 只导入事件状态为成功的 checkpoint，并重新验证 checkpoint 内容、typed 输出和 ExternalArtifact；首个未成功节点及其下游在新 run 中重新执行。该参数不能与 `--reuse-run-root` 或 `rerun-from` 混用，也不会放宽普通跨运行缓存的 `pure/cacheable` 合同。
 
+失败来源也可配合重复的 `--require-reused-node <节点>` 使用。此时允许修改其余 DAG，但指定节点及其全部上游必须在原事件链中成功，且局部节点合同、当前输入、实现、definition、cache profile、clock、seed、checkpoint、typed 输出和 ExternalArtifact 全部通过预检。环境兼容性仍使用各节点原有画像，`byte_exact` 不降级。全部指定节点导入后才进入 Runtime；缺少任何一个即拒绝整次运行，不回退执行。目标 `recovery-plan.json` 记录原 run、每个来源 checkpoint 和目标 run，来源记录保持只读。`resume` 与 `retry-node` 从冻结 invocation 恢复同一来源和强制节点列表，并重新完成复验。
+
 ## 执行记录
 
 - invocation：恢复所需的显式输入和计划内 bundle 闭包。

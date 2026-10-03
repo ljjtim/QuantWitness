@@ -92,6 +92,7 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness) -> dict[str, obj
     manifest, admitted, dag, recipe, registry = load_operator_graph_research_plan(
         target=args.plan,
     )
+    _validate_frozen_input_source(args, manifest)
     verifier_bundle_source = resolve_plan_verifier_bundle(
         args.plan,
         manifest.get("verifier_admission"),
@@ -116,11 +117,11 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness) -> dict[str, obj
         args,
         required_process_slots=max(declared_process_slots.values()),
     )
-    database = Path(args.data_db).resolve()
-    if not database.is_file():
+    database = None if not args.data_db else Path(args.data_db).resolve()
+    if database is not None and not database.is_file():
         raise ValueError("显式只读 data-db 不存在")
     source_databases = _source_database_arguments(args)
-    database_probe = (database.stat().st_size, database.stat().st_mtime_ns)
+    database_probe = None if database is None else (database.stat().st_size, database.stat().st_mtime_ns)
     source_database_probes = {
         profile: (path.stat().st_size, path.stat().st_mtime_ns)
         for profile, path in sorted(source_databases.items())
@@ -213,8 +214,8 @@ def _finalize_operator_graph_result(
     admitted: Mapping[str, object],
     runtime_result: Mapping[str, object],
     implementation_manifest_hash: str,
-    database: Path,
-    database_probe: tuple[int, int],
+    database: Path | None,
+    database_probe: tuple[int, int] | None,
     source_databases: Mapping[str, Path],
     source_database_probes: Mapping[str, tuple[int, int]],
     verifier_bundle_source: Path | None = None,
@@ -242,7 +243,7 @@ def _finalize_operator_graph_result(
         completion_metadata = runtime_result.get("completion_metadata")
         if not isinstance(completion_metadata, Mapping):
             raise ValueError("统一 Runtime 缺少 completion metadata")
-        if (database.stat().st_size, database.stat().st_mtime_ns) != database_probe:
+        if database is not None and (database.stat().st_size, database.stat().st_mtime_ns) != database_probe:
             raise ValueError("算子图正式运行后数据库指纹发生变化")
         if {
             profile: (path.stat().st_size, path.stat().st_mtime_ns)
@@ -303,7 +304,9 @@ def _finalize_operator_graph_result(
             "package_id": manifest["package_id"],
             "package_plan_hash": manifest["package_plan_hash"],
             "dag_hash": manifest["dag_hash"],
-            "database_unchanged": True,
+            **({"database_unchanged": True} if database is not None else {
+                "input_source": "archived_snapshot", "database_opened": False,
+            }),
             "execution_engine": "unified",
             "runtime_run_id": runtime_result["run_id"],
             "result_id": result_bundle.result_id,
@@ -454,7 +457,7 @@ def _execute_unified_operator_runtime(
     required_reused_nodes = tuple(
         getattr(args, "require_reused_node", ())
     )
-    if required_reused_nodes:
+    if required_reused_nodes and not failed_reuse_root:
         prepare_required_run_reuse(
             service=service,
             dag=dag,
@@ -480,6 +483,10 @@ def _execute_unified_operator_runtime(
             root_seed=args.root_seed,
             fixed_clock=args.clock,
             mode=ExecutionMode(args.mode),
+            required_node_ids=required_reused_nodes,
+            node_identity_projection=str(manifest.get(
+                "node_identity_projection", NODE_IDENTITY_PROJECTION_LEGACY,
+            )),
         )
     elif parent_run_root:
         recovery_path = runtime_root / "recovery-plan.json"
@@ -594,7 +601,7 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
             )
         ),
         "plan": str(Path(args.plan).resolve()),
-        "data_db": str(Path(args.data_db).resolve()),
+        "data_db": None if not args.data_db else str(Path(args.data_db).resolve()),
         "source_dbs": {
             profile: str(path) for profile, path in sorted(source_databases.items())
         },
@@ -619,6 +626,11 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
             for path in getattr(args, "reuse_run_root", ())
         ],
     }
+    if getattr(args, "input_snapshot_manifest", None):
+        payload["contract_version"] = "research-operator-dag-invocation-v14"
+        payload["input_snapshot_manifest"] = str(Path(args.input_snapshot_manifest).resolve())
+    if failed_reuse_root and required_reused_nodes:
+        payload["contract_version"] = "research-operator-dag-invocation-v15"
     if required_reused_nodes:
         payload["required_reused_nodes"] = required_reused_nodes
     if failed_reuse_root:
@@ -660,7 +672,23 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
         "execution_engine", "resource_capacity",
         "resource_governance",
     }
-    if version == "research-operator-dag-invocation-v13":
+    if version == "research-operator-dag-invocation-v15":
+        expected.update({"reuse_run_roots", "required_reused_nodes", "reuse_failed_run_root"})
+        if payload.get("reuse_run_roots") or not payload.get("required_reused_nodes") or not payload.get("reuse_failed_run_root"):
+            raise ValueError("严格失败节点复用 invocation 来源或节点无效")
+        if "input_snapshot_manifest" in payload:
+            expected.add("input_snapshot_manifest")
+            if not payload.get("input_snapshot_manifest") or payload.get("data_db") is not None or payload.get("source_dbs"):
+                raise ValueError("封存输入 invocation 不得混用数据库来源")
+    elif version == "research-operator-dag-invocation-v14":
+        expected.update({"reuse_run_roots", "input_snapshot_manifest"})
+        if "required_reused_nodes" in payload:
+            expected.add("required_reused_nodes")
+        if "reuse_failed_run_root" in payload:
+            expected.add("reuse_failed_run_root")
+        if not payload.get("input_snapshot_manifest") or payload.get("data_db") is not None or payload.get("source_dbs"):
+            raise ValueError("封存输入 invocation 不得混用数据库来源")
+    elif version == "research-operator-dag-invocation-v13":
         expected.update({"reuse_run_roots", "required_reused_nodes"})
     elif version == "research-operator-dag-invocation-v12":
         expected.update({"reuse_run_roots", "reuse_failed_run_root"})
@@ -882,23 +910,22 @@ def _validate_run_paths(args) -> None:
     required_reused_nodes = tuple(
         getattr(args, "require_reused_node", ())
     )
-    if required_reused_nodes and not getattr(args, "reuse_run_root", ()):
-        raise ValueError("要求节点复用时必须提供 --reuse-run-root")
+    if required_reused_nodes and not (
+        getattr(args, "reuse_run_root", ()) or getattr(args, "reuse_failed_run_root", None)
+    ):
+        raise ValueError("要求节点复用时必须提供 --reuse-run-root 或 --reuse-failed-run-root")
     if len(set(required_reused_nodes)) != len(required_reused_nodes):
         raise ValueError("--require-reused-node 不得重复")
     if getattr(args, "reuse_failed_run_root", None) and getattr(
         args, "reuse_run_root", ()
     ):
         raise ValueError("失败 run checkpoint 复用不能与完成态跨运行复用同时启用")
-    if getattr(args, "reuse_failed_run_root", None) and required_reused_nodes:
-        raise ValueError("失败 run checkpoint 复用不能要求完成态节点复用")
     if getattr(args, "reuse_failed_run_root", None) and getattr(
         args, "runtime_rerun_parent_root", None
     ):
         raise ValueError("失败 run checkpoint 复用不能与 rerun-from 同时启用")
     roles = {
         "plan_input": args.plan,
-        "database_input": args.data_db,
         "artifact_output": args.artifact_root,
         "handoff_output": args.handoff_out,
         "run_output": args.run_root,
@@ -908,7 +935,20 @@ def _validate_run_paths(args) -> None:
         roles["minute_data_input"] = args.minute_data_root
     if getattr(args, "resource_state_dir", None):
         roles["resource_governance_output"] = args.resource_state_dir
-    read_only = ["plan_input", "database_input"]
+    read_only = ["plan_input"]
+    if getattr(args, "data_db", None):
+        roles["database_input"] = args.data_db
+        read_only.append("database_input")
+    if getattr(args, "input_snapshot_manifest", None):
+        roles["input_snapshot_manifest_input"] = args.input_snapshot_manifest
+        read_only.append("input_snapshot_manifest_input")
+        from research_pipeline.data_plane.archived_inputs import load_archived_input_manifest
+
+        archived = load_archived_input_manifest(args.input_snapshot_manifest)
+        for request_id, entry in archived["requests"].items():
+            role = f"archive_{request_id}_input"
+            roles[role] = entry["root"]
+            read_only.append(role)
     for index, path in enumerate(getattr(args, "reuse_run_root", ())):
         role = f"reuse_run_input_{index}"
         roles[role] = path
@@ -925,11 +965,40 @@ def _validate_run_paths(args) -> None:
     PathRolePolicy().validate(roles, read_only_roles=tuple(read_only))
 
 
+def _validate_frozen_input_source(args, manifest: Mapping[str, object]) -> None:
+    """调用来源必须与准入时冻结的来源内容相同。"""
+    declared = manifest.get("input_snapshot_manifest")
+    path = getattr(args, "input_snapshot_manifest", None)
+    if declared is None:
+        if path:
+            raise ValueError("数据库来源计划不能改用封存输入")
+        return
+    if not path:
+        raise ValueError("封存来源计划必须提供 --input-snapshot-manifest")
+    from research_pipeline.data_plane.archived_inputs import load_archived_input_manifest
+
+    observed = load_archived_input_manifest(path)
+    if observed != declared:
+        raise ValueError("封存输入清单与准入计划不一致；来源改变须重新准入")
+    from research_pipeline.data_plane.archived_inputs import verify_archived_input_manifest
+
+    minute_roots = {entry["root"] for entry in observed["requests"].values() if entry["kind"] == "minute"}
+    if minute_roots:
+        minute_root = getattr(args, "minute_data_root", None)
+        if minute_root is None or minute_roots != {str(Path(minute_root).resolve())}:
+            raise ValueError("--minute-data-root 必须与冻结分钟来源一致")
+    verify_archived_input_manifest(observed)
+
+
 def _require_data_run_arguments(args) -> None:
+    archive = getattr(args, "input_snapshot_manifest", None)
+    if archive and (getattr(args, "data_db", None) or getattr(args, "source_db", None)):
+        raise ValueError("--input-snapshot-manifest 与 --data-db/--source-db 互斥")
+    if not archive and not getattr(args, "data_db", None):
+        raise ValueError("正式数据研究需要 --data-db 或 --input-snapshot-manifest")
     missing = [
         flag
         for flag, attribute in (
-            ("--data-db", "data_db"),
             ("--handoff-out", "handoff_out"),
             ("--result-store", "result_store"),
         )

@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from research_pipeline.data_plane import ArtifactResolver, DatasetArtifactRef, PartitionedDatasetRef
@@ -63,7 +64,13 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
         checked = CausalReadTrace(plan, item, facts["lineage"], source_partition_identities=identities) if plan.state_scope == "carry" else None
         core_facts = pd.DataFrame(facts["records"])
         for output in result.outputs:
-            metadata = pq.ParquetFile(output.path).metadata
+            parquet = pq.ParquetFile(output.path)
+            metadata = parquet.metadata
+            output_facts = core_facts.copy()
+            if output.port == plan.output_port:
+                for key in plan.key_columns:
+                    if pa.types.is_date(parquet.schema_arrow.field(key).type):
+                        output_facts[key] = pd.to_datetime(output_facts[key], errors="raise").dt.date
             if metadata.num_rows != len(item.key_rows):
                 raise RuntimeIntegrityError("项目 causal 输出行数与冻结键批不一致")
             uncompressed = sum(metadata.row_group(i).total_byte_size for i in range(metadata.num_row_groups))
@@ -76,7 +83,7 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
             committed = external.commit(
                 staging, artifact_name=output.port, artifact_type=output.artifact_type,
                 producer_scope="project",
-                core_time_facts=core_facts if output.port == plan.output_port else None,
+                core_time_facts=output_facts if output.port == plan.output_port else None,
                 causal_time_key_columns=plan.key_columns if output.port == plan.output_port else (),
             )
             committed_by_port.setdefault(output.port, []).append(committed)
@@ -87,6 +94,11 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
     values = {}
     for port, commits in committed_by_port.items():
         staging = external.prepare()
+        if port == plan.output_port and any(source.daily_time is not None for source in plan.sources):
+            _write_daily_causal_artifact(staging, commits, external, plan, environment)
+            final = external.commit(staging, artifact_name=port, artifact_type=commits[0].artifact_type)
+            values[port] = RuntimeNodeValue.external(final)
+            continue
         writer_root = ProjectOutputRoot(staging)
         first = external.objects_root / commits[0].semantic_hash / next(iter(commits[0].files))
         schema = pq.ParquetFile(first).schema_arrow
@@ -104,6 +116,38 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
         final = external.commit(staging, artifact_name=port, artifact_type=commits[0].artifact_type)
         values[port] = RuntimeNodeValue.external(final)
     return RuntimeNodeOutputs(values)
+
+
+def _write_daily_causal_artifact(staging, commits, external, plan, environment):
+    """沿用模型表元数据合同，并保留键批分区以隔离 holdout 的物理读取。"""
+    from .walk_forward_model_execution import _write_partitioned_artifact
+
+    semantics = getattr(environment, "semantics", None)
+    if semantics is None:
+        raise RuntimeIntegrityError("正式日频因果输出缺少冻结 ResearchSemantics")
+    table_name = "features" if plan.kind == "feature" else "labels"
+
+    def frames():
+        for commit in commits:
+            external.verify(commit.semantic_hash)
+            for relative in commit.files:
+                if relative.endswith(".parquet"):
+                    frame = pq.ParquetFile(external.objects_root / commit.semantic_hash / relative).read().to_pandas()
+                    time_columns = (
+                        ("observation_time", "available_time", "decision_time", "max_source_observation_time", "max_source_available_time")
+                        if plan.kind == "feature" else
+                        ("decision_time", "label_start_time", "label_end_time", "first_actual_observation_time", "last_actual_observation_time", "available_time")
+                    )
+                    for column in time_columns:
+                        if column in frame:
+                            frame[column] = pd.to_datetime(frame[column], utc=True, errors="raise")
+                    yield frame
+
+    _write_partitioned_artifact(
+        staging, partitioned_tables={table_name: frames()}, tables=lambda: {}, status="pass",
+        extra={"contract_version": "project-causal-daily-v1", "semantics_hash": semantics.semantics_hash,
+               "causal_plan": plan.to_dict()},
+    )
 
 
 def _causal_inputs(node_context, environment, plan):

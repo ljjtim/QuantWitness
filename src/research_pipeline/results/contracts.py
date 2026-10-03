@@ -25,6 +25,7 @@ RESULT_EMBEDDED_VERIFIER_CLOSURE_VERSION = (
 )
 RESULT_INPUT_REVISION_VERSION = "research-result-input-revision-v1"
 RESULT_REF_VERSION = "research-result-ref-v1"
+QLIB_MODEL_INVENTORY_SCHEMA_ID = "research.qlib-model-inventory.v1"
 
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -365,7 +366,7 @@ class ResultTableManifest:
 
 @dataclass(frozen=True)
 class ResultSupportFile:
-    """随最终表进入 Result 的小型验证材料。"""
+    """随正式表封存的验证材料、模型及处理器状态。"""
 
     artifact_key: str
     artifact_type: str
@@ -914,6 +915,7 @@ __all__ = [
     "MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS", "RESULT_BUNDLE_VERSION",
     "RESULT_EMBEDDED_VERIFIER_CLOSURE_VERSION",
     "RESULT_INPUT_REVISION_VERSION", "RESULT_REF_VERSION",
+    "QLIB_MODEL_INVENTORY_SCHEMA_ID",
     "RESULT_SPEC_VERSION", "RESULT_SUPPORT_FILE_VERSION", "RESULT_TABLE_MANIFEST_VERSION", "ResultBundle",
     "ResultInputRevision", "ResultReference", "ResultSpec", "ResultTableManifest",
     "ResultSupportFile", "ResultTableSpec",

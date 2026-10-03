@@ -54,7 +54,7 @@ def run_causal_entry(entry, context, inputs, output_root, causal_context):
                     for batch in parquet.iter_batches(columns=list(columns), batch_size=batch_size, use_threads=False):
                         if batch.nbytes > original._max_batch_bytes:
                             raise CausalTimeContractError("因果输入批次超过内存预算")
-                        for name in {source.observation_column, source.available_column}:
+                        for name in (() if source.daily_time is not None else {source.observation_column, source.available_column}):
                             index = batch.schema.get_field_index(name)
                             array = batch.column(index)
                             if pa.types.is_timestamp(array.type) and array.type.tz is None:
@@ -64,8 +64,8 @@ def run_causal_entry(entry, context, inputs, output_root, causal_context):
                                 batch = batch.set_column(index, name, array)
                         observations = batch.column(batch.schema.get_field_index(source.observation_column))
                         # 逻辑月份使用源的时区；UTC 归一只用于窗口不等式。
-                        local_observations = pd.Series(observations.to_pandas())
-                        if source_timezone is not None:
+                        local_observations = pd.to_datetime(pd.Series(observations.to_pandas()))
+                        if source.daily_time is None and source_timezone is not None:
                             local_observations = local_observations.dt.tz_convert(source_timezone)
                         months = local_observations.dt.strftime("%Y-%m")
                         for partition in partition_ids:

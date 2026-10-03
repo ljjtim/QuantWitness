@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantwitness"
-version = "1.1.0"
+version = "1.2.0"
 description = "PIT-safe quantitative research orchestration with independently verifiable results"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -34,8 +34,7 @@ dev = [
   "ruff>=0.12,<1",
   "tomli>=2; python_version < '3.11'",
 ]
-ml = ["scikit-learn"]
-ml-lightgbm = ["lightgbm"]
+ml = ["pyqlib==0.9.7", "xgboost>=3.2,<3.3", "plotly>=6,<7", "statsmodels>=0.15,<0.16"]
 
 [project.scripts]
 quantwitness = "research_pipeline.cli:main"

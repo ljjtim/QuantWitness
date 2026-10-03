@@ -1,0 +1,11 @@
+project_id: volume-concentration
+verifier_id: volume-concentration-formula-check
+verifier_version: 1.0.0
+entry: {module: check, function: verify}
+dependency_lock: {pyarrow: 21.0.0}
+metrics: []
+authorized_schema_ids:
+- project.volume-concentration.bars.v1
+- project.volume-concentration.calendar.v1
+- project.volume-concentration.coverage.v1
+- project.volume-concentration.daily.v1

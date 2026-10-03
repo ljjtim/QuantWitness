@@ -562,7 +562,7 @@ def _heterogeneous_project_context(
     return verify_result(
         directory,
         result_store=result_root,
-        verifier_bundle=bundle_path,
+        verifier_bundle=bundle_path, project_verifier_process_slots=3 if os.name == "nt" else 2
     )
 
 
@@ -729,11 +729,11 @@ def test_project_verifier_result_closure_and_independent_outcome(
         verifier_identity=verifier_identity,
     )
     with pytest.raises(EvidenceContractError, match="必须显式提供 bundle"):
-        verify_result(directory, result_store=result_root)
+        verify_result(directory, result_store=result_root, project_verifier_process_slots=3 if os.name == "nt" else 2)
     output = tmp_path / "verification.json"
     context = verify_result(
         directory, result_store=result_root,
-        verifier_bundle=bundle_path, output=output,
+        verifier_bundle=bundle_path, output=output, project_verifier_process_slots=3 if os.name == "nt" else 2
     )
     assert context.verification.project_verifier_identity == verifier_identity
     assert context.verification.status == behavior
@@ -743,7 +743,7 @@ def test_project_verifier_result_closure_and_independent_outcome(
         directory,
         result_store=result_root,
         verifier_bundle=bundle_path,
-        output=tmp_path / "verification-second.json",
+        output=tmp_path / "verification-second.json", project_verifier_process_slots=3 if os.name == "nt" else 2
     )
     assert second.verification.status == behavior
     assert _file_snapshot(bundle_path) == bundle_before
@@ -789,7 +789,7 @@ def test_project_verifier_v2_matrix_evidence_enters_statistics_gate(
     context = verify_result(
         directory,
         result_store=result_root,
-        verifier_bundle=bundle_path,
+        verifier_bundle=bundle_path, project_verifier_process_slots=3 if os.name == "nt" else 2
     )
 
     assert context.verification.status == "pass"
@@ -830,7 +830,7 @@ def test_new_project_result_embeds_plan_verifier_and_verifies_without_external_p
         f"verifiers/{manifest.bundle_hash}"
     )
     assert verify_project_verifier_bundle(embedded).identity() == manifest.identity()
-    context = verify_result(directory, result_store=result_root)
+    context = verify_result(directory, result_store=result_root, project_verifier_process_slots=3 if os.name == "nt" else 2)
     assert context.verification.status == "pass"
     assert not tuple(embedded.rglob("__pycache__"))
     assert not tuple(embedded.rglob("*.pyc"))
@@ -840,7 +840,7 @@ def test_new_project_result_embeds_plan_verifier_and_verifies_without_external_p
         encoding="utf-8",
     )
     with pytest.raises(ResultContractError, match="内嵌 Verifier bundle 无法复验"):
-        verify_result(directory, result_store=result_root)
+        verify_result(directory, result_store=result_root, project_verifier_process_slots=3 if os.name == "nt" else 2)
 
 
 def test_project_verifier_execution_failure_does_not_mutate_bundle(
@@ -877,7 +877,7 @@ def test_project_verifier_execution_failure_does_not_mutate_bundle(
         verify_result(
             directory,
             result_store=result_root,
-            verifier_bundle=bundle_path,
+            verifier_bundle=bundle_path, project_verifier_process_slots=3 if os.name == "nt" else 2
         )
 
     verify_project_verifier_bundle(bundle_path)
@@ -912,7 +912,7 @@ def test_project_verifier_rejects_wrong_bundle_and_missing_schema(tmp_path: Path
         verifier_identity=manifest.identity(),
     )
     with pytest.raises(ResultContractError, match="冻结身份不一致"):
-        verify_result(directory, result_store=result_root, verifier_bundle=other_path)
+        verify_result(directory, result_store=result_root, verifier_bundle=other_path, project_verifier_process_slots=3 if os.name == "nt" else 2)
     malformed = dict(identity)
     malformed["source_files"] = ["invalid"]
     with pytest.raises(ExtensionError, match="source_files 条目"):
@@ -971,7 +971,7 @@ def test_project_metric_is_result_scoped_and_does_not_enter_public_registry(
         verifier_identity=manifest.identity(),
     )
     context = verify_result(
-        directory, result_store=result_root, verifier_bundle=bundle_path,
+        directory, result_store=result_root, verifier_bundle=bundle_path, project_verifier_process_slots=3 if os.name == "nt" else 2
     )
     assert [item.metric_ref for item in context.metrics] == [definition.metric_ref]
     assert compare_verification_results(context, context).comparable is True
@@ -1027,7 +1027,7 @@ def test_project_metric_definition_drift_makes_verified_results_incomparable(
         contexts.append(verify_result(
             directory,
             result_store=result_root,
-            verifier_bundle=bundle_path,
+            verifier_bundle=bundle_path, project_verifier_process_slots=3 if os.name == "nt" else 2
         ))
 
     comparison = compare_verification_results(*contexts)

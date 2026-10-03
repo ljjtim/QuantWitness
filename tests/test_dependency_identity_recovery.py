@@ -113,9 +113,11 @@ def dependency_identities(tmp_path, monkeypatch):
 def runtime_case(request, monkeypatch):
     operator_id = {
         "byte_exact": "data.catalog.admission",
-        "numerical": "research.model.preprocess-fit",
+        "numerical": "research.model.fit",
     }[request.param]
-    definition = build_mainline_operator_manifest().require_operator(operator_id, "1.0.0")
+    definition = build_mainline_operator_manifest().require_operator(
+        operator_id, "2.0.0" if request.param == "numerical" else "1.0.0"
+    )
     assert definition.cache_compatibility_mode == request.param
     node = NodeSpec(
         "shared",

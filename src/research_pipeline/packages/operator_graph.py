@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Mapping, Protocol, runtime_checkable
 
 from research_pipeline.platform import typed_canonical_hash
@@ -546,6 +547,14 @@ def _validate_operator_graph_special_contracts(
                 raise ResearchPackageError(
                     f"{node.operator_id} 只允许 thread_count=1，以保证确定性"
                 )
+            from research_pipeline.research.modeling import normalize_model_candidates
+            try:
+                candidates = parameters.get("candidate_jsons")
+                if not isinstance(candidates, (list, tuple)) or not candidates:
+                    raise ValueError("candidate_jsons 必须是非空列表")
+                normalize_model_candidates([json.loads(value) for value in candidates])
+            except (ValueError, TypeError, KeyError) as exc:
+                raise ResearchPackageError(f"Qlib 模型候选声明无效: {exc}") from exc
         if node.operator_id in {"research.features.intraday", "research.signals.intraday"}:
             ancestors = [binding.source_node_id for binding in node.inputs]
             visited: set[str] = set()

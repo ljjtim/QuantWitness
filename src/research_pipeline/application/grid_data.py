@@ -25,7 +25,7 @@ def execute_operator_graph_data(
     *,
     manifest: Mapping[str, object],
     admitted_plans: Mapping[str, object],
-    data_db: str | Path,
+    data_db: str | Path | None,
     source_databases: Mapping[str, str | Path] | None = None,
     artifact_root: str | Path,
     root_seed: int,
@@ -35,6 +35,29 @@ def execute_operator_graph_data(
     request_recovery_root: str | Path | None = None,
 ) -> dict[str, object]:
     """只执行数据物化节点，避免统一 Runtime 中一个节点代跑后续节点。"""
+    archived = manifest.get("input_snapshot_manifest")
+    if archived is not None:
+        if data_db is not None or source_databases:
+            raise ValueError("封存来源不得混用数据库")
+        if root_seed != manifest["root_seed"] or fixed_clock != manifest["fixed_clock"]:
+            raise ValueError("run 的 clock/root_seed 必须与正式计划完全一致")
+        from research_pipeline.data_plane.archived_inputs import materialize_archived_inputs
+
+        estimates = load_execution_estimates(
+            manifest.get("execution_estimates"), request_ids=tuple(sorted(admitted_plans)),
+        )
+        bundle, verified_manifests = materialize_archived_inputs(
+            manifest=archived, admitted_plans=_columnar_materialization_plans(admitted_plans),
+            execution_estimates={key: estimates[key] for key in _columnar_materialization_plans(admitted_plans)}, execution_budget=execution_budget,
+            artifact_root=Path(artifact_root).resolve() / "data",
+        )
+        return {
+            "status": "data_succeeded", "data_bundle_hash": bundle["bundle_hash"],
+            "data_bundle": bundle, "input_source": "archived_snapshot",
+            "database_opened": False, "_verified_dataset_manifests": verified_manifests,
+        }
+    if data_db is None:
+        raise ValueError("数据库来源缺少显式只读 data-db")
     database = Path(data_db).resolve()
     databases = _source_database_map(database, source_databases)
     artifacts = Path(artifact_root).resolve()

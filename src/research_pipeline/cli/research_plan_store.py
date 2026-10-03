@@ -69,6 +69,7 @@ def publish_operator_graph_research_plan(
     dag: DagSpec,
     registry=None,
     verifier=None,
+    input_snapshot_manifest: Mapping[str, object] | None = None,
 ) -> Path:
     """原子发布声明式多查询候选计划；G 阶段不执行它。"""
     target = Path(destination).resolve()
@@ -160,6 +161,9 @@ def publish_operator_graph_research_plan(
         "effective_claim_level": effective_claim_level,
         "node_identity_projection": NODE_IDENTITY_PROJECTION_CURRENT,
     }
+    if input_snapshot_manifest is not None:
+        payload["contract_version"] = "research-cli-operator-graph-plan-v6"
+        payload["input_snapshot_manifest"] = dict(input_snapshot_manifest)
     if plan.research_semantics is not None:
         payload["research_semantics"] = plan.research_semantics.to_dict()
     if plan.project_bundle_hashes:
@@ -223,7 +227,11 @@ def load_operator_graph_research_plan(
     if not isinstance(manifest, dict):
         raise ValueError("operator graph plan manifest schema 无效")
     version = manifest.get("contract_version")
-    if version == OPERATOR_GRAPH_PLAN_VERSION:
+    if version == "research-cli-operator-graph-plan-v6":
+        expected_base.update({"node_identity_projection", "input_snapshot_manifest"})
+        if not isinstance(manifest.get("input_snapshot_manifest"), dict):
+            raise ValueError("封存来源计划缺少冻结清单")
+    elif version == OPERATOR_GRAPH_PLAN_VERSION:
         expected_base.add("node_identity_projection")
     elif version != _LEGACY_OPERATOR_GRAPH_PLAN_VERSION:
         raise ValueError("operator graph plan manifest hash 或版本无效")
@@ -466,7 +474,7 @@ def load_operator_graph_research_plan(
         registry,
         identity_projection=(
             str(manifest["node_identity_projection"])
-            if version == OPERATOR_GRAPH_PLAN_VERSION
+            if version in {OPERATOR_GRAPH_PLAN_VERSION, "research-cli-operator-graph-plan-v6"}
             else NODE_IDENTITY_PROJECTION_LEGACY
         ),
     )

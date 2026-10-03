@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Mapping, Sequence
+from decimal import Decimal, ROUND_HALF_UP
 
 from research_pipeline.results import CANONICAL_SIMULATION_SCHEMA_IDS
 
@@ -19,9 +20,10 @@ from .common import (
 
 def verify_canonical_tables(
     tables: Mapping[str, Sequence[dict[str, object]]],
+    *, frequency: str = "minute",
 ) -> None:
     if all(isinstance(rows, _OracleTable) for rows in tables.values()):
-        _verify_external_canonical_tables(tables)
+        _verify_external_canonical_tables(tables, frequency=frequency)
         return
     orders = tables["orders"]
     fills = tables["fills"]
@@ -48,7 +50,13 @@ def verify_canonical_tables(
         quantity = _integer(fill["quantity"], "fill.quantity", minimum=1)
         price = _integer(fill["execution_price_units"], "fill.execution_price_units", minimum=1)
         multiplier = _integer(fill["contract_multiplier"], "fill.contract_multiplier", minimum=1)
-        if _integer(fill["notional_units"], "fill.notional_units", minimum=0) != price * quantity * multiplier:
+        scale = _integer(fill["price_scale"], "fill.price_scale", minimum=0)
+        if scale > 9:
+            raise EvidenceContractError("canonical fill 价格精度超出范围")
+        expected_notional = price * quantity * multiplier
+        if frequency == "daily":
+            expected_notional = int(Decimal(expected_notional).scaleb(2 - scale).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+        if _integer(fill["notional_units"], "fill.notional_units", minimum=0) != expected_notional:
             raise EvidenceContractError("canonical fill 成交额不守恒")
         _integer(fill["fee_units"], "fill.fee_units", minimum=0)
         fill_quantity[order_key] = fill_quantity.get(order_key, 0) + quantity
@@ -85,6 +93,7 @@ def verify_canonical_tables(
 
 def _verify_external_canonical_tables(
     tables: Mapping[str, Sequence[dict[str, object]]],
+    *, frequency: str = "minute",
 ) -> None:
     """用可 spill 的关系扫描复核六表，不保留全量 Python 主键或行。"""
 
@@ -117,6 +126,10 @@ def _verify_external_canonical_tables(
     ):
         _unique(_OracleTable(workspace, name, 0), fields, label)
 
+    notional_expression = "CAST(f.execution_price_units AS HUGEINT) * CAST(f.quantity AS HUGEINT) * CAST(f.contract_multiplier AS HUGEINT)"
+    if frequency == "daily":
+        denominator = "CAST(power(10, f.price_scale) AS HUGEINT)"
+        notional_expression = f"((({notional_expression}) * 200 + {denominator}) // (2 * {denominator}))"
     _require_no_external_rows(
         workspace,
         f"""
@@ -132,12 +145,11 @@ def _verify_external_canonical_tables(
            OR f.session IS DISTINCT FROM o.session
            OR f.quantity IS NULL OR f.quantity < 1
            OR f.execution_price_units IS NULL OR f.execution_price_units < 1
+           OR f.price_scale IS NULL OR f.price_scale < 0 OR f.price_scale > 9
            OR f.contract_multiplier IS NULL OR f.contract_multiplier < 1
            OR f.notional_units IS NULL OR f.notional_units < 0
            OR CAST(f.notional_units AS HUGEINT) !=
-              CAST(f.execution_price_units AS HUGEINT)
-              * CAST(f.quantity AS HUGEINT)
-              * CAST(f.contract_multiplier AS HUGEINT)
+              {notional_expression}
            OR f.fee_units IS NULL OR f.fee_units < 0
            OR f.realized_pnl_units IS NULL
         LIMIT 1

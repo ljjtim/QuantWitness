@@ -33,6 +33,8 @@ python -m research_pipeline --help
 
 先按 [Catalog 与 PIT 准入](docs/catalog.md) 描述数据字段、物理表、可见日期和来源，通过现有的 `catalog validate/compile` 生成自己的持久 Catalog Lock。公开发行包不附带供应商或个人数据库的 Catalog，也不会猜测本机数据库路径；搜索、lint 和 admit 都复用显式 Lock 和只读数据源。
 
+日频 Qlib 研究可以从[模型与组合示例](examples/qlib_portfolio/README.md)开始；自有冻结行情通过显式输入配置复用相同研究包主链。组合结果可用[Qlib 研究报告](docs/qlib-report.md)生成离线净值、回撤、费用和成交诊断图表。
+
 再按[创建自己的研究](docs/getting-started.md)填写研究问题、样本、指标、数据请求和算子图。`package init` 只创建四份中性声明草稿，补齐后才可依次 `package lint` → `package admit` → `run` → `verify` → `report`。AI 协作者按 [AI 工作协议](docs/ai_workflow.md)确认研究口径、选择已有能力并读取诊断。
 
 ## 范围限制
@@ -58,7 +60,7 @@ python -m research_pipeline --help
 | `evidence.consume` | `local_only` | `verify`<br>`report`<br>`export-result`<br>`compare`<br>`analysis run`<br>`analysis compare` | `local_acceptance` / `local_only` | verify 直接从自包含 Result 生成结构化 VerificationResult；report、compare、analysis、export-result 和 Dashboard 不依赖 run-root。analysis run 只消费 status=pass 的 VerificationResult，要求外部请求显式声明表列、窗口、值语义、频率、单位、费用口径和处理政策，只投影日期和值两列并生成独立 AnalysisResult，不修改 Result、VerificationResult 或 claim。analysis compare 只对同规格、同实际窗口和同 claim 事实的 AnalysisResult 排名，任一必要事实不一致时不输出部分排名。直接 compare 仍只比较已验证指标事实并明示未检查 package 合同；package compare 由 delivery 唯一检查 metric/claim 合同。export-result 仅复制并复核已验证 Result，不重新执行研究。该合同尚未通过独立发布验收，因此保持 local_only。 |
 | `evidence.validity_recompute` | `local_only` | `verify` | `local_acceptance` / `local_only` | 独立 verify 从已封存的 canonical 六表与 Bar TCA 四表复核金融守恒、费用与 lineage；金融 oracle 使用有界 Arrow 批次和受配额 DuckDB 扫描，篡改或资源不足均阻止生成 VerificationResult。公开源码提供合同测试，不附带个人真实数据 Result 或独立发布验收；能力保持 local_only，不代表策略盈利、实盘成交或可交易性。 |
 | `operator_graph.generic_run` | `local_only` | `run`<br>`resume`<br>`retry-node`<br>`inspect` | `local_acceptance` / `local_only` | 正式 run 由 Runtime v2 调度，节点返回按端口索引的 typed refs，checkpoint 绑定全部端口；成功后唯一 finalize 自包含 Result，再由独立 verify 生成 VerificationResult。该边界尚缺独立发布验收，因此仍是 local_only。 |
-| `research.walk_forward_model` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | 公共模型七阶段保留 purge/embargo、fold 内预处理、validation 选模、test 与唯一候选 locked holdout；输入 Feature/Label 必须由当前研究包提供。split 先检查 Label row group 与时间可见性，再读取开发目标；holdout 打开后失败仍消耗访问资格。本地验证不代表真实策略、可交易性或已发布模型结论。 |
+| `research.walk_forward_model` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Qlib 六节点负责日频回归模型：Linear、LightGBM、XGBoost；Processor 与 Model 按候选/fold 一起训练保存。保留 purge/embargo、开发区 validation 选择及隔离 holdout；模型文件随 Result 封存。只接受 v2 模型工件，不恢复旧七阶段 ML checkpoint。本地技术验收不代表真实策略、可交易性或样本外盈利。 |
 | `minute_line.complete` | `local_only` | `run` | `local_acceptance` / `local_only` | 四类中国市场资产可按当前 Catalog、已完成分钟 bar、PIT 快照与历史规则进入同一研究主链；随包规则仅覆盖文档列明的参考标的及窗口，范围外无默认规则。公开源码提供合同与合成示例，不附带真实分钟数据或研究结果；能力保持 local_only，不代表全历史、全品种或实盘可交易。 |
 | `minute_line.real_data_smoke` | `local_only` | `run` | `local_acceptance` / `local_only` | 公开包提供四资产分钟输入和只读 Result/VerificationResult 合同，不附带供应商原始数据或个人真实运行收据。真实数据观察须由使用者在自己的来源、窗口和规则下重新执行并独立验证；当前能力只到 local_only，不宣称供应商历史版本精确重放或分钟交易仿真。 |
 | `simulation.bar_tca` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Bar TCA 只消费统一 SimulationResult 的正式订单与成交和账本身份，不二次撮合。分钟路径要求决策时可见基准、已完成执行 bar、可见容量与正式 fill，缺任何必要事实均失败关闭。随包参考规则只有有界中国市场标的窗口；公开源码不包含个人真实研究结果，能力保持 local_only。 |
@@ -77,3 +79,17 @@ python -m research_pipeline --help
 - [命令行](docs/cli.md)与[运维](docs/operations.md)：具体参数和日常操作。
 - [现行文档索引](docs/index.md)：按主题查阅其余文档。
 - [架构边界](ARCHITECTURE.md)、[参与贡献](CONTRIBUTING.md)、[安全报告](SECURITY.md)、[第三方材料](THIRD_PARTY_NOTICES.md)、[许可证](LICENSE)与[随附声明](NOTICE)。
+
+### Qlib 模型与研究图表
+
+使用 `pip install -e ".[ml]"` 安装 Qlib 模型与 Plotly 图形依赖。日频回归采用 Qlib 六节点链，模型与处理器共同封存；见[模型合同](docs/walk_forward_model.md)和[模型文件交付](docs/qlib-model-results.md)。`report --format html --request <请求文件> --output <报告.html>` 和 `package report` 使用同一 Qlib 研究图形服务。HTML 展示模型诊断及验证状态，不提升原结果的验证范围；完整请求见 [Qlib 报告](docs/qlib-report.md)。
+
+公开[Qlib 研究起点](examples/qlib_portfolio/README.md)支持 `development`、`model` 和 `portfolio`。组合模式把 test 预测经固定规则转为目标，调用 `finance.simulation.daily-cash@1.0.0` 完成下一会话开盘成交、现金和费用账本、TCA 与独立金融复核。该节点按[精确人工准入记录](release/daily-cash-local-admission.md)保持 `local_only`，不代表通用晋级或实盘交易能力。
+
+### 归档输入与 RD-Agent
+
+已提交的行情快照可通过 `--input-snapshot-manifest` 进入同一准入、运行和恢复流程；与数据库
+来源互斥，当前 Catalog 与 PIT 规则仍适用。详见 [封存输入](docs/data_plane.md#封存输入)。
+RD-Agent 可选集成包位于 `integrations/rdagent`，使用独立环境调用 RP 正式主链；其请求引用
+ResearchPackage，候选代码通过项目 bundle 执行，反馈引用 Result 与 VerificationResult。
+多轮开发研究既可比较已有预测，也可实际执行研究包参数变体；每轮独立运行和验证，开发循环不打开最终 holdout。见[研究循环](integrations/rdagent/docs/research-campaign.md)。

@@ -107,3 +107,17 @@ python -m research_pipeline report --verification-result work/verification-resul
 | bundle 身份变化 | 实现已经变化 | 重新 build、lint、admit，新 run |
 | checkpoint 身份变化 | 旧结果不可安全复用 | 新 run，不能手改状态 |
 | verifier gate 失败 | 当前结论上限不成立 | 修对应数据/算法或降低 claim 后新 run |
+
+
+## 从完整研究起点开始
+
+| 研究目的 | 起点 | 需要明确的研究事实 |
+| --- | --- | --- |
+| 按材料复现固定公式 | [公开公式示例](../integrations/rdagent/examples/volume_concentration/README.md) | 公式、输入字段、窗口、缺失规则和独立参考；真实材料由研究者确认 |
+| 让 RD-Agent 执行参数研究 | [研究包循环](../integrations/rdagent/examples/package_campaign/README.md) | 基包、允许变体、开发范围、评价字段、预算与停止条件 |
+| 日频特征与 Qlib 模型 | [Qlib 研究起点](../examples/qlib_portfolio/README.md) | 特征和标签可见时间、候选模型、时间切分与研究用途 |
+| 预测到组合、成交和成本 | [Qlib 组合起点](../examples/qlib_portfolio/README.md)的 `portfolio` 模式 | 固定 test 预测排名规则、目标权重、次会话开盘成交、费用、TCA 与独立金融复核 |
+
+可运行的公式、参数循环与模型起点自带公开合成输入。先在仓库外输出目录得到正式结果，再改动自己的研究参数；换成真实数据时重新声明数据可见性、来源和适用市场。合成例的验证结论仅证明声明的计算关系，不代表真实市场效果。
+
+公式复现与探索研究分别使用对应入口：固定公式根据独立参考判断是否复现正确；探索研究可以改变获准参数，但必须保存每个候选及失败记录。新增算法仍放项目扩展，不能通过修改框架核心把某个项目写成所有研究的默认规则。

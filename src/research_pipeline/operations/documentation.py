@@ -25,9 +25,12 @@ REQUIRED_DOCS = frozenset(
         "minute_rule_provenance.md",
         "operations.md",
         "release.md",
+        "external-acceptance.md",
         "research_package.md",
         "runtime.md",
         "walk_forward_model.md",
+        "qlib-model-results.md",
+        "qlib-report.md",
         "project_resource_budgets.md",
     }
 )

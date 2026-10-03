@@ -17,7 +17,8 @@ from .external_artifact import ExternalArtifactStore
 from .graph import DagSpec
 from .identity import derive_run_id
 from .operator_registry import NODE_IDENTITY_PROJECTION_CURRENT
-from .recovery import plan_rerun_from
+from .recovery import RecoveryPlan, plan_rerun_from
+from .required_run_reuse import _ancestor_closure
 from .scheduler import ExecutionMode
 from .store import EventStore
 
@@ -35,6 +36,8 @@ def prepare_failed_run_reuse(
     root_seed: int,
     fixed_clock: str,
     mode: ExecutionMode,
+    required_node_ids: tuple[str, ...] = (),
+    node_identity_projection: str = NODE_IDENTITY_PROJECTION_CURRENT,
 ) -> dict[str, object]:
     """完整复验失败运行的成功 checkpoint，并导入独立目标运行。"""
 
@@ -51,6 +54,9 @@ def prepare_failed_run_reuse(
     record = _read_run_record(source_root)
     parent_run_id = record.get("run_id")
     expected_audit = service.audit_environment.to_dict()
+    strict = bool(required_node_ids)
+    if strict and node_identity_projection != NODE_IDENTITY_PROJECTION_CURRENT:
+        raise RuntimeIntegrityError("要求节点复用只接受现行节点局部身份计划")
     if (
         record.get("contract_version") != OPERATOR_DAG_RUN_VERSION
         or record.get("status") != "failed"
@@ -60,15 +66,19 @@ def prepare_failed_run_reuse(
         or projection.run_id != parent_run_id
         or record.get("node_identity_projection")
         != NODE_IDENTITY_PROJECTION_CURRENT
-        or record.get("dag") != dag.to_dict()
+        or (not strict and record.get("dag") != dag.to_dict())
         or record.get("root_seed") != root_seed
         or record.get("fixed_clock") != fixed_clock
         or record.get("mode") != mode.value
-        or record.get("audit_environment") != expected_audit
-        or record.get("audit_manifest_digest")
-        != service.audit_environment.manifest_digest
+        or (not strict and record.get("audit_environment") != expected_audit)
+        or (
+            not strict
+            and record.get("audit_manifest_digest") != service.audit_environment.manifest_digest
+        )
     ):
         raise RuntimeIntegrityError(
+            "失败 run 复用要求来源终态、clock 和 seed 一致"
+            if strict else
             "失败 run 复用要求来源终态、DAG、节点身份环境、clock 和 seed 完全一致"
         )
     recorded_chain_head = record.get("event_chain_head")
@@ -76,11 +86,35 @@ def prepare_failed_run_reuse(
         raise RuntimeIntegrityError("失败 run 记录的事件链与当前内容不一致")
 
     ordered_nodes = dag.topological_order()
+    required = frozenset(required_node_ids)
+    needed = frozenset()
+    if strict:
+        if len(required) != len(required_node_ids):
+            raise RuntimeIntegrityError("要求复用的节点不得重复")
+        unknown = required - set(ordered_nodes)
+        if unknown:
+            raise RuntimeIntegrityError("要求复用的节点不在当前 DAG: " + ", ".join(sorted(unknown)))
+        needed = _ancestor_closure(dag, required)
+        unsuccessful = sorted(
+            node_id for node_id in needed
+            if projection.node_statuses.get(node_id) != "succeeded"
+        )
+        if unsuccessful:
+            raise RuntimeIntegrityError("要求复用的来源节点未成功: " + ", ".join(unsuccessful))
+        source_dag = DagSpec.from_dict(dict(record["dag"]))
+        source_nodes = {node.node_id: node for node in source_dag.nodes}
+        for node in dag.nodes:
+            if node.node_id in needed and source_nodes.get(node.node_id) != node:
+                raise RuntimeIntegrityError(f"要求复用节点的局部合同发生变化: {node.node_id}")
     first_unfinished = next(
         (
             node_id
             for node_id in ordered_nodes
-            if projection.node_statuses.get(node_id) != "succeeded"
+            if (
+                node_id not in needed
+                if strict
+                else projection.node_statuses.get(node_id) != "succeeded"
+            )
         ),
         None,
     )
@@ -96,14 +130,25 @@ def prepare_failed_run_reuse(
         project_id=project_id,
         parent_run_id=parent_run_id,
     )
-    recovery = plan_rerun_from(
-        dag,
-        child_run_id,
-        parent_run_id,
-        projection,
-        first_unfinished,
-        verified_nodes=frozenset(node_id for node_id, status in projection.node_statuses.items() if status == "succeeded"),
-    )
+    if strict:
+        recovery = RecoveryPlan(
+            "rerun-from", child_run_id, parent_run_id,
+            tuple(node_id for node_id in ordered_nodes if node_id in needed),
+            tuple(node_id for node_id in ordered_nodes if node_id not in needed),
+            (), reason="显式要求复用失败运行中的成功节点及其上游",
+        )
+    else:
+        recovery = plan_rerun_from(
+            dag,
+            child_run_id,
+            parent_run_id,
+            projection,
+            first_unfinished,
+            verified_nodes=frozenset(
+                node_id for node_id, status in projection.node_statuses.items()
+                if status == "succeeded"
+            ),
+        )
     if any(
         projection.node_statuses.get(node_id) != "succeeded"
         for node_id in recovery.reuse_nodes
@@ -133,6 +178,12 @@ def prepare_failed_run_reuse(
     )
     values = {}
     copied_external_nodes: list[str] = []
+    reused_checkpoints: dict[str, str] = {}
+    committed = {
+        (event.node_id, event.payload.get("node_execution_id"))
+        for event in EventStore(source_root).read_events()
+        if event.kind == "checkpoint_committed"
+    }
     node_map = {node.node_id: node for node in dag.nodes}
     sources = (
         (
@@ -150,6 +201,8 @@ def prepare_failed_run_reuse(
             tuple(value.artifact_ref for _, value in sorted(inputs.items())),
             context,
         )
+        if strict and (node_id, expectation.node_execution_id) not in committed:
+            raise RuntimeIntegrityError(f"要求复用节点缺少当前身份的来源提交事件: {node_id}")
         reused = service._reuse_cross_run_checkpoint(
             node=node,
             expectation=expectation,
@@ -166,6 +219,7 @@ def prepare_failed_run_reuse(
             )
         _source_run_id, _manifest, outputs = reused
         values[node_id] = outputs
+        reused_checkpoints[node_id] = expectation.node_execution_id
         if any(value.external_commit is not None for value in outputs.values.values()):
             copied_external_nodes.append(node_id)
 
@@ -177,6 +231,9 @@ def prepare_failed_run_reuse(
         "source_run_root": str(source_root),
         "copied_external_nodes": copied_external_nodes,
     }
+    if strict:
+        payload["required_nodes"] = sorted(required)
+        payload["source_checkpoints_by_node"] = reused_checkpoints
     _write_or_verify_recovery_plan(recovery_path, payload)
     return payload
 

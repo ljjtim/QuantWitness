@@ -219,7 +219,6 @@ def _verify_financial_workspace(
         canonical_hashes[name] = _hash_canonical_source(source, name=name)
         canonical_schemas[name] = source.schema
         canonical_rows[name] = source.row_count
-    verify_canonical_tables(canonical)
 
     tca_tables: dict[str, OracleTable] = {}
     tca_table_hashes: dict[str, str] = {}
@@ -241,6 +240,9 @@ def _verify_financial_workspace(
     simulation_manifest = _json_bytes(
         controls[control_paths[0]],
         "SimulationResult manifest",
+    )
+    verify_canonical_tables(
+        canonical, frequency=simulation_manifest.get("semantics", {}).get("frequency"),
     )
     tca_manifest = _json_bytes(
         controls[control_paths[2]],

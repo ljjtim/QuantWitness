@@ -1,0 +1,24 @@
+# 固定 RD-Agent CoSTEER/LoopBase 场景的直接导入依赖；Python 3.12。
+pydantic-settings==2.15.0
+loguru==0.7.3
+psutil==7.2.2
+tqdm==4.70.1
+numpy==2.5.3
+pandas==3.0.6
+filelock==4.0.8
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.27.5
+rich==15.0.0
+jinja2==3.1.6
+pyyaml==6.0.3
+httpx==0.28.1
+openai==2.54.0
+litellm==1.103.2
+tiktoken==0.14.0
+azure-identity==1.26.0
+python-dotenv==1.2.4
+networkx==3.7
+pytz==2026.4
+scipy==1.18.1
+pydantic==2.13.5
+dill==0.4.1

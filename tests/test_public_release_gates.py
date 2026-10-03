@@ -173,7 +173,7 @@ def test_ci_records_original_push_versions_only_after_main_checks() -> None:
         (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     )
     request = workflow["jobs"]["release-request"]
-    assert request["needs"] == "public-boundary"
+    assert request["needs"] == ["public-boundary", "rdagent-distribution", "ml-distribution"]
     assert request["if"] == "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}"
     steps = {item["name"]: item for item in request["steps"]}
     assert steps["Checkout tested commit"]["with"]["fetch-depth"] == 0

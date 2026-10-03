@@ -162,6 +162,9 @@ def validate_project_causal_admitted_sources(
             temporal = admitted.temporal_selection
             if temporal.requires_consumer_binding or temporal.revision_selector is not None or temporal.effective_interval_selector is not None:
                 raise ResearchPackageError("项目因果输入尚不支持需逐决策快照选择的数据请求")
+            if source.get("daily_time") is not None:
+                _validate_daily_source(source, admitted)
+                continue
             if admitted.daily_availability_rule is not None or admitted.session_close_binding is not None:
                 raise ResearchPackageError("项目因果输入缺少日频或 session-close 核心可见时间列")
             available_column = None
@@ -179,3 +182,24 @@ def validate_project_causal_admitted_sources(
                 for column in (source["observation_column"], source["available_column"])
             ):
                 raise ResearchPackageError("项目因果输入时间列必须是已准入 timestamp")
+
+
+def _validate_daily_source(source: Mapping, admitted: AdmittedQueryPlan) -> None:
+    from research_pipeline.domain.time import TradingSessionCalendar
+
+    daily = source["daily_time"]
+    temporal = admitted.temporal_selection
+    if (admitted.daily_availability_policy_ref != "available.daily.v1"
+            or admitted.daily_availability_rule != daily["rule"]
+            or admitted.session_close_binding is not None
+            or temporal.visibility_filter is not None
+            or temporal.source_timezone not in (None, daily["timezone"])):
+        raise ResearchPackageError("日频 causal 时间规则与 Catalog 准入事实不一致")
+    if source["observation_column"] != admitted.event_time_field or source["available_column"] != admitted.event_time_field:
+        raise ResearchPackageError("日频 causal 日期列角色与 Catalog 准入事实不一致")
+    if not str(dict(admitted.field_types).get(admitted.event_time_field, "")).lower().startswith("date"):
+        raise ResearchPackageError("日频 causal 来源必须是已准入 date 列")
+    calendar = TradingSessionCalendar.build(daily["sessions"])
+    scope = admitted.query.time_range
+    if isinstance(scope, InstantRangeV2) or calendar.sessions[0] > scope.start or calendar.sessions[-1] <= scope.end:
+        raise ResearchPackageError("日频冻结交易日历必须覆盖请求及结束后的下一交易日")

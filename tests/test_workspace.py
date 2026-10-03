@@ -503,6 +503,8 @@ def test_workspace_cli_validate_fails_for_tracked_generated_file(tmp_path, capsy
           "--require-reused-node", "panel", "--require-reused-node", "statistics"],
          (["first-run", "second-run"], ["panel", "statistics"], None)),
         (["--reuse-failed-run-root", "failed-run"], ([], [], "failed-run")),
+        (["--reuse-failed-run-root", "failed-run", "--require-reused-node", "panel"],
+         ([], ["panel"], "failed-run")),
     ],
 )
 def test_workspace_cli_forwards_reuse_options_to_run_service(
@@ -546,8 +548,6 @@ def test_workspace_cli_forwards_reuse_options_to_run_service(
           "--require-reused-node", "panel"], "不得重复"),
         (["--reuse-run-root", "first-run", "--reuse-failed-run-root", "failed-run"],
          "不能与完成态跨运行复用同时启用"),
-        (["--reuse-failed-run-root", "failed-run", "--require-reused-node", "panel"],
-         "必须提供 --reuse-run-root"),
     ],
 )
 def test_workspace_cli_reuses_run_rejection_before_engine_start(

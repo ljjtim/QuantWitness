@@ -42,6 +42,7 @@ from research_pipeline.results import (
     BAR_TCA_SCHEMA_IDS,
     CANONICAL_SIMULATION_SCHEMA_IDS,
     MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS,
+    QLIB_MODEL_INVENTORY_SCHEMA_ID,
     ResultMetric,
     ResultReference,
     ResultRunSummary,
@@ -59,6 +60,8 @@ from .causal_uniqueness import verify_causal_key_uniqueness
 from .errors import EvidenceContractError
 from .facets import ArtifactIntegrityFacet, ReproducibilityFacet, require_sha256, strict_fields
 from .minute_validity import MINUTE_VERIFIER_ALGORITHM_VERSIONS
+from .model_validity import MODEL_VERIFIER_ALGORITHM_VERSIONS, verify_model_result_binding
+from .model_result_binding import model_verification_support_paths
 from .result_financial_oracle import (
     FinancialOracleBudget,
     FinancialOracleResult,
@@ -219,6 +222,7 @@ _RESULT_SEMANTIC_HANDLERS = (
 
 
 BUILTIN_RESULT_SCHEMA_IDENTITIES = frozenset({
+    QLIB_MODEL_INVENTORY_SCHEMA_ID,
     "data.adjustment-factor-snapshot.payload.v1",
     "data.columnar-bundle.metrics.v1",
     "research.bar-tca.daily.v1",
@@ -267,6 +271,11 @@ BUILTIN_VERIFIER_IDENTITIES = frozenset({
     "default:label.split:verifier.label-split.v2",
     "default:search.holdout:verifier.search-holdout.v1",
     "default:statistics:verifier.statistics.v2",
+    "model:data.pit:verifier.data-pit.v1",
+    "model:label.split:verifier.model-label-split.v1",
+    "model:search.holdout:verifier.model-search-holdout.v1",
+    "model:statistics:verifier.model-statistics.v1",
+    "model:financial.tradability:verifier.model-financial-scope.v2",
     "minute:data.pit:verifier.minute-data-pit.v2",
     "minute:financial.tradability:verifier.minute-financial.v2",
     "minute:label.split:verifier.minute-label-split.v2",
@@ -318,6 +327,7 @@ def validate_builtin_verification_semantics() -> None:
     """冻结 core 会主动解释的 Result schema 与 Verifier 算法身份。"""
 
     result_schemas = {
+        QLIB_MODEL_INVENTORY_SCHEMA_ID,
         *(
             schema_id
             for handler in _RESULT_SEMANTIC_HANDLERS
@@ -348,6 +358,10 @@ def validate_builtin_verification_semantics() -> None:
         *(
             f"minute:{gate_id}:{version}"
             for gate_id, version in MINUTE_VERIFIER_ALGORITHM_VERSIONS.items()
+        ),
+        *(
+            f"model:{gate_id}:{version}"
+            for gate_id, version in MODEL_VERIFIER_ALGORITHM_VERSIONS.items()
         ),
         *(handler.verifier_identity for handler in _RESULT_SEMANTIC_HANDLERS),
     }
@@ -422,6 +436,7 @@ class VerificationResult:
         if algorithms not in {
             tuple(sorted(GATE_ALGORITHM_VERSIONS.items())),
             tuple(sorted(MINUTE_VERIFIER_ALGORITHM_VERSIONS.items())),
+            tuple(sorted(MODEL_VERIFIER_ALGORITHM_VERSIONS.items())),
         }:
             raise EvidenceContractError("VerificationResult verifier 算法组不受支持")
         if tuple(sorted(set(self.limitations))) != self.limitations:
@@ -907,6 +922,7 @@ def verify_result(
     if not isinstance(facts, Mapping):
         raise EvidenceContractError("Result validity facts 必须是对象")
     _verify_input_claim_lineage(bundle, facts)
+    verify_model_result_binding(snapshot, facts)
     research_cost_assumption = _research_cost_assumption_from_facts(facts)
 
     policy = load_claim_policy(closure.policy_id)
@@ -979,7 +995,9 @@ def verify_result(
         external_claim_ceiling=simulation_claim_ceiling_from_facts(facts),
     )
     algorithms = (
-        MINUTE_VERIFIER_ALGORITHM_VERSIONS
+        MODEL_VERIFIER_ALGORITHM_VERSIONS
+        if isinstance(facts.get("model_diagnostics"), Mapping)
+        else MINUTE_VERIFIER_ALGORITHM_VERSIONS
         if isinstance(facts.get("statistics"), Mapping)
         and isinstance(facts["statistics"].get("minute_intraday"), Mapping)
         else GATE_ALGORITHM_VERSIONS
@@ -1031,9 +1049,10 @@ def verify_result(
         snapshot,
         financial_oracle=financial_oracle,
     )
+    metrics = metrics_from_snapshot(snapshot)
     if output is not None:
         write_verification_result(verification, output)
-    return VerifiedResultContext(verification, snapshot, metrics_from_snapshot(snapshot))
+    return VerifiedResultContext(verification, snapshot, metrics)
 
 
 def _verify_input_claim_lineage(bundle, facts: Mapping[str, object]) -> None:
@@ -1212,6 +1231,7 @@ def _load_snapshot(
     support_paths: set[str] = set()
     if include_verification_material:
         support_paths.add(bundle.verification.validity_source_path)
+        support_paths.update(model_verification_support_paths(bundle))
         identity = bundle.verification.verifier_identity
         if identity is not None:
             allowed_types = set(identity["authorized_support_artifact_types"])

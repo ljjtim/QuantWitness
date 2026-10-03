@@ -15,10 +15,13 @@
 - [ResearchPackage](research_package.md)
 - [Runtime 与恢复](runtime.md)
 - [滚动模型与样本外选择](walk_forward_model.md)
+- [Qlib 模型文件交付与恢复](qlib-model-results.md)
+- [Qlib 模型与组合研究报告](qlib-report.md)
 - [项目执行与独立复核资源预算](project_resource_budgets.md)
 - [Result 与 VerificationResult](evidence.md)：金融口径、准确性与验证边界
 - [命令行](cli.md)
 - [运维](operations.md)
+- [独立使用验收](external-acceptance.md)：同版本安装、远端 CI 与首次使用反馈
 - [安装与发布构建](release.md)
 - [分钟参考规则来源边界](minute_rule_provenance.md)
 
@@ -26,6 +29,10 @@
 [参与贡献](../CONTRIBUTING.md)、[安全报告](../SECURITY.md)、
 [第三方材料边界](../THIRD_PARTY_NOTICES.md) 和 [Apache License 2.0](../LICENSE)
 共同定义公开项目的代码、协作与分发边界。
+
+## 可选源码集成
+
+[RD-Agent 场景说明](../integrations/rdagent/README.md)与[公式复现指南](../integrations/rdagent/docs/formula-reproduction.md)面向完整源码副本，需单独安装；不属于核心 wheel 自带命令。研究执行仍委托同一 ResearchPackage 主链。可选集成的 wheel/sdist 构建、空环境安装与贡献任务见[安装验收](../integrations/rdagent/docs/installation.md)。比较已验证开发预测或执行新研究包变体的入口见[有界开发区研究](../integrations/rdagent/docs/research-campaign.md)与[两轮教学例](../integrations/rdagent/examples/prediction_campaign/README.md)。
 
 ## 当前流程
 
@@ -54,7 +61,7 @@ capabilities / operator / artifact / recipe / catalog 发现
 | `evidence.consume` | `local_only` | `verify`<br>`report`<br>`export-result`<br>`compare`<br>`analysis run`<br>`analysis compare` | `local_acceptance` / `local_only` | verify 直接从自包含 Result 生成结构化 VerificationResult；report、compare、analysis、export-result 和 Dashboard 不依赖 run-root。analysis run 只消费 status=pass 的 VerificationResult，要求外部请求显式声明表列、窗口、值语义、频率、单位、费用口径和处理政策，只投影日期和值两列并生成独立 AnalysisResult，不修改 Result、VerificationResult 或 claim。analysis compare 只对同规格、同实际窗口和同 claim 事实的 AnalysisResult 排名，任一必要事实不一致时不输出部分排名。直接 compare 仍只比较已验证指标事实并明示未检查 package 合同；package compare 由 delivery 唯一检查 metric/claim 合同。export-result 仅复制并复核已验证 Result，不重新执行研究。该合同尚未通过独立发布验收，因此保持 local_only。 |
 | `evidence.validity_recompute` | `local_only` | `verify` | `local_acceptance` / `local_only` | 独立 verify 从已封存的 canonical 六表与 Bar TCA 四表复核金融守恒、费用与 lineage；金融 oracle 使用有界 Arrow 批次和受配额 DuckDB 扫描，篡改或资源不足均阻止生成 VerificationResult。公开源码提供合同测试，不附带个人真实数据 Result 或独立发布验收；能力保持 local_only，不代表策略盈利、实盘成交或可交易性。 |
 | `operator_graph.generic_run` | `local_only` | `run`<br>`resume`<br>`retry-node`<br>`inspect` | `local_acceptance` / `local_only` | 正式 run 由 Runtime v2 调度，节点返回按端口索引的 typed refs，checkpoint 绑定全部端口；成功后唯一 finalize 自包含 Result，再由独立 verify 生成 VerificationResult。该边界尚缺独立发布验收，因此仍是 local_only。 |
-| `research.walk_forward_model` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | 公共模型七阶段保留 purge/embargo、fold 内预处理、validation 选模、test 与唯一候选 locked holdout；输入 Feature/Label 必须由当前研究包提供。split 先检查 Label row group 与时间可见性，再读取开发目标；holdout 打开后失败仍消耗访问资格。本地验证不代表真实策略、可交易性或已发布模型结论。 |
+| `research.walk_forward_model` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Qlib 六节点负责日频回归模型：Linear、LightGBM、XGBoost；Processor 与 Model 按候选/fold 一起训练保存。保留 purge/embargo、开发区 validation 选择及隔离 holdout；模型文件随 Result 封存。只接受 v2 模型工件，不恢复旧七阶段 ML checkpoint。本地技术验收不代表真实策略、可交易性或样本外盈利。 |
 | `minute_line.complete` | `local_only` | `run` | `local_acceptance` / `local_only` | 四类中国市场资产可按当前 Catalog、已完成分钟 bar、PIT 快照与历史规则进入同一研究主链；随包规则仅覆盖文档列明的参考标的及窗口，范围外无默认规则。公开源码提供合同与合成示例，不附带真实分钟数据或研究结果；能力保持 local_only，不代表全历史、全品种或实盘可交易。 |
 | `minute_line.real_data_smoke` | `local_only` | `run` | `local_acceptance` / `local_only` | 公开包提供四资产分钟输入和只读 Result/VerificationResult 合同，不附带供应商原始数据或个人真实运行收据。真实数据观察须由使用者在自己的来源、窗口和规则下重新执行并独立验证；当前能力只到 local_only，不宣称供应商历史版本精确重放或分钟交易仿真。 |
 | `simulation.bar_tca` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Bar TCA 只消费统一 SimulationResult 的正式订单与成交和账本身份，不二次撮合。分钟路径要求决策时可见基准、已完成执行 bar、可见容量与正式 fill，缺任何必要事实均失败关闭。随包参考规则只有有界中国市场标的窗口；公开源码不包含个人真实研究结果，能力保持 local_only。 |

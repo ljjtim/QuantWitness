@@ -81,7 +81,10 @@ def admit_package(
         name for name in ("catalog_lock", "output")
         if not getattr(args, name, None)
     ]
-    if not getattr(args, "data_db", None) and not getattr(args, "source_db", None):
+    archive = getattr(args, "input_snapshot_manifest", None)
+    if archive and (getattr(args, "data_db", None) or getattr(args, "source_db", None)):
+        raise ValueError("--input-snapshot-manifest 与 --data-db/--source-db 互斥")
+    if not archive and not getattr(args, "data_db", None) and not getattr(args, "source_db", None):
         missing.append("data_source")
     if (
         any(
@@ -101,6 +104,8 @@ def admit_package(
         "catalog_input": args.catalog_lock,
         "plan_output": args.output,
     }
+    if archive:
+        roles["input_snapshot_manifest_input"] = archive
     if getattr(args, "data_db", None):
         roles["source_database_input"] = args.data_db
     for index, binding in enumerate(getattr(args, "source_db", ())):
@@ -166,15 +171,32 @@ def _execute_operator_graph(
         recipe_nodes=provisional_plan.recipe.nodes,
         dag=provisional_dag,
     )
-    admitted, execution_estimates, platform_admission, database_unchanged = (
-        _auto_admit_queries(
-        package,
-        catalog=catalog,
-        data_db=getattr(args, "data_db", None),
-        source_db=getattr(args, "source_db", ()),
-        execution_budgets=execution_budgets,
+    input_snapshot_manifest = None
+    archive_path = getattr(args, "input_snapshot_manifest", None)
+    if archive_path:
+        from research_pipeline.data_plane.archived_inputs import (
+            load_archived_input_manifest, admit_archived_queries,
         )
-    )
+
+        input_snapshot_manifest = load_archived_input_manifest(archive_path)
+        source_roles = {f"archive_{key}_input": item["root"]
+                        for key, item in input_snapshot_manifest["requests"].items()}
+        PathRolePolicy().validate(
+            {"plan_output": args.output, **source_roles},
+            read_only_roles=tuple(source_roles),
+        )
+        compiled_queries = compile_package_queries(package)
+        admitted, execution_estimates, platform_admission = admit_archived_queries(
+            dict(zip(compiled_queries.request_ids, compiled_queries.queries, strict=True)), catalog=catalog,
+            manifest=input_snapshot_manifest, execution_budgets=execution_budgets,
+        )
+        source_status = {"input_source": "archived_snapshot", "database_opened": False}
+    else:
+        admitted, execution_estimates, platform_admission, database_unchanged = _auto_admit_queries(
+            package, catalog=catalog, data_db=getattr(args, "data_db", None),
+            source_db=getattr(args, "source_db", ()), execution_budgets=execution_budgets,
+        )
+        source_status = {"database_unchanged": database_unchanged}
     package_plan = compile_research_package(
         package,
         admission=registry,
@@ -203,6 +225,7 @@ def _execute_operator_graph(
         dag=dag,
         registry=registry,
         verifier=verifier,
+        input_snapshot_manifest=input_snapshot_manifest,
     )
     return {
         "package_id": package.package_id,
@@ -212,11 +235,11 @@ def _execute_operator_graph(
         "admission_hash": package_plan.admission_hash,
         "dag_hash": dag.dag_id,
         "query_count": len(admitted),
-        "database_unchanged": database_unchanged,
+        **source_status,
         "source_verification": source_verification,
         "output": str(output),
         "execution_ready": True,
-        "next_action": "使用 run，并显式提供只读 data-db、产物目录、固定时钟和 seed。",
+        "next_action": "使用 run，提供相同来源、产物目录、固定时钟和 seed。",
     }
 
 

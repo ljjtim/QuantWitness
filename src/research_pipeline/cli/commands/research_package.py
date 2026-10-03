@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..command_suggestion import command_suggestion
-from ..report_output import write_verification_report
+from ..report_output import prepare_qlib_request, report_table_ids, write_qlib_report, write_verification_report
 from ..result import execute_guarded
 
 
@@ -180,28 +180,36 @@ def _execute(args) -> dict[str, object]:
         )
         return {**base, "comparison": asdict(comparison)}
     if args.package_command == "report":
+        request = prepare_qlib_request(args)
         context = load_verified_result_context(
             args.verification_result,
             result_store=args.result_store,
+            additional_table_ids=report_table_ids(request),
         )
         _validate_package_result(package, plan, context)
         markdown = f"# {package.display_name}\n\n{render_verification_report(context)}"
         if args.output is not None:
-            output = write_verification_report(
-                args.output,
-                output_format=args.format,
-                markdown=markdown,
-                report={
-                    "package": base,
-                    "verification": asdict(build_verification_report(context)),
-                },
-            )
+            if request is not None:
+                output = write_qlib_report(args.output, context=context, request=request, markdown=markdown)
+            else:
+                output = write_verification_report(
+                    args.output,
+                    output_format=args.format,
+                    markdown=markdown,
+                    report={
+                        "package": base,
+                        "verification": asdict(build_verification_report(context)),
+                    },
+                )
             return {
                 **base,
                 "output": str(output),
                 "format": args.format,
                 "result_id": context.snapshot.bundle.result_id,
                 "verification_hash": context.verification.verification_hash,
+                "verification_status": context.verification.status,
+                "validity_status": context.verification.validity_status,
+                "claim_level": context.verification.claim_level,
             }
         return {
             **base,

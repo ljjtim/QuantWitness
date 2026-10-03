@@ -37,3 +37,8 @@ python examples/build_bundles.py --output <必须不存在的临时目录>
 ```powershell
 python -m pytest -q tests/test_public_examples.py::test_public_examples_complete_formal_cli_workflow
 ```
+
+
+## Qlib 日频模型起点
+
+[qlib_portfolio](qlib_portfolio/README.md)使用公开合成ETF行情和Parquet归档。`development`仅训练和评价validation，`model`继续完成逐时点选择及单次最终holdout；`portfolio`将test预测按冻结规则转为组合目标，经日频现金引擎生成成交、费用、规范六表和TCA，并由正式Result与独立VerificationResult交付。三种模式共享特征公式和模型实现，最终holdout不用于组合规则选优。运行需要安装`ml`可选依赖。

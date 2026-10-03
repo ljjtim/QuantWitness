@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, ROUND_HALF_UP, localcontext
+from decimal import ROUND_CEILING, Decimal, ROUND_HALF_UP, localcontext
 import hashlib
 import json
 import os
@@ -115,7 +115,7 @@ class BarTcaPolicy:
     @property
     def implementation_digest(self) -> str:
         return typed_canonical_hash({
-            "formula": "formal-fill-attribution-with-optional-visible-liquidity-v2",
+            "formula": "formal-fill-attribution-with-explicit-cash-scale-v3",
             "impact_model": self.impact_model,
             "rounding": self.rounding_rule,
             "contract_version": self.contract_version,
@@ -902,6 +902,8 @@ def _attribute_fill(
         * fill.quantity
         * policy.contract_multiplier
     )
+    if policy.bar_frequency == "daily":
+        shortfall = int(Decimal(shortfall).scaleb(2 - policy.price_scale).quantize(Decimal(1), rounding=ROUND_HALF_UP))
     computed = fill.arrival_price_units is not None and fill.visible_capacity is not None
     participation = None
     spread = None
@@ -922,6 +924,9 @@ def _attribute_fill(
         impact_delta = _price_bps_units(int(fill.arrival_price_units), impact_bps)
         spread = spread_delta * fill.quantity * policy.contract_multiplier
         impact = impact_delta * fill.quantity * policy.contract_multiplier
+        if policy.bar_frequency == "daily":
+            spread = int(Decimal(spread).scaleb(2 - policy.price_scale).quantize(Decimal(1), rounding=ROUND_CEILING))
+            impact = int(Decimal(impact).scaleb(2 - policy.price_scale).quantize(Decimal(1), rounding=ROUND_CEILING))
     return BarTcaFill(
         source_fill_id=fill.source_fill_id,
         source_fill_hash=fill.source_fill_hash,

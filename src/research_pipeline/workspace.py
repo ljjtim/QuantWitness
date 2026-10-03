@@ -347,7 +347,7 @@ def run_workspace_execution(
     *,
     execution_id: str,
     plan: str | Path,
-    data_db: str | Path,
+    data_db: str | Path | None,
     clock: str,
     root_seed: int,
     handler=None,
@@ -375,7 +375,7 @@ def run_workspace_execution(
 
     payload = {
         "plan": str(Path(plan).resolve()),
-        "data_db": str(Path(data_db).resolve()),
+        "data_db": None if data_db is None else str(Path(data_db).resolve()),
         "clock": clock,
         "root_seed": root_seed,
         "mode": options.pop("mode", "deterministic_serial"),

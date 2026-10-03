@@ -117,3 +117,53 @@ causal_plan:
 `state_scope: independent` 每个键批独立；`carry` 在下一键批前由核心检查继承来源和时间
 窗口，超界失败，不静默清空。输出事实与 state 同时继承本次交付和已有来源的并集。
 这是受支持 ABI 的因果约束，不是恶意 Python 沙箱；不能用绕开 ABI 的文件读取声称合规。
+
+### 中国股票日频来源
+
+Catalog 以 `available.daily.v1/next_session_open` 准入的原始日线，可以在 source 中
+显式绑定日期列和冻结交易日历：
+
+```yaml
+sources:
+  - port: bars
+    request_id: daily_prices
+    columns: [date, code, close]
+    observation_column: date
+    available_column: date
+    daily_time:
+      rule: next_session_open
+      timezone: Asia/Shanghai
+      calendar_id: cn-equity-example
+      calendar_source: 已归档交易日历的来源和提取范围
+      sessions: ['2024-01-04', '2024-01-05', '2024-01-08', '2024-01-09']
+```
+
+`sessions` 必须严格递增，覆盖请求范围以及最后一个输入日之后的下一交易日，缺失行情
+不能压缩日历。`calendar_id` 和 `calendar_source` 标识日历及其来源，完整绑定随计划、
+输出元数据和继承来源冻结。日历变更不能继承旧时间证据或复用旧计划身份。
+示例日期仅用于说明结构，真实研究须提供其实际冻结日历。
+
+核心把 D 日数据的观测时间解释为 D 日 15:00，把可见时间解释为日历中下一交易日
+09:30，时区固定为 `Asia/Shanghai`。项目不能自填更早的时点；原始 `date` 列仍以
+日期交给算子。Feature 仅收到决定时点已可见的窗口内输入；Label 使用未来观测窗口，
+其成熟时间由最后实际观测对应的下一交易日开盘确定。Label 请求不得流入 Feature。
+
+日频正式输出使用 `features/` 或 `labels/` 表目录，核心生成 `artifact-metadata.json`，
+绑定当前 `ResearchSemantics`、表内容和完整因果计划。每个键批单独保存为 Parquet；
+用于机器学习的 Label 键批须保持单一 `label_end_time` 与 `horizon_sessions`，使开发区
+读取可在物理行组边界排除 holdout。日期行键在计划中采用 ISO 字符串，在 Arrow 输出中
+可采用 date 类型，由核心按输出 schema 对齐后附加逐行时间事实。日频模型工件中的
+观察、决定、标签区间和可见时间统一保存为带 UTC 时区的时间戳，保留同一实际时刻。项目仍不得填写
+`CORE_FEATURE_TIME_COLUMNS` 或 `CORE_LABEL_TIME_COLUMNS` 中的核心列。
+
+## 待著而救统计指标
+
+覆盖率使用输入全集分母，分组成员变化使用前后成员并集分母。指标身份、独立复核和历史结果边界见 [待著而救指标合同](dai_zhu_er_jiu_metrics.md)。
+
+## 日频模型预测有效性
+
+`qlib_prediction_validity/` 从已提交的 Feature、Label、切分、拟合审计、预测、选模、模型配置和 holdout 账本收集预测诊断事实。数据观察算子不适用于包含模型训练和候选选择的研究。
+
+该扩展输出 `research-validity-facts-v1`，其中 `model_diagnostics.mode` 为 `walk_forward_prediction_v1`。事实明确绑定 Result 的表 schema 与模型配置；框架独立复核时间切分、拟合范围、逐时点选模、唯一 holdout 收据和 MSE。研究公式与原始输入的对应关系仍由研究包冻结的项目 Verifier 检查。正式指标从独立的 `project.stage3.prediction-metrics.v1` 端口输出，保留汇总MSE原值，并从封存预测补齐单位、观察日期范围、样本数和计算状态；这些字段由核心统计门禁核对。
+
+Result 显式交付模型清单及 holdout 表时，模型诊断同时封存四阶段 holdout 账本。验证从 Result 读取，不访问原运行目录。该合同用于原始收益标签的回归诊断，只有交易仿真门禁不适用；标签、选模、holdout和统计诊断均需实际通过，结论上限为 `research_observation`。

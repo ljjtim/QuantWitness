@@ -42,6 +42,11 @@ python -m research_pipeline package admit --package <package目录> --catalog-lo
 
 `workspace init` 同样创建中性草稿；`workspace validate` 检查工作区路径、四份 YAML 的结构与文件边界，不代替检查研究内容的 `package lint`。草稿补齐前不得运行 `package admit`。
 
+使用已提交的数据快照时，`package admit`、`run`、`workspace run/execute` 可传
+`--input-snapshot-manifest <清单.json>`，与 `--data-db/--source-db` 互斥。分钟仍显式传入
+`--minute-data-root`。清单引用原准入和工件，但新研究须使用当前批准的归档 Catalog 绑定；
+运行与恢复核对计划冻结的清单内容。格式与边界见 [数据平面](data_plane.md#封存输入)。
+
 多个数据源使用可重复的 `--source-db PROFILE=PATH`。来源声明为 `archived_snapshot` 时，lint、admit 和 package 消费命令必须提供 `--source-archive-root`。
 
 直接采集的 raw 分钟查询没有额外来源版本参数。admit 从当前 Catalog binding 判断来源是否为
@@ -115,6 +120,8 @@ python -m research_pipeline export-result --verification-result <VerificationRes
 `--verifier-bundle` 提供同一身份的旧闭包。`report --output` 按 UTF-8 原子发布，目标已存在时拒绝
 覆盖；`--format json` 写版本化结构对象，不把 Markdown 正文再包成字符串。省略 `--output` 时保留
 原 stdout 报告行为。
+
+`report --format html --request <Qlib报告请求.yaml> --output <报告.html>` 从 Result 的模型预测表或日频组合正式表生成离线图形。模型请求显式选择候选、fold、阶段、周期和日期窗口；组合请求以 `qlib-portfolio-report-v1` 绑定六张规范表及组合指标表，展示完整组合窗口的净值、回撤、费用和成交诊断，见 [Qlib 报告](qlib-report.md)。`package report` 使用相同参数和服务。HTML 保留原 VerificationResult 状态，不重新训练、不重跑交易、不修改 Result。
 
 package 也提供绑定 ResearchPackage 的 report、compare 和 export-result 入口。直接 `compare`
 返回 `verified_metric_facts_only`，明确说明未检查 package 合同；它只在已验证的指标单位、方向、

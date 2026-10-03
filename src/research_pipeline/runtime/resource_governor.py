@@ -266,10 +266,12 @@ class ResourceUsageSampler:
         try:
             root = psutil.Process(os.getpid())
             descendants = root.children(recursive=True)
-            identities = {
-                (item.pid, item.create_time()): item
-                for item in descendants
-            }
+            identities = {}
+            for item in descendants:
+                try:
+                    identities[(item.pid, item.create_time())] = item
+                except psutil.NoSuchProcess:
+                    continue
             if self._baseline_descendants is None:
                 self._baseline_descendants = frozenset(identities)
             processes = [
@@ -280,7 +282,12 @@ class ResourceUsageSampler:
                     if identity not in self._baseline_descendants
                 ),
             ]
-            rss = sum(item.memory_info().rss for item in processes if item.is_running())
+            rss = root.memory_info().rss
+            for item in processes[1:]:
+                try:
+                    rss += item.memory_info().rss
+                except psutil.NoSuchProcess:
+                    continue
             self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
             self.max_processes = max(self.max_processes, len(processes))
         except (psutil.Error, OSError, RuntimeError):

@@ -29,7 +29,7 @@ _RUNTIME_OPTIONS = (
     "mode", "workers", "resource_state_dir", "resource_memory_bytes",
     "resource_cpu_slots", "resource_scratch_bytes", "resource_process_slots",
     "resource_timeout_seconds", "resource_stale_seconds", "source_db",
-    "minute_data_root", "reuse_run_root", "require_reused_node", "reuse_failed_run_root",
+    "input_snapshot_manifest", "minute_data_root", "reuse_run_root", "require_reused_node", "reuse_failed_run_root",
 )
 
 
@@ -62,6 +62,17 @@ def execute_workspace(args) -> dict[str, object]:
             raise WorkspaceError("execute 的 clock 必须与研究包 fixed_clock 一致")
         if args.root_seed is not None and args.root_seed != root_seed:
             raise WorkspaceError("execute 的 root_seed 必须与研究包一致")
+        if getattr(args, "input_snapshot_manifest", None):
+            from research_pipeline.data_plane.archived_inputs import load_archived_input_manifest
+            from research_pipeline.data_plane import PathRolePolicy
+
+            archived = load_archived_input_manifest(args.input_snapshot_manifest)
+            sources = {f"archive_{key}_input": value["root"]
+                       for key, value in archived["requests"].items()}
+            PathRolePolicy().validate(
+                {"workspace_generated_output": config.generated_root, **sources},
+                read_only_roles=tuple(sources),
+            )
         outcome["resource_advice"] = _resource_advice(lint, args)
         for advice in outcome["resource_advice"]:
             if advice["status"] == "configuration_insufficient":
@@ -94,7 +105,7 @@ def execute_workspace(args) -> dict[str, object]:
             config.root, execution_id=allocation["execution_id"],
             plan=admission["output"], data_db=args.data_db, clock=clock,
             root_seed=root_seed, handler=run_with_diagnostics,
-            **{name: getattr(args, name) for name in _RUNTIME_OPTIONS},
+            **{name: getattr(args, name, None) for name in _RUNTIME_OPTIONS},
         )
         if run.get("status") != "result_finalized":
             raise WorkspaceError("run 未返回已封存 Result，不能进入独立验证")

@@ -40,6 +40,9 @@ class CausalReadTrace:
         source = next((source for source in self.plan.sources if source.port == fact.get("port")), None)
         if source is None or fact.get("request_id") != source.request_id:
             raise CausalTimeContractError("causal state lineage 含未允许来源")
+        expected_daily = source.to_dict().get("daily_time")
+        if fact.get("daily_time") != expected_daily:
+            raise CausalTimeContractError("causal state lineage 日频交易日历或时间规则不一致")
         if fact.get("partition_id") not in self.item.source_partitions[source.port]:
             raise CausalTimeContractError("causal state lineage 含未允许分区")
         identities = self._identities[source.port][fact["partition_id"]]
@@ -69,6 +72,7 @@ class CausalReadTrace:
             "first_observation_time": min(first, _time(previous["first_observation_time"])).isoformat() if previous else first.isoformat(),
             "last_observation_time": max(last, _time(previous["last_observation_time"])).isoformat() if previous else last.isoformat(),
             "available_time": max(available, _time(previous["available_time"])).isoformat() if previous else available.isoformat(),
+            **({"daily_time": expected_daily} if expected_daily is not None else {}),
         }
 
     def wrap_input(self, port: str, source_iter: Callable) -> RestrictedCausalInput:
@@ -142,8 +146,11 @@ class RestrictedCausalInput:
             if not isinstance(batch, pa.RecordBatch) or batch.num_rows > batch_size:
                 raise CausalTimeContractError("causal 底层批次超出资源边界")
             frame = batch.select(physical_columns).to_pandas()
-            observations = frame[source.observation_column].map(_time)
-            available = frame[source.available_column].map(_time)
+            if source.daily_time is None:
+                observations = frame[source.observation_column].map(_time)
+                available = frame[source.available_column].map(_time)
+            else:
+                observations, available = daily_source_times(frame[source.observation_column], source.daily_time)
             in_window = (observations >= trace.item.window_start) & (observations <= trace.item.window_end)
             if trace.plan.kind == "feature":
                 in_window &= available <= trace.item.decision_time
@@ -159,5 +166,28 @@ class RestrictedCausalInput:
                 "first_observation_time": observations[in_window].min().isoformat(),
                 "last_observation_time": observations[in_window].max().isoformat(),
                 "available_time": available[in_window].max().isoformat(),
+                **({"daily_time": source.to_dict()["daily_time"]} if source.daily_time is not None else {}),
             })
             yield batch.filter(pa.array(in_window.to_numpy())).select(selected)
+
+
+def daily_source_times(values: pd.Series, binding: Mapping) -> tuple[pd.Series, pd.Series]:
+    """原始日期保持不变；可见时点由冻结交易日历与固定开收盘规则生成。"""
+    from research_pipeline.domain.time import TradingSessionCalendar, TimeContractError
+
+    calendar = TradingSessionCalendar.build(binding["sessions"])
+    following = dict(zip(calendar.sessions[:-1], calendar.sessions[1:]))
+    try:
+        dates = pd.to_datetime(values, errors="raise")
+        if dates.isna().any() or dates.dt.tz is not None or (dates != dates.dt.normalize()).any():
+            raise CausalTimeContractError("日频来源必须是无时区的完整日期")
+        next_dates = dates.dt.date.map(following)
+        if next_dates.isna().any():
+            raise CausalTimeContractError("日频日期不在冻结日历中或缺少后续交易日")
+        observations = (dates + pd.Timedelta(hours=15)).dt.tz_localize(binding["timezone"]).dt.tz_convert("UTC")
+        available = (pd.to_datetime(next_dates) + pd.Timedelta(hours=9, minutes=30)).dt.tz_localize(binding["timezone"]).dt.tz_convert("UTC")
+    except (TimeContractError, TypeError, ValueError) as exc:
+        if isinstance(exc, CausalTimeContractError):
+            raise
+        raise CausalTimeContractError("日频来源日期或交易日历无效") from exc
+    return observations, available

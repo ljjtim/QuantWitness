@@ -376,8 +376,19 @@ def _has_draft_diagnostic(parsed, commands, events) -> bool:
         and isinstance(payload, Mapping)
         and payload.get("status") == "fail"
         and payload.get("error_code") == "research_package_invalid"
-        and isinstance(payload.get("message"), str)
-        and payload["message"] == "sources/sources.yaml.sources 必须是非空列表；请填写对应声明后重新运行 package lint"
+        and isinstance(payload.get("data"), Mapping)
+        and all(
+            isinstance(issue, Mapping) and issue.get("code") == "package_field_invalid"
+            for issue in payload["data"].get("issues", ())
+        )
+        and any(
+            isinstance(issue, Mapping)
+            and issue.get("file") == "sources/sources.yaml"
+            and issue.get("field") == "sources"
+            and issue.get("code") == "package_field_invalid"
+            and issue.get("message") == "sources/sources.yaml.sources 必须是非空列表；请填写对应声明后重新运行 package lint"
+            for issue in payload["data"].get("issues", ())
+        )
         for payload, command, event in zip(parsed, commands, events, strict=True)
     )
 

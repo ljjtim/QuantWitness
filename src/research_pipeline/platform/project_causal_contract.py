@@ -52,6 +52,14 @@ class CausalSource:
     columns: tuple[str, ...]
     observation_column: str
     available_column: str
+    daily_time: Mapping | None = None
+
+    def to_dict(self) -> dict:
+        result = dict(port=self.port, request_id=self.request_id, columns=list(self.columns),
+                      observation_column=self.observation_column, available_column=self.available_column)
+        if self.daily_time is not None:
+            result["daily_time"] = {**self.daily_time, "sessions": list(self.daily_time["sessions"])}
+        return result
 
 
 @dataclass(frozen=True)
@@ -76,9 +84,7 @@ class CausalPlan:
         return {
             "kind": self.kind, "output_port": self.output_port,
             "key_columns": list(self.key_columns), "state_scope": self.state_scope,
-            "sources": [dict(port=source.port, request_id=source.request_id,
-                columns=list(source.columns), observation_column=source.observation_column,
-                available_column=source.available_column) for source in self.sources],
+            "sources": [source.to_dict() for source in self.sources],
             "work_items": [dict(key_rows=[list(row) for row in item.key_rows],
                 decision_time=item.decision_time.isoformat(), window_start=item.window_start.isoformat(),
                 window_end=item.window_end.isoformat(), source_partitions={port: list(ids)
@@ -128,15 +134,23 @@ def parse_causal_plan(raw: object) -> CausalPlan:
         raise CausalTimeContractError("causal sources 必须非空")
     sources = []
     for value in data["sources"]:
-        source = _fields(value, {
+        fields = {
             "port", "request_id", "columns", "observation_column", "available_column",
-        }, "causal source")
+        }
+        if isinstance(value, Mapping) and "daily_time" in value:
+            fields.add("daily_time")
+        source = _fields(value, fields, "causal source")
         columns = _names(source["columns"], "source columns")
         for name in ("port", "request_id", "observation_column", "available_column"):
             _names([source[name]], name)
         if not {source["observation_column"], source["available_column"]} <= set(columns):
             raise CausalTimeContractError("causal source columns 必须包含冻结时间列")
-        sources.append(CausalSource(**{**source, "columns": columns}))
+        daily_time = None
+        if "daily_time" in source:
+            daily_time = _parse_daily_time(source["daily_time"])
+            if source["observation_column"] != source["available_column"]:
+                raise CausalTimeContractError("日频因果来源必须绑定同一个原始日期列")
+        sources.append(CausalSource(**{**source, "columns": columns, "daily_time": daily_time}))
     ports = {source.port for source in sources}
     if len(ports) != len(sources):
         raise CausalTimeContractError("causal source port 不能重复")
@@ -182,3 +196,21 @@ def parse_causal_plan(raw: object) -> CausalPlan:
         tuple(sorted(item.source_partitions.items())),
     ))
     return CausalPlan(data["kind"], output_port, keys, tuple(sources), tuple(work_items), data["state_scope"])
+
+
+def _parse_daily_time(raw: object) -> Mapping:
+    from datetime import date
+
+    data = _fields(raw, {"rule", "timezone", "calendar_id", "calendar_source", "sessions"}, "daily_time")
+    if data["rule"] != "next_session_open" or data["timezone"] != "Asia/Shanghai":
+        raise CausalTimeContractError("日频因果来源只支持中国股票 next_session_open")
+    _names([data["calendar_id"]], "calendar_id")
+    _names([data["calendar_source"]], "calendar_source")
+    sessions = _names(data["sessions"], "sessions")
+    try:
+        dates = tuple(date.fromisoformat(value) for value in sessions)
+    except ValueError as exc:
+        raise CausalTimeContractError("日频交易日历必须是 ISO 日期") from exc
+    if sessions != tuple(value.isoformat() for value in dates) or dates != tuple(sorted(set(dates))) or len(dates) < 2:
+        raise CausalTimeContractError("日频交易日历必须规范、严格递增且包含后续交易日")
+    return {**data, "sessions": sessions}

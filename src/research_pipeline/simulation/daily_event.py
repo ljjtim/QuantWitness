@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from research_pipeline.domain import CorporateAction, MarketRuleSnapshot, Price
+from research_pipeline.domain import CorporateAction, MarketRuleSnapshot, Money, Price
 from research_pipeline.domain.trading import OrderIntent, PortfolioTarget, TradingRuleBinding
 from research_pipeline.platform import typed_canonical_hash
 
@@ -21,6 +21,7 @@ from .cash_market import (
     cash_daily_nav_units,
     cash_daily_preopen_at,
     cash_position_quantities,
+    cash_price_amount_units,
     cash_rebalance_deltas,
     cash_target_quantity,
     execute_cash_order,
@@ -35,9 +36,9 @@ from .ledger import ExecutionGroup, SpotLedgerState, reduce_spot
 from .orders import SimulationContractError
 
 
-DAILY_EVENT_SIMULATION_VERSION = "research-daily-event-simulation-v2"
+DAILY_EVENT_SIMULATION_VERSION = "research-daily-event-simulation-v3"
 _TIMEZONE = ZoneInfo("Asia/Shanghai")
-_PRICE_SCALE = 2
+DAILY_CASH_PRICE_SCALE = 3
 
 
 @dataclass(frozen=True)
@@ -185,7 +186,7 @@ def run_daily_cash_event_simulation(
                 code: cash_target_quantity(
                     nav_units=nav_at_open,
                     target_weight=weights.get(code, 0.0),
-                    price_units=_price_units(day.loc[code, "open"]),
+                    price=_price(day.loc[code, "open"]),
                     lot_size=policies[code].lot_size,
                 )
                 for code in codes
@@ -221,9 +222,9 @@ def run_daily_cash_event_simulation(
                 raw = day.loc[code]
                 snapshot = OpeningSnapshot(
                     instrument.instrument_hash,
-                    Price(_price_units(raw["open"]), _PRICE_SCALE, "CNY"),
-                    Price(_price_units(raw["high_limit"]), _PRICE_SCALE, "CNY"),
-                    Price(_price_units(raw["low_limit"]), _PRICE_SCALE, "CNY"),
+                    _price(raw["open"]),
+                    _price(raw["high_limit"]),
+                    _price(raw["low_limit"]),
                     bool(raw["paused"]),
                     order.quantity,
                     opening_time,
@@ -234,6 +235,7 @@ def run_daily_cash_event_simulation(
                     snapshot=snapshot,
                     state=state,
                     execution_at=opening_time,
+                    cash_scale=2,
                 )
                 order_rows.append({
                     "session": session,
@@ -269,7 +271,9 @@ def run_daily_cash_event_simulation(
                             "quantity": values["quantity"],
                             "notional_units": notional,
                             "fee_units": fee,
-                            "price_cny": _money_value(notional) / int(values["quantity"]),
+                            "price_cny": float(Price(int(values["execution_price_units"]), int(values["price_scale"]), "CNY").decimal),
+                            "execution_price_units": int(values["execution_price_units"]),
+                            "price_scale": int(values["price_scale"]),
                             "order_id": order.order_id,
                             "intent_hash": intent.intent_hash,
                         })
@@ -307,7 +311,7 @@ def run_daily_cash_event_simulation(
                 "sellable_quantity": 0 if lot is None else lot.sellable,
                 "unsettled_quantity": 0 if lot is None else lot.unsettled,
                 "frozen_quantity": 0 if lot is None else lot.frozen,
-                "market_value_units": quantity * _price_units(day.loc[code, "close"]),
+                "market_value_units": cash_price_amount_units(_price(day.loc[code, "close"]), quantity, cash_scale=2),
                 "trade_quantity_change": trade_change,
                 "non_trade_quantity_change": quantity - previous - trade_change,
                 "source_state_hash": state.state_hash,
@@ -479,7 +483,7 @@ def _nav_units(
     market: str,
 ) -> int:
     prices = {
-        _instrument_hash(str(code), market): _price_units(row[price_column])
+        _instrument_hash(str(code), market): _price(row[price_column])
         for code, row in day.iterrows()
     }
     return cash_daily_nav_units(state, prices)
@@ -509,15 +513,15 @@ def _instrument_hash(code: str, market: str) -> str:
     return _instrument(code, market).instrument_hash
 
 
-def _price_units(value: object) -> int:
+def _price(value: object) -> Price:
     numeric = float(value)
     if not math.isfinite(numeric) or numeric <= 0:
-        raise SimulationContractError("现货日频价格必须为正有限数")
-    return int(round(numeric * 100))
+        raise SimulationContractError("价格必须为有限正数")
+    return Price.from_decimal(value, scale=DAILY_CASH_PRICE_SCALE, currency="CNY")
 
 
 def _money_units(value: float) -> int:
-    return int(round(value * 100))
+    return Money.from_decimal(value, scale=2, currency="CNY").units
 
 
 def _money_value(value: int) -> float:

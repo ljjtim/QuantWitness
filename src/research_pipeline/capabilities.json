@@ -227,13 +227,13 @@
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_walk_forward_model_mainline.py::test_model_split_rejects_mixed_label_row_group_before_target_scan",
-        "research_pipeline/tests/test_walk_forward_model_mainline.py::test_same_input_and_seed_produce_identical_predictions_and_hashes",
+        "research_pipeline/tests/test_qlib_model_integration.py::test_three_models_frozen_bundle_round_trip_and_future_labels",
         "research_pipeline/tests/test_walk_forward_model_mainline.py::test_locked_holdout_is_reserved_once_and_cannot_be_reused",
         "research_pipeline/tests/test_walk_forward_model_mainline.py::test_model_split_adapter_verifies_label_before_starting_split"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "公共模型七阶段保留 purge/embargo、fold 内预处理、validation 选模、test 与唯一候选 locked holdout；输入 Feature/Label 必须由当前研究包提供。split 先检查 Label row group 与时间可见性，再读取开发目标；holdout 打开后失败仍消耗访问资格。本地验证不代表真实策略、可交易性或已发布模型结论。"
+      "notes": "Qlib 六节点负责日频回归模型：Linear、LightGBM、XGBoost；Processor 与 Model 按候选/fold 一起训练保存。保留 purge/embargo、开发区 validation 选择及隔离 holdout；模型文件随 Result 封存。只接受 v2 模型工件，不恢复旧七阶段 ML checkpoint。本地技术验收不代表真实策略、可交易性或样本外盈利。"
     },
     {
       "id": "minute_line.complete",

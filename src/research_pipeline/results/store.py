@@ -443,6 +443,23 @@ class ResultStore:
         self._require_expected_bundle(snapshot, bundle)
         return dict(snapshot.support_bytes)
 
+    def read_support_bytes(
+        self,
+        bundle: ResultBundle,
+        *,
+        artifact_key: str,
+        source_path: str,
+    ) -> bytes:
+        """按工件和源路径读取状态，允许不同模型使用同名文件。"""
+
+        selected = tuple(
+            item for item in bundle.support_files
+            if item.artifact_key == artifact_key and item.source_path == source_path
+        )
+        if len(selected) != 1:
+            raise ResultContractError("ResultBundle 必须恰好包含指定工件支持文件")
+        return self.read_artifact_bytes(bundle, relative_path=selected[0].relative_path)
+
     @staticmethod
     def _require_expected_bundle(snapshot: ResultSnapshot, bundle: ResultBundle) -> None:
         if snapshot.bundle != bundle:
@@ -583,7 +600,8 @@ class ResultStore:
         support_matches = {}
         for source_path in requested_support_paths:
             matches = tuple(
-                item for item in bundle.support_files if item.source_path == source_path
+                item for item in bundle.support_files
+                if item.source_path == source_path or item.relative_path == source_path
             )
             if len(matches) != 1:
                 raise ResultContractError(f"ResultBundle 控制文件必须唯一: {source_path}")

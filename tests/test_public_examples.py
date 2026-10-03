@@ -139,7 +139,7 @@ def test_public_examples_complete_formal_cli_workflow(
 
         verification = work / "verification-result.json"
         assert main([
-            "verify", "--result", str(result),
+            "verify", "--verification-process-slots", "3" if sys.platform == "win32" else "2", "--result", str(result),
             "--result-store", str(store_path),
             "--verifier-bundle", project["verifier_bundle"],
             "--output", str(verification), "--json",

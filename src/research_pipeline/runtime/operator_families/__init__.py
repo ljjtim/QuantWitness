@@ -2,10 +2,12 @@
 
 from .minute import build_minute_operator_definitions
 from .data_event_daily import build_data_event_daily_operator_definitions
+from .daily_cash import build_daily_cash_operator_definitions
 from .daily_model import build_daily_model_operator_definitions
 
 __all__ = [
     "build_minute_operator_definitions",
     "build_data_event_daily_operator_definitions",
     "build_daily_model_operator_definitions",
+    "build_daily_cash_operator_definitions",
 ]

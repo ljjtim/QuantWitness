@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from research_pipeline.research.validation import persistent_holdout_ledger_root
-from ..walk_forward_model_execution import execute_model_fit_artifact, execute_model_fold_metrics_artifact, execute_model_locked_holdout_artifact, execute_model_predict_artifact, execute_model_preprocess_artifact, execute_model_selection_artifact, execute_model_split_artifact
+from ..walk_forward_model_execution import execute_model_fit_artifact, execute_model_fold_metrics_artifact, execute_model_locked_holdout_artifact, execute_model_predict_artifact, execute_model_selection_artifact, execute_model_split_artifact
 from ..operator_runtime import OperatorRuntimeContext, RuntimeNodeValue
 from .common import _environment, _factor_external_result, _input_external_root, _parameters
 
 
-def execute_research_model_split_manifest_v1(
+def execute_research_model_split_manifest_v2(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeValue:
     result, value = _factor_external_result(
@@ -23,12 +23,12 @@ def execute_research_model_split_manifest_v1(
     return value
 
 
-def execute_research_model_preprocess_fit_v1(
+def execute_research_model_fit_v2(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeValue:
     result, value = _factor_external_result(
         context,
-        execute_model_preprocess_artifact,
+        execute_model_fit_artifact,
         split_root=_input_external_root(context, "splits"),
         parameters=_parameters(context),
         root_seed=_environment(context).root_seed,
@@ -37,34 +37,20 @@ def execute_research_model_preprocess_fit_v1(
     return value
 
 
-def execute_research_model_fit_v1(
-    context: OperatorRuntimeContext,
-) -> RuntimeNodeValue:
-    result, value = _factor_external_result(
-        context,
-        execute_model_fit_artifact,
-        preprocess_root=_input_external_root(context, "preprocessed"),
-        parameters=_parameters(context),
-        root_seed=_environment(context).root_seed,
-        max_memory_bytes=context.effective_resource_budget.memory_bytes,
-    )
-    return value
-
-
-def execute_research_model_predict_v1(
+def execute_research_model_predict_v2(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeValue:
     result, value = _factor_external_result(
         context,
         execute_model_predict_artifact,
-        preprocess_root=_input_external_root(context, "preprocessed"),
+        split_root=_input_external_root(context, "splits"),
         model_root=_input_external_root(context, "models"),
         max_memory_bytes=context.effective_resource_budget.memory_bytes,
     )
     return value
 
 
-def execute_research_model_fold_metrics_v1(
+def execute_research_model_fold_metrics_v2(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeValue:
     result, value = _factor_external_result(
@@ -78,14 +64,14 @@ def execute_research_model_fold_metrics_v1(
     return value
 
 
-def execute_research_model_selection_v1(
+def execute_research_model_selection_v2(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeValue:
     result, value = _factor_external_result(
         context,
         execute_model_selection_artifact,
         metrics_root=_input_external_root(context, "metrics"),
-        preprocess_root=_input_external_root(context, "preprocessed"),
+        split_root=_input_external_root(context, "splits"),
         model_root=_input_external_root(context, "models"),
         parameters=_parameters(context),
         max_memory_bytes=context.effective_resource_budget.memory_bytes,
@@ -93,7 +79,7 @@ def execute_research_model_selection_v1(
     return value
 
 
-def execute_research_model_locked_holdout_v1(
+def execute_research_model_locked_holdout_v2(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeValue:
     env = _environment(context)
