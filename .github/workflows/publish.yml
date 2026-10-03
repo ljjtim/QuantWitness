@@ -212,19 +212,51 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/quantwitness-pypi-env"
           python_bin="$RUNNER_TEMP/quantwitness-pypi-env/bin/python"
-          "$python_bin" -m pip install --no-cache-dir --index-url https://pypi.org/simple "quantwitness==${RELEASE_TAG#v}"
+          version="${RELEASE_TAG#v}"
+      
+          # PyPI 上传完成后，simple index/CDN 可能需要一点时间同步。
+          # 每 15 秒尝试一次，最多尝试 12 次。
+          installed=false
+      
+          for attempt in $(seq 1 12); do
+            echo "Attempt $attempt/12: installing quantwitness==$version from PyPI"
+      
+            if "$python_bin" -m pip install \
+                --no-cache-dir \
+                --index-url https://pypi.org/simple \
+                "quantwitness==$version"; then
+              installed=true
+              break
+            fi
+      
+            if [ "$attempt" -lt 12 ]; then
+              echo "quantwitness==$version is not available yet; retrying in 15 seconds..."
+              sleep 15
+            fi
+          done
+      
+          if [ "$installed" != "true" ]; then
+            echo "quantwitness==$version is still unavailable on PyPI after retries."
+            exit 1
+          fi
+      
           "$python_bin" -m pip check
+      
           cd "$RUNNER_TEMP"
+      
           "$python_bin" - <<'PY'
           import importlib.metadata
           import os
           from pathlib import Path
           import sys
           import research_pipeline
-
+      
           assert importlib.metadata.version("quantwitness") == os.environ["RELEASE_TAG"][1:]
-          assert Path(research_pipeline.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+          assert Path(research_pipeline.__file__).resolve().is_relative_to(
+              Path(sys.prefix).resolve()
+          )
           PY
+      
           "$RUNNER_TEMP/quantwitness-pypi-env/bin/quantwitness" --help
       - name: Download Python distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
