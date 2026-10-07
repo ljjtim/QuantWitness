@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quantwitness-rdagent"
 version = "0.1.0"
-description = "QuantWitness 的可选 RD-Agent 公式复现场景"
+description = "QuantWitness 的可选 RD-Agent 公式复现与因子研究循环"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"

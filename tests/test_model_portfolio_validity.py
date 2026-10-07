@@ -138,7 +138,7 @@ def test_model_financial_gate_consumes_independent_oracle(financial_case, monkey
     monkeypatch.setattr(model_validity, "_holdout", lambda *_: (0.0, 1))
     monkeypatch.setattr(model_validity, "_statistics", lambda *_: None)
     mode = model_validity.MODEL_DIAGNOSTICS_MODE
-    facts = {"model_diagnostics": {"mode": mode}, "label_split": {"mode": mode},
+    facts = {"model_diagnostics": {"mode": mode, "design": {}, "tables": {}}, "label_split": {"mode": mode},
              "search_holdout": {"mode": mode}, "statistics": {},
              "financial_tradability": financial}
     assert not model_validity.recompute_model_validity_issues(

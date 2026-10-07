@@ -243,3 +243,17 @@ python -m quantwitness_rdagent spec-render --draft I:/research/paper-spec/draft.
 ## 多轮正式研究
 
 `campaign-run/resume/inspect` 支持已有预测校准和新的ResearchPackage参数研究。研究包模式每轮形成独立Result与VerificationResult，反馈仅包含通过验证的开发指标；最终test/holdout留给单独冻结的最终研究。说明见[研究循环](docs/research-campaign.md)，无需私有数据的入口见[两轮正式研究例](examples/package_campaign/README.md)。
+
+## 文档基线后的新因子研究
+
+`factor-run/factor-resume/factor-inspect`提供基线复现、原生假设、表达式实验和研究反思循环。每轮执行正式研究包并独立验证；新候选不必预列菜单。当前独立验证范围为日频收盘动量、均价偏离、相对波动和区间位置，配置与教学例见[因子研究](docs/factor-research.md)。该模式不使用上游ChatSession缓存，模型身份与代理继续由显式.env提供。`knowledge-export`可从正式开发会话导出研究知识；新会话通过可选`knowledge`声明冻结索引，引用历史结果选择已支持的四类价格因子方向。因子与模型联合方向使用 `joint-run/joint-resume/joint-inspect`，复用同一开发范围及统一预算，模型特征绑定通过验证的因子；见[联合研究指南](docs/joint-research.md)。
+
+## 编码经验复用
+
+公式复现请求可声明 `coding_knowledge`，从已通过正式独立验证的会话读取实际错误与修复源码。默认精确匹配公式和接口；`retrieval_scope: technical_transfer` 允许相同接口下按共同计算结构迁移不同公式的经验。模型研究支持逐候选节点定义、当前编译失败和正式模型来源复用。提示保留来源身份与修复配对，排除完整诊断和 test/holdout 金融指标；恢复读取冻结记录。字段、预算和正式来源核验见[编码经验](docs/coding-knowledge.md)。
+
+生成式前馈模型入口为 `model-run/model-resume/model-inspect`，通过上游模型假设、结构编译修复与反思驱动正式开发研究。范围与教学例见[生成式模型研究](docs/model-research.md)。
+
+## 因子与模型联合研究
+
+`joint-run/joint-resume/joint-inspect`统一方向选择、调用预算和研究反思。模型消费已验证因子中开发指标最好的表达式，并在正式设计及Result中保存特征绑定；两分支共用冻结输入、开发范围和指标。外部真实归档与已确认材料沿用各自请求接口。三轮合成准备例及恢复方法见[联合研究指南](docs/joint-research.md)。

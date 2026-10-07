@@ -31,6 +31,9 @@ REQUIRED_DOCS = frozenset(
         "walk_forward_model.md",
         "qlib-model-results.md",
         "qlib-report.md",
+        "qlib-expressions.md",
+        "qlib-factor-baselines.md",
+        "qlib-portfolio-risk.md",
         "project_resource_budgets.md",
     }
 )

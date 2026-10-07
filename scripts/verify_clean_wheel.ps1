@@ -197,11 +197,16 @@ try {
             "-m", "research_pipeline", "package", "lint", "--package", $package, "--json"
         ) $false
         $draftLint = $draftLintResult.Stdout | ConvertFrom-Json -ErrorAction Stop
+        $sourceIssues = @($draftLint.data.issues | Where-Object {
+            $_.file -ceq "sources/sources.yaml" -and $_.field -ceq "sources"
+        })
         if (
             $draftLintResult.ExitCode -ne 1 -or
             $draftLint.status -cne "fail" -or
             $draftLint.error_code -cne "research_package_invalid" -or
-            $draftLint.message -cne "sources/sources.yaml.sources 必须是非空列表；请填写对应声明后重新运行 package lint"
+            $draftLint.data.execution_ready -cne $false -or
+            $sourceIssues.Count -ne 1 -or
+            $sourceIssues[0].message -cne "sources/sources.yaml.sources 必须是非空列表；请填写对应声明后重新运行 package lint"
         ) {
             throw "中性草稿 lint 必须以 exit=1 和 research_package_invalid JSON 拒绝空 sources"
         }

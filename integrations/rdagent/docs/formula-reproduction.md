@@ -82,3 +82,23 @@ python -m quantwitness_rdagent request-build --template I:/research/request-temp
 - 当前是固定接口下的公式复现和技术修复，未提供自主假设、多轮研究决策或任意 Python 程序执行。
 - 独立原始分钟参考覆盖两只指定证券，不代表全市场逐分钟独立复算；真实验收结论为 `research_observation`。
 - 论文发表时间、历史样本期、数据修订可见性分别记录。历史样本复现不证明当时已知该方法，也不证明长期盈利。
+
+## 跨会话复用编码经验
+
+同一已确认公式可以读取前一完成会话的错误和修复代码。来源仍须保留完整请求、冻结材料、候选源码、正式 Result 和 VerificationResult；导入时复验公式覆盖、Verifier 身份及源码绑定。知识只进入编码提示，每个新会话仍按自身冻结输入执行并验证。
+
+在请求模板增加：
+
+```json
+"coding_knowledge": {
+  "source_session": "I:/research/formula-source/session",
+  "max_records": 3,
+  "max_source_chars": 12000
+}
+```
+
+`confirmed_formula` 由前述 `request-build` 写入，不能省略；当前公式及接口必须与来源完全一致。首个来源会话可只声明两个上限，不填 `source_session`。记录数允许1至6，总代码字符数允许1至60000；预算不足的整条代码记录不进入提示。接口规范、纯计算限制和技术错误码进入知识，完整日志、行情、标签与收益指标不进入知识。
+
+运行仍使用原来的 `run/resume/inspect` 命令。当前会话的 `coding-knowledge/input.json` 保存冻结来源，`query-0000.json` 等文件保存各次检索，`knowledge.pkl` 保存上游签名编码知识。已完成调用的实际提示保存在 `model-calls/call-0000.json`。恢复复用冻结知识和调用回执，不重新选择外部经验或重复付费。签名密钥沿用本会话 `rd-signing.key`，不随公开示例发布。
+
+这条路径按相同公式精确检索，复用 CoSTEER 的知识对象、历史查询、演化调度和存取。它不需要 embedding、SQLite 或额外模型调用。编码修复成功只表示该公式实现通过独立验证，不能用来表示收益改善。

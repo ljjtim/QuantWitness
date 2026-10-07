@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from research_pipeline.platform.canonical import typed_canonical_hash
-from research_pipeline.platform.errors import MainlineError
+from .inputs import ModelMainlineError, assemble_daily_feature_context, _require_columns
 from research_pipeline.research.validation import (
     HoldoutAccessPlan,
     PersistentHoldoutLedger,
@@ -20,10 +20,6 @@ from research_pipeline.research.validation import (
 
 
 WALK_FORWARD_MODEL_VERSION = "research-qlib-model-v1"
-
-
-class ModelMainlineError(MainlineError):
-    error_code = "research_model_mainline_invalid"
 
 
 class ModelDependencyError(ModelMainlineError):
@@ -48,17 +44,6 @@ def assemble_daily_model_samples(
     target_field: str = "forward_return",
 ) -> tuple[pd.DataFrame, tuple[str, ...]]:
     """把日频长表变成资产无关的样本矩阵，不改变任何特征值。"""
-    feature_required = {
-        "entity_id",
-        "observation_session",
-        "observation_time",
-        "available_time",
-        "window_sessions",
-        "feature_id",
-        "value",
-        "status",
-        "lineage_hash",
-    }
     label_required = {
         "entity_id",
         "observation_session",
@@ -70,57 +55,19 @@ def assemble_daily_model_samples(
         target_field,
         "lineage_hash",
     }
-    _require_columns(features, feature_required, "features")
     _require_columns(labels, label_required, "labels")
     if type(horizon_sessions) is not int or horizon_sessions < 1:
         raise ModelMainlineError("horizon_sessions 必须是正整数")
-    valid_features = features.loc[features["status"].astype(str) == "ok"].copy()
+    context, feature_columns = assemble_daily_feature_context(features)
     selected_labels = labels.loc[labels["horizon_sessions"] == horizon_sessions].copy()
-    if valid_features.empty or selected_labels.empty:
-        raise ModelMainlineError("模型样本缺少可用 Feature 或目标 horizon Label")
-    for frame, columns in (
-        (valid_features, ("observation_time", "available_time")),
-        (
-            selected_labels,
-            ("decision_time", "label_start_time", "label_end_time", "available_time"),
-        ),
-    ):
-        for column in columns:
-            frame[column] = pd.to_datetime(frame[column], utc=True, errors="raise")
-    if (valid_features["observation_time"] > valid_features["available_time"]).any():
-        raise ModelMainlineError("Feature 在观察时点尚不可见")
-    # 收盘到下一收盘标签使用开区间 (decision_time, label_end_time]：
-    # 起点价格在决定时点已可见，因此边界相等合法，只有更早的起点才是前视。
+    if selected_labels.empty:
+        raise ModelMainlineError("模型样本缺少目标 horizon Label")
+    for column in ("decision_time", "label_start_time", "label_end_time", "available_time"):
+        selected_labels[column] = pd.to_datetime(selected_labels[column], utc=True, errors="raise")
+    # 起点价格在决策时点已可见，标签区间为 (decision_time, label_end_time]。
     if (selected_labels["decision_time"] > selected_labels["label_start_time"]).any():
         raise ModelMainlineError("Label 不得从决策之前开始")
-    valid_features["feature_column"] = (
-        valid_features["feature_id"].astype(str)
-        + "__w"
-        + valid_features["window_sessions"].astype(int).astype(str)
-    )
     keys = ["entity_id", "observation_session"]
-    if valid_features.duplicated([*keys, "feature_column"]).any():
-        raise ModelMainlineError("同一样本的 Feature 列不唯一")
-    wide = valid_features.pivot(
-        index=keys, columns="feature_column", values="value"
-    ).reset_index()
-    feature_columns = tuple(
-        sorted(str(column) for column in wide.columns if column not in keys)
-    )
-    if not feature_columns:
-        raise ModelMainlineError("模型样本没有数值 Feature")
-    feature_meta = (
-        valid_features.groupby(keys, sort=True)
-        .agg(
-            observation_time=("observation_time", "max"),
-            feature_available_time=("available_time", "max"),
-            feature_lineage_hash=(
-                "lineage_hash",
-                lambda values: typed_canonical_hash(sorted(map(str, values))),
-            ),
-        )
-        .reset_index()
-    )
     label_columns = [
         *keys,
         "decision_time",
@@ -132,9 +79,7 @@ def assemble_daily_model_samples(
     ]
     if selected_labels.duplicated(keys).any():
         raise ModelMainlineError("同一样本的目标 horizon Label 不唯一")
-    result = wide.merge(
-        feature_meta, on=keys, how="inner", validate="one_to_one"
-    ).merge(
+    result = context.merge(
         selected_labels.loc[:, label_columns],
         on=keys,
         how="inner",
@@ -187,14 +132,18 @@ def model_dependency_preflight(candidates, *, thread_count: int) -> dict[str, ob
     """冻结本次 Qlib 候选实际依赖及 CPU 单线程约束。"""
     if thread_count != 1:
         raise ModelMainlineError("Qlib 首批只支持 thread_count=1")
-    normalized = normalize_model_candidates(candidates)
+    from .qlib import normalize_candidates
+    normalized = normalize_candidates(candidates)
     distributions = {"pyqlib", "numpy", "pandas"}
     for candidate in normalized:
-        distributions.add({"LinearModel": "scikit-learn", "LGBModel": "lightgbm", "XGBModel": "xgboost"}[candidate["model"]["class"]])
+        distributions.add({"LinearModel": "scikit-learn", "LGBModel": "lightgbm", "XGBModel": "xgboost", "DEnsembleModel": "lightgbm", "GRU": "torch", "LSTM": "torch", "TransformerModel": "torch", "GeneratedModel": "torch"}[candidate["model"]["class"]])
     versions = {name: _distribution_version(name) for name in sorted(distributions)}
     missing = [name for name, version in versions.items() if version == "missing"]
     if missing:
         raise ModelDependencyError(f"Qlib 模型依赖缺失: {missing}")
+    if any(candidate["model"]["class"] in {"GRU", "LSTM", "TransformerModel", "GeneratedModel"} for candidate in normalized):
+        if versions["torch"].split("+", 1)[0] != "2.5.1" or versions["pyqlib"] != "0.9.7":
+            raise ModelDependencyError("Torch模型要求 pyqlib==0.9.7 与 torch==2.5.1")
     payload = {"contract_version": WALK_FORWARD_MODEL_VERSION, "dependencies": versions, "thread_count": 1}
     payload["preflight_hash"] = typed_canonical_hash(payload)
     return payload
@@ -212,7 +161,8 @@ def normalize_model_candidates(
 ) -> list[dict[str, object]]:
     """规范化并校验静态候选全集。"""
     from .qlib import normalize_candidates
-    return normalize_candidates(candidates)
+    normalized = normalize_candidates(candidates)
+    return normalized
 
 
 def evaluate_locked_holdout(
@@ -242,8 +192,15 @@ def evaluate_locked_holdout(
     ledger_root: str | Path,
     root_seed: int,
     thread_count: int = 1,
+    development_sequence_context=None,
+    holdout_sequence_loader: Callable[[], object] | None = None,
 ) -> dict[str, object]:
     """开发拟合完成后原子记录 opened，再首次读取 holdout 值。"""
+    is_sequence = selected_candidate.get("model", {}).get("class") in {"GRU", "LSTM", "TransformerModel"}
+    if is_sequence and (development_sequence_context is None or not callable(holdout_sequence_loader)):
+        raise ModelMainlineError("序列模型 holdout 必须提供开发序列上下文及打开后加载窗口的回调")
+    if not is_sequence and (development_sequence_context is not None or holdout_sequence_loader is not None):
+        raise ModelMainlineError("表格 holdout 不接受序列上下文")
     if fixed_clock.tzinfo is None or fixed_clock.utcoffset() is None:
         raise ModelMainlineError("locked holdout fixed_clock 必须包含时区")
     development_ids = tuple(sorted(map(str, development_ids)))
@@ -349,7 +306,8 @@ def evaluate_locked_holdout(
     model = fit_bundle(fit_train, valid, candidate=selected_candidate,
                        feature_columns=feature_columns, output_root=output_root,
                        bundle_path="bundles/holdout/0", root_seed=root_seed,
-                       fit_scope_ref="holdout-final-development")
+                       fit_scope_ref="holdout-final-development",
+                       sequence_context=development_sequence_context)
     model.update(candidate_id=f"candidate_{candidate_id[:16]}", fold_id="locked_holdout", status="fitted")
     prepared = ledger.prepare(prepared_at=fixed_clock, preflight=holdout_preflight)
     opened = ledger.open(
@@ -378,7 +336,8 @@ def evaluate_locked_holdout(
                     "locked holdout Label 在 fixed_clock 时尚不可见"
                 )
         holdout = holdout_frame.loc[list(holdout_ids)].copy()
-        predictions = predict_bundle(output_root, model, holdout)
+        holdout_context = holdout_sequence_loader() if is_sequence else None
+        predictions = predict_bundle(output_root, model, holdout, sequence_context=holdout_context)
         evaluation_target = evaluation_labels(output_root, model, holdout)
         metric = _metric(evaluation_target, predictions, objective, target_kind)
         rows = _prediction_records(
@@ -527,12 +486,6 @@ def _distribution_version(name: str) -> str:
         return importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:
         return "missing"
-
-
-def _require_columns(frame: pd.DataFrame, required: set[str], label: str) -> None:
-    missing = required - set(frame.columns)
-    if missing:
-        raise ModelMainlineError(f"{label} 缺少字段: {sorted(missing)}")
 
 
 __all__ = [

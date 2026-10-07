@@ -94,14 +94,27 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
     values = {}
     for port, commits in committed_by_port.items():
         staging = external.prepare()
-        if port == plan.output_port and any(source.daily_time is not None for source in plan.sources):
+        first = external.objects_root / commits[0].semantic_hash / next(iter(commits[0].files))
+        schema = pq.ParquetFile(first).schema_arrow
+        daily_keys = (
+            {"entity_id", "observation_session", "window_sessions", "feature_id"}
+            if plan.kind == "feature" else
+            {"entity_id", "observation_session", "horizon_sessions"}
+        )
+        is_daily_research = (
+            getattr(environment, "semantics", None) is not None
+            and set(plan.key_columns) == daily_keys
+            and "observation_session" in schema.names
+            and pa.types.is_date(schema.field("observation_session").type)
+        )
+        if port == plan.output_port and (
+            any(source.daily_time is not None for source in plan.sources) or is_daily_research
+        ):
             _write_daily_causal_artifact(staging, commits, external, plan, environment)
             final = external.commit(staging, artifact_name=port, artifact_type=commits[0].artifact_type)
             values[port] = RuntimeNodeValue.external(final)
             continue
         writer_root = ProjectOutputRoot(staging)
-        first = external.objects_root / commits[0].semantic_hash / next(iter(commits[0].files))
-        schema = pq.ParquetFile(first).schema_arrow
 
         def batches(commits=commits):
             for commit in commits:

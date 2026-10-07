@@ -16,6 +16,7 @@ from statistics import fmean
 from research_pipeline.platform import typed_canonical_hash
 
 from .errors import EvidenceContractError
+from .model_sequence_validity import verify_sequence_research_facts, sequence_expected_parameters
 
 MODEL_DIAGNOSTICS_MODE = "walk_forward_prediction_v1"
 MODEL_DEVELOPMENT_MODE = "walk_forward_development_v1"
@@ -27,7 +28,10 @@ def _require(condition, message):
 
 
 def _time(value):
-    result = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    result = value if isinstance(value, datetime) else datetime.fromisoformat(text)
     _require(result.tzinfo is not None, "模型事实时间缺少时区")
     return result
 
@@ -85,6 +89,23 @@ def verify_model_result_binding(snapshot, facts):
     _require(set(configs) == {row["config_path"] for row in tables["models"]}, "模型配置事实不完整")
     for path, config in configs.items():
         _require(read_support(model_table.artifact_key, path) == config, "模型配置事实与封存文件不一致")
+        if config["candidate"]["model"]["class"] == "GeneratedModel":
+            from .generated_model_validity import verify_generated_support
+            verify_generated_support(snapshot, model_table.artifact_key, config)
+        if config["candidate"]["model"]["class"] in {"GRU", "LSTM", "TransformerModel"}:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            weights = support.get((model_table.artifact_key, config["weights_path"]))
+            _require(weights is not None, "序列模型 Result缺少显式权重文件")
+            windows = model.get("model_window_facts", {}).get(path)
+            _require(isinstance(windows, Mapping), "序列模型缺少窗口文件事实")
+            for name, source in config["sequence"]["files"].items():
+                item = support.get((model_table.artifact_key, source))
+                _require(item is not None, "序列模型 Result缺少窗口文件")
+                raw = snapshot.support_bytes.get(item.relative_path)
+                _require(raw is not None, "序列模型窗口文件未经本次快照验证")
+                actual = _json_value(pq.read_table(pa.BufferReader(raw)).to_pylist())
+                _require(actual == windows.get(name), "序列模型窗口事实与封存文件不一致")
     for name in (("plan", "prepared", "opened", "terminal") if holdout_table is not None else ()):
         actual = read_support(holdout_table.artifact_key, f"holdout-ledger/{name}.json")
         _require(actual == model["holdout_ledger"][name], "holdout 事实与封存账本不一致")
@@ -96,13 +117,16 @@ def _split(model):
     tables, design = model["tables"], model["design"]
     samples = {key[0]: row for key, row in _index(tables["samples"], ("sample_id",)).items()}
     _require(samples, "模型开发样本为空")
+    horizon = design.get("horizon_sessions", 1)
+    _require(type(horizon) is int and horizon > 0, "冻结模型期限无效")
+    _require(all(row.get("horizon_sessions", 1) == horizon for row in samples.values()), "模型开发样本期限与冻结设计不一致")
     boundary = _time(design["holdout_start"])
     for row in samples.values():
         _require(_time(row["feature_available_time"]) <= _time(row["decision_time"]) <= _time(row["label_start_time"]) <= _time(row["label_end_time"]) < boundary, "模型特征前视或标签区间无效")
         _require(_time(row["label_end_time"]) <= _time(row["label_available_time"]) <= boundary, "模型开发标签尚未成熟")
     calendar = [_day(day) for day in design["split_calendar_sessions"]]
     _require(calendar == sorted(set(calendar)), "模型切分日历无序或重复")
-    calendar = [day for day in calendar if day <= max(_day(row["observation_session"]) for row in samples.values())]
+    calendar = [day for day in calendar if day <= max(_day(_time(row["observation_time"])) for row in samples.values())]
     train, valid, test, step = (design[name] for name in ("train_sessions", "validation_sessions", "test_sessions", "step_sessions"))
     embargo = design["embargo_sessions"]
     _require(all(type(v) is int and v > 0 for v in (train, valid, test, step)) and type(embargo) is int and embargo >= 0, "模型切分窗口无效")
@@ -113,7 +137,7 @@ def _split(model):
         boundary_valid = offset + train
         boundary_test = boundary_valid + valid + embargo
         windows = {"train": calendar[train_start:boundary_valid], "validation": calendar[boundary_valid:boundary_valid + valid], "embargoed": calendar[boundary_valid + valid:boundary_test], "test": calendar[boundary_test:boundary_test + test]}
-        groups = {role: {sid for sid, row in samples.items() if _day(row["observation_session"]) in days} for role, days in windows.items()}
+        groups = {role: {sid for sid, row in samples.items() if _day(_time(row["observation_time"])) in days} for role, days in windows.items()}
         _require(all(groups[role] for role in ("train", "validation", "test")), "模型切分窗口为空")
         cutoffs = {"train": min(_time(samples[sid]["decision_time"]) for sid in groups["validation"]), "validation": min(_time(samples[sid]["decision_time"]) for sid in groups["test"])}
         groups["purged"] = set()
@@ -198,8 +222,8 @@ def _selection(model, samples, folds, candidates):
 
 MODEL_VERIFIER_ALGORITHM_VERSIONS = {
     "data.pit": "verifier.data-pit.v1",
-    "label.split": "verifier.model-label-split.v1",
-    "search.holdout": "verifier.model-search-holdout.v1",
+    "label.split": "verifier.model-label-split.v2",
+    "search.holdout": "verifier.model-search-holdout.v2",
     "statistics": "verifier.model-statistics.v1",
     "financial.tradability": "verifier.model-financial-scope.v2",
 }
@@ -233,9 +257,32 @@ def _fit_configs(model, samples, folds, selection=None):
         _require(config["thread_count"] == 1 and row["target_kind"] == "regression", "模型资源或任务类型不符")
         _require(config["model_path"] == row["model_path"] and config["feature_columns"] == json.loads(row["feature_columns_json"]), "模型文件或特征列索引不符")
         kwargs, fit = dict(candidate["model"]["kwargs"]), dict(candidate["fit"])
-        if candidate["model"]["class"] == "LGBModel":
+        if candidate["model"]["class"] in {"GRU", "LSTM", "TransformerModel"}:
+            kwargs, fit = sequence_expected_parameters(config, candidate, design)
+        elif candidate["model"]["class"] == "GeneratedModel":
+            kwargs.update(d_feat=len(config["feature_columns"]), seed=design["root_seed"])
+            _require(config.get("generated", {}).get("definition") == kwargs["definition"], "生成模型结构与冻结声明不符")
+            _require(config.get("versions", {}).get("torch", "").split("+")[0] == "2.5.1", "生成模型Torch版本不符")
+            _require(config.get("training_curve") and all(row["metric"] == "mse" and math.isfinite(row["value"]) and row["value"] >= 0 for row in config["training_curve"]), "生成模型训练曲线无效")
+        elif candidate["model"]["class"] == "LGBModel":
             kwargs.update(num_threads=1, seed=design["root_seed"], device_type="cpu")
             fit.setdefault("verbose_eval", 0)
+        elif candidate["model"]["class"] == "DEnsembleModel":
+            kwargs.update(num_threads=1, seed=design["root_seed"], device_type="cpu")
+            count = kwargs.get("num_models", 6)
+            state = config.get("ensemble_state", {})
+            _require(kwargs.get("enable_sr", True) is True and kwargs.get("enable_fs") is False,
+                     "Double Ensemble 只准入样本重加权版本")
+            _require(state.get("num_models") == count
+                     and state.get("sub_features") == [config["feature_columns"]] * count
+                     and state.get("sub_weights") == (kwargs.get("sub_weights") or [1] * count),
+                     "Double Ensemble 子模型状态与声明不一致")
+            iterations = state.get("iterations", [])
+            _require(len(iterations) == count
+                     and all(type(n) is int and 1 <= n <= kwargs.get("epochs", 100) for n in iterations),
+                     "Double Ensemble 训练轮数不符")
+            _require(config.get("training_curve") == [] and not fit,
+                     "Double Ensemble 不能声明未导出的训练曲线或 fit 参数")
         elif candidate["model"]["class"] == "XGBModel":
             kwargs.update(nthread=1, seed=design["root_seed"], device="cpu", objective="reg:squarederror")
             fit.update(early_stopping_rounds=None)
@@ -257,6 +304,9 @@ def _fit_configs(model, samples, folds, selection=None):
 def _holdout(model, selection):
     tables, design = model["tables"], model["design"]
     predictions = tables["holdout_predictions"]
+    horizon = design.get("horizon_sessions", 1)
+    _require(type(horizon) is int and horizon > 0, "冻结模型期限无效")
+    _require(all(row.get("horizon_sessions") == horizon for row in predictions), "holdout预测期限与冻结设计不一致")
     index = _index(tables["holdout_index"], ("sample_id",))
     rows = _index(predictions, ("sample_id",))
     _require(rows and rows.keys() == index.keys(), "holdout 预测与冻结索引不一致")
@@ -354,6 +404,7 @@ def recompute_model_validity_issues(facts, *, bar_tca_expectations=None):
     try:
         _require(model["mode"] in {MODEL_DIAGNOSTICS_MODE, MODEL_DEVELOPMENT_MODE}, "模型诊断模式无效")
         _require(facts.get("label_split") == {"mode": model["mode"]} and facts.get("search_holdout") == {"mode": model["mode"]}, "模型门禁模式不一致")
+        verify_sequence_research_facts(model)
         samples, folds, candidates = _split(model)
     except errors:
         issues["label.split"].add("label.leakage")

@@ -35,6 +35,7 @@ dev = [
   "tomli>=2; python_version < '3.11'",
 ]
 ml = ["pyqlib==0.9.7", "xgboost>=3.2,<3.3", "plotly>=6,<7", "statsmodels>=0.15,<0.16"]
+ml-sequence = ["pyqlib==0.9.7", "torch==2.5.1"]
 
 [project.scripts]
 quantwitness = "research_pipeline.cli:main"

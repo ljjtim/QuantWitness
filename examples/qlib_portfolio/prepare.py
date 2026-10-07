@@ -3,7 +3,9 @@ from copy import deepcopy
 from datetime import datetime
 import argparse
 import hashlib
+from importlib.metadata import version
 import json
+import shutil
 from pathlib import Path
 import yaml
 
@@ -41,6 +43,34 @@ def candidate(alpha):
         "learn": [{"class": "DropnaLabel", "kwargs": {}}]}, "fit": {}}
 
 
+def gru_candidate(step_len):
+    return {"candidate_id": "gru", "model": {"class": "GRU",
+        "module_path": "qlib.contrib.model.pytorch_gru_ts", "kwargs": {
+            "hidden_size": 4, "num_layers": 1, "batch_size": 1,
+            "n_epochs": 2, "early_stop": 1, "GPU": -1, "n_jobs": 0,
+            "loss": "mse", "metric": "", "optimizer": "adam"}},
+        "dataset": {"class": "TSDatasetH", "step_len": step_len, "missing_policy": "complete_window"},
+        "processors": deepcopy(candidate(0.1)["processors"]), "fit": {}}
+
+
+def lstm_candidate(step_len):
+    item = gru_candidate(step_len)
+    item["candidate_id"] = "lstm"
+    item["model"]["class"] = "LSTM"
+    item["model"]["module_path"] = "qlib.contrib.model.pytorch_lstm_ts"
+    return item
+
+
+def transformer_candidate(step_len):
+    item = gru_candidate(step_len)
+    item["candidate_id"] = "transformer"
+    item["model"]["class"] = "TransformerModel"
+    item["model"]["module_path"] = "qlib.contrib.model.pytorch_transformer_ts"
+    del item["model"]["kwargs"]["hidden_size"]
+    item["model"]["kwargs"].update(d_model=4, nhead=2, reg=1e-3)
+    return item
+
+
 def edge(port, node, output):
     return {"input_port": port, "source_node_id": node, "source_output_port": output}
 
@@ -60,21 +90,51 @@ def declaration(name, inputs, outputs, parameters, types=(), module="operator", 
         "strategy_roles": [], "resource_profile": {"memory_bytes": 1024**3, "cpu_slots": 1,
             "process_slots": 4, "temp_bytes": 1024**3, "wall_seconds": 1800},
         "determinism_mode": "deterministic", "seed_policy": "none", "pit_capabilities": ["pit.as_of.v1"]},
-        "entry": {"module": module, "function": function}, "dependency_lock": {"pyarrow": "21.0.0"},
+        "entry": {"module": module, "function": function}, "dependency_lock": {"pyarrow": "21.0.0", "qlib": "0.9.7", "pandas": version("pandas"), "numpy": version("numpy")},
         "permissions": {"artifact_write_scope": "output_only"}}
 
 
-def prepare(root, mode="model", input_config=None):
+def prepare(root, mode="model", input_config=None, feature_expressions=None, sequence_step_len=None, model_candidates=None, horizon_sessions=1, window_config=None, feature_suite=None):
     root = Path(root).resolve()
     if mode not in {"model", "development", "portfolio"}:
         raise ValueError("不支持的公开起点")
     if (root / "bundle-paths.json").exists():
         raise ValueError("该输出目录已有冻结研究，请使用新目录")
+    if sequence_step_len is not None and (type(sequence_step_len) is not int or sequence_step_len < 2):
+        raise ValueError("sequence_step_len必须为至少2的整数")
+    if sequence_step_len is not None and mode == "portfolio":
+        raise ValueError("序列示例当前支持development和model模式")
+    if type(horizon_sessions) is not int or horizon_sessions < 1:
+        raise ValueError("horizon_sessions必须为正整数")
+    if mode == "portfolio" and (horizon_sessions != 1 or window_config is not None):
+        raise ValueError("组合示例保持原单日期限和窗口；滚动多期限请使用development或model")
+    windows = {"train_sessions": 30, "validation_sessions": 10, "test_sessions": 10,
+               "step_sessions": 10, "embargo_sessions": 1, "expanding": True}
+    if window_config is not None:
+        if not isinstance(window_config, dict) or set(window_config) - set(windows):
+            raise ValueError("window_config只接受六项已支持切分参数")
+        windows.update(deepcopy(window_config))
+    if type(windows["expanding"]) is not bool:
+        raise ValueError("expanding必须为布尔值")
+    for key, value in windows.items():
+        if key != "expanding" and (type(value) is not int or value < (0 if key == "embargo_sessions" else 1)):
+            raise ValueError(key + "窗口参数无效")
+    if horizon_sessions >= windows["train_sessions"] or horizon_sessions >= windows["validation_sessions"] + windows["embargo_sessions"]:
+        raise ValueError("标签成熟后的train或validation窗口为空，请调整期限、训练/验证长度或embargo")
+    suite = None
+    if feature_suite is not None:
+        from extension.factor_baselines import factor_suite as build_factor_suite
+        from extension.factor_baseline_oracle import validate_factor_suite
+        if feature_expressions is not None:
+            raise ValueError("固定因子集合与单表达式替换不能同时声明")
+        suite = build_factor_suite(feature_suite) if isinstance(feature_suite, str) else deepcopy(feature_suite)
+        validate_factor_suite(suite)
     metric_ref = "project.qlib_demo.validation_mse@1.0.0" if mode == "development" else METRIC
     own = None
     if input_config is not None:
         from input_config import load_input_config
-        own, requests, archive_payload = load_input_config(input_config, mode=mode)
+        own, requests, archive_payload = (load_input_config(input_config, mode=mode, feature_fields=suite["fields"])
+            if suite is not None else load_input_config(input_config, mode=mode))
         root.mkdir(parents=True, exist_ok=True)
         archive = root / "inputs.json"
         archive.write_text(json.dumps(archive_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -84,30 +144,60 @@ def prepare(root, mode="model", input_config=None):
         (root / "input-config.json").write_text(json.dumps(own, ensure_ascii=False, indent=2), encoding="utf-8")
     else:
         calendar = synthetic.sessions()
-        _, requests, archive = prepare_inputs(root, end_session=calendar[78] if mode == "development" else None)
+        _, requests, archive = prepare_inputs(root, end_session=calendar[78] if mode == "development" else None,
+            include_factor_fields=suite is not None)
         days, entities = [day.isoformat() for day in calendar], list(synthetic.instruments())
         fields, catalog_lock = PRICE_FIELDS, str(root / "catalog")
     for request in requests:
         request.pop("ir_version", None)
         request.pop("as_of", None)
-    study = days[11:-3]
-    boundary = study[-20]
+    study = days[11:-(horizon_sessions + 2)]
+    if not study:
+        raise ValueError("标签期限超出研究日历")
+    boundary = days[-23]
     cutoff = days[days.index(boundary)-1]
     clock = stamp(boundary, "16:00:00").isoformat() if mode == "development" else own["fixed_clock"] if own else CLOCK
     if mode == "development":
-        study = [day for day in study if day < cutoff]
+        study = [day for day in study if days.index(day) + horizon_sessions <= days.index(cutoff)]
     research_id = own["research_id"] if own else "public.qlib.etf"
     design = {"calendar_sessions": days, "research_sessions": study,
         "split_calendar_sessions": [day for day in study if day < boundary], "entities": entities,
-        "holdout_start": boundary+"T00:00:00+08:00", "train_sessions": 30, "validation_sessions": 10,
-        "test_sessions": 10, "step_sessions": 10, "embargo_sessions": 1, "expanding": True, "root_seed": SEED,
+        "holdout_start": boundary+"T00:00:00+08:00", **windows, "horizon_sessions": horizon_sessions, "root_seed": SEED,
         "price_basis": "unadjusted_price_change", "calendar_source": own["calendar_source"] if own else "synthetic.py deterministic weekdays",
         "calendar_id": own["calendar_id"] if own else "public_synthetic_weekdays",
         "snapshot_scope": own["snapshot_scope"] if own else "public_synthetic_no_market_claim",
         "price_fields": list(fields),
         "market_fields": [own["columns"][key] for key in ("date", "code", "close", "open", "high_limit", "low_limit", "paused")] if own else [*PRICE_FIELDS, "fld_demo_open", "fld_demo_high_limit", "fld_demo_low_limit", "fld_demo_paused"]}
+    if suite is not None:
+        design["feature_suite"] = suite
+        role_fields = own["columns"] if own else {"close": fields[2], "open": "fld_demo_open",
+            "high": "fld_demo_high", "low": "fld_demo_low", "vwap": "fld_demo_vwap", "volume": "fld_demo_volume"}
+        design["factor_fields"] = {role: role_fields[role] for role in suite["fields"]}
+        design["feature_columns"] = sorted(f"{name}__w{spec['window_sessions']}" for name, spec in suite["features"].items())
+    if feature_expressions is not None:
+        from verifier.check import validate_feature_expressions
+        design["feature_expressions"] = validate_feature_expressions(feature_expressions)
     design["finance"] = own["finance"] if own else {"initial_cash_cny": 100000., "price_scale": 3}
     candidates = [candidate(0.1), candidate(1.0)]
+    if sequence_step_len is not None:
+        candidates = [candidate(0.1), gru_candidate(sequence_step_len)]
+        # 序列日历覆盖留出窗口，实际训练切分仍截止于开发样本。
+        design["split_calendar_sessions"] = list(study)
+        design["sequence"] = {"schema": "research.model-sequence-context.v1",
+            "step_len": sequence_step_len, "calendar_sessions": list(study),
+            "feature_columns": design.get("feature_columns", ["historical_return__w10", "historical_return__w5", "volatility__w10", "volatility__w5"]),
+            "missing_policy": "complete_window", "candidate_sample_policy": "shared_complete_endpoints"}
+    if model_candidates is not None:
+        from research_pipeline.research.modeling.walk_forward import normalize_model_candidates
+        candidates = normalize_model_candidates(deepcopy(model_candidates))
+    eligible_start = (sequence_step_len or 1) - 1
+    last_development = days.index(boundary) - horizon_sessions - 2
+    development_count = last_development - days.index(study[0]) + 1
+    minimum = windows["train_sessions"] + windows["validation_sessions"] + windows["test_sessions"] + windows["embargo_sessions"]
+    if development_count < minimum or eligible_start >= windows["train_sessions"] - horizon_sessions:
+        raise ValueError("冻结日历或完整序列窗口不足以形成非空walk-forward")
+    if mode != "development" and not any(day >= boundary for day in study):
+        raise ValueError("标签期限超出最终holdout日历闭包")
     search = build_search_manifest(search_id=research_id, candidates=candidates, method="grid",
         max_trials=len(candidates), max_parallel=1, stopping_condition="complete_declared_candidate_universe",
         objective="neg_mean_squared_error", direction="maximize", frozen_at=stamp(days[0], "09:00:00"))
@@ -152,10 +242,10 @@ def prepare(root, mode="model", input_config=None):
         entity_keys=("entity_id", "observation_session"), value_fields=("value",),
         time_window=ResearchTimeWindow(stamp(first,"00:00:00"), stamp(first), stamp(days[0],"15:00:00"), stamp(first,"00:00:00")),
         schema_hash=typed_canonical_hash(["feature_id","window_sessions","value"]), transform_lineage_hash=identity,
-        source_revision_hash=identity, preprocessing_order=("historical_return","volatility"))
+        source_revision_hash=identity, preprocessing_order=tuple(suite["features"]) if suite is not None else ("historical_return","volatility"))
     label = LabelArtifact.build(label_id="qlib_demo.labels", artifact_id="qlib_demo.label.rows",
         entity_keys=("entity_id","observation_session"), value_field="forward_return",
-        time_window=ResearchTimeWindow(stamp(first), stamp(days[13]), stamp(first,"15:00:00"), stamp(days[12],"15:00:00")),
+        time_window=ResearchTimeWindow(stamp(first), stamp(days[11+horizon_sessions+1]), stamp(first,"15:00:00"), stamp(days[11+horizon_sessions],"15:00:00")),
         schema_hash=typed_canonical_hash(["horizon_sessions","forward_return"]), source_lineage_hash=identity,
         source_revision_hash=identity, visibility_policy_hash=typed_canonical_hash("available.daily.v1/next_session_open"),
         revision_policy="point_in_time", training_only=True)
@@ -174,12 +264,16 @@ def prepare(root, mode="model", input_config=None):
         work = []
         for day in study:
             i = days.index(day)
-            start, end = (days[i-11],days[i-1]) if kind == "feature" else (day,days[i+1])
-            rows = [[code,day,w,f] for code in entities for w in (5,10) for f in ("historical_return","volatility")] if kind == "feature" else [[code,day,1] for code in entities]
+            history_span = suite["lookback"] + 1 if suite is not None else 11
+            start, end = (days[i-history_span],days[i-1]) if kind == "feature" else (day,days[i+horizon_sessions])
+            if kind == "feature" and suite is not None:
+                rows = [[code,day,spec["window_sessions"],name] for code in entities for name,spec in suite["features"].items()]
+            else:
+                rows = [[code,day,w,f] for code in entities for w in (5,10) for f in ("historical_return","volatility")] if kind == "feature" else [[code,day,horizon_sessions] for code in entities]
             work.append({"key_rows": rows, "decision_time": stamp(day).isoformat(), "window_start": stamp(start,"15:00:00").isoformat(),
                 "window_end": stamp(end,"15:00:00").isoformat(), "source_partitions": {"bars": sorted({d[:7] for d in days if start <= d <= end})}})
         causal = {"kind": kind, "output_port": output, "key_columns": keys, "state_scope": "independent",
-            "sources": [{"port": "bars", "request_id": "daily_"+kind, "columns": list(fields), "observation_column": fields[0],
+            "sources": [{"port": "bars", "request_id": "daily_"+kind, "columns": list(dict.fromkeys([*fields, *design.get("factor_fields", {}).values()])) if kind == "feature" else list(fields), "observation_column": fields[0],
                 "available_column": fields[0], "daily_time": {"rule": "next_session_open", "timezone": "Asia/Shanghai",
                 "calendar_id": design["calendar_id"], "calendar_source": design["calendar_source"], "sessions": days}}], "work_items": work}
         nodes.append(node(kind,"project.qlib_demo."+kind,[("bars","data_plane","data")],
@@ -187,8 +281,10 @@ def prepare(root, mode="model", input_config=None):
         declarations.append((kind, declaration(kind,[("bars","data.columnar-bundle.v1")],[(output,artifact)],
             [("causal_plan","json"),("design","json"),("lineage_ref","string")])))
     split_params = {key: design[key] for key in ("holdout_start","train_sessions","validation_sessions","test_sessions","step_sessions","embargo_sessions","expanding")}
-    split_params.update(horizon_sessions=1,target_field="forward_return",calendar_sessions=design["split_calendar_sessions"])
+    split_params.update(horizon_sessions=horizon_sessions,target_field="forward_return",calendar_sessions=design["split_calendar_sessions"])
     split_params["evaluation_scope"] = "development" if mode == "development" else "final"
+    if sequence_step_len is not None:
+        split_params["sequence_step_len"] = sequence_step_len
     nodes.extend([
         node("model_split","research.model.split-manifest",[("features","feature","features"),("labels","label","labels")],split_params),
         node("model_fit","research.model.fit",[("splits","model_split","splits")],parameters),
@@ -219,6 +315,9 @@ def prepare(root, mode="model", input_config=None):
         ("model_holdout","holdout","research.model-locked-holdout.v2",("holdout_predictions","holdout_receipt")),
         ("summary","result",summary_type,("raw_prices","study_design"))]:
         for name in names: table(name,source,port,kind)
+    if sequence_step_len is not None:
+        for name in ("context", "targets", "members", "exclusions"):
+            table("sequence_" + name, "model_split", "splits", "research.model-split-manifest.v2")
     table("metrics","validity","metrics","project.qlib_demo.prediction-metrics.v1",role="primary")
     table("models","summary","result",summary_type,"research.qlib-model-inventory.v1")
     validity_ports=[("data","data_plane","data","data.columnar-bundle.v1"),("features","feature","features","research.feature-set.v1"),
@@ -257,7 +356,12 @@ def prepare(root, mode="model", input_config=None):
     if mode == "portfolio":
         from portfolio_plan import metric_definitions
         definitions += metric_definitions(HERE/"verifier/portfolio.py")
-    verifier=compile_project_verifier_bundle(source_root=HERE/"verifier",output_root=root/"verifier-bundles",project_id="qlib-public",
+    verifier_source = root / "verifier-source"
+    verifier_source.mkdir()
+    for source in (HERE / "verifier").glob("*.py"):
+        shutil.copyfile(source, verifier_source / source.name)
+    shutil.copyfile(HERE / "extension/factor_baseline_oracle.py", verifier_source / "factor_baseline_oracle.py")
+    verifier=compile_project_verifier_bundle(source_root=verifier_source,output_root=root/"verifier-bundles",project_id="qlib-public",
         verifier_id="public-qlib-independent",verifier_version="1.0.0",entry_module="check",entry_function="verify",
         authorized_schema_ids=tuple(item["schema_id"] for item in tables),metric_definitions=definitions,dependency_lock={"pyarrow":"21.0.0"})
     result={"package":str(package),"extensions":built,"verifier":str(verifier),"catalog_lock":catalog_lock,"input_snapshot_manifest":str(archive),"mode":mode,"fixed_clock":clock}
@@ -270,5 +374,7 @@ if __name__ == "__main__":
     parser.add_argument("--output",required=True)
     parser.add_argument("--mode",choices=("development","model","portfolio"),default="model")
     parser.add_argument("--input-config")
+    parser.add_argument("--sequence-step-len",type=int)
+    parser.add_argument("--factor-suite", choices=("volume_price_v1", "alpha158_selected_v1", "alpha360_selected_v1"))
     args=parser.parse_args()
-    print(json.dumps(prepare(args.output,args.mode,args.input_config),ensure_ascii=False,indent=2))
+    print(json.dumps(prepare(args.output,args.mode,args.input_config,sequence_step_len=args.sequence_step_len,feature_suite=args.factor_suite),ensure_ascii=False,indent=2))

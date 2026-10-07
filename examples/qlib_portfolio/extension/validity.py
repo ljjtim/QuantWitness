@@ -54,13 +54,23 @@ def collect_facts(context, inputs):
     bindings = context.parameters['table_bindings']
     development = 'holdout' not in values
     table_ports = {name: port for name, port in TABLE_PORTS.items() if not development or port not in ('holdout', 'selection')}
-    if set(bindings) != set(table_ports):
+    sequence_ports = {"sequence_" + name: "splits" for name in ("context", "targets", "members", "exclusions")}
+    if set(bindings) not in (set(table_ports), set(table_ports) | set(sequence_ports)):
         raise ValueError('模型有效性绑定表集合与正式端口不一致')
     tables = {name: _table(values[port], name, allow_empty=development and name == "holdout_index") for name, port in table_ports.items()}
     if len(tables['study_design']) != 1:
         raise ValueError('冻结研究设计必须唯一')
     design = json.loads(tables['study_design'][0]['design_json'])
+    if design.get('sequence') is not None:
+        if not set(sequence_ports) <= set(bindings):
+            raise ValueError('序列研究缺少窗口表绑定')
+        tables.update({name: _table(values[port], name, allow_empty=name == "sequence_exclusions") for name, port in sequence_ports.items()})
+    elif set(sequence_ports) & set(bindings):
+        raise ValueError('未声明序列研究却绑定窗口表')
     configs = {row['config_path']: values['summary'].read_json(row['config_path']) for row in tables['models']}
+    model_windows = {path: {name: pq.read_table(pa.BufferReader(values['summary'].read_bytes(source))).to_pylist()
+        for name, source in config['sequence']['files'].items()}
+        for path, config in configs.items() if config['candidate']['model']['class'] in {'GRU', 'LSTM', 'TransformerModel'}}
     ledger = {name: values['holdout'].read_json('holdout-ledger/' + name + '.json')
               for name in ('plan', 'prepared', 'opened', 'terminal')} if not development else {}
     observations, ceilings = [], {}
@@ -91,7 +101,7 @@ def collect_facts(context, inputs):
         'model_diagnostics': {
             'mode': 'walk_forward_development_v1' if development else 'walk_forward_prediction_v1', 'design': design,
             'tables': tables, 'table_bindings': dict(bindings),
-            'model_configs': configs, 'holdout_ledger': ledger,
+            'model_configs': configs, 'holdout_ledger': ledger, 'model_window_facts': model_windows,
         },
         'data_pit': {
             'observations': observations, 'consumed_request_ids': sorted(ceilings),

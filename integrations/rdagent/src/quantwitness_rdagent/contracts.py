@@ -25,7 +25,7 @@ class FrozenRequest:
     def from_dict(cls, payload):
         fields = {"request_id", "mode", "base_package", "source_archive_root", "input_snapshot_manifest",
                   "editable_source_root", "reference_bundle", "development_scope", "runtime_binding", "budget"}
-        optional = {"code_generation", "confirmed_formula", "formula_evaluation"}
+        optional = {"code_generation", "confirmed_formula", "formula_evaluation", "coding_knowledge"}
         if not isinstance(payload, dict) or not fields <= set(payload) or set(payload) - fields - optional:
             raise ValueError("冻结请求字段必须完整且无额外字段")
         if payload["mode"] != "formula_reproduction":
@@ -38,6 +38,23 @@ class FrozenRequest:
             if (not isinstance(confirmed, dict) or set(confirmed) != {"formula", "interface"}
                     or any(not isinstance(value, str) or not value.strip() for value in confirmed.values())):
                 raise ValueError("confirmed_formula必须包含完整公式与接口")
+        knowledge = payload.get("coding_knowledge")
+        if "coding_knowledge" in payload:
+            if (not isinstance(knowledge, dict)
+                    or not {"max_records", "max_source_chars"} <= set(knowledge)
+                    or set(knowledge) - {"source_session", "retrieval_scope", "max_records", "max_source_chars"}
+                    or confirmed is None):
+                raise ValueError("coding_knowledge需要确认公式、记录数与代码长度上限")
+            if (type(knowledge["max_records"]) is not int or not 1 <= knowledge["max_records"] <= 6
+                    or type(knowledge["max_source_chars"]) is not int
+                    or not 1 <= knowledge["max_source_chars"] <= 60000):
+                raise ValueError("编码知识预算无效")
+            if (not isinstance(knowledge.get("retrieval_scope", "exact_formula"), str)
+                    or knowledge.get("retrieval_scope", "exact_formula") not in {"exact_formula", "technical_transfer"}):
+                raise ValueError("编码知识检索范围无效")
+            if "source_session" in knowledge and (not isinstance(knowledge["source_session"], str)
+                    or not knowledge["source_session"].strip()):
+                raise ValueError("编码知识来源会话路径无效")
         evaluation = payload.get("formula_evaluation")
         if "formula_evaluation" in payload:
             if (not isinstance(evaluation, dict)
@@ -149,6 +166,11 @@ class FrozenRequest:
             source_roots.append((root if root.is_absolute() else manifest_path.parent / root).resolve())
         if any(output.is_relative_to(root) or root.is_relative_to(output) for root in source_roots):
             raise ValueError("会话输出不能与只读来源目录重叠")
+        source_session = self.payload.get("coding_knowledge", {}).get("source_session")
+        if source_session:
+            knowledge_input = self._local_path(source_session).resolve()
+            if output.is_relative_to(knowledge_input) or knowledge_input.is_relative_to(output):
+                raise ValueError("编码知识来源与当前会话不能重叠")
         materials = self._materials()
         material_path = self.session_root / "frozen-inputs.json"
         if material_path.exists():

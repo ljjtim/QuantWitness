@@ -27,8 +27,10 @@ def validate_package_campaign(value):
         if not isinstance(request[name], str) or not request[name].strip():
             raise ValueError(name + "必须非空")
     source = request["source"]
-    if set(source) != {"kind", "path", "source_archive_root", "input_snapshot_manifest", "catalog_lock",
-                       "verifier_bundle", "extension_bundles", "runtime_options", "verification_process_slots"} or source["kind"] != "research_package":
+    source_fields = {"kind", "path", "source_archive_root", "input_snapshot_manifest", "catalog_lock",
+                     "verifier_bundle", "extension_bundles", "runtime_options", "verification_process_slots"}
+    if (not source_fields <= set(source) or set(source) - source_fields - {"verification_memory_bytes"}
+            or source["kind"] != "research_package"):
         raise ValueError("来源必须绑定完整研究包、归档、Catalog和Verifier")
     for key in ("path", "source_archive_root", "input_snapshot_manifest", "catalog_lock", "verifier_bundle"):
         if not isinstance(source[key], str) or not source[key]:
@@ -37,6 +39,9 @@ def validate_package_campaign(value):
             any(not isinstance(x, str) or not x for x in source["extension_bundles"]) or
             type(source["verification_process_slots"]) is not int or source["verification_process_slots"] < 1):
         raise ValueError("扩展或Verifier资源声明无效")
+    if "verification_memory_bytes" in source and (
+            type(source["verification_memory_bytes"]) is not int or source["verification_memory_bytes"] < 1):
+        raise ValueError("verification_memory_bytes必须为正整数")
     if not isinstance(source["runtime_options"], dict) or set(source["runtime_options"]) & {
         "data_db", "source_db", "input_snapshot_manifest", "reuse_run_root", "reuse_failed_run_root", "require_reused_node"}:
         raise ValueError("研究循环只消费冻结归档，不跨候选复用运行")

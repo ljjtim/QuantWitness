@@ -21,6 +21,14 @@ diagnostic 分支、且不是正式结论祖先的 Feature/Label 不封存。Fea
 `verify` 失败。表身份按来源节点、端口、Artifact 类型和路径共同区分，不能因路径相同误删
 另一张正式时间表。
 
+### 序列模型的封存与复核
+
+选中Qlib序列模型清单时，Result收录配置、模型对象、Processor、显式权重，以及模型使用的`sequence/context.parquet`、`targets.parquet`和`members.parquet`。所有文件必须属于该清单引用的已提交工件。三份固定窗口文件可作为模型支持文件，普通Parquet研究表仍使用ResultSpec表声明。
+
+独立复核只读取配置、窗口Parquet和holdout账本，不反序列化模型或重新训练。研究级原始Feature、Label、完整末端、上下文、成员和排除记录必须逐行绑定Result。验证器从原始输入重建窗口资格，检查实际样本的证券、会话、决策时间和目标值，再核对每个模型的历史输入是其train/valid末端的精确子集。GRU配置复核固定Qlib/Torch版本、输入维度、CPU和单条batch、实际参数、窗口声明及negative_mse曲线。
+
+正式ResearchPackage接受显式完整窗口的GRU候选，公开示例的development/model模式同时绑定原始Feature、Label及四张序列表。缺少窗口声明、窗口长度不一致或非raw标签的序列评价在准入阶段拒绝；Result独立验证进一步核对实际样本与封存模型。
+
 ## 金融与统计口径
 
 期货账本以精确持仓成本处理增仓、部分平仓、反转和逐日结算，独立金融复核从成交现金流与结算事件重算，不复用账本的均价算法。以乘数 15 先后按 100、110 各买入一手、按 120 结算，累计盈亏为 450。

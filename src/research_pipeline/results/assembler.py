@@ -563,6 +563,8 @@ class ResultAssembler:
                     if row["status"] != "fitted":
                         continue
                     config_path = row["config_path"]
+                    if not isinstance(config_path, str) or config_path not in commit.files:
+                        raise ResultContractError(f"Qlib 模型引用未提交文件: {config_path}")
                     try:
                         config = json.loads(external.read_bytes(commit, config_path))
                     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -573,6 +575,18 @@ class ResultAssembler:
                     if not isinstance(processor_files, dict) or set(processor_files) != {"infer", "learn"}:
                         raise ResultContractError("Qlib 模型配置缺少 Processor 文件清单")
                     paths = [config_path, row["model_path"]]
+                    if config.get("schema") == "research.qlib-sequence-model-bundle.v1":
+                        sequence = config.get("sequence")
+                        sequence_files = sequence.get("files") if isinstance(sequence, dict) else None
+                        if not isinstance(sequence_files, dict) or set(sequence_files) != {"context", "targets", "members"}:
+                            raise ResultContractError("Qlib 序列模型配置缺少窗口文件清单")
+                        paths.append(config.get("weights_path"))
+                        paths.extend(sequence_files[name] for name in ("context", "targets", "members"))
+                    if config.get("candidate", {}).get("model", {}).get("class") == "GeneratedModel":
+                        generated = config.get("generated")
+                        if not isinstance(generated, dict):
+                            raise ResultContractError("生成模型配置缺少源码与权重清单")
+                        paths.extend((generated.get("source_path"), generated.get("weights_path")))
                     for role in ("infer", "learn"):
                         if not isinstance(processor_files[role], list):
                             raise ResultContractError("Qlib Processor 文件清单必须为列表")
@@ -580,6 +594,7 @@ class ResultAssembler:
                     for path in paths:
                         if not isinstance(path, str) or path not in commit.files:
                             raise ResultContractError(f"Qlib 模型引用未提交文件: {path}")
+                    for path in paths:
                         key = (commit.semantic_hash, path)
                         selected[key] = ResultSupportFile(
                             artifact_key=commit.semantic_hash,

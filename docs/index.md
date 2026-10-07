@@ -14,7 +14,10 @@
 - [列式数据平面](data_plane.md)
 - [ResearchPackage](research_package.md)
 - [Runtime 与恢复](runtime.md)
-- [滚动模型与样本外选择](walk_forward_model.md)
+- [滚动模型与样本外选择](walk_forward_model.md)：表格模型、GRU/LSTM/Transformer主链、完整序列窗口、滚动与多期限研究
+- [Qlib 因子表达式与标准特征](qlib-expressions.md)
+- [Qlib 量价与选定Alpha基线](qlib-factor-baselines.md)
+- [Qlib 组合与风险目标](qlib-portfolio-risk.md)
 - [Qlib 模型文件交付与恢复](qlib-model-results.md)
 - [Qlib 模型与组合研究报告](qlib-report.md)
 - [项目执行与独立复核资源预算](project_resource_budgets.md)
@@ -33,6 +36,8 @@
 ## 可选源码集成
 
 [RD-Agent 场景说明](../integrations/rdagent/README.md)与[公式复现指南](../integrations/rdagent/docs/formula-reproduction.md)面向完整源码副本，需单独安装；不属于核心 wheel 自带命令。研究执行仍委托同一 ResearchPackage 主链。可选集成的 wheel/sdist 构建、空环境安装与贡献任务见[安装验收](../integrations/rdagent/docs/installation.md)。比较已验证开发预测或执行新研究包变体的入口见[有界开发区研究](../integrations/rdagent/docs/research-campaign.md)与[两轮教学例](../integrations/rdagent/examples/prediction_campaign/README.md)。
+
+新因子研究见[文档基线后的提案与反思](../integrations/rdagent/docs/factor-research.md)，与有限参数菜单研究分别保留。模型结构提案见[生成式模型研究](../integrations/rdagent/docs/model-research.md)，统一方向、预算及恢复见[因子与模型联合研究](../integrations/rdagent/docs/joint-research.md)。
 
 ## 当前流程
 
@@ -68,3 +73,7 @@ capabilities / operator / artifact / recipe / catalog 发现
 | `capability.discovery` | `local_only` | `capabilities --format json`<br>`operator list/describe/scaffold/validate/build`<br>`artifact describe`<br>`recipe list/describe/scaffold`<br>`catalog dataset/field search`<br>`package lint`<br>`package expand-variants` | `local_acceptance` / `local_only` | capabilities 命令逐字段读取本清单；operator、artifact、catalog 和 package lint 的发现结果来自正式 registry、schema、Catalog Lock 或 package compiler。package expand-variants 只覆盖基包中已存在的 node 参数，原子生成普通完整包，不接受深层 YAML 合并、模板、Python 或 SQL。当前没有获准的公共 recipe，使用 package init 创建通用起点；项目完整拓扑由 ResearchPackage 声明。operator scaffold 生成可验证的最小项目算子；正式 Feature/Label 需必填 causal_plan，且来源必须可由已准入请求证明。validate/build 只复验显式源码闭包，不扫描目录或自动安装。 |
 | `resource.governance` | `local_only` | `run --resource-state-dir` | `local_acceptance` / `local_only` | 数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。合成探针不进入正式运行校准总体。 |
 <!-- CAPABILITIES_TABLE:END -->
+
+Qlib 表格模型的 Double Ensemble 样本重加权、四条执行路径与封存状态见 [模型研究](walk_forward_model.md)。确认公式的跨会话编码经验见 [RD-Agent公式复现](../integrations/rdagent/docs/formula-reproduction.md)。
+
+生成式模型入口见[模型结构、修复与开发反思](../integrations/rdagent/docs/model-research.md)。

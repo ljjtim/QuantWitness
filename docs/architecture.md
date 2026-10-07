@@ -17,7 +17,7 @@ ResearchPackage
 
 - `catalog/`：数据集、字段、可见性、修订、binding 和漂移合同。
 - `packages/`：ResearchPackage schema、纯编译和 ResultSpec。
-- `data_plane/`：唯一数据库读取边界，输出列式工件。
+- `data_plane/`：研究数据取数与列式工件边界；Catalog schema 观测、来源修订与因子发布绑定另有直接只读连接。
 - `extensions/`：受控项目 bundle、算子合同和准入。
 - `runtime/`：typed DAG、事件、checkpoint、资源租约和恢复。
 - `domain/`、`simulation/`：金融时间、市场规则、订单、成交和账本。

@@ -23,10 +23,11 @@ from research_pipeline.research.modeling import (
     assemble_daily_model_samples,
     evaluate_locked_holdout,
     model_dependency_preflight,
-    normalize_model_candidates,
     score_model,
 )
-from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle, evaluation_labels
+from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle, evaluation_labels, normalize_candidates
+from .model_sequence import (sequence_step, build_runtime_windows, window_tables, window_metadata,
+    load_runtime_windows, validate_sequence_candidates, sequence_for_candidate)
 from research_pipeline.research.validation import (
     SplitFold,
     SplitManifest,
@@ -54,6 +55,8 @@ def execute_model_split_artifact(
     max_memory_bytes: int,
 ) -> dict[str, object]:
     frame_budget = PandasFrameBudget(max_memory_bytes)
+    step_len = sequence_step(parameters)
+    sequence_windows = None
     features, feature_metadata = _load_table(
         feature_root, "features", frame_budget=frame_budget,
     )
@@ -91,22 +94,9 @@ def execute_model_split_artifact(
     )
     if feature_metadata.get("semantics_hash") != label_metadata.get("semantics_hash"):
         raise ModelMainlineError("Walk-forward Feature/Label 语义身份不一致")
-    samples, feature_columns = assemble_daily_model_samples(
-        features, development_labels, horizon_sessions=horizon_sessions,
-        target_field=target_field,
-    )
-    frame_budget.reserve_frame(samples, label="Walk-forward development samples")
-    frame_budget.release_frame(development_labels)
-    visible_at = pd.Timestamp(fixed_clock)
-    if visible_at.tzinfo is None:
-        raise ModelMainlineError("模型 Runtime fixed_clock 必须包含时区")
-    if (pd.to_datetime(samples["label_available_time"], utc=True) > visible_at).any():
-        raise ModelMainlineError("模型 Runtime fixed_clock 早于样本 Label 的真实可见时间")
     evaluation_scope = parameters.get("evaluation_scope", "final")
     if evaluation_scope not in {"development", "final"}:
         raise ModelMainlineError("evaluation_scope 必须为 development 或 final")
-    if samples.empty:
-        raise ModelMainlineError("development 样本必须非空")
     if evaluation_scope == "development":
         holdout_index = pd.DataFrame({
             "sample_id": pd.Series(dtype="string"),
@@ -149,10 +139,48 @@ def execute_model_split_artifact(
             }
         )
     frame_budget.reserve_frame(holdout_index, label="Walk-forward holdout index")
-    if evaluation_scope == "final":
-        frame_budget.release_frame(holdout_labels)
     if holdout_index["sample_id"].duplicated().any():
         raise ModelMainlineError("locked holdout sample_id 必须唯一")
+    if step_len is not None:
+        targets = development_labels.loc[:, ["entity_id", "observation_session", "decision_time"]].copy()
+        targets["sample_id"] = (targets.entity_id.astype(str) + ":"
+            + pd.to_datetime(targets.observation_session).dt.strftime("%Y-%m-%d") + f":h{horizon_sessions}")
+        if evaluation_scope == "final":
+            holdout_targets = holdout_labels.loc[:, ["entity_id", "observation_session", "decision_time"]].copy()
+            holdout_targets["sample_id"] = holdout_index["sample_id"].to_numpy()
+            targets = pd.concat([targets, holdout_targets], ignore_index=True)
+        feature_columns = tuple(sorted(set(features.loc[features.status.astype(str) == "ok", "feature_id"].astype(str)
+            + "__w" + features.loc[features.status.astype(str) == "ok", "window_sessions"].astype(int).astype(str))))
+        sequence_windows = build_runtime_windows(features, targets,
+            calendar=parameters["calendar_sessions"], columns=feature_columns, step_len=step_len, budget=frame_budget)
+        eligible = set(sequence_windows.members["sample_id"])
+        development_ids = (development_labels.entity_id.astype(str) + ":"
+            + pd.to_datetime(development_labels.observation_session).dt.strftime("%Y-%m-%d") + f":h{horizon_sessions}")
+        eligible_labels = development_labels.loc[development_ids.isin(eligible)].copy()
+        frame_budget.reserve_frame(eligible_labels, label="完整窗口development标签")
+        frame_budget.release_frame(development_labels)
+        development_labels = eligible_labels
+        selected_holdout = holdout_index.loc[holdout_index.sample_id.isin(eligible)].copy()
+        frame_budget.reserve_frame(selected_holdout, label="完整窗口holdout末端")
+        frame_budget.release_frame(holdout_index)
+        holdout_index = selected_holdout
+        if development_labels.empty or (evaluation_scope == "final" and holdout_index.empty):
+            raise ModelMainlineError("完整序列窗口筛选后development/holdout末端为空")
+    if evaluation_scope == "final":
+        frame_budget.release_frame(holdout_labels)
+    samples, feature_columns = assemble_daily_model_samples(
+        features, development_labels, horizon_sessions=horizon_sessions,
+        target_field=target_field,
+    )
+    frame_budget.reserve_frame(samples, label="Walk-forward development samples")
+    frame_budget.release_frame(development_labels)
+    visible_at = pd.Timestamp(fixed_clock)
+    if visible_at.tzinfo is None:
+        raise ModelMainlineError("模型 Runtime fixed_clock 必须包含时区")
+    if (pd.to_datetime(samples["label_available_time"], utc=True) > visible_at).any():
+        raise ModelMainlineError("模型 Runtime fixed_clock 早于样本 Label 的真实可见时间")
+    if samples.empty:
+        raise ModelMainlineError("development 样本必须非空")
     last_development_session = samples["observation_time"].max().date()
     calendar = tuple(
         session for session in (pd.Timestamp(value).date() for value in parameters["calendar_sessions"])
@@ -172,9 +200,11 @@ def execute_model_split_artifact(
     )
     return _write_artifact(
         output_root,
-        {"samples": samples, "holdout_index": holdout_index, "split_audit": split.audit},
+        {"samples": samples, "holdout_index": holdout_index, "split_audit": split.audit,
+         **(window_tables(sequence_windows) if sequence_windows is not None else {})},
         status="model_split_succeeded",
         extra={
+            **({"sequence": window_metadata(sequence_windows)} if sequence_windows is not None else {}),
             "feature_columns": list(feature_columns),
             "split_manifest": _split_payload(split),
             "semantics_hash": feature_metadata.get("semantics_hash"),
@@ -202,6 +232,8 @@ def execute_model_fit_artifact(
     audit, _ = _load_table(split_root, "split_audit", frame_budget=budget)
     split = _split_from_payload(metadata["split_manifest"], audit)
     candidates = _candidates(parameters)
+    sequence_windows = load_runtime_windows(split_root, metadata, budget, _load_table)
+    validate_sequence_candidates(candidates, sequence_windows)
     preflight = model_dependency_preflight(candidates, thread_count=int(parameters["thread_count"]))
     if _text(parameters, "target_kind") != "regression":
         raise ModelMainlineError("Qlib 首批只支持 regression")
@@ -227,7 +259,8 @@ def execute_model_fit_artifact(
             try:
                 row = fit_bundle(train, valid, candidate=candidate, feature_columns=features,
                     output_root=output_root, bundle_path=f"bundles/{fi}/{ci}", root_seed=root_seed,
-                    fit_scope_ref=certificate.certificate_hash)
+                    fit_scope_ref=certificate.certificate_hash,
+                    sequence_context=sequence_for_candidate(sequence_windows, candidate, budget))
                 row.update(candidate_id=cid, fold_id=fold.fold_id, status="fitted", reason_code=None)
                 fit_audit.append({"candidate_id": cid, "fold_id": fold.fold_id,
                     "fit_scope_certificate_hash": certificate.certificate_hash,
@@ -298,12 +331,15 @@ def execute_model_predict_artifact(
     models, model_metadata = _load_table(model_root, "models", frame_budget=budget)
     if model_metadata.get("split_artifact_hash") != metadata.get("artifact_hash"):
         raise ModelMainlineError("模型工件与 split 工件身份不一致")
+    sequence_windows = load_runtime_windows(split_root, metadata, budget, _load_table)
     def partitions():
         fitted = models.loc[models["status"] == "fitted"]
         for frame in _fold_frames(split_root, "validation", budget):
             fold_id = str(frame["fold_id"].iloc[0])
             for row in fitted.loc[fitted["fold_id"].astype(str) == fold_id].to_dict("records"):
-                prediction = predict_bundle(model_root, row, frame)
+                config = json.loads((Path(model_root) / row["config_path"]).read_text(encoding="utf-8"))
+                prediction = predict_bundle(model_root, row, frame,
+                    sequence_context=sequence_for_candidate(sequence_windows, config["candidate"], budget))
                 output = _prediction_frame(frame, prediction, str(row["candidate_id"]), fold_id,
                     "validation", row["model_path"], row["config_path"], _score_semantics(model_root, row))
                 output["evaluation_label"] = evaluation_labels(model_root, row, frame)
@@ -429,6 +465,7 @@ def execute_model_selection_artifact(
         or _text(parameters, "direction") != manifest.direction
     ):
         raise ModelMainlineError("选择阶段的目标、方向或 target_kind 合同不一致")
+    sequence_windows = load_runtime_windows(split_root, split_metadata, frame_budget, _load_table)
     selected = select_by_validation(
         candidate_metrics, objective=objective, direction=_text(parameters, "direction"),
     )
@@ -491,7 +528,9 @@ def execute_model_selection_artifact(
             if len(model_rows) != 1:
                 raise ModelMainlineError("每个 test fold 必须绑定唯一已拟合模型")
             model_row = model_rows.iloc[0]
-            predictions = predict_bundle(model_root, model_row, fold_frame)
+            config = json.loads((Path(model_root) / model_row["config_path"]).read_text(encoding="utf-8"))
+            predictions = predict_bundle(model_root, model_row, fold_frame,
+                sequence_context=sequence_for_candidate(sequence_windows, config["candidate"], frame_budget))
             output = _prediction_frame(
                 fold_frame, predictions, local_winner, fold_id, "test", str(model_row["model_path"]), str(model_row["config_path"]), _score_semantics(model_root, model_row),
             )
@@ -594,6 +633,9 @@ def execute_model_locked_holdout_artifact(
     if selection_metadata.get("final_fit_contract") != expected_fit_contract:
         raise ModelMainlineError("locked holdout 的最终拟合合同与 selection 不一致")
     selected_parameters = json.loads(selection_table.iloc[0]["selected_parameters_json"])
+    sequence_windows = load_runtime_windows(split_root, split_metadata, frame_budget, _load_table)
+    sequence_context = sequence_for_candidate(sequence_windows, selected_parameters, frame_budget)
+    loaded_holdout_windows = None
 
     def preflight_holdout_samples() -> Mapping[str, object]:
         feature_schema = _preflight_table(feature_root, "features")
@@ -615,6 +657,7 @@ def execute_model_locked_holdout_artifact(
         return {"features": feature_schema, "labels": label_schema}
 
     def load_holdout_samples() -> pd.DataFrame:
+        nonlocal loaded_holdout_windows
         features, feature_metadata = _load_table(
             feature_root, "features", frame_budget=frame_budget,
         )
@@ -634,6 +677,14 @@ def execute_model_locked_holdout_artifact(
             != split_metadata.get("source_label_table_hash")
         ):
             raise ModelMainlineError("locked holdout 的原始 Feature/Label 工件与 split 不一致")
+        if sequence_windows is not None:
+            label_ids = (labels.entity_id.astype(str) + ":"
+                + pd.to_datetime(labels.observation_session).dt.strftime("%Y-%m-%d")
+                + f":h{int(split_metadata['horizon_sessions'])}")
+            selected_labels = labels.loc[label_ids.isin(set(holdout_index.sample_id.astype(str)))].copy()
+            frame_budget.reserve_frame(selected_labels, label="完整窗口holdout标签")
+            frame_budget.release_frame(labels)
+            labels = selected_labels
         samples, feature_columns = assemble_daily_model_samples(
             features,
             labels,
@@ -651,6 +702,10 @@ def execute_model_locked_holdout_artifact(
             selected_samples,
             label="Walk-forward selected holdout samples",
         )
+        if sequence_context is not None:
+            loaded_holdout_windows = build_runtime_windows(features, selected_samples,
+                calendar=sequence_context.calendar_sessions, columns=sequence_context.feature_columns,
+                step_len=sequence_context.step_len, budget=frame_budget)
         frame_budget.release_frame(samples)
         frame_budget.release_frame(features)
         frame_budget.release_frame(labels)
@@ -688,6 +743,8 @@ def execute_model_locked_holdout_artifact(
         ledger_root=ledger_root,
         root_seed=root_seed,
         thread_count=int(parameters["thread_count"]),
+        development_sequence_context=sequence_context,
+        holdout_sequence_loader=(lambda: loaded_holdout_windows) if sequence_context is not None else None,
     )
     receipt = {key: value for key, value in result.items() if key not in {"predictions", "model_row"}}
     persistent_ledger_root = (
@@ -1180,7 +1237,7 @@ def _candidates(parameters: Mapping[str, object]) -> list[dict[str, object]]:
         raw = [json.loads(str(value)) for value in parameters["candidate_jsons"]]
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ModelMainlineError("candidate_jsons 必须是规范 JSON 对象列表") from exc
-    return normalize_model_candidates(raw)
+    return normalize_candidates(raw)
 
 
 def _text(parameters: Mapping[str, object], field: str) -> str:

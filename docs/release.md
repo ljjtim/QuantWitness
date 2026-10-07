@@ -8,13 +8,25 @@
 
 ## 分发内容与命令适用范围
 
-sdist 和源码 zip 均按显式清单附带当前公开操作文档、文档链接所需的根目录说明、项目扩展合同及示例说明。源码 zip 另含核心测试；wheel 只安装运行所需的包代码和资源。
+sdist 和源码 zip 均按显式清单附带当前公开操作文档、文档链接所需的根目录说明、项目扩展合同及示例说明。源码 zip 另含核心测试及 RD 集成的执行恢复、隔离和错误分类专项；RD sdist 附带同一集成的公开测试。wheel 只安装运行所需的包代码和资源。
 
 本文的发布构建、最低版本验收、干净 wheel 验收及公开 CI 命令从独立公开源码仓库的根目录执行，也可在完整单仓的 `research_pipeline/` 下执行发布构建和验收。发布工具、`tests/test_release_metadata_ssot.py` 及可执行合成示例随独立公开源码仓库提供，不包含在 sdist 和源码 zip 中；压缩包中的示例说明用于查阅，执行示例须使用独立公开源码仓库。
 
 文档由 `tools/release_allowlist.py` 的 `CORE_DOC_FILES` 与 `MANIFEST.in` 显式列入，不递归收录历史文档。个人研究项目源码、真实研究数据、私有 Catalog 声明和 Lock、内部整改基线及维护脚本均不进入三类发行产物。需要 Catalog 的命令由调用方提供自己的持久 Lock。
 
-公开示例与可选集成的使用说明随核心文档一起分发，保持本地文档链接可读；对应示例脚本和可选集成代码仍需完整公开源码。日频现金节点的本地准入说明单独列入文档清单，内部发布证据不随包分发。
+公开示例与可选集成的使用说明随核心文档一起分发，包含[待著而救日级合同](../integrations/rdagent/docs/dai-daily-research.md)，保持本地文档链接可读；对应示例脚本和可选集成代码仍需完整公开源码。日频现金节点的本地准入说明单独列入文档清单，内部发布证据不随包分发。
+
+恢复专项使用已安装的核心和 RD 发行，不访问数据库或模型/API。安装核心测试依赖和 RD 发行后，从公开源码根或源码 zip 解压根运行：
+
+```powershell
+python -m pytest -s -q -o pythonpath= integrations/rdagent/tests/test_package_campaign_execution.py integrations/rdagent/tests/test_package_execution_isolation.py integrations/rdagent/tests/test_failure_classification.py
+```
+
+从 RD sdist 解压根运行同一专项：
+
+```powershell
+python -m pytest -s -q -o pythonpath= tests/test_package_campaign_execution.py tests/test_package_execution_isolation.py tests/test_failure_classification.py
+```
 
 ## 正式构建
 
@@ -29,7 +41,7 @@ python tools/build_release_artifacts.py --project . --output <不存在的仓库
 
 人工发布只使用本次命令 JSON 回执中的 `wheel`、`sdist` 和 `source_archive` 绝对路径，并记录候选提交及库存验收结果。确认新目录恰好包含这三件文件；混入第二个 wheel 不得发布。历史 `dist/` 文件不属于本次候选，不能按通配符选择，更不能以旧文件代替当前源码构建。
 
-干净 wheel 验收创建不继承系统包的 venv。调用方须显式提供离线 wheelhouse，包含 `release/dependency-distributions.json` 中锁定版本的 Windows/Python 3.10 wheel 及其传递依赖；脚本先安装这些依赖，再安装本次 wheel，执行 `pip check` 和锁定版本、字节核验。依赖缺失或不匹配会失败，不能由系统环境补齐。还需显式提供一个持久 Catalog Lock，供安装后资源读取测试使用；它不是发行包资源。验收还检查公共 Recipe 为空、`package init` 可用；新建中性草稿的 `lint` 必须返回 exit=1，且 JSON 中 `status=fail`、`error_code=research_package_invalid` 并明确指出 sources 为空。意外成功、其他错误或无效 JSON 都使验收失败：
+干净 wheel 验收创建不继承系统包的 venv。调用方须显式提供离线 wheelhouse，包含 `release/dependency-distributions.json` 中锁定版本的 Windows/Python 3.10 wheel 及其传递依赖；脚本先安装这些依赖，再安装本次 wheel，执行 `pip check` 和锁定版本、字节核验。依赖缺失或不匹配会失败，不能由系统环境补齐。还需显式提供一个持久 Catalog Lock，供安装后资源读取测试使用；它不是发行包资源。验收还检查公共 Recipe 为空、`package init` 可用；新建中性草稿的 `lint` 必须返回 exit=1，且 JSON 中 `status=fail`、`error_code=research_package_invalid`、`data.execution_ready=false`，聚合 `data.issues` 明确指出 `sources/sources.yaml` 的 `sources` 为空。意外成功、其他错误或无效 JSON 都使验收失败：
 
 ```powershell
 ./scripts/verify_clean_wheel.ps1 -Wheel <wheel路径> -ReceiptOut <仓库外新收据路径> -CatalogLock <持久Catalog-Lock目录> -Wheelhouse <离线wheelhouse目录>
@@ -53,6 +65,24 @@ python -m pytest tests/test_release_metadata_ssot.py -q
 ```
 
 测试解释器也需安装 test extras。缺少最低版本解释器或离线依赖时验收失败，不能跳过。干净环境安装 pyproject 所允许的新版本不等于满足当前发布锁。
+
+## Qlib 与 RD-Agent 固定版本
+
+核心 `ml`、`ml-sequence` 与可选 RD-Agent 分别安装，保持各自支持的 Python 范围。
+
+| 组件 | 当前研究基准 | 声明位置与安装方式 |
+| --- | --- | --- |
+| Qlib | `pyqlib==0.9.7` | 核心 `pyproject.toml` 的 `ml` 和 `ml-sequence`；`pip install ".[ml]"` |
+| Torch | `2.5.1`，本轮序列及生成模型验收使用 CPU | 核心 `ml-sequence`；生成模型同时安装 `ml` 与 `ml-sequence` |
+| RD-Agent | 提交 `484776c211e4fbbeef03e0ec00d6bbee7362a4f4` | 可选集成的 `UPSTREAM_COMMIT`；固定源码与 `requirements-linux.txt`，研究循环使用 Linux Python 3.12 |
+
+核心最低 Python 为 3.10，可选 `quantwitness-rdagent` 最低 Python 为 3.11。上游 RD-Agent 普通 wheel 未包含本场景需要的子模块，研究循环继续从上述固定提交的源码导入；核心和本地可选集成使用当前发行包。安装命令、wheel/sdist 公开公式验收见[可选集成安装说明](../integrations/rdagent/docs/installation.md)。
+
+升级先确定一个目标版本或提交，并说明实际受影响的因子、Processor、模型、求解器及研究调度调用点。同步修改依赖声明、固定上游提交、场景直接依赖和公开文档，在新隔离环境中安装；保留原环境和历史 Result 的身份。升级后的研究使用新冻结请求，不跨依赖身份恢复或复用旧模型节点。
+
+按调用点验证升级：Qlib 因子复核数值、历史窗口及未来输入扰动；模型复核处理器拟合范围、成熟标签、训练与跨进程预测恢复；组合复核求解状态、约束、目标与实际成交；RD-Agent 复核提案、编码、反思、知识引用、预算与中断恢复。新增联合方向还须在同一会话实际执行因子和模型分支，只消费独立验证通过的开发反馈。已有未受影响的正式结果继续作为历史证据，不替代升级后发生变化的行为验收。
+
+源码冻结后，从同一公开清单构建核心 wheel、sdist、源码包和可选集成发行文件。在仓库外空环境确认导入来自安装目录、`pip check` 通过及新增入口可用，再运行受影响的公开回归。提交和推送获准后，补齐该提交对应的远端 CI；本地安装或旧提交 CI 不能代替这一记录。
 
 ## 依赖分发身份
 

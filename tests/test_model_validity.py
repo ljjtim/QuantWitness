@@ -22,7 +22,7 @@ def stamp(day, hour=9):
 
 def sample(day):
     return dict(sample_id=f"s{day}", entity_id="A", observation_session=f"2020-01-{day:02d}",
-                feature_available_time=stamp(day, 8), decision_time=stamp(day),
+                observation_time=stamp(day, 8), feature_available_time=stamp(day, 8), decision_time=stamp(day),
                 label_start_time=stamp(day, 10), label_end_time=stamp(day, 15),
                 label_available_time=stamp(day + 1, 8), target=0.0)
 
@@ -190,3 +190,21 @@ def test_metric_metadata_is_required():
     del model["tables"]["metrics"][0]["sample_size"]
     with pytest.raises(KeyError):
         _statistics(model, statistics, 0.25, 1)
+
+
+@pytest.mark.parametrize("field,value", [("sample", 5), ("design", 5), ("design", True), ("design", 0)])
+def test_split_rejects_sample_horizon_different_from_frozen_design(field, value):
+    model = model_fixture()
+    if field == "sample":
+        model["tables"]["samples"][0]["horizon_sessions"] = value
+    else:
+        model["design"]["horizon_sessions"] = value
+    with pytest.raises(EvidenceContractError, match="期限"):
+        _split(model)
+
+
+def test_holdout_rejects_prediction_horizon_different_from_design():
+    model, selection = holdout_fixture()
+    model["tables"]["holdout_predictions"][0]["horizon_sessions"] = 5
+    with pytest.raises(EvidenceContractError, match="期限"):
+        _holdout(model, selection)

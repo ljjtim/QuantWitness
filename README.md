@@ -44,6 +44,8 @@ python -m research_pipeline --help
 - 运行成功不等于研究结论可信，需要读取独立 VerificationResult 的状态；金融口径、准确性与验证边界见[结果与独立验证](docs/evidence.md)。框架不是交易执行平台，不承诺策略盈利或实盘可交易。
 - 能力适用范围以机器清单和[分钟参考规则](docs/minute_rule_provenance.md)为准。发布验收与逐项晋级条件见[安装与发布构建](docs/release.md)。`planned` 只能发现，`local_only` 不代表已通过独立发布验收；不承诺全历史、全品种覆盖。
 
+序列模型的开发接口已支持完整历史窗口、Qlib GRU/LSTM/Transformer CPU 训练、预测和文件恢复，依赖使用 `pip install -e ".[ml-sequence]"`（Torch 2.5.1）。正式 ResearchPackage 通过显式 `sequence_step_len` 支持 GRU、LSTM、TransformerModel 与表格混合候选，统一完整窗口资格；六阶段、Result 封存与独立序列验证沿用正式主链。公开模型示例提供同名 `--sequence-step-len` 选项，支持开发与最终留出研究。公开入口还支持滚动窗口及 `--horizons 1 5` 多期限研究组，每个期限独立冻结、执行、验证和恢复，分别保存最终留出账本。范围见[序列模型与完整窗口](docs/walk_forward_model.md#序列模型与完整窗口)。
+
 ### 能力状态
 
 <details>
@@ -93,3 +95,13 @@ python -m research_pipeline --help
 RD-Agent 可选集成包位于 `integrations/rdagent`，使用独立环境调用 RP 正式主链；其请求引用
 ResearchPackage，候选代码通过项目 bundle 执行，反馈引用 Result 与 VerificationResult。
 多轮开发研究既可比较已有预测，也可实际执行研究包参数变体；每轮独立运行和验证，开发循环不打开最终 holdout。见[研究循环](integrations/rdagent/docs/research-campaign.md)。
+
+### 新因子研究与表达式
+
+可选RD集成的[因子研究循环](integrations/rdagent/docs/factor-research.md)把已确认基线、上游提案及反思接入同一研究包执行。受控示例的[Qlib表达式](docs/qlib-expressions.md)直接复用原生算子和Alpha158/360定义；正式因子循环目前只开放独立Verifier已覆盖的收盘动量与均价偏离。模型处理器另支持ZScoreNorm与CSZScoreNorm，训练期拟合及可见性要求不变。
+
+Qlib 日频表格模型支持 LinearModel、LGBModel、XGBModel 和 DEnsembleModel 的样本重加权版本；后者显式关闭特征选择，沿用模型六节点与一次性 holdout。候选声明、支持范围及合成验收见 [模型研究](docs/walk_forward_model.md)。RD-Agent 的确认公式复现可复用同公式错误与修复经验，字段与证据边界见 [公式复现](integrations/rdagent/docs/formula-reproduction.md)。
+
+可选 RD-Agent [生成式模型研究](integrations/rdagent/docs/model-research.md)支持运行时提出前馈网络连接、编译修复、Qlib 开发评价与研究反思，源码和权重随 Result 封存。量价与选定 Alpha 因子见[固定因子集](docs/qlib-factor-baselines.md)，组合目标与求解状态见[Qlib 风险组合](docs/qlib-portfolio-risk.md)。
+
+[因子与模型联合研究](integrations/rdagent/docs/joint-research.md)在同一会话中选择研究方向，共用开发输入、调用预算和正式验证；模型分支使用已验证因子中开发指标最好的表达式，保存来源记录并支持中断恢复。

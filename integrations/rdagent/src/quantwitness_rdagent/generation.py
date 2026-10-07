@@ -101,10 +101,12 @@ def _technical_feedback(evidence):
     return result
 
 
-def build_prompt(request, previous_source=None, evidence=None):
+def build_prompt(request, previous_source=None, evidence=None, coding_knowledge=None):
     spec = request.payload["code_generation"]
     payload = {"interface": spec["interface"], "formula": spec["formula"],
                "source": spec["initial_stub"] if previous_source is None else previous_source}
+    if coding_knowledge:
+        payload["coding_knowledge"] = coding_knowledge
     if evidence is not None:
         payload["technical_feedback"] = _technical_feedback(evidence)
     return ("请只返回可直接保存为compute.py的完整Python源码，不加Markdown代码围栏。"
@@ -115,7 +117,7 @@ def build_prompt(request, previous_source=None, evidence=None):
             + json.dumps(payload, ensure_ascii=False))
 
 
-def generate_source(request, attempt, *, previous_source=None, evidence=None):
+def generate_source(request, attempt, *, previous_source=None, evidence=None, coding_knowledge=None):
     """每次编码尝试最多一次调用；预约中断或失败必须显式处理，不自动重付费。"""
     folder = request.session_root / "model-calls"
     folder.mkdir(exist_ok=True)
@@ -138,7 +140,7 @@ def generate_source(request, attempt, *, previous_source=None, evidence=None):
     if len(calls) >= budget["live_llm_calls"] or remaining <= 0:
         raise RuntimeError("持久模型调用或输出token预约预算已耗尽")
     maximum = min(remaining, request.payload["code_generation"]["max_output_tokens_per_call"])
-    prompt = build_prompt(request, previous_source, evidence)
+    prompt = build_prompt(request, previous_source, evidence, coding_knowledge)
     receipt = {"attempt": attempt, "status": "reserved", "model": request.payload["code_generation"]["model"],
                "reserved_output_tokens": maximum, "prompt": prompt}
     write_json(path, receipt)

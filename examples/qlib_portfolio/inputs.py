@@ -24,10 +24,10 @@ DATASET = "public.synthetic.etf.daily"
 PRICE_FIELDS = ("fld_equity_daily_date", "fld_equity_daily_code", "fld_equity_daily_close")
 
 
-def prepare_inputs(root, *, end_session=None):
+def prepare_inputs(root, *, end_session=None, include_factor_fields=False):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    rows = synthetic.rows()
+    rows = synthetic.rows(include_factor_fields=include_factor_fields)
     if end_session is not None:
         rows = [row for row in rows if row[PRICE_FIELDS[0]] <= end_session]
     table = pa.Table.from_pylist(rows)
@@ -36,12 +36,24 @@ def prepare_inputs(root, *, end_session=None):
         PolicyContract("drift.strict.v1", 1, "schema_drift", {"schema_changed": "reject"}),
         PolicyContract("revision.none.v1", 1, "revision", {"mode": "none"}),
     )
-    fields = tuple(FieldContract(field.name, logical, 1, "date32" if pa.types.is_date32(field.type) else "float64" if pa.types.is_float64(field.type) else str(field.type), semantic, unit, False,
+    field_roles = {
+        "fld_equity_daily_date": ("market.date", "date", "day"),
+        "fld_equity_daily_code": ("instrument.id", "identifier", "dimensionless"),
+        "fld_equity_daily_close": ("market.close", "numeric", "CNY"),
+        "fld_demo_open": ("market.open", "numeric", "CNY"),
+        "fld_demo_high_limit": ("market.high_limit", "numeric", "CNY"),
+        "fld_demo_low_limit": ("market.low_limit", "numeric", "CNY"),
+        "fld_demo_paused": ("market.paused", "boolean", "dimensionless"),
+        "fld_demo_high": ("market.high", "numeric", "CNY"),
+        "fld_demo_low": ("market.low", "numeric", "CNY"),
+        "fld_demo_vwap": ("market.vwap", "numeric", "CNY"),
+        "fld_demo_volume": ("market.volume", "numeric", "share"),
+    }
+    fields = tuple(FieldContract(field.name, field_roles[field.name][0], 1,
+        "date32" if pa.types.is_date32(field.type) else "float64" if pa.types.is_float64(field.type) else str(field.type),
+        field_roles[field.name][1], field_roles[field.name][2], False,
         "available.daily.v1", ("daily",), ("etf",), adjustment_allowed=("unadjusted",))
-        for field, logical, semantic, unit in zip(table.schema,
-        ("market.date", "instrument.id", "market.close", "market.open", "market.high_limit", "market.low_limit", "market.paused"),
-        ("date", "identifier", "numeric", "numeric", "numeric", "numeric", "boolean"),
-        ("day", "dimensionless", "CNY", "CNY", "CNY", "CNY", "dimensionless")))
+        for field in table.schema)
     dataset = DatasetContract(DATASET, 1, "cn_etf", "etf", "daily", PRICE_FIELDS[:2],
         tuple(table.column_names), PRICE_FIELDS[0], "available.daily.v1", "drift.strict.v1", PRICE_FIELDS[:2])
     inventory = PhysicalInventory("parquet", "public_synthetic", "example", "snapshot",
@@ -73,7 +85,7 @@ def prepare_inputs(root, *, end_session=None):
         plan = admit_query(query, catalog=catalog, binding=catalog.bindings[binding.binding_id], attestation=attestation)
         revision = SourceRevision("public_synthetic", "deterministic_generator",
             (SourceFileEvidence("synthetic.py", Path(synthetic.__file__).stat().st_size, 0),),
-            typed_canonical_hash([{key: value.isoformat() if hasattr(value, "isoformat") else value for key, value in row.items()} for row in synthetic.rows()]), None, "metadata")
+            typed_canonical_hash([{key: value.isoformat() if hasattr(value, "isoformat") else value for key, value in row.items()} for row in synthetic.rows(include_factor_fields=include_factor_fields)]), None, "metadata")
         output = root / "inputs" / kind
         snapshot = publish_parquet_snapshot(batches=table.to_batches(), schema=table.schema, plan=plan,
             logical_snapshot=build_logical_snapshot(plan, source_revisions=(revision,), output_schema=table.schema,
