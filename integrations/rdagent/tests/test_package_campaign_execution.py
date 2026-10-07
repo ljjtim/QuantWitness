@@ -60,12 +60,12 @@ def published(tmp_path, monkeypatch):
 
 def test_existing_result_only_runs_missing_verification_and_report(published):
     kwargs, execution, result, calls = published
-    feedback = package_execution.execute_package(**kwargs)
+    feedback = package_execution._execute_package(**kwargs)
     assert feedback["verification_status"] == "pass"
     assert feedback["result_ref"] == str(result)
     assert calls == ["package", "verify", "report"]
     calls.clear()
-    repeated = package_execution.execute_package(**kwargs)
+    repeated = package_execution._execute_package(**kwargs)
     assert repeated == feedback
     assert calls == ["package"]
 
@@ -74,7 +74,7 @@ def test_published_result_without_reference_uses_inspect_not_runtime(published):
     kwargs, execution, result, calls = published
     (execution / "run/result-ref.json").rename(execution / "result-reference.retained")
     (execution / "run/operator-dag-invocation.json").write_text("{}", encoding="utf-8")
-    feedback = package_execution.execute_package(**kwargs)
+    feedback = package_execution._execute_package(**kwargs)
     assert feedback["result_ref"] == str(result)
     assert calls == ["package", "inspect", "verify", "report"]
 
@@ -88,7 +88,7 @@ def test_unknown_execution_error_preserves_stage_and_propagates(published, monke
         return original(argv)
     monkeypatch.setattr(worker, "_command", command)
     with pytest.raises(package_execution.PackageExecutionInterrupted, match="Runtime诊断") as captured:
-        package_execution.execute_package(**kwargs)
+        package_execution._execute_package(**kwargs)
     evidence = captured.value.package_execution_feedback
     assert evidence["failed_stage"] == "verify"
     assert evidence["execution_status"] == "succeeded"
@@ -106,7 +106,21 @@ def test_runtime_wait_keeps_existing_execution_for_manual_resume(published, monk
         return original(argv)
     monkeypatch.setattr(worker, "_command", command)
     with pytest.raises(package_execution.PackageExecutionInterrupted) as captured:
-        package_execution.execute_package(**kwargs)
+        package_execution._execute_package(**kwargs)
     assert captured.value.package_execution_feedback["failed_stage"] == "run"
     assert (kwargs["root"] / "execution-diagnostic.json").exists()
     assert (execution / "run/operator-dag-invocation.json").exists()
+
+
+def test_verification_memory_bytes_is_forwarded_to_verify(published, monkeypatch):
+    kwargs, execution, result, calls = published
+    kwargs["binding"]["verification_memory_bytes"] = 4 * 1024 ** 3
+    seen = []
+    original = worker._command
+    def command(argv):
+        seen.append(list(argv))
+        return original(argv)
+    monkeypatch.setattr(worker, "_command", command)
+    package_execution._execute_package(**kwargs)
+    verify = next(argv for argv in seen if argv[0] == "verify")
+    assert verify[verify.index("--verification-memory-bytes") + 1] == str(4 * 1024 ** 3)

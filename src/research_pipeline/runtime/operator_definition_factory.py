@@ -101,6 +101,10 @@ _ADAPTER_FAMILY_DEPENDENCIES = {
     ),
     "research_pipeline.runtime.adapters.model": (
         "research_pipeline.runtime.walk_forward_model_execution",
+        "research_pipeline.runtime.model_sequence",
+        "research_pipeline.research.modeling.sequence",
+        "research_pipeline.research.modeling.inputs",
+        "research_pipeline.research.dataframe_budget",
         "research_pipeline.research.validation.holdout",
     ),
     "research_pipeline.runtime.adapters.validity": (

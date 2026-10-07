@@ -72,6 +72,11 @@ class RPEvolvingStrategy(EvolvingStrategy):
             if len(attempts) >= self.bridge.request.payload["budget"]["coder_attempts"]:
                 raise RuntimeError("持久编码尝试次数已耗尽")
             record = {"attempt": len(attempts)}
+            knowledge = None
+            if queried_knowledge is not None:
+                from .coding_knowledge import query_view
+                knowledge = query_view(self.bridge.request, evo.sub_tasks[0], queried_knowledge, len(attempts))
+                record["coding_knowledge_records"] = [item["record_id"] for item in knowledge]
             generation = self.bridge.request.payload.get("code_generation")
             if generation and not attempts and "initial_source" in generation:
                 source = generation["initial_source"]
@@ -84,7 +89,7 @@ class RPEvolvingStrategy(EvolvingStrategy):
                     previous_source = (previous / "compute.py").read_text(encoding="utf-8")
                     evidence = json.loads((previous / "feedback.json").read_text(encoding="utf-8"))
                 source = generate_source(self.bridge.request, len(attempts),
-                                         previous_source=previous_source, evidence=evidence)
+                                         previous_source=previous_source, evidence=evidence, coding_knowledge=knowledge)
                 record["model_call_index"] = len(attempts)
             else:
                 responses = self.bridge.request.payload["runtime_binding"]["fixed_responses"]
@@ -115,6 +120,13 @@ class RPEvaluator(RAGEvaluator):
 
 
 def build_coder(scenario, bridge):
-    return CoSTEER(settings=CoSTEERSettings(max_loop=3, enable_filelock=False),
+    coder = CoSTEER(settings=CoSTEERSettings(max_loop=3, enable_filelock=False),
                    eva=RPEvaluator(), es=RPEvolvingStrategy(scenario, bridge),
                    scen=scenario, with_knowledge=False, knowledge_self_gen=False, max_loop=3)
+
+    if "coding_knowledge" in bridge.request.payload:
+        from .coding_knowledge import RPCodingRAG
+        coder.rag = RPCodingRAG(bridge.request, coder.settings)
+        coder.with_knowledge = True
+        coder.knowledge_self_gen = True
+    return coder

@@ -50,3 +50,15 @@ include integrations/rdagent/docs/research-campaign.md
 include integrations/rdagent/examples/package_campaign/README.md
 include integrations/rdagent/examples/prediction_campaign/README.md
 include integrations/rdagent/examples/volume_concentration/README.md
+include docs/qlib-expressions.md
+include integrations/rdagent/docs/factor-research.md
+include integrations/rdagent/examples/factor_research/README.md
+include docs/qlib-factor-baselines.md
+include docs/qlib-portfolio-risk.md
+include examples/qlib_risk/README.md
+include integrations/rdagent/docs/coding-knowledge.md
+include integrations/rdagent/docs/model-research.md
+include integrations/rdagent/examples/model_research/README.md
+include integrations/rdagent/docs/joint-research.md
+include project_extensions/qlib_portfolio_risk/README.md
+include integrations/rdagent/docs/dai-daily-research.md

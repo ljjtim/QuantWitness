@@ -26,6 +26,13 @@ class RPScenario(Scenario):
 class RPTask(Task):
     def __init__(self, request):
         super().__init__(name=request.payload["request_id"], description="冻结公式复现；评价只使用开发区技术诊断。")
+        self.coding_definition = None
+        if "coding_knowledge" in request.payload:
+            from .coding_knowledge import definition
+            self.coding_definition = definition(request)
+
+    def get_task_information(self):
+        return self.coding_definition or super().get_task_information()
 
 
 class RPExperiment(Experiment):

@@ -166,6 +166,28 @@ class BuiltinSemanticRevision:
 MAINLINE_BUILTIN_SEMANTIC_REVISIONS = (
     BuiltinSemanticRevision(
         semantic_kind="verifier",
+        previous_identity="model:label.split:verifier.model-label-split.v1",
+        replacement_identity="model:label.split:verifier.model-label-split.v2",
+        reason="序列研究按原始特征和标签重建窗口资格并复核模型训练子集与GRU配置",
+        regression_test_ids=(
+            "test_real_gru_window_and_model_facts_pass_without_production_sampling",
+            "test_sequence_facts_reject_changed_evidence",
+            "test_window_file_fact_must_match_result_snapshot",
+        ),
+    ),
+    BuiltinSemanticRevision(
+        semantic_kind="verifier",
+        previous_identity="model:search.holdout:verifier.model-search-holdout.v1",
+        replacement_identity="model:search.holdout:verifier.model-search-holdout.v2",
+        reason="序列研究按原始特征和标签重建窗口资格并复核模型训练子集与GRU配置",
+        regression_test_ids=(
+            "test_real_gru_window_and_model_facts_pass_without_production_sampling",
+            "test_sequence_facts_reject_changed_evidence",
+            "test_window_file_fact_must_match_result_snapshot",
+        ),
+    ),
+    BuiltinSemanticRevision(
+        semantic_kind="verifier",
         previous_identity="model:financial.tradability:verifier.model-prediction-scope.v1",
         replacement_identity="model:financial.tradability:verifier.model-financial-scope.v2",
         reason="模型组合金融事实绑定正式 Result 的独立日频现金及 TCA 复核",

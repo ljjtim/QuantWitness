@@ -32,6 +32,19 @@ def prepared(tmp_path_factory):
     return _prepare().make_request(root, template, [])
 
 
+def test_optional_verification_memory_bytes_preserves_old_requests(prepared):
+    old = validate_package_campaign(prepared)
+    assert "verification_memory_bytes" not in old["source"]
+    updated = copy.deepcopy(prepared)
+    updated["source"]["verification_memory_bytes"] = 4 * 1024 ** 3
+    assert validate_package_campaign(updated)["source"]["verification_memory_bytes"] == 4 * 1024 ** 3
+    for value in (0, -1, 1.5, True):
+        invalid = copy.deepcopy(prepared)
+        invalid["source"]["verification_memory_bytes"] = value
+        with pytest.raises(ValueError, match="verification_memory_bytes"):
+            validate_package_campaign(invalid)
+
+
 def test_prepare_and_freeze_have_distinct_formal_variants(prepared, monkeypatch):
     import duckdb
     import sqlite3

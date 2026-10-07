@@ -15,11 +15,18 @@ def _command(argv):
     return module._execute(args)
 
 
-def find_or_allocate(workspace, label, *, clock, root_seed):
+def find_or_allocate(workspace, label, *, clock, root_seed, execution_id=None):
     """allocation.label 随 execution.json 落盘，覆盖 allocate 尚未返回的空档。"""
     from research_pipeline.workspace import allocate_execution, load_workspace, rebuild_workspace_index
     config = load_workspace(workspace)
     index = rebuild_workspace_index(workspace)
+    if execution_id is not None:
+        from research_pipeline.workspace import inspect_workspace
+        item = dict(inspect_workspace(workspace, execution_id))
+        if item["clock"] != clock or item["root_seed"] != root_seed:
+            raise ValueError("已采用 execution 的时钟或种子不一致")
+        item["execution_path"] = str(config.generated_root / "executions" / execution_id)
+        return item
     matches = [item for item in index["executions"] if item.get("label") == label]
     if len(matches) > 1:
         raise ValueError("候选标识对应多个 execution")
@@ -79,8 +86,10 @@ def failure_diagnostics(error, *, stage, execution=None, bundle=None):
     """保存正式异常分类，并从inspect定位失败节点与其候选身份。"""
     from research_pipeline.runtime.diagnostics import safe_error_summary
     summary = safe_error_summary(error, default_error_code="rp_command_failed")
-    result = [{"stage": stage, "error_type": summary["exception_type"],
-               "error_code": summary["error_code"], "message": summary["message"]}]
+    carried = getattr(error, "package_execution_feedback", {}).get("diagnostics")
+    result = [dict(item) for item in carried] if carried else [{
+        "stage": stage, "error_type": summary["exception_type"],
+        "error_code": summary["error_code"], "message": summary["message"]}]
     if stage != "run" or execution is None:
         return result
     run = Path(execution) / "run"
@@ -100,6 +109,10 @@ def failure_diagnostics(error, *, stage, execution=None, bundle=None):
         for node_id, node in inspection.get("nodes", {}).items():
             last_error = node.get("last_error")
             if node.get("status") == "succeeded" or not isinstance(last_error, dict):
+                continue
+            existing = next((item for item in result if item.get("node_id") == node_id), None)
+            if existing is not None:
+                existing["candidate_operator"] = node_id in candidate_nodes
                 continue
             result.append({"stage": "run", "node_id": node_id,
                            "error_type": last_error.get("exception_type"),

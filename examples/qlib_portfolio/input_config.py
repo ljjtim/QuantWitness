@@ -11,7 +11,7 @@ from research_pipeline.data_plane.admitted_plan_codec import admitted_plan_from_
 COLUMN_ROLES = ("date", "code", "close", "open", "high_limit", "low_limit", "paused")
 
 
-def load_input_config(path, *, mode):
+def load_input_config(path, *, mode, feature_fields=()):
     path = Path(path).resolve()
     config = json.loads(path.read_text(encoding="utf-8"))
     required = {"contract_version", "research_id", "display_name", "catalog_lock", "input_snapshot_manifest",
@@ -38,7 +38,7 @@ def load_input_config(path, *, mode):
     if len(codes) < 3 or codes != sorted(set(codes)) or any(not code for code in codes):
         raise ValueError("固定证券池至少三只，必须排序且不重复")
     columns = config["columns"]
-    if set(columns) != set(COLUMN_ROLES) or len(set(columns.values())) != len(COLUMN_ROLES):
+    if set(columns) != set(COLUMN_ROLES).union(feature_fields) or len(set(columns.values())) != len(set(COLUMN_ROLES).union(feature_fields)):
         raise ValueError("行情字段映射必须包含七个不同逻辑字段")
     if not config["sources"] or not config["localization"]:
         raise ValueError("自有输入必须说明来源和固定证券池的研究边界")
@@ -118,6 +118,8 @@ def write_input_template(root, *, design, research_id, display_name, catalog_loc
         "columns": dict(zip(COLUMN_ROLES, design["market_fields"])), "sources": sources,
         "localization": localization, "snapshot_scope": design["snapshot_scope"],
         "finance": finance, "fixed_clock": fixed_clock}
+    if "factor_fields" in design:
+        payload["columns"].update(design["factor_fields"])
     path = root / "input-config.json"
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path

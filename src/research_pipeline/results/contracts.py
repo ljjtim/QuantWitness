@@ -384,7 +384,10 @@ class ResultSupportFile:
         expected = f"support/{self.artifact_key}/{source_path}"
         if relative_path != expected:
             raise ResultContractError("Result support file 必须使用 Result 内部相对路径")
-        if source_path.endswith(".parquet"):
+        sequence_window = source_path.endswith(tuple(
+            f"/sequence/{name}.parquet" for name in ("context", "targets", "members")
+        ))
+        if source_path.endswith(".parquet") and not sequence_window:
             raise ResultContractError("Result support file 不能代替正式 Parquet 表")
         if self.contract_version != RESULT_SUPPORT_FILE_VERSION:
             raise ResultContractError("ResultSupportFile 版本不受支持")

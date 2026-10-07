@@ -19,6 +19,21 @@ def main():
         command = commands.add_parser(name, help="有界开发区研究：预测校准或正式研究包执行")
         command.add_argument("--request", required=True)
         command.add_argument("--model-env-file", help="live假设提议使用的.env文件")
+    for name in ("factor-run", "factor-resume", "factor-inspect"):
+        command = commands.add_parser(name, help="文档基线、新因子提案和反思的正式开发循环")
+        command.add_argument("--request", required=True)
+        command.add_argument("--model-env-file", help="显式模型.env配置")
+    for name in ("model-run", "model-resume", "model-inspect"):
+        command = commands.add_parser(name, help="运行时前馈模型结构、正式开发评价与反思")
+        command.add_argument("--request", required=True)
+        command.add_argument("--model-env-file", help="显式模型.env配置")
+    for name in ("joint-run", "joint-resume", "joint-inspect"):
+        command = commands.add_parser(name, help="联合因子与模型方向、预算和正式开发评价")
+        command.add_argument("--request", required=True)
+        command.add_argument("--model-env-file", help="显式模型.env配置")
+    knowledge_export = commands.add_parser("knowledge-export", help="复核已完成会话并导出不可变开发知识索引")
+    knowledge_export.add_argument("--session", required=True)
+    knowledge_export.add_argument("--output", required=True)
     extract = commands.add_parser("spec-extract", help="从归档PDF提取待人工确认规格")
     for name in ("package", "source-archive-root", "source-id", "output", "model-env-file"):
         extract.add_argument("--" + name, required=True)
@@ -41,6 +56,45 @@ def main():
     for field in ("template", "draft", "materials", "decisions", "confirmation", "output"):
         builder.add_argument("--" + field, required=True)
     args = parser.parse_args()
+    if args.command == "knowledge-export":
+        from .research_knowledge import export_session
+        result = export_session(args.session, args.output)
+        print(json.dumps({"status": "exported", "records": len(result["records"]), "output": args.output}))
+        return
+    if args.command.startswith("joint-"):
+        from .joint_research import validate_joint_research
+        payload = validate_joint_research(json.loads(Path(args.request).read_text(encoding="utf-8")))
+        if args.command == "joint-inspect":
+            outcome = Path(payload["session_root"]) / "outcome.json"
+            print(outcome.read_text(encoding="utf-8") if outcome.exists() else json.dumps({"status": "incomplete"}))
+            return
+        os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+        from .joint_loop import run_joint_research
+        print(json.dumps(run_joint_research(payload, resume=args.command == "joint-resume", model_env_file=args.model_env_file), ensure_ascii=False))
+        return
+    if args.command.startswith("model-"):
+        from .model_research import validate_model_research
+        payload = validate_model_research(json.loads(Path(args.request).read_text(encoding="utf-8")))
+        if args.command == "model-inspect":
+            outcome = Path(payload["session_root"]) / "outcome.json"
+            print(outcome.read_text(encoding="utf-8") if outcome.exists() else json.dumps({"status": "incomplete"}))
+            return
+        os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+        from .model_loop import run_model_research
+        print(json.dumps(run_model_research(payload, resume=args.command == "model-resume", model_env_file=args.model_env_file), ensure_ascii=False))
+        return
+    if args.command.startswith("factor-"):
+        from .factor_research import validate_factor_research
+        payload = validate_factor_research(json.loads(Path(args.request).read_text(encoding="utf-8")))
+        if args.command == "factor-inspect":
+            outcome = Path(payload["session_root"]) / "outcome.json"
+            print(outcome.read_text(encoding="utf-8") if outcome.exists() else json.dumps({"status": "incomplete"}))
+            return
+        os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+        from .factor_loop import run_factor_research
+        result = run_factor_research(payload, resume=args.command == "factor-resume", model_env_file=args.model_env_file)
+        print(json.dumps(result, ensure_ascii=False))
+        return
     if args.command.startswith("campaign-"):
         from .campaign import validate_campaign
         payload = json.loads(Path(args.request).read_text(encoding="utf-8"))

@@ -1,4 +1,4 @@
-"""Qlib 三模型、冻结处理器及六节点无数据库合成验收。"""
+"""Qlib 表格模型、冻结处理器及六节点无数据库合成验收。"""
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -35,7 +35,7 @@ def synthetic_samples():
 def candidate(name="LinearModel", *, alpha=0.1, rank=False):
     spec={"candidate_id":f"{name}-{alpha}", "model":{"class":name,"module_path":{
         "LinearModel":"qlib.contrib.model.linear", "LGBModel":"qlib.contrib.model.gbdt",
-        "XGBModel":"qlib.contrib.model.xgboost"}[name],"kwargs":{}},
+        "XGBModel":"qlib.contrib.model.xgboost", "DEnsembleModel":"qlib.contrib.model.double_ensemble"}[name],"kwargs":{}},
         "processors":{"infer":[],"learn":[{"class":"DropnaLabel","kwargs":{}}]}, "fit":{}}
     if name == "LinearModel":
         spec["model"]["kwargs"]={"estimator":"ridge","alpha":alpha,"fit_intercept":True,"include_valid":False}
@@ -44,6 +44,9 @@ def candidate(name="LinearModel", *, alpha=0.1, rank=False):
     elif name == "LGBModel":
         spec["model"]["kwargs"]={"num_leaves":5,"min_data_in_leaf":5,"learning_rate":0.1}
         spec["fit"]={"num_boost_round":8,"early_stopping_rounds":3,"verbose_eval":0}
+    elif name == "DEnsembleModel":
+        spec["model"]["kwargs"]={"num_models":2,"enable_sr":True,"enable_fs":False,
+            "decay":0.9,"epochs":4,"bins_sr":3,"num_leaves":5,"min_data_in_leaf":5,"verbosity":-1}
     else:
         spec["model"]["kwargs"]={"max_depth":2,"eta":0.1}
         spec["fit"]={"num_boost_round":8,"early_stopping_rounds":None,"verbose_eval":False}
@@ -52,7 +55,7 @@ def candidate(name="LinearModel", *, alpha=0.1, rank=False):
     return spec
 
 
-@pytest.mark.parametrize("name", ["LinearModel","LGBModel","XGBModel"])
+@pytest.mark.parametrize("name", ["LinearModel","LGBModel","XGBModel","DEnsembleModel"])
 def test_three_models_frozen_bundle_round_trip_and_future_labels(tmp_path, name, monkeypatch):
     import sqlite3
     def reject_database(*args, **kwargs):
@@ -132,7 +135,8 @@ def _read(root,name):
     return pd.concat([pd.read_parquet(p) for p in sorted((root/name).glob("*.parquet"))],ignore_index=True)
 
 
-def test_split_fit_predict_metrics_selection_and_locked_holdout(tmp_path):
+@pytest.mark.parametrize("model_name", ["LinearModel", "DEnsembleModel"])
+def test_split_fit_predict_metrics_selection_and_locked_holdout(tmp_path, model_name):
     samples,sessions=synthetic_samples()
     development=samples.iloc[:590].copy()
     split=build_walk_forward(development.rename(columns={"label_start_time":"label_start","label_end_time":"label_end"}),
@@ -143,6 +147,8 @@ def test_split_fit_predict_metrics_selection_and_locked_holdout(tmp_path):
         "feature_columns":["x1","x2"],"holdout_start":str(sessions[60])+"T00:00:00Z","semantics_hash":"2"*64,
         "validation_sessions":10,"horizon_sessions":1})
     p=_parameters()
+    if model_name == "DEnsembleModel":
+        p["candidate_jsons"] = [canonical_json(candidate(model_name))]
     runtime.execute_model_fit_artifact(split_root=tmp_path/"split",parameters=p,output_root=tmp_path/"fit",root_seed=7,max_memory_bytes=BUDGET)
     runtime.execute_model_predict_artifact(split_root=tmp_path/"split",model_root=tmp_path/"fit",output_root=tmp_path/"predict",max_memory_bytes=BUDGET)
     runtime.execute_model_fold_metrics_artifact(prediction_root=tmp_path/"predict",model_root=tmp_path/"fit",parameters=p,output_root=tmp_path/"metrics",max_memory_bytes=BUDGET)
@@ -338,3 +344,60 @@ def test_managed_predictions_match_direct_qlib(name, tmp_path):
     if name != "LinearModel":
         assert set(curves.segment) == {"train", "valid"}
         assert np.isfinite(curves.value).all()
+
+
+@pytest.mark.parametrize("change", [
+    {"enable_fs": True}, {"decay": None}, {"decay": 0}, {"num_models": 1},
+    {"epochs": 0}, {"sub_weights": [0, 1]}, {"sub_weights": [1]},
+    {"enable_sr": False}, {"bins_sr": 0}, {"device": "gpu"},
+])
+def test_double_ensemble_rejects_unsupported_or_invalid_parameters(change):
+    spec = candidate("DEnsembleModel")
+    spec["model"]["kwargs"].update(change)
+    with pytest.raises(QlibModelError):
+        normalize_candidates([spec])
+
+
+def test_double_ensemble_matches_upstream_and_seals_submodels(tmp_path):
+    from qlib.contrib.model.double_ensemble import DEnsembleModel
+    from research_pipeline.research.modeling.qlib import _matrix, _dataset
+    from qlib.utils.serial import Serializable
+    samples, _ = synthetic_samples()
+    train, valid, test = samples.iloc[:390], samples.iloc[400:490], samples.iloc[500:600]
+    spec = candidate("DEnsembleModel")
+    row = fit_bundle(train, valid, candidate=spec, feature_columns=("x1", "x2"),
+        output_root=tmp_path, bundle_path="bundles/de", root_seed=7, fit_scope_ref="train-only")
+    tr, va = _matrix(train, ("x1", "x2"), label=True), _matrix(valid, ("x1", "x2"), label=True)
+    dataset = _dataset(pd.concat([tr, va]), [], [], {
+        "train": (tr.index.get_level_values(0).min(), tr.index.get_level_values(0).max()),
+        "valid": (va.index.get_level_values(0).min(), va.index.get_level_values(0).max())})
+    direct = DEnsembleModel(**dict(spec["model"]["kwargs"], num_threads=1, seed=7, device_type="cpu"))
+    direct.fit(dataset)
+    matrix = _matrix(test, ("x1", "x2"), label=False)
+    predictions = direct.predict(_dataset(matrix, [], [], {"test": (matrix.index.get_level_values(0).min(),
+        matrix.index.get_level_values(0).max())}))
+    np.testing.assert_array_equal(predictions.to_numpy(), predict_bundle(tmp_path, row, test))
+    config_path = tmp_path / row["config_path"]
+    config = json.loads(config_path.read_text())
+    assert config["ensemble_state"]["num_models"] == 2 and config["training_curve"] == []
+    model = Serializable.load(tmp_path / row["model_path"])
+    assert len(model.ensemble) == 2 and model.params["num_threads"] == 1
+    from research_pipeline.evidence.model_validity import _fit_configs
+    cid = spec["candidate_id"]
+    sealed = dict(row, fold_id="fold", candidate_id=cid, status="fitted")
+    evidence = {"design": {"candidate_parameters_json": json.dumps({cid: spec}),
+        "candidate_ids": [cid], "validation_sessions": 9, "root_seed": 7,
+        "holdout_start": "2024-12-31T00:00:00+00:00"},
+        "tables": {"models": [sealed], "fit_audit": [{"fold_id": "fold", "candidate_id": cid,
+            "fit_scope_ref": "train-only"}]}, "model_configs": {row["config_path"]: config}}
+    sample_map = {value["sample_id"]: value for value in pd.concat([train, valid]).to_dict("records")}
+    folds = {"fold": {"train": set(train.sample_id), "validation": set(valid.sample_id)}}
+    _fit_configs(evidence, sample_map, folds)
+    config["ensemble_state"]["sub_weights"][1] = 99
+    with pytest.raises(ValueError, match="子模型状态"):
+        _fit_configs(evidence, sample_map, folds)
+    config["ensemble_state"]["sub_weights"][1] = 1
+    config["ensemble_state"]["sub_features"][1].reverse()
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(QlibModelError, match="状态"):
+        predict_bundle(tmp_path, row, test)
