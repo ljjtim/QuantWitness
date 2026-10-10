@@ -854,7 +854,11 @@ def _recompute_issue_map(
                     "financial.minute_simulation_unsupported"
                 )
             issues["financial.tradability"].update(
-                recompute_minute_simulation_issues(minute_simulation)
+                recompute_minute_simulation_issues(
+                    minute_simulation, financial_facts=financial,
+                    bar_tca_expectations=bar_tca_expectations,
+                    require_bar_tca_oracle=require_bar_tca_oracle,
+                )
             )
     bar_tca = financial.get("bar_tca")
     if bar_tca is not None:

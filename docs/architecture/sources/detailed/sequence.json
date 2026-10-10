@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "普通 DuckDB Research Run 的调用",
+    "output": "sequence-research-run.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1020,
+      650
+    ],
+    "column_fit": "spread",
+    "subtitle": "数据节点物化 → 下游算子 → CLI 封存 → 独立 verify",
+    "animation": "trace",
+    "visual_preset": "classic"
+  },
+  "participants": [
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "CLI",
+      "sublabel": "run / verify"
+    },
+    {
+      "id": "svc",
+      "type": "backend",
+      "label": "run 主控",
+      "sublabel": "RuntimeExecutionService"
+    },
+    {
+      "id": "adapter",
+      "type": "messagebus",
+      "label": "算子适配器",
+      "sublabel": "含数据节点"
+    },
+    {
+      "id": "plane",
+      "type": "backend",
+      "label": "data_plane",
+      "sublabel": "普通列式物化"
+    },
+    {
+      "id": "results",
+      "type": "backend",
+      "label": "results",
+      "sublabel": "Assembler / Store"
+    },
+    {
+      "id": "evidence",
+      "type": "security",
+      "label": "evidence",
+      "sublabel": "独立验证"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 312,
+      "label": "数据节点"
+    },
+    {
+      "from": 318,
+      "to": 410,
+      "label": "下游执行"
+    },
+    {
+      "from": 416,
+      "to": 546,
+      "label": "封存与验证"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m-run",
+      "from": "cli",
+      "to": "svc",
+      "y": 160,
+      "label": "执行已准入 DAG",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-data-adapter",
+      "from": "svc",
+      "to": "adapter",
+      "y": 194,
+      "label": "数据节点 + 上下文",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-materialize",
+      "from": "adapter",
+      "to": "plane",
+      "y": 228,
+      "label": "materialize_dataset_plan",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-dataset",
+      "from": "plane",
+      "to": "adapter",
+      "y": 262,
+      "label": "Parquet 工件引用",
+      "variant": "return"
+    },
+    {
+      "id": "m-data-output",
+      "from": "adapter",
+      "to": "svc",
+      "y": 296,
+      "label": "数据节点产出",
+      "variant": "return"
+    },
+    {
+      "id": "m-downstream",
+      "from": "svc",
+      "to": "adapter",
+      "y": 330,
+      "label": "提交后调度下游节点",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-node-output",
+      "from": "adapter",
+      "to": "svc",
+      "y": 364,
+      "label": "研究 / 仿真节点产出",
+      "variant": "return"
+    },
+    {
+      "id": "m-runtime-return",
+      "from": "svc",
+      "to": "cli",
+      "y": 398,
+      "label": "checkpoint 完成 / 运行摘要",
+      "variant": "return"
+    },
+    {
+      "id": "m-finalize",
+      "from": "cli",
+      "to": "results",
+      "y": 432,
+      "label": "ResultAssembler.finalize",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-result",
+      "from": "results",
+      "to": "cli",
+      "y": 466,
+      "label": "ResultBundle",
+      "variant": "return"
+    },
+    {
+      "id": "m-verify",
+      "from": "cli",
+      "to": "evidence",
+      "y": 500,
+      "label": "单独执行 verify",
+      "variant": "security"
+    },
+    {
+      "id": "m-verification",
+      "from": "evidence",
+      "to": "cli",
+      "y": 534,
+      "label": "VerificationResult",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "svc",
+      "from": 158,
+      "to": 404,
+      "type": "backend"
+    },
+    {
+      "participant": "adapter",
+      "from": 190,
+      "to": 302,
+      "type": "messagebus"
+    },
+    {
+      "participant": "adapter",
+      "from": 326,
+      "to": 370,
+      "type": "messagebus"
+    },
+    {
+      "participant": "plane",
+      "from": 224,
+      "to": 268,
+      "type": "backend"
+    },
+    {
+      "participant": "results",
+      "from": 428,
+      "to": 472,
+      "type": "backend"
+    },
+    {
+      "participant": "evidence",
+      "from": 496,
+      "to": 540,
+      "type": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "普通 DuckDB 数据路径",
+      "items": [
+        "图展示无 checkpoint 缓存的普通列式取数；主控先构建 RuntimeNodeContext，再调用已登记的数据适配器",
+        "数据适配器调用 materialize_dataset_plan；数据平面只读研究库、发布 Parquet 工件并返回引用",
+        "主控复验节点产出并提交 checkpoint，再把工件引用传给就绪的下游研究或仿真节点",
+        "RuntimeNodeContext 承载输入、工作路径与预算，由适配器读取；它不主动调度或取数"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Result 由 CLI 封存",
+      "items": [
+        "每个节点的 checkpoint 由 RuntimeExecutionService 提交；缓存节点在身份复验后可跳过执行",
+        "Runtime 返回运行摘要、节点输出与完成元数据",
+        "CLI 在 Runtime 成功后调用 ResultAssembler / ResultStore，封存自包含 ResultBundle",
+        "Result finalize 有独立状态，不能用 Runtime 的 succeeded 代替封存成功"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "独立验证与其他数据入口",
+      "items": [
+        "verify 是独立命令，只读消费 Result 封存输入、结果和配置，并另存 VerificationResult",
+        "金融 oracle 在内存 DuckDB 中复算；项目 Verifier 使用独立 worker，验证状态由实际门禁结果决定",
+        "分钟扫描与归档快照走各自正式入口；它们不要求调用普通 DuckDB 的物化函数"
+      ]
+    }
+  ]
+}

@@ -20,9 +20,12 @@ from research_pipeline.runtime.operator_promotion import (
 def test_public_operator_inventory_is_only_approved_builtins() -> None:
     manifest = build_mainline_operator_manifest()
     assert LEGACY_OPERATOR_DISPOSITIONS == {}
-    from research_pipeline.runtime.operator_promotion import DAILY_CASH_LOCAL_APPROVAL
+    from research_pipeline.runtime.operator_promotion import (
+        DAILY_CASH_LOCAL_APPROVAL, SHARED_FUTURES_LOCAL_APPROVALS,
+    )
     assert {operator_identity(item) for item in manifest.definitions} == (
         BUILTIN_OPERATOR_IDENTITIES | {DAILY_CASH_LOCAL_APPROVAL["operator_identity"]}
+        | {item["operator_identity"] for item in SHARED_FUTURES_LOCAL_APPROVALS}
     )
     validate_mainline_operator_promotions(manifest)
 

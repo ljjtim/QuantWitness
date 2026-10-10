@@ -1,0 +1,189 @@
+{
+  "schema_version": 2,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Research Run 生命周期",
+    "output": "lifecycle-research-run.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "animation": "trace",
+    "visual_preset": "classic"
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "主链"
+    },
+    {
+      "id": "retryable",
+      "label": "可恢复"
+    },
+    {
+      "id": "terminal",
+      "label": "终态"
+    }
+  ],
+  "states": [
+    {
+      "id": "created",
+      "type": "start",
+      "label": "created",
+      "sublabel": "run 建立",
+      "lane": "main",
+      "col": 0
+    },
+    {
+      "id": "planned",
+      "type": "active",
+      "label": "planned",
+      "sublabel": "计划就绪",
+      "lane": "main",
+      "col": 1
+    },
+    {
+      "id": "running",
+      "type": "active",
+      "label": "running",
+      "sublabel": "执行中",
+      "lane": "main",
+      "col": 2
+    },
+    {
+      "id": "paused",
+      "type": "waiting",
+      "label": "paused",
+      "sublabel": "等待重试",
+      "lane": "retryable",
+      "col": 2
+    },
+    {
+      "id": "succeeded",
+      "type": "success",
+      "label": "succeeded",
+      "sublabel": "全部节点成功",
+      "lane": "terminal",
+      "col": 4
+    },
+    {
+      "id": "failed",
+      "type": "failure",
+      "label": "failed",
+      "sublabel": "不可重试或重试耗尽",
+      "lane": "terminal",
+      "col": 3
+    },
+    {
+      "id": "cancelled",
+      "type": "failure",
+      "label": "cancelled",
+      "sublabel": "声明但当前无写入者",
+      "lane": "terminal",
+      "col": 1
+    }
+  ],
+  "transitions": [
+    {
+      "id": "t-created-planned",
+      "from": "created",
+      "to": "planned",
+      "label": "启动"
+    },
+    {
+      "id": "t-planned-running",
+      "from": "planned",
+      "to": "running",
+      "label": "进入执行"
+    },
+    {
+      "id": "t-running-paused",
+      "from": "running",
+      "to": "paused",
+      "label": "节点失败可重试"
+    },
+    {
+      "id": "t-paused-running",
+      "from": "paused",
+      "to": "running",
+      "label": "resume / retry-node"
+    },
+    {
+      "id": "t-running-succeeded",
+      "from": "running",
+      "to": "succeeded",
+      "label": "全部节点完成"
+    },
+    {
+      "id": "t-running-failed",
+      "from": "running",
+      "to": "failed",
+      "label": "不可重试 / 次数耗尽"
+    },
+    {
+      "id": "t-created-cancelled",
+      "from": "created",
+      "to": "cancelled",
+      "label": "仅状态表允许",
+      "variant": "dashed"
+    },
+    {
+      "id": "t-planned-cancelled",
+      "from": "planned",
+      "to": "cancelled",
+      "label": "仅状态表允许",
+      "variant": "dashed"
+    },
+    {
+      "id": "t-running-cancelled",
+      "from": "running",
+      "to": "cancelled",
+      "label": "仅状态表允许",
+      "variant": "dashed"
+    },
+    {
+      "id": "t-paused-cancelled",
+      "from": "paused",
+      "to": "cancelled",
+      "label": "仅状态表允许",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "状态表在源码里的位置",
+      "items": [
+        "run / node / attempt 三张转移表都在 runtime/state.py，事件日志由 apply_event 投影",
+        "非法转移直接抛 RuntimeStateError（state.py 的 _transition）",
+        "状态转换写入事件日志，由唯一投影器验证；command_id 用于事件重放幂等"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "哪些转移能真正发生",
+      "items": [
+        "当前写入路径：created → planned → running → succeeded / failed；可重试节点失败进入 paused",
+        "retry-node 先把 paused 转为 running，再执行重试；次数耗尽由 running 转 failed",
+        "run 的 cancelled、node 的 blocked，以及 paused → failed 在状态表允许，但当前没有直接写入路径",
+        "进程中断可能保留 running；resume 将遗留 attempt 收敛为 lost / cancelled，再恢复节点执行"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "另外两台状态机",
+      "items": [
+        "node：pending → ready → running，可选经过 waiting_for_resources；随后 succeeded / retryable_failed / exhausted，可重试节点回到 ready",
+        "attempt：pending → admitted → ready → running，可选经过 waiting_for_resources；随后 succeeded / failed，中断恢复为 lost / cancelled",
+        "attempt 次数不是字段，而是数 status=pending 的事件；attempt_id 由序号拼出"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "独立的两个小状态机",
+      "items": [
+        "holdout 账本：frozen → prepared → opened → committed / consumed_failed（family_wide_confirmation 另可 retired），单调不可回退",
+        "finalize 投影：必须先写 pending，再转 succeeded / failed，终态不可覆盖；缺文件读作 unknown",
+        "ResultBundle 的 status 恒为 finalized，Result 运行摘要只接受 succeeded —— 是断言不是状态机"
+      ]
+    }
+  ]
+}

@@ -53,9 +53,6 @@ policies:
     frequency: minute
   rules:
     consumer_id: catalog.minute.contracts
-    minute_capability_manifest_hash: 73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033
-    contract_version: minute-capability-binding-v1
-    binding_hash: 170c8248012ff6dfce0f311c17496c3fe1e2e0663f0cf88426b210b2a7c46c90
 - policy_id: drift.strict.v1
   policy_type: schema_drift
   rules:
@@ -102,7 +99,6 @@ datasets:
     source_kind: collected
     adjustment_anchor: none
     factor_snapshot_policy: not_applicable
-    scope_binding_hash: 170c8248012ff6dfce0f311c17496c3fe1e2e0663f0cf88426b210b2a7c46c90
     evidence_refs:
     - volume-concentration-teaching-definition
     semantics_version: minute-source-semantics-v1
@@ -258,6 +254,7 @@ def build(root, repo, windows_python, linux_repo, linux_output):
     from research_pipeline.data_plane.minute_scan import build_minute_scan_plan, build_minute_partitioned_dataset
     from research_pipeline.extensions import compile_project_verifier_bundle
     from research_pipeline.packages.source_provenance import ingest_source_snapshot
+    from research_pipeline.platform import load_minute_capability_manifest
 
     root, repo = Path(root).resolve(), Path(repo).resolve()
     rp = repo if (repo / "src/research_pipeline").is_dir() else repo / "research_pipeline"
@@ -276,7 +273,13 @@ def build(root, repo, windows_python, linux_repo, linux_output):
                              "volume": volume, "money": volume * 10, "avg": 10.0})
     pq.write_table(pa.Table.from_pylist(rows), target)
     declaration_path = root / "synthetic-catalog.yaml"
-    declaration_path.write_text(SYNTHETIC_CATALOG, encoding="utf-8")
+    catalog_payload = yaml.safe_load(SYNTHETIC_CATALOG)
+    identity = load_minute_capability_manifest().downstream_identity("catalog.minute.contracts")
+    scope = next(policy for policy in catalog_payload["policies"]
+                 if policy["policy_id"] == "scope.minute.catalog.v4")
+    scope["rules"].update(identity)
+    catalog_payload["datasets"][0]["minute_source_semantics"]["scope_binding_hash"] = identity["binding_hash"]
+    declaration_path.write_text(yaml.safe_dump(catalog_payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     declaration = load_declarative_catalog((declaration_path,), allow_generated_approvals=True)
     catalog = compile_catalog(baseline=declaration.baseline, expected_baseline_hash=declaration.baseline.content_hash,
         manifest=declaration.manifest, contracts=declaration.contracts, decisions=declaration.decisions,

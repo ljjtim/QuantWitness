@@ -17,10 +17,10 @@ from research_pipeline.platform import typed_canonical_hash
 
 MINUTE_VERIFIER_ALGORITHM_VERSIONS = {
     "data.pit": "verifier.minute-data-pit.v2",
-    "label.split": "verifier.minute-label-split.v2",
+    "label.split": "verifier.minute-label-split.v3",
     "search.holdout": "verifier.minute-trial-universe.v2",
-    "statistics": "verifier.minute-statistics.v2",
-    "financial.tradability": "verifier.minute-financial.v2",
+    "statistics": "verifier.minute-statistics.v3",
+    "financial.tradability": "verifier.minute-financial.v4",
 }
 _CLAIM_CEILING = "historical_intraday_research_observation"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -271,7 +271,7 @@ def recompute_minute_validity_issues(
             if candidate in last_keys and key <= last_keys[candidate]:
                 raise ValueError("observation order")
             last_keys[candidate] = key
-            if not 0 < decision < entry < exit_at or not math.isfinite(return_value):
+            if not (0 < entry < exit_at and 0 < decision < exit_at) or not math.isfinite(return_value):
                 issues["label.split"].add("label.leakage")
             expected_assignment = {
                 "observation_id": observation_id,
@@ -374,10 +374,121 @@ def recompute_minute_validity_issues(
     return issues
 
 
+MINUTE_SIMULATION_FACTS_VERSION = "minute-simulation-facts-v3"
+
+
+def _current_simulation_issues(
+    payload: Mapping[str, object],
+    *,
+    financial_facts: Mapping[str, object] | None,
+    bar_tca_expectations: Mapping[str, object] | None,
+    require_bar_tca_oracle: bool,
+) -> set[str]:
+    """重算六表结果与账本身份，并绑定正式 Result 的独立金融期望。"""
+
+    try:
+        if set(payload) != {
+            "contract_version", "result_hash", "semantics",
+            "simulation_result_identity", "source_ledger_hash", "rule_bundle_hash",
+        }:
+            raise ValueError("simulation facts schema")
+        identity = payload["simulation_result_identity"]
+        semantics = payload["semantics"]
+        if not isinstance(identity, Mapping) or not isinstance(semantics, Mapping):
+            raise ValueError("simulation identity")
+        expected_identity = {
+            "contract_version", "semantics_hash", "source_simulation_hash",
+            "table_hashes",
+        }
+        if "order_lifecycle_contract" in identity:
+            from .financial_oracle.order_lifecycle import LIFECYCLE_DECLARATION
+
+            expected_identity.add("order_lifecycle_contract")
+            if identity["order_lifecycle_contract"] != LIFECYCLE_DECLARATION:
+                raise ValueError("order lifecycle declaration")
+        if (
+            set(identity) != expected_identity
+            or identity["contract_version"] != "research-simulation-result-v1"
+            or semantics.get("frequency") != "minute"
+            or semantics.get("contract_version") not in {
+                "research-simulation-result-semantics-v1",
+                "research-simulation-result-semantics-v2",
+            }
+            or (
+                semantics.get("contract_version") == "research-simulation-result-semantics-v2"
+                and "order_lifecycle_contract" not in identity
+            )
+            or identity["semantics_hash"] != typed_canonical_hash(dict(semantics))
+            or payload["result_hash"] != typed_canonical_hash(dict(identity))
+        ):
+            raise ValueError("simulation result identity")
+        hashes = identity["table_hashes"]
+        if (
+            not isinstance(hashes, Mapping)
+            or set(hashes) != {"orders", "fills", "positions", "cash", "costs", "valuations"}
+            or any(
+                not isinstance(value, str) or _SHA256.fullmatch(value) is None
+                for value in (
+                    *hashes.values(), identity["source_simulation_hash"],
+                    payload["result_hash"], payload["rule_bundle_hash"],
+                    payload["source_ledger_hash"],
+                )
+            )
+        ):
+            raise ValueError("canonical table identity")
+        ledger_hash = typed_canonical_hash({
+            "simulation_result_hash": payload["result_hash"],
+            "ledger_table_hashes": {
+                name: hashes[name] for name in ("costs", "cash", "positions", "valuations")
+            },
+        })
+        if payload["source_ledger_hash"] != ledger_hash or financial_facts is None:
+            raise ValueError("simulation ledger identity")
+        if any(financial_facts.get(field) != expected for field, expected in {
+            "rule_snapshot_hash": payload["rule_bundle_hash"],
+            "order_audit_hash": hashes["orders"],
+            "ledger_hash": ledger_hash,
+            "tradability_hash": payload["result_hash"],
+        }.items()):
+            raise ValueError("financial facts binding")
+        bar_tca = financial_facts.get("bar_tca")
+        if not isinstance(bar_tca, Mapping):
+            raise ValueError("simulation TCA missing")
+        bindings = {
+            "tca_source_simulation_hash": payload["result_hash"],
+            "tca_source_ledger_hash": ledger_hash,
+            "tca_rule_snapshot_hash": payload["rule_bundle_hash"],
+        }
+        if any(bar_tca.get(field) != expected for field, expected in bindings.items()):
+            raise ValueError("simulation TCA binding")
+        if bar_tca_expectations is None:
+            if require_bar_tca_oracle:
+                raise ValueError("Result financial oracle missing")
+        elif any(
+            bar_tca_expectations.get(field) != expected
+            for field, expected in bindings.items()
+        ):
+            raise ValueError("Result financial oracle binding")
+    except (KeyError, TypeError, ValueError):
+        return {"financial.minute_simulation_unsupported"}
+    return set()
+
+
 def recompute_minute_simulation_issues(
     payload: Mapping[str, object],
+    *,
+    financial_facts: Mapping[str, object] | None = None,
+    bar_tca_expectations: Mapping[str, object] | None = None,
+    require_bar_tca_oracle: bool = True,
 ) -> set[str]:
-    """独立复核分钟仿真载荷，并如实保留不受支持的规则路径。"""
+    """独立复核当前六表身份或已封存 v2 载荷。"""
+
+    if payload.get("contract_version") == MINUTE_SIMULATION_FACTS_VERSION:
+        return _current_simulation_issues(
+            payload, financial_facts=financial_facts,
+            bar_tca_expectations=bar_tca_expectations,
+            require_bar_tca_oracle=require_bar_tca_oracle,
+        )
 
     issues: set[str] = set()
     try:
@@ -448,6 +559,7 @@ def recompute_minute_simulation_issues(
 
 __all__ = [
     "MINUTE_VERIFIER_ALGORITHM_VERSIONS",
+    "MINUTE_SIMULATION_FACTS_VERSION",
     "recompute_minute_simulation_issues",
     "recompute_minute_validity_issues",
 ]

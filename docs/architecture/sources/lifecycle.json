@@ -1,0 +1,253 @@
+{
+  "schema_version": 3,
+  "diagram_type": "lifecycle",
+  "title": "程序跑完，不代表研究已验证",
+  "question": "运行、结果封存和独立验证是三个独立的判断。",
+  "width": 1120,
+  "height": 695,
+  "nodes": [
+    {
+      "id": "created",
+      "label": "created",
+      "sub": "已建立运行",
+      "x": 35,
+      "y": 60,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "Runtime 已建立运行记录。",
+      "source": "src/research_pipeline/runtime/state.py"
+    },
+    {
+      "id": "planned",
+      "label": "planned",
+      "sub": "计划就绪",
+      "x": 415,
+      "y": 60,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "执行前的计划状态。",
+      "source": "src/research_pipeline/runtime/state.py"
+    },
+    {
+      "id": "running",
+      "label": "running",
+      "sub": "节点执行中",
+      "x": 795,
+      "y": 60,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "进程意外终止时可能保留本状态，随后用 resume 恢复。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
+    },
+    {
+      "id": "paused",
+      "label": "paused",
+      "sub": "可重试节点失败，等待处理",
+      "x": 795,
+      "y": 280,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "按 inspect 建议使用 retry-node；该命令先将运行恢复为 running。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
+    },
+    {
+      "id": "failed",
+      "label": "failed",
+      "sub": "不可重试 / 次数已耗尽",
+      "x": 415,
+      "y": 280,
+      "w": 240,
+      "h": 90,
+      "kind": "error",
+      "detail": "需要查阅诊断。不能把失败步骤输出当正式结果。",
+      "source": "src/research_pipeline/runtime/state.py"
+    },
+    {
+      "id": "success",
+      "label": "succeeded",
+      "sub": "全部节点成功",
+      "x": 35,
+      "y": 280,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "仅指 Runtime 成功，不代表 Result 已封存或独立验证通过。",
+      "source": "src/research_pipeline/runtime/state.py"
+    },
+    {
+      "id": "finalize",
+      "label": "Result 封存",
+      "sub": "pending → succeeded / failed",
+      "x": 35,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "CLI 单独记录封存状态，成功后才有正式结果交付。",
+      "source": "src/research_pipeline/runtime/diagnostics.py"
+    },
+    {
+      "id": "verify",
+      "label": "独立验证",
+      "sub": "生成检查结论与发现",
+      "x": 415,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "VerificationResult 是独立文件；判断验证结果，而不是仅检查进程退出。",
+      "source": "src/research_pipeline/evidence/verification_result.py"
+    },
+    {
+      "id": "delivery",
+      "label": "可阅读、可复核的交付",
+      "sub": "Result + 检查单 + 报告",
+      "x": 795,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "保留检查范围。失败报告可用于诊断，不能用于有效开发选优。",
+      "source": "src/research_pipeline/cli/report_output.py"
+    }
+  ],
+  "edges": [
+    {
+      "from_id": "created",
+      "to_id": "planned",
+      "label": "",
+      "kind": "main"
+    },
+    {
+      "from_id": "planned",
+      "to_id": "running",
+      "label": "",
+      "kind": "main"
+    },
+    {
+      "from_id": "running",
+      "to_id": "paused",
+      "label": "可重试失败",
+      "kind": "main"
+    },
+    {
+      "from_id": "running",
+      "to_id": "failed",
+      "label": "终止性错误",
+      "kind": "main",
+      "points": [
+        [
+          915,
+          150
+        ],
+        [
+          915,
+          215
+        ],
+        [
+          535,
+          215
+        ],
+        [
+          535,
+          280
+        ]
+      ],
+      "label_pos": [
+        750,
+        201
+      ]
+    },
+    {
+      "from_id": "running",
+      "to_id": "success",
+      "label": "全部节点成功",
+      "kind": "main",
+      "points": [
+        [
+          1035,
+          105
+        ],
+        [
+          1080,
+          105
+        ],
+        [
+          1080,
+          460
+        ],
+        [
+          320,
+          460
+        ],
+        [
+          320,
+          325
+        ],
+        [
+          275,
+          325
+        ]
+      ],
+      "label_pos": [
+        680,
+        450
+      ]
+    },
+    {
+      "from_id": "paused",
+      "to_id": "running",
+      "label": "resume / retry-node",
+      "kind": "optional",
+      "points": [
+        [
+          1035,
+          325
+        ],
+        [
+          1058,
+          325
+        ],
+        [
+          1058,
+          180
+        ],
+        [
+          1030,
+          150
+        ]
+      ],
+      "label_pos": [
+        1053,
+        252
+      ]
+    },
+    {
+      "from_id": "success",
+      "to_id": "finalize",
+      "label": "封存",
+      "kind": "main"
+    },
+    {
+      "from_id": "finalize",
+      "to_id": "verify",
+      "label": "成功后",
+      "kind": "main"
+    },
+    {
+      "from_id": "verify",
+      "to_id": "delivery",
+      "label": "结论与报告",
+      "kind": "main"
+    }
+  ],
+  "notes": [
+    "cancelled 在状态表中允许，但当前执行主控没有直接写入路径；这里不画成可操作的“取消按钮”。",
+    "node 与 attempt 有各自状态；node 可经过 waiting_for_resources，异常中断的 attempt 可转为 lost / cancelled。",
+    "holdout：frozen → prepared → opened → committed / consumed_failed；打开后不因失败而重新获得机会。"
+  ]
+}

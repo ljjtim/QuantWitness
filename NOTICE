@@ -1,5 +1,17 @@
 QuantWitness
 Copyright 2026 QuantWitness contributors
 
-This product includes software developed by QuantWitness contributors.
-Third-party materials, if any, are documented in THIRD_PARTY_NOTICES.md.
+QuantWitness original code is licensed under the Apache License, Version 2.0.
+
+QuantWitness integrates optional components from Qlib and RD-Agent.
+Qlib and RD-Agent are Copyright (c) Microsoft Corporation and are licensed
+under the MIT License. Their licenses are reproduced in licenses/QLIB-MIT.txt
+and licenses/RD-AGENT-MIT.txt. Upstream components retain their own licenses.
+
+Usage scope and other third-party materials are described in
+THIRD_PARTY_NOTICES.md. References do not imply upstream endorsement.
+
+Interactive architecture diagrams include the Archify 3.0.1 viewer,
+Copyright (c) 2026 tt-a1i (Archify), Copyright (c) 2025 Cocoon AI,
+licensed under MIT. See licenses/ARCHIFY-MIT.txt. Embedded font notices
+remain in the self-contained HTML files.

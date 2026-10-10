@@ -91,6 +91,26 @@ def verify_archived_input_manifest(manifest):
         _resolve_entry(entry)
 
 
+def _snapshot_fields(plan):
+    return (plan.temporal_selection.required_scan_fields
+            if plan.temporal_selection.requires_consumer_binding else plan.query.field_ids)
+
+
+def _snapshot_batches(dataset, files, plan, *, columns, batch_size):
+    if not plan.temporal_selection.requires_consumer_binding:
+        yield from dataset.iter_batches(columns=columns, batch_size=batch_size)
+        return
+    import pyarrow.parquet as pq
+
+    # 归档复制保留完整版本事实；业务消费者仍须绑定自己的观察时点。
+    for path in files:
+        with pq.ParquetFile(path, pre_buffer=False) as parquet:
+            for batch in parquet.iter_batches(columns=list(columns), batch_size=batch_size, use_threads=False):
+                if batch.nbytes > dataset.max_batch_bytes:
+                    raise SnapshotIntegrityError("归档时态批次超过批准内存上限")
+                yield batch
+
+
 def _logical_query(query):
     value = query.to_dict()
     value.pop("budget", None)
@@ -118,8 +138,8 @@ def require_archived_plan_equivalent(original, current):
             raise SnapshotIntegrityError(f"封存输入时间或逻辑合同改变: {field}")
     if original.temporal_selection.to_dict() != current.temporal_selection.to_dict():
         raise SnapshotIntegrityError("封存输入时态选择合同改变")
-    if original.temporal_selection.requires_consumer_binding or original.factor_publication is not None:
-        raise SnapshotIntegrityError("首批封存输入不接收逐决策版本来源或因子 publication")
+    if original.factor_publication is not None:
+        raise SnapshotIntegrityError("封存输入不接收因子 publication")
 
 
 def _resolve_entry(entry):
@@ -133,10 +153,10 @@ def _resolve_entry(entry):
         dataset = ArtifactResolver(root).resolve(reference)
         if dataset.manifest.get("admitted_plan_hash") != original.plan_hash:
             raise SnapshotIntegrityError("归档快照未绑定所声明原准入")
-        if dataset.manifest.get("temporal_source") is True:
-            raise SnapshotIntegrityError("首批封存输入不支持逐决策时态快照")
+        if dataset.manifest.get("temporal_source", False) is not original.temporal_selection.requires_consumer_binding:
+            raise SnapshotIntegrityError("归档时态来源模式与原准入不一致")
         files = tuple(root / reference.relative_path / part for part in reference.partitions)
-        if tuple(dataset.schema.names) != original.query.field_ids:
+        if tuple(dataset.schema.names) != _snapshot_fields(original):
             raise SnapshotIntegrityError("归档快照列与原准入投影不一致")
         return original, reference, files, dataset.schema, dataset
     reference = PartitionedDatasetRef.from_dict(entry["reference"])
@@ -224,7 +244,7 @@ def _evidence(entry, plan, files, reference):
             if dtype != "string":
                 continue
             maximum = 0
-            for batch in dataset.iter_batches(columns=(field_id,), batch_size=min(plan.query.budget.batch_size, 65536)):
+            for batch in _snapshot_batches(dataset, files, plan, columns=(field_id,), batch_size=min(plan.query.budget.batch_size, 65536)):
                 for value in batch.column(0).to_pylist():
                     if value is not None:
                         maximum = max(maximum, len(value.encode("utf-8")))
@@ -270,7 +290,7 @@ def admit_archived_queries(queries, *, catalog, execution_budgets, manifest):
         )
         plan = admit_query(query, catalog=catalog, binding=resolved, attestation=attestation)
         require_archived_plan_equivalent(original, plan)
-        expected_mapping = {field_id: field_id for field_id in original.query.field_ids} if entry["kind"] == "dataset" else dict(original.columns)
+        expected_mapping = {field_id: field_id for field_id in _snapshot_fields(original)} if entry["kind"] == "dataset" else dict(original.columns)
         if dict(plan.columns) != expected_mapping:
             raise SnapshotIntegrityError("归档物理字段映射与已封存列不一致")
         evidence = _evidence(entry, plan, files, reference)
@@ -305,7 +325,7 @@ def rebind_archived_minute(entry, plan):
 
 
 def materialize_archived_inputs(*, manifest, admitted_plans, execution_estimates, execution_budget, artifact_root):
-    """在节点预算内按主键重排，再发布当前计划绑定的普通快照。"""
+    """在节点预算内按主键和版本顺序重排，保留原时态来源模式。"""
     import pyarrow as pa
 
     manifest = load_archived_input_manifest(manifest)
@@ -339,17 +359,20 @@ def materialize_archived_inputs(*, manifest, admitted_plans, execution_estimates
         path = _existing_snapshot(root, logical.logical_snapshot_id, plan)
         if path is None:
             batches, total_bytes, rows = [], 0, 0
-            for batch in dataset.iter_batches(columns=plan.query.field_ids, batch_size=min(estimate.provider_batch_rows, 65536)):
+            for batch in _snapshot_batches(dataset, files, original, columns=_snapshot_fields(plan), batch_size=min(estimate.provider_batch_rows, 65536)):
                 total_bytes += batch.nbytes
                 rows += batch.num_rows
                 if 4 * total_bytes + 16 * rows > estimate.provider_duckdb_memory_bytes:
                     raise SnapshotIntegrityError("归档 Arrow 排序超过节点内存预算")
                 batches.append(batch)
             table = pa.Table.from_batches(batches, schema=schema)
-            table = table.sort_by([(field, "ascending") for field in plan.primary_key])
+            order_fields = tuple(dict.fromkeys((*plan.primary_key,
+                *(plan.temporal_selection.source_order_fields if plan.temporal_selection.requires_consumer_binding else ()))))
+            table = table.sort_by([(field, "ascending") for field in order_fields])
             path = publish_parquet_snapshot(batches=table.to_batches(max_chunksize=estimate.provider_batch_rows),
                 schema=table.schema, plan=plan, logical_snapshot=logical, root=root,
-                before_commit=lambda entry=entry: _resolve_entry(entry))
+                before_commit=lambda entry=entry: _resolve_entry(entry),
+                temporal_source=plan.temporal_selection.requires_consumer_binding)
         references[request_id] = build_dataset_artifact_ref(path, allowed_root=root).to_dict()
         verified[request_id] = verify_parquet_snapshot(path)
     return build_research_data_bundle(admitted_plan_hashes={key: value.plan_hash for key, value in admitted_plans.items()}, references=references), verified

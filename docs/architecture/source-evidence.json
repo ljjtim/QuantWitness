@@ -1,0 +1,995 @@
+{
+  "scope": "README 使用简明 SVG；同名 HTML 使用详细图源。总体架构详细图箭头表示调用或依赖，其余图按各自图例阅读。",
+  "diagrams": [
+    {
+      "type": "overview",
+      "source": "sources/overview.json",
+      "relations": [
+        "主线箭头表示工作交接；虚线表示可选 AI 路径，不是 Python import 图。",
+        "Qlib 位于计算层，负责已接入的模型、处理器和表达式；RD-Agent 位于提案层，两者职责不同。",
+        "市场规则按 cn_stock / cn_etf / cn_future 等实际资产类别、品种与日期声明；并非全市场自动覆盖。",
+        "采集与实盘下单在本图范围外。AI 不拥有数据写入、确认自身公式或绕过验证的权限。"
+      ],
+      "nodes": [
+        {
+          "id": "human",
+          "meaning": "人确认公式含义、窗口、可用时点、研究范围与预算。AI 草稿不能代替人的确认。",
+          "source": "integrations/rdagent/src/quantwitness_rdagent/formula_spec.py"
+        },
+        {
+          "id": "rd",
+          "meaning": "可选集成，位于框架核心之外。公式复现固定定义；探索模式仅使用通过验证的开发指标，test/holdout 不进入反馈。",
+          "source": "integrations/rdagent/src/quantwitness_rdagent/package_campaign.py"
+        },
+        {
+          "id": "data",
+          "meaning": "数据由使用者提供。归档快照与数据库是互斥来源；历史可见性必须有相应字段和来源说明。",
+          "source": "src/research_pipeline/data_plane/providers/duckdb.py"
+        },
+        {
+          "id": "entry",
+          "meaning": "人或 RD-Agent 均通过正式入口执行研究包。ResearchPackage 描述数据请求、算法步骤、参数和结果要求。",
+          "source": "src/research_pipeline/cli/commands/workspace_flow.py"
+        },
+        {
+          "id": "pit",
+          "meaning": "Catalog 描述字段及来源；准入绑定来源和时点。取数时复查来源，按决策时点限制数据。PIT 不证明供应商没有修订历史。",
+          "source": "src/research_pipeline/data_plane/admission.py"
+        },
+        {
+          "id": "compute",
+          "meaning": "Runtime 调度依赖图、资源与检查点。Qlib 是可选模型与表达式后端；原生仿真处理声明范围内的订单、费用、仓位和现金。",
+          "source": "src/research_pipeline/runtime/execution_service.py"
+        },
+        {
+          "id": "result",
+          "meaning": "Runtime 完成后由 CLI 调用 ResultAssembler 封存。保留正式输入、实现与结果引用；封存有独立成功状态。",
+          "source": "src/research_pipeline/cli/commands/research_run.py"
+        },
+        {
+          "id": "verify",
+          "meaning": "独立读取 Result 及其支持事实，产生 VerificationResult。项目公式验证器与金融 oracle 的检查范围需要显式声明。 开发探索只从验证通过的开发指标生成 AI 反馈，报告展示不是反馈的前置步骤。",
+          "source": "src/research_pipeline/evidence/verification_result.py"
+        },
+        {
+          "id": "report",
+          "meaning": "报告读取结果包和验证结果。开发探索反馈仅从验证通过的开发指标中提取，不把执行成功当作验证通过。",
+          "source": "src/research_pipeline/cli/report_output.py"
+        }
+      ],
+      "preview_source": "sources/overview.json",
+      "detailed_source": "sources/detailed/overview.json"
+    },
+    {
+      "type": "architecture",
+      "source": "sources/architecture.json",
+      "relations": [
+        "每个核心模块均可点击查看职责和源码；箭头表示主要工作交接或组件使用，不穷举 Python 导入关系。",
+        "研究包编译、数据准入和取数共同使用 Catalog 约定；为保持可读性，图中不重复画出每条校验依赖。",
+        "Runtime 交回执行产物，由 CLI 调用 results 封存；独立 verify 是另一执行步骤，报告不是 AI 开发反馈的前置条件。",
+        "operations 与 platform 为全链提供公共支持；图中没有把共用依赖展开为跨全图连线。",
+        "Qlib 的项目侧表达式与组合接口同样经扩展接入；原生回测通过 simulation 与 domain 实现，数据采集和实盘交易在图外。"
+      ],
+      "nodes": [
+        {
+          "id": "data",
+          "meaning": "外部数据由使用者准备。数据库、分钟文件与已封存输入分别走适用入口；读取保持只读，来源与历史可见性必须有依据。",
+          "source": "src/research_pipeline/data_plane/providers/duckdb.py"
+        },
+        {
+          "id": "human",
+          "meaning": "人确定研究问题、样本范围、时间约定与预算，填写研究包。普通研究不需要启用 AI。",
+          "source": "src/research_pipeline/packages/store.py"
+        },
+        {
+          "id": "rd",
+          "meaning": "位于核心之外，通过 Workspace 与研究包接口提交候选。公式复现先由人确认定义；探索只接收通过验证的开发指标，不接收最终 test/holdout 答案。",
+          "source": "integrations/rdagent/src/quantwitness_rdagent/package_campaign.py"
+        },
+        {
+          "id": "qlib",
+          "meaning": "通过研究模型适配层及项目扩展调用。提供模型与处理器，以及项目侧表达式、风险模型和组合组件，不负责本框架的结果封存与独立验证。",
+          "source": "src/research_pipeline/research/modeling/qlib.py"
+        },
+        {
+          "id": "catalog",
+          "meaning": "描述数据集、字段、单位、物理绑定、可见性和修订政策；经明确确认编译为 Catalog Lock。packages 与数据准入会读取这份约定。",
+          "source": "src/research_pipeline/catalog/declarative.py"
+        },
+        {
+          "id": "cli",
+          "meaning": "编排检查、准入、执行、封存、独立验证和报告。Runtime 完成后由命令层调用 ResultAssembler 封存，运行完成本身不等于验证通过。",
+          "source": "src/research_pipeline/cli/commands/workspace_flow.py"
+        },
+        {
+          "id": "packages",
+          "meaning": "把研究声明、数据请求、算子图与结果要求编译为计划；结合 Catalog 和准入检查固定本次研究约定。",
+          "source": "src/research_pipeline/packages/compiler.py"
+        },
+        {
+          "id": "extensions",
+          "meaning": "装载明确声明的项目算子包和相关接口，绑定实现及依赖。项目算法经运行时适配器调用，不能绕过正式输入与结果要求。",
+          "source": "src/research_pipeline/extensions/__init__.py"
+        },
+        {
+          "id": "data_plane",
+          "meaning": "核对来源和数据约定，按请求读取数据并形成列式工件。普通读取、分钟扫描、归档输入有各自入口；与 Catalog 共同约束可见性。",
+          "source": "src/research_pipeline/data_plane/admission.py"
+        },
+        {
+          "id": "application",
+          "meaning": "为普通网格化数据节点组织请求、读取和资源测量，通过数据平面获得正式输入工件。不是所有分钟或归档入口都经过同一函数。",
+          "source": "src/research_pipeline/application/grid_data.py"
+        },
+        {
+          "id": "runtime",
+          "meaning": "调度节点依赖、资源、进程和检查点，经适配器执行数据、研究与仿真节点。只复用完整提交且身份一致的产物。",
+          "source": "src/research_pipeline/runtime/execution_service.py"
+        },
+        {
+          "id": "research",
+          "meaning": "消费正式输入，执行已支持的因子、标签、模型和统计步骤。模型训练与选择遵守开发/最终留出划分，Qlib 是可选算法后端。",
+          "source": "src/research_pipeline/research/__init__.py"
+        },
+        {
+          "id": "domain",
+          "meaning": "定义市场、订单、持仓、现金、信用、保证金和公司行动的数据类型与规则口径。账户和市场规则按实际资产、品种、日期及来源声明。",
+          "source": "src/research_pipeline/domain/spot_account.py"
+        },
+        {
+          "id": "simulation",
+          "meaning": "在声明范围内处理交易事件、撮合、费用和账户记账，产出正式金融事实。借鉴 RQAlpha 的职责划分，不调用其执行引擎。",
+          "source": "src/research_pipeline/simulation/engine.py"
+        },
+        {
+          "id": "results",
+          "meaning": "由 CLI 在 Runtime 返回后调用，封存输入、配置、实现信息和输出表为 Result。结果封存具有单独状态，不由节点成功自动代替。",
+          "source": "src/research_pipeline/results/assembler.py"
+        },
+        {
+          "id": "evidence",
+          "meaning": "读取封存结果及支持事实，按声明的验证范围重新检查公式、时间和金融关系，生成 VerificationResult。报告由命令层读取结果及检查单；开发反馈只使用验证通过的指标。",
+          "source": "src/research_pipeline/evidence/verification_result.py"
+        },
+        {
+          "id": "operations",
+          "meaning": "提供能力查询、环境诊断、文档检查与维护入口，为正式主链提供操作支持，不承担项目策略算法。",
+          "source": "src/research_pipeline/operations/__init__.py"
+        },
+        {
+          "id": "platform",
+          "meaning": "提供时间、单位、身份、原子目录及公共数据类型等底层机制，被上层模块复用。",
+          "source": "src/research_pipeline/platform/__init__.py"
+        }
+      ],
+      "preview_source": "sources/architecture.json",
+      "detailed_source": "sources/detailed/architecture.json"
+    },
+    {
+      "type": "dataflow",
+      "source": "sources/dataflow.json",
+      "relations": [
+        "数据进入计算的方向与模块依赖方向不是一回事。",
+        "Report 不把 VerificationResult 当作数值表；它同时读取结果与检查单。",
+        "普通列式路径、分钟扫描与归档输入在取数入口不同，之后遵守相同结果和验证约定。"
+      ],
+      "nodes": [
+        {
+          "id": "source",
+          "meaning": "只读使用。已提交快照不会自动变成历史版本完整的数据。",
+          "source": "src/research_pipeline/data_plane/providers/duckdb.py"
+        },
+        {
+          "id": "catalog",
+          "meaning": "字段、物理绑定、可见日期和修订来源组成数据约定。",
+          "source": "src/research_pipeline/catalog/compiler.py"
+        },
+        {
+          "id": "plan",
+          "meaning": "绑定查询、预算、输入来源与可见时点。",
+          "source": "src/research_pipeline/data_plane/admission.py"
+        },
+        {
+          "id": "input",
+          "meaning": "普通路径经 provider 与数据平面生成列式工件；分钟扫描和归档快照使用各自入口。",
+          "source": "src/research_pipeline/application/grid_data.py"
+        },
+        {
+          "id": "compute",
+          "meaning": "研究计算不自行回查未来数据。处理器拟合、信号与交易时点各有可见性约定。",
+          "source": "src/research_pipeline/runtime/adapters/model.py"
+        },
+        {
+          "id": "result",
+          "meaning": "数值表及其支持事实一起封存，按结果身份查阅。",
+          "source": "src/research_pipeline/results/assembler.py"
+        },
+        {
+          "id": "verify",
+          "meaning": "结果与输入都来自封存材料；验证不直接沿用生产算法的正确性结论。",
+          "source": "src/research_pipeline/evidence/verification_result.py"
+        },
+        {
+          "id": "vr",
+          "meaning": "单独保存并绑定对应 Result。检查通过仅适用于声明过的验证范围。",
+          "source": "src/research_pipeline/evidence/verification_result.py"
+        },
+        {
+          "id": "report",
+          "meaning": "报告使用 Result 和 VerificationResult；反馈投影只允许已验证开发指标。",
+          "source": "integrations/rdagent/src/quantwitness_rdagent/package_campaign.py"
+        }
+      ],
+      "preview_source": "sources/dataflow.json",
+      "detailed_source": "sources/detailed/dataflow.json"
+    },
+    {
+      "type": "workflow",
+      "source": "sources/workflow.json",
+      "relations": [
+        "Workspace execute 会依次编排这些步骤；运行时本身不负责把独立验证自动判为成功。",
+        "检查或准入失败：补齐研究声明／数据条件，不产生可执行计划。",
+        "最终留出集单独管理。AI 开发循环不得读取 test / holdout 作为改进反馈。"
+      ],
+      "nodes": [
+        {
+          "id": "spec",
+          "meaning": "可由人填写或由 AI 辅助起草；用 ResearchPackage 保存。",
+          "source": "src/research_pipeline/packages/lint.py"
+        },
+        {
+          "id": "lint",
+          "meaning": "检查必填项、算法步骤、输出要求和缺口。检查通过不等于获得数据准入。",
+          "source": "src/research_pipeline/packages/lint.py"
+        },
+        {
+          "id": "admit",
+          "meaning": "绑定已批准的数据说明、来源和 PIT 约定，发布不可变计划。",
+          "source": "src/research_pipeline/cli/commands/research_plan.py"
+        },
+        {
+          "id": "run",
+          "meaning": "Runtime 调度节点、控制资源、记录事件并提交检查点。",
+          "source": "src/research_pipeline/runtime/execution_service.py"
+        },
+        {
+          "id": "result",
+          "meaning": "节点全部成功后，CLI 独立封存结果；封存失败不能报作研究交付完成。",
+          "source": "src/research_pipeline/cli/commands/research_run.py"
+        },
+        {
+          "id": "verify",
+          "meaning": "按声明的公式、金融和统计约定进行独立检查。",
+          "source": "src/research_pipeline/evidence/verification_result.py"
+        },
+        {
+          "id": "report",
+          "meaning": "验证失败也可有诊断报告，但不能作为有效开发指标反馈给 AI。",
+          "source": "src/research_pipeline/cli/report_output.py"
+        },
+        {
+          "id": "recover",
+          "meaning": "进程中断用 resume；paused 状态按诊断对指定节点 retry-node。不可恢复错误先修正问题并重新准入。",
+          "source": "src/research_pipeline/runtime/diagnostics.py"
+        }
+      ],
+      "preview_source": "sources/workflow.json",
+      "detailed_source": "sources/detailed/workflow.json"
+    },
+    {
+      "type": "sequence",
+      "source": "sources/sequence.json",
+      "relations": [
+        "每个箭头表示一条调用或返回。数据访问只在对应数据节点发生。",
+        "Result 封存位于 Runtime 返回之后；verify 是另一条正式命令。",
+        "Checkpoint 只复用完整、身份匹配的已提交节点，不复用半成品。"
+      ],
+      "nodes": [
+        {
+          "id": "cli",
+          "meaning": "负责运行编排与最终封存。",
+          "source": "src/research_pipeline/cli/commands/research_run.py"
+        },
+        {
+          "id": "runtime",
+          "meaning": "调度算法步骤，验证并提交检查点。",
+          "source": "src/research_pipeline/runtime/execution_service.py"
+        },
+        {
+          "id": "adapter",
+          "meaning": "数据节点调用数据平面，算法节点消费正式输入。",
+          "source": "src/research_pipeline/application/grid_data.py"
+        },
+        {
+          "id": "store",
+          "meaning": "Result 封存后，再执行独立检查。",
+          "source": "src/research_pipeline/results/assembler.py"
+        }
+      ],
+      "preview_source": "sources/sequence.json",
+      "detailed_source": "sources/detailed/sequence.json"
+    },
+    {
+      "type": "lifecycle",
+      "source": "sources/lifecycle.json",
+      "relations": [
+        "cancelled 在状态表中允许，但当前执行主控没有直接写入路径；这里不画成可操作的“取消按钮”。",
+        "node 与 attempt 有各自状态；node 可经过 waiting_for_resources，异常中断的 attempt 可转为 lost / cancelled。",
+        "holdout：frozen → prepared → opened → committed / consumed_failed；打开后不因失败而重新获得机会。"
+      ],
+      "nodes": [
+        {
+          "id": "created",
+          "meaning": "Runtime 已建立运行记录。",
+          "source": "src/research_pipeline/runtime/state.py"
+        },
+        {
+          "id": "planned",
+          "meaning": "执行前的计划状态。",
+          "source": "src/research_pipeline/runtime/state.py"
+        },
+        {
+          "id": "running",
+          "meaning": "进程意外终止时可能保留本状态，随后用 resume 恢复。",
+          "source": "src/research_pipeline/runtime/execution_service.py"
+        },
+        {
+          "id": "paused",
+          "meaning": "按 inspect 建议使用 retry-node；该命令先将运行恢复为 running。",
+          "source": "src/research_pipeline/runtime/execution_service.py"
+        },
+        {
+          "id": "failed",
+          "meaning": "需要查阅诊断。不能把失败步骤输出当正式结果。",
+          "source": "src/research_pipeline/runtime/state.py"
+        },
+        {
+          "id": "success",
+          "meaning": "仅指 Runtime 成功，不代表 Result 已封存或独立验证通过。",
+          "source": "src/research_pipeline/runtime/state.py"
+        },
+        {
+          "id": "finalize",
+          "meaning": "CLI 单独记录封存状态，成功后才有正式结果交付。",
+          "source": "src/research_pipeline/runtime/diagnostics.py"
+        },
+        {
+          "id": "verify",
+          "meaning": "VerificationResult 是独立文件；判断验证结果，而不是仅检查进程退出。",
+          "source": "src/research_pipeline/evidence/verification_result.py"
+        },
+        {
+          "id": "delivery",
+          "meaning": "保留检查范围。失败报告可用于诊断，不能用于有效开发选优。",
+          "source": "src/research_pipeline/cli/report_output.py"
+        }
+      ],
+      "preview_source": "sources/lifecycle.json",
+      "detailed_source": "sources/detailed/lifecycle.json"
+    }
+  ],
+  "detailed_evidence": {
+    "note": "详细图的源码依据；路径相对 QuantWitness 公开仓库根目录。line 为定位起点，函数与类以 interfaces 的完整名称定位。",
+    "nodes": [
+      {
+        "id": "research_mod",
+        "label": "研究引擎 research（图中节点）",
+        "sources": [
+          {
+            "path": "src/research_pipeline/research/minute_operators.py",
+            "line": 1
+          },
+          {
+            "path": "src/research_pipeline/research/modeling/sequence.py",
+            "line": 1
+          },
+          {
+            "path": "src/research_pipeline/research/validation/holdout.py",
+            "line": 126
+          }
+        ]
+      },
+      {
+        "id": "ext_ml",
+        "label": "ML 后端（外部）",
+        "sources": [
+          {
+            "path": "src/research_pipeline/research/modeling/qlib.py",
+            "line": 190
+          },
+          {
+            "path": "src/research_pipeline/research/modeling/gru.py",
+            "line": 56
+          }
+        ]
+      },
+      {
+        "id": "proposer",
+        "label": "上游 LLM 提案器（外部）",
+        "sources": [
+          {
+            "path": "integrations/rdagent/src/quantwitness_rdagent/package_execution.py",
+            "line": 12
+          }
+        ]
+      },
+      {
+        "id": "catalog_defs",
+        "label": "目录声明",
+        "sources": [
+          {
+            "path": "src/research_pipeline/catalog/declarative.py",
+            "line": 108
+          },
+          {
+            "path": "docs/catalog.md",
+            "line": 1
+          }
+        ]
+      },
+      {
+        "id": "cn_rules",
+        "label": "中国市场口径",
+        "sources": [
+          {
+            "path": "src/research_pipeline/simulation/cn_stock.py",
+            "line": 1
+          },
+          {
+            "path": "src/research_pipeline/simulation/cn_futures.py",
+            "line": 1
+          },
+          {
+            "path": "src/research_pipeline/domain/session_calendar.py",
+            "line": 256
+          }
+        ]
+      },
+      {
+        "id": "cli",
+        "label": "CLI / Workspace（核心入口）",
+        "sources": [
+          {
+            "path": "src/research_pipeline/cli/main.py",
+            "line": 9
+          },
+          {
+            "path": "src/research_pipeline/cli/parser.py",
+            "line": 11
+          },
+          {
+            "path": "src/research_pipeline/workspace.py",
+            "line": 1
+          }
+        ]
+      },
+      {
+        "id": "packages",
+        "label": "ResearchPackage",
+        "sources": [
+          {
+            "path": "src/research_pipeline/packages/compilation.py",
+            "line": 19
+          },
+          {
+            "path": "src/research_pipeline/packages/lint.py",
+            "line": 125
+          },
+          {
+            "path": "src/research_pipeline/cli/commands/research_plan.py",
+            "line": 73
+          }
+        ]
+      },
+      {
+        "id": "runtime_ctx",
+        "label": "运行上下文 RuntimeNodeContext",
+        "sources": [
+          {
+            "path": "src/research_pipeline/runtime/operator_runtime.py",
+            "line": 239
+          },
+          {
+            "path": "src/research_pipeline/runtime/graph.py",
+            "line": 36
+          }
+        ]
+      },
+      {
+        "id": "engine_adapters",
+        "label": "运行时适配器 runtime/adapters",
+        "sources": [
+          {
+            "path": "src/research_pipeline/runtime/adapters/common.py",
+            "line": 20
+          },
+          {
+            "path": "src/research_pipeline/runtime/adapters/minute_research.py",
+            "line": 11
+          },
+          {
+            "path": "src/research_pipeline/runtime/adapters/model.py",
+            "line": 11
+          }
+        ]
+      },
+      {
+        "id": "runtime",
+        "label": "运行时 runtime",
+        "sources": [
+          {
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 94
+          },
+          {
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 300
+          },
+          {
+            "path": "src/research_pipeline/cli/commands/research_run.py",
+            "line": 417
+          }
+        ]
+      },
+      {
+        "id": "simulation",
+        "label": "回测仿真 simulation",
+        "sources": [
+          {
+            "path": "src/research_pipeline/simulation/daily_event.py",
+            "line": 64
+          },
+          {
+            "path": "src/research_pipeline/simulation/event_loop.py",
+            "line": 62
+          },
+          {
+            "path": "src/research_pipeline/simulation/result_contract.py",
+            "line": 80
+          }
+        ]
+      },
+      {
+        "id": "data_plane",
+        "label": "数据平面 data_plane",
+        "sources": [
+          {
+            "path": "src/research_pipeline/data_plane/admission.py",
+            "line": 236
+          },
+          {
+            "path": "src/research_pipeline/data_plane/service.py",
+            "line": 173
+          },
+          {
+            "path": "src/research_pipeline/data_plane/temporal.py",
+            "line": 66
+          }
+        ]
+      },
+      {
+        "id": "extensions",
+        "label": "项目扩展 extensions",
+        "sources": [
+          {
+            "path": "src/research_pipeline/extensions/project_loading.py",
+            "line": 14
+          },
+          {
+            "path": "src/research_pipeline/extensions/registry.py",
+            "line": 24
+          },
+          {
+            "path": "src/research_pipeline/extensions/governance.py",
+            "line": 130,
+            "end_line": 142
+          }
+        ]
+      },
+      {
+        "id": "domain",
+        "label": "领域合同 domain",
+        "sources": [
+          {
+            "path": "src/research_pipeline/domain/rules.py",
+            "line": 21
+          },
+          {
+            "path": "src/research_pipeline/domain/session_calendar.py",
+            "line": 256
+          }
+        ]
+      },
+      {
+        "id": "catalog",
+        "label": "目录与 PIT catalog",
+        "sources": [
+          {
+            "path": "src/research_pipeline/catalog/compiler.py",
+            "line": 100
+          },
+          {
+            "path": "src/research_pipeline/catalog/compiler.py",
+            "line": 365
+          },
+          {
+            "path": "src/research_pipeline/catalog/policy_validators.py",
+            "line": 16
+          }
+        ]
+      },
+      {
+        "id": "results",
+        "label": "结果 results",
+        "sources": [
+          {
+            "path": "src/research_pipeline/results/assembler.py",
+            "line": 50
+          },
+          {
+            "path": "src/research_pipeline/results/store.py",
+            "line": 214
+          },
+          {
+            "path": "src/research_pipeline/results/contracts.py",
+            "line": 598
+          }
+        ]
+      },
+      {
+        "id": "evidence",
+        "label": "证据与复核 evidence",
+        "sources": [
+          {
+            "path": "src/research_pipeline/evidence/verification_result.py",
+            "line": 853
+          },
+          {
+            "path": "src/research_pipeline/evidence/verification_result.py",
+            "line": 378
+          },
+          {
+            "path": "src/research_pipeline/evidence/result_financial_oracle.py",
+            "line": 103
+          }
+        ]
+      },
+      {
+        "id": "operations",
+        "label": "运维 operations",
+        "sources": [
+          {
+            "path": "src/research_pipeline/operations/observability.py",
+            "line": 75
+          },
+          {
+            "path": "src/research_pipeline/operations/doctor.py",
+            "line": 27
+          },
+          {
+            "path": "src/research_pipeline/operations/gc.py",
+            "line": 34
+          },
+          {
+            "path": "src/research_pipeline/operations/framework_boundary.py",
+            "line": 613
+          }
+        ]
+      },
+      {
+        "id": "platform",
+        "label": "合同底座 platform",
+        "sources": [
+          {
+            "path": "src/research_pipeline/platform/canonical.py",
+            "line": 46
+          },
+          {
+            "path": "src/research_pipeline/platform/metric_contracts.py",
+            "line": 1
+          }
+        ]
+      },
+      {
+        "id": "providers",
+        "label": "数据适配器 providers",
+        "sources": [
+          {
+            "path": "src/research_pipeline/data_plane/providers/duckdb.py",
+            "line": 23
+          },
+          {
+            "path": "src/research_pipeline/data_plane/providers/parquet.py",
+            "line": 24
+          }
+        ]
+      },
+      {
+        "id": "report",
+        "label": "报告与比较",
+        "sources": [
+          {
+            "path": "src/research_pipeline/cli/report_output.py",
+            "line": 15
+          },
+          {
+            "path": "src/research_pipeline/evidence/verification_result.py",
+            "line": 1406
+          }
+        ]
+      },
+      {
+        "id": "ext_duckdb",
+        "label": "DuckDB 数据库（外部）",
+        "sources": [
+          {
+            "path": "src/research_pipeline/data_plane/providers/duckdb.py",
+            "line": 95
+          }
+        ],
+        "other_read_only_connections": [
+          "src/research_pipeline/catalog/discovery.py:1015 (DuckDBSourceInspector.observe_current_schema)",
+          "src/research_pipeline/catalog/discovery.py:1059",
+          "src/research_pipeline/data_plane/revision.py:88 (probe_duckdb_source)",
+          "src/research_pipeline/data_plane/factor_publication.py:322 (observe_factor_publication)"
+        ]
+      },
+      {
+        "id": "ext_parquet",
+        "label": "Parquet 工件库（外部）",
+        "sources": [
+          {
+            "path": "src/research_pipeline/data_plane/dataset_artifacts.py",
+            "line": 147
+          }
+        ]
+      },
+      {
+        "id": "application",
+        "label": "数据节点 application（正式 Runtime 适配器）",
+        "sources": [
+          {
+            "path": "src/research_pipeline/application/grid_data.py",
+            "line": 339
+          },
+          {
+            "path": "src/research_pipeline/runtime/operator_definition_factory.py",
+            "line": 43
+          }
+        ]
+      }
+    ],
+    "not_in_diagram": [
+      {
+        "id": "oracle",
+        "label": "独立金融 oracle（图中以卡片说明，未出节点）",
+        "sources": [
+          {
+            "path": "src/research_pipeline/evidence/oracle_workspace.py",
+            "line": 102
+          },
+          {
+            "path": "src/research_pipeline/evidence/oracle_workspace.py",
+            "line": 144
+          }
+        ]
+      }
+    ],
+    "reviewed_date": "2026-10-06",
+    "diagrams": [
+      {
+        "type": "architecture",
+        "source": "sources/detailed/architecture.json",
+        "facts": [
+          {
+            "statement": "主控构建节点上下文并调用适配器",
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 807
+          },
+          {
+            "statement": "仿真实现依赖领域合同",
+            "path": "src/research_pipeline/simulation/daily_event.py",
+            "line": 14
+          },
+          {
+            "statement": "Catalog 加载调用方显式声明",
+            "path": "src/research_pipeline/cli/commands/catalog.py",
+            "line": 44
+          },
+          {
+            "statement": "框架边界审计扫描核心源码",
+            "path": "src/research_pipeline/operations/framework_boundary.py",
+            "line": 613
+          }
+        ]
+      },
+      {
+        "type": "dataflow",
+        "source": "sources/detailed/dataflow.json",
+        "facts": [
+          {
+            "statement": "普通物化从只读 provider 接收批次并发布快照",
+            "path": "src/research_pipeline/data_plane/service.py",
+            "line": 101
+          },
+          {
+            "statement": "VerificationResult 单独保存",
+            "path": "src/research_pipeline/evidence/verification_result.py",
+            "line": 1053
+          },
+          {
+            "statement": "验证文件使用独占创建",
+            "path": "src/research_pipeline/evidence/verification_result.py",
+            "line": 1089
+          }
+        ]
+      },
+      {
+        "type": "workflow",
+        "source": "sources/detailed/workflow.json",
+        "facts": [
+          {
+            "statement": "package admit 内进行 Catalog 预检",
+            "path": "src/research_pipeline/cli/commands/research_plan.py",
+            "line": 353
+          },
+          {
+            "statement": "完成准入后编译并发布正式计划",
+            "path": "src/research_pipeline/cli/commands/research_plan.py",
+            "line": 195
+          },
+          {
+            "statement": "数据节点物化前复查 schema",
+            "path": "src/research_pipeline/data_plane/service.py",
+            "line": 88
+          }
+        ]
+      },
+      {
+        "type": "sequence",
+        "source": "sources/detailed/sequence.json",
+        "facts": [
+          {
+            "statement": "节点上下文承载输入、路径与预算",
+            "path": "src/research_pipeline/runtime/operator_runtime.py",
+            "line": 239
+          },
+          {
+            "statement": "主控调用适配器",
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 832
+          },
+          {
+            "statement": "普通数据适配器调用数据物化",
+            "path": "src/research_pipeline/application/grid_data.py",
+            "line": 174
+          },
+          {
+            "statement": "主控提交 checkpoint",
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 872
+          },
+          {
+            "statement": "Runtime 返回后由 CLI 执行 Result finalize",
+            "path": "src/research_pipeline/cli/commands/research_run.py",
+            "line": 153
+          },
+          {
+            "statement": "分钟扫描独立入口",
+            "path": "src/research_pipeline/runtime/adapters/minute_data.py",
+            "line": 20
+          },
+          {
+            "statement": "归档快照独立入口",
+            "path": "src/research_pipeline/application/grid_data.py",
+            "line": 38
+          }
+        ]
+      },
+      {
+        "type": "lifecycle",
+        "source": "sources/detailed/lifecycle.json",
+        "facts": [
+          {
+            "statement": "run / node / attempt 状态转移表",
+            "path": "src/research_pipeline/runtime/state.py",
+            "line": 11
+          },
+          {
+            "statement": "paused 恢复先转为 running",
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 520
+          },
+          {
+            "statement": "次数耗尽将 running 转为 failed",
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 634
+          },
+          {
+            "statement": "可重试失败进入 paused",
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 991
+          },
+          {
+            "statement": "进程中断恢复 attempt 与节点",
+            "path": "src/research_pipeline/runtime/execution_service.py",
+            "line": 2457
+          },
+          {
+            "statement": "Result finalize 独立状态",
+            "path": "src/research_pipeline/runtime/diagnostics.py",
+            "line": 113
+          }
+        ]
+      }
+    ]
+  },
+  "interfaces": [
+    {
+      "path": "src/research_pipeline/cli/commands/workspace_flow.py",
+      "symbol": "execute_workspace",
+      "role": "依次委托 lint、admit、run、verify 与 report。"
+    },
+    {
+      "path": "src/research_pipeline/workspace.py",
+      "symbol": "run_workspace_execution",
+      "role": "工作区执行委托正式运行命令。"
+    },
+    {
+      "path": "src/research_pipeline/catalog/compiler.py",
+      "symbol": "compile_catalog",
+      "role": "编译显式数据目录声明。"
+    },
+    {
+      "path": "src/research_pipeline/data_plane/admission.py",
+      "symbol": "admit_query",
+      "role": "输出 AdmittedQueryPlan。"
+    },
+    {
+      "path": "src/research_pipeline/application/grid_data.py",
+      "symbol": "execute_operator_graph_data",
+      "role": "普通数据节点调用 materialize_dataset_plan；归档输入选择独立分支。"
+    },
+    {
+      "path": "src/research_pipeline/data_plane/service.py",
+      "symbol": "materialize_dataset_plan",
+      "role": "按准入计划物化普通 DuckDB 输入并发布列式工件。"
+    },
+    {
+      "path": "src/research_pipeline/runtime/execution_service.py",
+      "symbol": "RuntimeExecutionService.execute",
+      "role": "构建上下文，调度适配器，核验产出并提交 checkpoint。"
+    },
+    {
+      "path": "src/research_pipeline/runtime/operator_runtime.py",
+      "symbol": "RuntimeNodeContext",
+      "role": "承载节点输入、路径与资源预算。"
+    },
+    {
+      "path": "src/research_pipeline/results/assembler.py",
+      "symbol": "ResultAssembler.finalize",
+      "role": "由 CLI 在 Runtime 成功后调用，返回 ResultBundle、目录及 ResultReference。"
+    },
+    {
+      "path": "src/research_pipeline/results/store.py",
+      "symbol": "ResultStore",
+      "role": "负责结果存储，由 ResultAssembler 使用。"
+    },
+    {
+      "path": "src/research_pipeline/evidence/verification_result.py",
+      "symbol": "verify_result",
+      "role": "独立消费封存结果，返回包含 VerificationResult 的验证上下文。"
+    },
+    {
+      "path": "src/research_pipeline/cli/commands/evidence_lifecycle.py",
+      "symbol": "_execute",
+      "role": "编排 verify、report 和 compare 命令。"
+    },
+    {
+      "path": "integrations/rdagent/src/quantwitness_rdagent/package_execution.py",
+      "symbol": "execute_package",
+      "role": "经 Workspace 运行候选，再独立验证、生成开发反馈。"
+    }
+  ],
+  "reviewed_date": "2026-10-10"
+}

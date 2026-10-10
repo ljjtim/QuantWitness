@@ -1,0 +1,200 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "研究数据与结果血缘",
+    "output": "dataflow-research-lineage.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "subtitle": "普通列式取数的数据、计划与封存结果",
+    "animation": "trace",
+    "visual_preset": "classic"
+  },
+  "stages": [
+    {
+      "label": "数据源"
+    },
+    {
+      "label": "目录与准入"
+    },
+    {
+      "label": "取数与计算"
+    },
+    {
+      "label": "工件与复核"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "source",
+      "type": "database",
+      "label": "研究数据源",
+      "sublabel": "DuckDB + Parquet",
+      "tag": "只读打开",
+      "stage": 0,
+      "row": 0
+    },
+    {
+      "id": "catalog",
+      "type": "security",
+      "label": "Catalog / PIT 准入",
+      "sublabel": "声明编译 + 漂移证明",
+      "tag": "approved 槽位",
+      "stage": 1,
+      "row": 0
+    },
+    {
+      "id": "plan",
+      "type": "backend",
+      "label": "AdmittedQueryPlan",
+      "sublabel": "静态准入结果",
+      "stage": 2,
+      "row": 0
+    },
+    {
+      "id": "provider",
+      "type": "messagebus",
+      "label": "列式取数 provider",
+      "sublabel": "只读源 → Parquet",
+      "stage": 2,
+      "row": 2
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "研究引擎 + 回测",
+      "sublabel": "特征 / 仿真",
+      "stage": 2,
+      "row": 3
+    },
+    {
+      "id": "bundle",
+      "type": "backend",
+      "label": "ResultBundle",
+      "sublabel": "表清单 + 哈希",
+      "stage": 3,
+      "row": 3
+    },
+    {
+      "id": "verify",
+      "type": "security",
+      "label": "VerificationResult",
+      "sublabel": "独立复核",
+      "tag": "验证文件单独封存",
+      "stage": 3,
+      "row": 1
+    }
+  ],
+  "flows": [
+    {
+      "id": "source-catalog",
+      "from": "source",
+      "to": "catalog",
+      "label": "schema / 修订",
+      "classification": "只读观测",
+      "variant": "security"
+    },
+    {
+      "id": "catalog-plan",
+      "from": "catalog",
+      "to": "plan",
+      "label": "绑定 / PIT",
+      "classification": "准入事实",
+      "variant": "security"
+    },
+    {
+      "id": "plan-provider",
+      "from": "plan",
+      "to": "provider",
+      "label": "查询计划",
+      "classification": "执行依据",
+      "variant": "security",
+      "labelAt": [
+        475,
+        295
+      ]
+    },
+    {
+      "id": "source-provider",
+      "from": "source",
+      "to": "provider",
+      "label": "只读数据",
+      "classification": "实际输入",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          100,
+          385
+        ]
+      ],
+      "labelAt": [
+        285,
+        372
+      ]
+    },
+    {
+      "id": "provider-engine",
+      "from": "provider",
+      "to": "engine",
+      "label": "列式工件",
+      "classification": "数据引用",
+      "variant": "emphasis",
+      "labelAt": [
+        470,
+        446
+      ]
+    },
+    {
+      "id": "engine-bundle",
+      "from": "engine",
+      "to": "bundle",
+      "label": "正式结果表",
+      "classification": "封存数据",
+      "variant": "emphasis"
+    },
+    {
+      "id": "bundle-verify",
+      "from": "bundle",
+      "to": "verify",
+      "label": "封存输入与结果",
+      "classification": "只读复核",
+      "variant": "emphasis",
+      "labelAt": [
+        832,
+        402
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "数据与计划分别进入取数节点",
+      "items": [
+        "源数据提供实际记录；Catalog 只读观察来源 schema 与修订，并给出绑定和 PIT 准入事实",
+        "AdmittedQueryPlan 是取数依据，不承载原始数据；provider 从只读数据源读取并发布列式工件",
+        "普通 DuckDB 源库以 read_only=True 打开，Parquet 输入按相应文件合同读取"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "时间可见性与漂移",
+      "items": [
+        "可见日期、已完成 bar 和来源修订政策由当前 Catalog Lock 约束",
+        "取数前复查 schema，取数前后核对来源修订与指纹；变化阻止本次工件发布",
+        "财报、成分、行业、复权与市场规则仍需使用当时可见的快照或有效区间"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "结果与验证分别封存",
+      "items": [
+        "ResultBundle 绑定正式表清单、输入修订、运行与配置身份及内容哈希",
+        "Verifier 只读封存输入与结果，按独立金融、模型或统计合同生成 VerificationResult",
+        "VerificationResult 另存文件并绑定 Result 身份；报告消费 Result 与验证文件",
+        "图展示普通列式路径；分钟扫描与归档快照走相应入口，再接入相同结果和验证链"
+      ]
+    }
+  ]
+}

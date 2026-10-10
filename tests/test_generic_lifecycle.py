@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
-from datetime import timedelta
 import importlib
 import json
 import shutil
@@ -23,7 +22,6 @@ from research_pipeline.evidence.errors import EvidenceContractError
 from research_pipeline.evidence.validity_recompute import (
     VALIDITY_FACTS_PRODUCER_HASH,
     policy_id_for_claim,
-    recompute_gate_results,
 )
 from research_pipeline.platform import canonical_json, typed_canonical_hash
 from research_pipeline.platform.metric_contracts import (

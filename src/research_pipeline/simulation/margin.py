@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 
 from .orders import SimulationContractError
+
+
+_FEN = Decimal("1")
 
 
 @dataclass(frozen=True)
@@ -22,9 +26,12 @@ class MarginPolicy:
             raise SimulationContractError("券商保证金加收不能为负")
 
     def required_units(self, *, price_units: int, multiplier: int, contracts: int) -> int:
-        gross = abs(contracts) * price_units * multiplier
-        rate = self.initial_margin_ppm + self.broker_addon_ppm
-        return (gross * rate + 999_999) // 1_000_000
+        return required_futures_margin(
+            price_units=price_units,
+            multiplier=multiplier,
+            contracts=abs(contracts),
+            margin_ppm=self.initial_margin_ppm + self.broker_addon_ppm,
+        )
 
     def maintenance_units(self, *, price_units: int, multiplier: int, contracts: int) -> int:
         gross = abs(contracts) * price_units * multiplier
@@ -37,4 +44,25 @@ def deterministic_liquidation_order(positions: tuple[tuple[str, int, int], ...],
     return tuple(item[0] for item in sorted(active, key=lambda item: (rank.get(item[0], len(rank)), -abs(item[1]) * item[2], item[0])))
 
 
-__all__ = ["MarginPolicy", "deterministic_liquidation_order"]
+def required_futures_margin(
+    *,
+    price_units: int,
+    multiplier: int,
+    contracts: int,
+    margin_ppm: int,
+) -> int:
+    """按整数金额和百万分比向上取整，与日频分金额半升口径分开。"""
+    numerator = price_units * multiplier * contracts * margin_ppm
+    return (numerator + 999_999) // 1_000_000
+
+
+def futures_margin_fen(price: Decimal, multiplier: int, quantity: int, rate_pct: Decimal) -> int:
+    return int((price * multiplier * quantity * rate_pct).quantize(_FEN, rounding=ROUND_HALF_UP))
+
+
+__all__ = [
+    "MarginPolicy",
+    "deterministic_liquidation_order",
+    "futures_margin_fen",
+    "required_futures_margin",
+]

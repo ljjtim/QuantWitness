@@ -1,4 +1,10 @@
-# Qlib 日频模型与样本外选择
+# 模型研究：滚动训练与样本外评价
+
+模型应该用过去训练，用之后的数据评价。滚动研究会沿时间推进训练和评价窗口；开发阶段用于比较候选，最终留出样本用于评价已经选定的方案。
+
+这页说明 Qlib 模型、训练处理器、样本划分、候选选择与最终评价怎样接入同一研究流程。
+
+## 参数与行为说明
 
 模型计算采用 Qlib 0.9.7 的 Dataset、Processor 与 Model，支持日频、每模型单期限、单标签回归：LinearModel 的 OLS/Ridge、LGBModel、XGBModel、DEnsembleModel（样本重加权版本）以及 GRU/LSTM/Transformer 序列模型。安装使用 `pip install -e ".[ml]"`。分类、多标签和在线更新不在当前支持范围。
 

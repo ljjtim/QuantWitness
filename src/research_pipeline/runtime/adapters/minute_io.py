@@ -584,6 +584,7 @@ def _commit_partitioned_minute_rows(
 
 
 _MINUTE_ADJUSTMENT_CONTEXT_KEYS = (
+    "financial_corporate_actions",
     "adjustment_snapshot_identity_hash",
     "adjustment_candidates",
     "adjustment_effective_times",

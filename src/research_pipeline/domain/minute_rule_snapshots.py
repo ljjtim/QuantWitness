@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import cached_property
 from importlib.resources import files
 import json
 from pathlib import Path
@@ -12,12 +13,11 @@ from typing import Mapping
 
 from research_pipeline.platform import typed_canonical_hash
 from research_pipeline.platform.minute_reference import (
-    load_minute_capability_manifest,
-    require_current_minute_capability_binding,
+    require_published_minute_capability_binding,
 )
 from .models import DomainContractError
 from .session_calendar import (
-    CURRENT_SESSION_POLICY_BUNDLE_HASH,
+    published_session_bundle_hash,
     SessionCalendarError,
     SessionInstrumentMetadata,
 )
@@ -28,10 +28,10 @@ MINUTE_RULE_VERSION = "minute-rule-snapshot-v1"
 MINUTE_RULE_SOURCE_VERSION = "minute-rule-source-v1"
 MINUTE_RULE_CAPABILITY_CONSUMER = "domain.minute.market_rule_snapshots"
 CURRENT_MINUTE_RULE_BUNDLE_HASH = (
-    "781d7dde9d15aa003ee23ebf6d49f3371ab966e9eb3d56c8f48a63203dd70051"
+    "ca1d930bc7ae6f3587aade2b8da30d3207fd978dc01f15954696aca11d7bd9dd"
 )
 CURRENT_MINUTE_RULE_COVERAGE_HASH = (
-    "6039a2bcb3322061507a99fd13a6f1d093b457fb2697c9e556ed38d0347fbbb4"
+    "340fca44d5986732e1ed636ddd9f10a9b235bb8748c7e473e20616d83487a8d8"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -68,7 +68,7 @@ class MinuteRuleSource:
         if self.claim_ceiling != "research_observation":
             raise MinuteRuleSnapshotError("分钟规则只能声明 research_observation")
 
-    @property
+    @cached_property
     def source_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -221,14 +221,14 @@ class MinuteRuleSnapshotBundle:
         }:
             raise MinuteRuleSnapshotError("规则 capability binding schema 无效")
         try:
-            require_current_minute_capability_binding(
+            manifest = require_published_minute_capability_binding(
                 consumer_id=binding["consumer_id"],
                 manifest_hash=binding["minute_capability_manifest_hash"],
                 contract_version=binding["contract_version"],
                 binding_hash=binding["binding_hash"],
             )
         except Exception as exc:
-            raise MinuteRuleSnapshotError("规则 bundle 未绑定当前分钟能力 manifest") from exc
+            raise MinuteRuleSnapshotError("规则 bundle 未绑定已发布分钟能力 manifest") from exc
         if binding["consumer_id"] != MINUTE_RULE_CAPABILITY_CONSUMER:
             raise MinuteRuleSnapshotError("规则 bundle consumer 不一致")
         if self.sources != tuple(sorted(self.sources, key=lambda item: item.source_id)):
@@ -240,7 +240,7 @@ class MinuteRuleSnapshotBundle:
             if source.source_kind == "repository_snapshot":
                 _require_locator_hash(
                     source.locator,
-                    CURRENT_SESSION_POLICY_BUNDLE_HASH,
+                    published_session_bundle_hash(binding["minute_capability_manifest_hash"]),
                     "session repository source",
                 )
             elif source.source_kind == "platform_capability":
@@ -267,7 +267,6 @@ class MinuteRuleSnapshotBundle:
             for item in self.rules
         ):
             raise MinuteRuleSnapshotError("规则与 instrument classification 不一致")
-        manifest = load_minute_capability_manifest()
         expected_instruments = {
             item.instrument.instrument_id: item for item in manifest.coverages
         }
@@ -356,13 +355,23 @@ class MinuteRuleResolver:
             and item.instrument_id == instrument_id
             and item.effective_from <= effective_on <= item.effective_to
         )
-        if len(candidates) != 1:
+        if not candidates:
             raise MinuteRuleSnapshotError("rule_snapshot_missing_or_conflicting")
-        rule = candidates[0]
+        # 尚未可见的修订不能使当时唯一可见的历史规则失效。
+        visible = tuple(
+            item for item in candidates
+            if item.status == "unsupported"
+            or (item.available_at is not None and item.available_at <= current)
+        )
+        if not visible:
+            raise MinuteRuleSnapshotError("rule_snapshot_unavailable_at_decision")
+        intervals = {(item.effective_from, item.effective_to) for item in visible}
+        if len(intervals) != 1:
+            raise MinuteRuleSnapshotError("rule_snapshot_missing_or_conflicting")
+        # 同一适用区间的修订按可见版本选取，交叉适用区间仍拒绝。
+        rule = max(visible, key=lambda item: item.revision)
         if rule.status != "supported":
             raise MinuteRuleSnapshotError(f"rule_snapshot_unsupported:{rule.unsupported_reason}")
-        if rule.available_at is None or rule.available_at > current:
-            raise MinuteRuleSnapshotError("rule_snapshot_unavailable_at_decision")
         sources = {item.source_id: item.source_hash for item in self.bundle.sources}
         return MinuteRuleBinding(
             rule,
@@ -391,7 +400,7 @@ def load_minute_rule_snapshot_bundle(
     is_default = path is None
     if path is None:
         resource = files("research_pipeline.domain").joinpath(
-            "rule_snapshots/minute_reference_rules.json"
+            "rule_snapshots/minute_reference_rules.v6.json"
         )
         raw = resource.read_text(encoding="utf-8")
     else:

@@ -1,15 +1,26 @@
-# 用 Workspace 完成第一项合成研究
+# 入门教程：完成第一项可验证研究
 
 从股票横截面示例开始：四只虚构证券，按决策时已知的收益排序，再观察之后的收益差。研究包、算子与独立 Verifier 都已填写完整。目标是得到一个通过验证的报告，再改一个样本范围并比较两次结果。
 
+你会完成这条流程：**准备合成行情 → 建立研究工作区 → 执行并验证 → 打开报告**。不需要模型服务或真实行情；本例先教会你判断研究有没有正确完成，再接入 AI。
+
+| 你会遇到的名称 | 在这个教程里是什么 |
+| --- | --- |
+| ResearchPackage，研究包 | 已填好的研究说明：用哪些数据、算什么、验证什么 |
+| Workspace，工作区 | 保存每次实验的目录 |
+| bundle，扩展包 | 示例算法和独立检查代码的封装文件 |
+| Result / VerificationResult | 结果包 / 独立检查单 |
+
+## 1. 准备环境
+
 按 [README 的源码获取步骤](../README.md)取得完整公开源码，示例位于其中的 `examples/`；仅安装 wheel 不包含示例源码。在 QuantWitness 源码根目录执行本页 PowerShell 命令；单仓库用户先进入 `research_pipeline/`。从源码可用 `python -m pip install -e ".[dev]" "pyarrow==21.0.0"` 准备依赖；示例 bundle 明确锁定 PyArrow 21.0.0，`dev` 包含本页负例检查所需的 pytest。分发与安装范围见[安装说明](release.md)。Verifier 默认进程槽为 2；Windows venv 启动器会增加进程层级，本页 verify 显式使用 `--verification-process-slots 3`，覆盖 Supervisor、启动器和 Worker，详见[资源预算](project_resource_budgets.md)。
 
-## 准备合成输入
+## 2. 准备合成输入
 
-指定一个不存在的仓库外目录。准备脚本会在此创建一次性合成 DuckDB 和 Catalog，不读取个人数据库；后续准入和运行只读访问这个合成数据库。需要遵守所在环境的数据库写入授权规则。
+指定一个不存在的仓库外目录。示例默认放在源码所在磁盘的相邻目录；也可以将 `$work` 改成容量足够的数据盘路径。准备脚本会在此创建一次性合成 DuckDB 和 Catalog，不读取个人数据库；后续准入和运行只读访问这个合成数据库。需要遵守所在环境的数据库写入授权规则。
 
 ```powershell
-$work = Join-Path ([IO.Path]::GetTempPath()) 'quantwitness_first_study'
+$work = Join-Path (Get-Location).Path '../quantwitness-work/first-study'
 if (Test-Path -LiteralPath $work) { throw '请选择不存在的研究目录' }
 New-Item -ItemType Directory -Path $work | Out-Null
 $env:PYTHONIOENCODING = 'utf-8'
@@ -33,7 +44,7 @@ $bundleText | Set-Content -LiteralPath "$work/bundles.json" -Encoding utf8
 
 构建器统一生成四个示例的 bundle；本页只使用横截面项目。保存的 JSON 可在新的 PowerShell 会话中用 `Get-Content -Raw | ConvertFrom-Json` 重新加载。
 
-## 从现成研究包建立 Workspace
+## 3. 从现成研究包建立工作区
 
 `--from-package` 校验并复制示例的四份 YAML；目标目录必须不存在，源码示例保持不变。不提供该参数时，`workspace init` 仍生成待填写的中性草稿。
 
@@ -43,7 +54,7 @@ python -m research_pipeline workspace init $workspace --from-package $project.pa
 if ($LASTEXITCODE -ne 0) { throw 'Workspace 初始化失败' }
 ```
 
-## 一次完成研究、验证和报告
+## 4. 执行研究并打开报告
 
 `workspace execute` 依次执行静态检查、分配 execution、只读准入、运行、独立验证和报告。时点与种子取自研究包；显式传入不同的 `--clock` 或 `--root-seed` 会在分配前被拒绝。Catalog、数据库和 bundle 只需提供一次。
 
@@ -61,6 +72,12 @@ $verification = $flow.verification_result
 Get-Content -LiteralPath $flow.report_path
 ```
 
+### 怎么判断自己跑通了
+
+先看 `verification_status` 是否为 `pass`，再看 `report_path` 指向的报告。若只有 `execution_status` 成功而验证没通过，还不能作为完成。`result_store` 保存结果包，`verification_result` 指向独立检查单；保留它们，后续报告和比较不必重新计算。
+
+到这里就完成了第一项研究。想接入自己的行情，转到[基本数据接入](catalog.md)；想尝试 AI，转到[PDF 因子复现](../integrations/rdagent/docs/formula-reproduction.md)。下面的变体比较和恢复是可选练习。
+
 保存第一次结果，供下面的比较使用：
 
 ```powershell
@@ -73,7 +90,7 @@ $firstRunRoot = Join-Path $executionRoot 'run'
 
 本例 A 与 C 的未来收益差约为 `0.0472222222222223`（小数收益单位）。报告展示验证结论，具体数值表保存在 Result 中；本例不包含交易费用或实盘成交模型。
 
-## 改一个范围并比较
+## 5. 可选练习：改一个范围并比较
 
 在工作区 `package/spec/research.yaml` 中，把唯一请求的 `universe.instruments` 从四只证券改成 `[SYN.A, SYN.B, SYN.D]`，其他字段保持不变。只改工作区中的研究包。
 
@@ -95,7 +112,7 @@ python -m pytest -q -p no:cacheprovider examples/equity_cross_section/test_opera
 
 预期三项测试通过，含义是“正常手算正确，两个有问题的输入得到预期处理”，不是允许未来数据进入研究。
 
-## 恢复和复用
+## 遇到中断：恢复和复用
 
 进程中断或节点可重试失败时，沿用原 execution。先查看运行状态：
 

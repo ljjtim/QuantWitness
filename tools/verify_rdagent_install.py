@@ -38,7 +38,7 @@ def verify_install(project: Path, output: Path) -> dict[str, object]:
 
     def command(name, arguments, stdin=None):
         completed = subprocess.run(
-            [sys.executable, "-I", *arguments], input=stdin, text=True,
+            [sys.executable, "-I", "-X", "utf8", *arguments], input=stdin, text=True,
             encoding="utf-8", capture_output=True, cwd=output, env=environment,
             check=False,
         )

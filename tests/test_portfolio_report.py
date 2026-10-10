@@ -47,9 +47,10 @@ def context():
         "sample_start": str(days[0]), "sample_end": str(days[-1]), "sample_size": 3, "status": "computed"}])
 
     class Snapshot:
+        support_bytes = {}
         bundle = SimpleNamespace(result_id="result.portfolio", tables=[SimpleNamespace(
-            table_id=role, schema_id=schema, source_node_id="simulation", source_port="simulation"
-        ) for role, schema in TABLE_SCHEMAS.items()])
+            table_id=role, schema_id=schema, source_node_id="simulation", source_port="simulation", artifact_key="simulation-artifact"
+        ) for role, schema in TABLE_SCHEMAS.items()], support_files=[])
         projected = {}
 
         def table_schema(self, schema_id):

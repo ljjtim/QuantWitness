@@ -79,7 +79,7 @@ python -m research_pipeline --help
 
 ## 从可复现的小改动参与
 
-先按[完整研究起点](docs/getting-started.md#从完整研究起点开始)运行一个公开合成项目，再选择与该项目相关的改动：
+先按[入门教程](docs/workspace-quickstart.md)运行一个公开合成项目，再选择与该项目相关的改动：
 
 | 改动 | 推荐交付 |
 | --- | --- |

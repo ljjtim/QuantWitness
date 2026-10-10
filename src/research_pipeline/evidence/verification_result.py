@@ -62,6 +62,7 @@ from .facets import ArtifactIntegrityFacet, ReproducibilityFacet, require_sha256
 from .minute_validity import MINUTE_VERIFIER_ALGORITHM_VERSIONS
 from .model_validity import MODEL_VERIFIER_ALGORITHM_VERSIONS, verify_model_result_binding
 from .model_result_binding import model_verification_support_paths
+from research_pipeline.domain.shared_futures_result import SHARED_FUTURES_SCHEMA_IDS
 from .result_financial_oracle import (
     FinancialOracleBudget,
     FinancialOracleResult,
@@ -156,9 +157,10 @@ _BAR_TCA_HANDLER = _ResultSemanticHandler(
     optional_support_paths=(
         "simulation/context.json",
         "simulation/daily-context.json",
+        "simulation/futures-context.json",
     ),
     verifier_identity=(
-        "result-semantic:financial_oracle:result-bundle-financial-oracle-v5"
+        "result-semantic:financial_oracle:result-bundle-financial-oracle-v11"
     ),
 )
 _CANONICAL_SIMULATION_HANDLER = _ResultSemanticHandler(
@@ -191,7 +193,7 @@ _MINUTE_STATISTICS_HANDLER = _ResultSemanticHandler(
         ("observations", MINUTE_STATISTICS_OBSERVATION_SCHEMA_ID),
         ("split_assignments", MINUTE_STATISTICS_SPLIT_SCHEMA_ID),
     ),
-    verifier_identity="minute:statistics:verifier.minute-statistics.v2",
+    verifier_identity="minute:statistics:verifier.minute-statistics.v3",
 )
 _ADJUSTMENT_HANDLER = _ResultSemanticHandler(
     "adjustment_snapshot",
@@ -209,11 +211,40 @@ _ADJUSTMENT_HANDLER = _ResultSemanticHandler(
     ),
     artifact_types=("data.adjustment-factor-snapshot.v1",),
     verifier_identity=(
-        "result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v1"
+        "result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v2"
     ),
 )
+_ORDER_LIFECYCLE_HANDLER = _ResultSemanticHandler(
+    "order_lifecycle",
+    ("research.order-lifecycle.v1",),
+    (("research.order-lifecycle.v1", "simulation/context-tables/order-lifecycle"),),
+    schema_roles=(("lifecycle", "research.order-lifecycle.v1"),),
+    verifier_identity=_BAR_TCA_HANDLER.verifier_identity,
+)
+_FUTURES_FINANCIAL_CONTEXT_HANDLER = _ResultSemanticHandler(
+    "futures_daily_context",
+    ("research.futures-daily-context.v1",),
+    (("research.futures-daily-context.v1", "simulation/futures-context-tables"),),
+    schema_roles=(("context", "research.futures-daily-context.v1"),),
+    verifier_identity=_BAR_TCA_HANDLER.verifier_identity,
+)
+_SHARED_FUTURES_HANDLER = _ResultSemanticHandler(
+    "shared_futures",
+    (*SHARED_FUTURES_SCHEMA_IDS.values(), "research.shared-futures.context.v1"),
+    tuple((schema_id, f"shared_futures/{role}")
+          for role, schema_id in SHARED_FUTURES_SCHEMA_IDS.items())
+    + (("research.shared-futures.context.v1", "shared_futures/context"),),
+    phase="financial_oracle",
+    operation="financial_oracle",
+    schema_roles=(*SHARED_FUTURES_SCHEMA_IDS.items(),
+                  ("context", "research.shared-futures.context.v1")),
+    verifier_identity="result-semantic:shared_futures:shared-futures-financial-oracle-v1",
+)
 _RESULT_SEMANTIC_HANDLERS = (
+    _SHARED_FUTURES_HANDLER,
+    _FUTURES_FINANCIAL_CONTEXT_HANDLER,
     _BAR_TCA_HANDLER,
+    _ORDER_LIFECYCLE_HANDLER,
     _CANONICAL_SIMULATION_HANDLER,
     _MINUTE_FINANCIAL_CONTEXT_HANDLER,
     _MINUTE_STATISTICS_HANDLER,
@@ -222,6 +253,10 @@ _RESULT_SEMANTIC_HANDLERS = (
 
 
 BUILTIN_RESULT_SCHEMA_IDENTITIES = frozenset({
+    "research.shared-futures.context.v1",
+    *SHARED_FUTURES_SCHEMA_IDS.values(),
+    "research.futures-daily-context.v1",
+    "research.order-lifecycle.v1",
     QLIB_MODEL_INVENTORY_SCHEMA_ID,
     "data.adjustment-factor-snapshot.payload.v1",
     "data.columnar-bundle.metrics.v1",
@@ -248,6 +283,9 @@ BUILTIN_RESULT_SCHEMA_IDENTITIES = frozenset({
     "research.simulation.valuations.v1",
 })
 BUILTIN_RESULT_SCHEMA_SET_IDENTITIES = frozenset({
+    _SHARED_FUTURES_HANDLER.schema_set_identity,
+    "futures_daily_context:research.futures-daily-context.v1@simulation/futures-context-tables",
+    "order_lifecycle:research.order-lifecycle.v1@simulation/context-tables/order-lifecycle",
     "adjustment_snapshot:data.adjustment-factor-snapshot.payload.v1,"
     "research.minute-features.pre-anchor.v1,research.minute-labels.pre-anchor.v1",
     "bar_tca:research.bar-tca.daily.v1@simulation/tca/daily,"
@@ -266,6 +304,7 @@ BUILTIN_RESULT_SCHEMA_SET_IDENTITIES = frozenset({
     "research.minute-targets.payload.v1",
 })
 BUILTIN_VERIFIER_IDENTITIES = frozenset({
+    _SHARED_FUTURES_HANDLER.verifier_identity,
     "default:data.pit:verifier.data-pit.v1",
     "default:financial.tradability:verifier.financial-tradability.v3",
     "default:label.split:verifier.label-split.v2",
@@ -277,12 +316,12 @@ BUILTIN_VERIFIER_IDENTITIES = frozenset({
     "model:statistics:verifier.model-statistics.v1",
     "model:financial.tradability:verifier.model-financial-scope.v2",
     "minute:data.pit:verifier.minute-data-pit.v2",
-    "minute:financial.tradability:verifier.minute-financial.v2",
-    "minute:label.split:verifier.minute-label-split.v2",
+    "minute:financial.tradability:verifier.minute-financial.v4",
+    "minute:label.split:verifier.minute-label-split.v3",
     "minute:search.holdout:verifier.minute-trial-universe.v2",
-    "minute:statistics:verifier.minute-statistics.v2",
-    "result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v1",
-    "result-semantic:financial_oracle:result-bundle-financial-oracle-v5",
+    "minute:statistics:verifier.minute-statistics.v3",
+    "result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v2",
+    "result-semantic:financial_oracle:result-bundle-financial-oracle-v11",
 })
 
 
@@ -306,9 +345,13 @@ def financial_oracle_semantic_contract() -> FinancialOracleSemanticContract:
     canonical = _semantic_handler("canonical_simulation")
     minute_context = _semantic_handler("minute_financial_context")
     adjustment = _semantic_handler("adjustment_snapshot")
-    if not bar_tca.required_support_paths or len(bar_tca.optional_support_paths) != 2:
+    lifecycle = _semantic_handler("order_lifecycle")
+    shared_futures = _semantic_handler("shared_futures")
+    if not bar_tca.required_support_paths or len(bar_tca.optional_support_paths) != 3:
         raise EvidenceContractError("金融复核 handler 的支持文件声明不完整")
     return FinancialOracleSemanticContract(
+        shared_futures_schema_roles=shared_futures.schema_roles,
+        shared_futures_path_bindings=shared_futures.path_bindings,
         canonical_schema_roles=canonical.schema_roles,
         bar_tca_schema_roles=bar_tca.schema_roles,
         bar_tca_path_bindings=bar_tca.path_bindings,
@@ -320,6 +363,9 @@ def financial_oracle_semantic_contract() -> FinancialOracleSemanticContract:
         required_control_paths=bar_tca.required_support_paths,
         minute_context_path=bar_tca.optional_support_paths[0],
         daily_etf_context_path=bar_tca.optional_support_paths[1],
+        daily_futures_context_path=bar_tca.optional_support_paths[2],
+        order_lifecycle_schema_id=lifecycle.schema_by_role["lifecycle"],
+        order_lifecycle_path_prefix=lifecycle.path_by_schema[lifecycle.schema_by_role["lifecycle"]],
     )
 
 

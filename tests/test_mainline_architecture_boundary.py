@@ -51,6 +51,7 @@ LAYER_ALLOWED_PREFIXES = {
     "packages": (
         "research_pipeline.platform",
         "research_pipeline.domain.time",
+        "research_pipeline.domain.shared_futures",
         "research_pipeline.data_plane",
         "research_pipeline.evidence",
         "research_pipeline.research",

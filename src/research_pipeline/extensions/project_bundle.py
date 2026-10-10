@@ -18,6 +18,7 @@ from typing import Iterable, Mapping
 
 import yaml
 
+from research_pipeline.platform.atomic_directory import publish_directory
 from research_pipeline.platform import typed_canonical_hash
 from research_pipeline.platform.operator_contracts import (
     OPERATOR_CONTRACT_VERSION,
@@ -1050,7 +1051,7 @@ def compile_project_operator_bundle(
         (staging / "dependency-lock.json").write_bytes(_canonical_bytes(normalized_lock) + b"\n")
         (staging / "manifest.json").write_bytes(_canonical_bytes(manifest.to_dict()) + b"\n")
         (staging / "COMMITTED").write_text(bundle_hash + "\n", encoding="utf-8")
-        os.replace(staging, output)
+        publish_directory(staging, output)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise

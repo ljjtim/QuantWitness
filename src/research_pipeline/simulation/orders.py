@@ -107,7 +107,7 @@ def transition_order(order: Order, *, action: str, fill_quantity: int = 0, rejec
         return replace(order, status="submitted")
     if action == "accept" and order.status == "submitted":
         return replace(order, status="accepted")
-    if action == "reject" and order.status == "submitted" and rejection_code:
+    if action == "reject" and order.status in {"submitted", "accepted"} and rejection_code:
         return replace(order, status="rejected", rejection_code=rejection_code)
     if action == "fill" and order.status in {"accepted", "partially_filled"}:
         quantity = require_integer_quantity(fill_quantity, "fill_quantity")
@@ -116,7 +116,8 @@ def transition_order(order: Order, *, action: str, fill_quantity: int = 0, rejec
             raise SimulationContractError("累计成交量超过订单量")
         return replace(order, status="filled" if total == order.quantity else "partially_filled", filled_quantity=total)
     if action in {"cancel", "expire"} and order.status in {"submitted", "accepted", "partially_filled"}:
-        return replace(order, status="cancelled" if action == "cancel" else "expired")
+        return replace(order, status="cancelled" if action == "cancel" else "expired",
+                       rejection_code=rejection_code)
     raise SimulationContractError(f"非法订单转换: {order.status}->{action}")
 
 

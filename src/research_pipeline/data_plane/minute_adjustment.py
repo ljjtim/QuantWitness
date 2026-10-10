@@ -296,10 +296,15 @@ _RESULT_SNAPSHOT_COLUMNS = {
 def verify_adjustment_snapshot_result_table(table: object) -> None:
     """只用 Result 内的候选、可见时间和前收盘价复算完整快照。"""
 
+    columns = set(getattr(table, "column_names", ()))
     if (
         getattr(table, "num_rows", None) != 1
-        or set(getattr(table, "column_names", ())) != _RESULT_SNAPSHOT_COLUMNS
-        or any(table[name].null_count for name in _RESULT_SNAPSHOT_COLUMNS)
+        or columns not in (
+            _RESULT_SNAPSHOT_COLUMNS,
+            _RESULT_SNAPSHOT_COLUMNS | {"financial_corporate_actions_json"},
+            _RESULT_SNAPSHOT_COLUMNS | {"financial_corporate_actions_json", "initial_listing_evidence_json"},
+        )
+        or any(table[name].null_count for name in columns)
     ):
         raise QualityGateError("PIT 复权快照完整载荷表 schema 无效")
     try:
@@ -330,8 +335,37 @@ def verify_adjustment_snapshot_result_table(table: object) -> None:
         snapshot = AdjustmentFactorSnapshot.from_mapping(raw_snapshot)
         included = tuple(CorporateAction.from_dict(item) for item in raw_included)
         candidates = tuple(CorporateAction.from_dict(item) for item in raw_candidates)
+        if "financial_corporate_actions_json" in columns:
+            financial_actions = tuple(CorporateAction.from_dict(item) for item in
+                _json_mapping_list(row["financial_corporate_actions_json"], "financial_actions"))
+            if any(action.contract_version != 2 or action.announcement_available_time >
+                   datetime.fromisoformat(snapshot.as_of) for action in financial_actions):
+                raise ValueError("金融行动必须使用研究时钟可见的完整 v2 合同")
+        source_identity = input_references
+        if "initial_listing_evidence_json" in columns:
+            evidence = _json_mapping(row["initial_listing_evidence_json"], "initial_listing_evidence")
+            if set(evidence) != {"instrument_id", "listed_date", "available_at", "source_reference"} or any(
+                not isinstance(value, str) or not value.strip() for value in evidence.values()
+            ):
+                raise ValueError("IPO 上市证据必须完整绑定四个非空字段")
+            listed = date.fromisoformat(evidence["listed_date"])
+            start = _json_aware(snapshot.applicable_start).astimezone(_ZONE)
+            visible = _json_aware(evidence["available_at"])
+            market_open = start.replace(hour=9, minute=30, second=0, microsecond=0)
+            if (
+                snapshot.asset_class != "cn_stock"
+                or evidence["instrument_id"] != snapshot.instrument_id
+                or listed != start.date()
+                or snapshot.initial_factor_date != listed.isoformat()
+                or Decimal(snapshot.initial_factor) != 1
+                or visible > start or visible >= market_open
+            ):
+                raise ValueError("IPO 首日归一化原点或上市证据可见性不一致")
+            if any(action.effective_date <= listed for action in (*candidates, *financial_actions)):
+                raise ValueError("IPO 原点不能省略上市前或当日生效的公司行动")
+            source_identity = {"input_references": input_references, "initial_listing_evidence": evidence}
         if not input_references or snapshot.source_revision_hash != typed_canonical_hash(
-            input_references
+            source_identity
         ):
             raise ValueError("快照来源身份与实际输入引用不一致")
         if any(

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 import hashlib
 from importlib.resources import files
+from functools import lru_cache
 import json
 from pathlib import Path
 import re
@@ -23,7 +24,7 @@ from .errors import MainlineError
 
 MINUTE_CAPABILITY_MANIFEST_VERSION = "minute-capability-manifest-v1"
 MINUTE_CAPABILITY_BINDING_VERSION = "minute-capability-binding-v1"
-CURRENT_MINUTE_CAPABILITY_MANIFEST_REVISION = 1
+CURRENT_MINUTE_CAPABILITY_MANIFEST_REVISION = 3
 MINUTE_INTERVALS = ("1m", "5m", "15m", "30m", "60m", "120m")
 MINUTE_CAPABILITY_REQUIRED_CONSUMERS = (
     "catalog.minute.contracts",
@@ -31,7 +32,20 @@ MINUTE_CAPABILITY_REQUIRED_CONSUMERS = (
     "domain.minute.session_calendar",
     "reference.minute.acceptance",
 )
-CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH = "73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033"
+CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH = "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+_PUBLISHED_MINUTE_MANIFESTS = {
+    "73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033": "minute_capability_manifest.v1.json",
+    "a2d3bdebba11b28e72076a29cf9d6e10ca0650822822da387460abb62a560cf9": "minute_capability_manifest.v2.json",
+    CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH: "minute_capability_manifest.v3.json",
+}
+
+# 公开摘要与已发布能力绑定，原始清单保留在本地验收材料中。
+_PUBLISHED_INVENTORY_PROJECTIONS = {
+    "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838": (
+        "minute_inventory.v3.public.json",
+        "d1f35ecb1fc4111ac789444e44e1e7b58bb6c047c40ca2bb3417f586c3b81a2f",
+    ),
+}
 
 _DATASET_ASSET_PAIRS = {
     ("cn_equity.minute_bar", "cn_stock"),
@@ -439,43 +453,86 @@ class MinuteCapabilityManifest:
         )
 
 
+def _validate_inventory_evidence(manifest: MinuteCapabilityManifest, directory) -> None:
+    """原件逐字节核验；仅已发布能力允许使用固定的公开摘要。"""
+    try:
+        inventory_raw = directory.joinpath(
+            f"minute_inventory.v{manifest.revision}.json"
+        ).read_bytes()
+    except FileNotFoundError:
+        published = _PUBLISHED_INVENTORY_PROJECTIONS.get(manifest.manifest_hash)
+        if published is None:
+            raise MinuteCapabilityManifestError("分钟能力只读 inventory 缺失") from None
+        name, expected_hash = published
+        try:
+            public_raw = directory.joinpath(name).read_bytes()
+        except OSError as exc:
+            raise MinuteCapabilityManifestError("分钟能力公开 inventory 摘要无法读取") from exc
+        if hashlib.sha256(public_raw).hexdigest() != expected_hash:
+            raise MinuteCapabilityManifestError("分钟能力公开 inventory 摘要与发布记录不一致")
+        payload = json.loads(public_raw)
+        if (payload.get("schema_version") != "minute-inventory-public-projection-v1"
+                or payload.get("source_inventory_hash") != manifest.inventory_evidence_hash):
+            raise MinuteCapabilityManifestError("分钟能力公开 inventory 未绑定原始证据身份")
+    except OSError as exc:
+        raise MinuteCapabilityManifestError("分钟能力只读 inventory 无法读取") from exc
+    else:
+        if hashlib.sha256(inventory_raw).hexdigest() != manifest.inventory_evidence_hash:
+            raise MinuteCapabilityManifestError("分钟能力只读 inventory 摘要不一致")
+
+
 def load_minute_capability_manifest(
     path: str | Path | None = None,
     *,
     expected_manifest_hash: str | None = None,
 ) -> MinuteCapabilityManifest:
-    """读取平台分钟能力 manifest，并核对同目录只读 inventory。"""
+    """核验能力清单及来源证据；公开安装使用已登记的可移植摘要。"""
 
     is_default = path is None
     if is_default:
-        resource = files("research_pipeline.platform").joinpath(
-            "minute_capabilities/minute_capability_manifest.v1.json"
-        )
-        raw = resource.read_text(encoding="utf-8")
-        inventory_raw = files("research_pipeline.platform").joinpath(
-            "minute_capabilities/minute_inventory.v1.json"
-        ).read_bytes()
+        directory = files("research_pipeline.platform").joinpath("minute_capabilities")
+        resource = directory.joinpath("minute_capability_manifest.v3.json")
     else:
-        manifest_path = Path(path)
-        try:
-            raw = manifest_path.read_text(encoding="utf-8")
-            inventory_raw = manifest_path.with_name("minute_inventory.v1.json").read_bytes()
-        except (OSError, UnicodeError) as exc:
-            raise MinuteCapabilityManifestError("分钟能力 manifest 或 inventory 无法读取") from exc
+        resource = Path(path)
+        directory = resource.parent
     try:
+        raw = resource.read_text(encoding="utf-8")
         payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise MinuteCapabilityManifestError("分钟能力 manifest 不是有效 JSON") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MinuteCapabilityManifestError("分钟能力 manifest 无法读取或不是有效 JSON") from exc
     manifest = MinuteCapabilityManifest.from_dict(
         _mapping(payload, "MinuteCapabilityManifest")
     )
     anchor = CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH if is_default else expected_manifest_hash
     if anchor is None or manifest.manifest_hash != _require_hash(anchor, "expected_manifest_hash"):
         raise MinuteCapabilityManifestError("分钟能力 manifest 与预期发布锚点不一致")
-    if manifest.revision != CURRENT_MINUTE_CAPABILITY_MANIFEST_REVISION:
+    if is_default and manifest.revision != CURRENT_MINUTE_CAPABILITY_MANIFEST_REVISION:
         raise MinuteCapabilityManifestError("分钟能力 manifest revision 不受支持")
-    if hashlib.sha256(inventory_raw).hexdigest() != manifest.inventory_evidence_hash:
-        raise MinuteCapabilityManifestError("分钟能力只读 inventory 摘要不一致")
+    _validate_inventory_evidence(manifest, directory)
+    return manifest
+
+
+@lru_cache(maxsize=3)
+def load_published_minute_capability_manifest(manifest_hash: str) -> MinuteCapabilityManifest:
+    """按已发布身份读取历史能力，用于封存结果复核；新准入仍要求当前版本。"""
+    name = _PUBLISHED_MINUTE_MANIFESTS.get(manifest_hash)
+    if name is None:
+        raise MinuteCapabilityManifestError("分钟能力身份不属于已发布版本")
+    from importlib.resources import as_file
+
+    resource = files("research_pipeline.platform").joinpath("minute_capabilities/" + name)
+    with as_file(resource) as path:
+        return load_minute_capability_manifest(path, expected_manifest_hash=manifest_hash)
+
+
+def require_published_minute_capability_binding(
+    *, consumer_id: str, manifest_hash: str, contract_version: str, binding_hash: str,
+) -> MinuteCapabilityManifest:
+    """复验封存绑定及对应的已发布清单，不接受自行拼装的历史身份。"""
+    manifest = load_published_minute_capability_manifest(manifest_hash)
+    expected = manifest.downstream_identity(consumer_id)
+    if contract_version != expected["contract_version"] or binding_hash != expected["binding_hash"]:
+        raise MinuteCapabilityManifestError("分钟能力 consumer binding hash 或版本不一致")
     return manifest
 
 

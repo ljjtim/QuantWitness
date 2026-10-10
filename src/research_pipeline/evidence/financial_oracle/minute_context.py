@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+from hashlib import sha256
 import json
 from typing import Mapping, Sequence
 
@@ -20,18 +21,23 @@ from ..errors import EvidenceContractError
 from ..oracle_workspace import OracleTable, ResultTableSource, arrow_table_source
 from .bar_tca import minute_tca_referenced_inputs
 from .common import (
+    aware_datetime as _aware_datetime,
+    date_value as _date_value,
     context_table_rows as _context_table_rows,
     normalized as _normalized,
     read_source_rows as _read_source_rows,
     require_no_rows as _require_no_external_rows,
 )
+from .order_lifecycle import LIFECYCLE_DECLARATION
 from .minute_rules import (
+    visible_minute_rule,
     MinuteIndexedRows,
     MinuteSettlementRows,
     minute_decode_settlement,
     minute_index,
     minute_single_bar,
     verify_minute_execution_rules,
+    verify_minute_spot_valuation,
 )
 
 
@@ -57,9 +63,27 @@ def verify_minute_financial_context(
         "source_simulation_hash", "simulation_result_hash",
         "source_ledger_hash", "context_hash",
     }
-    if set(context) != expected or context.get("contract_version") != (
-        "research-minute-financial-context-v3"
-    ):
+    version = context.get("contract_version")
+    explicit = version == "research-minute-financial-context-v7"
+    if explicit:
+        expected.update({"explicit_order_context", "execution_mode", "execution_policy"})
+        if context.get("execution_mode") != "explicit_orders":
+            raise EvidenceContractError("分钟 v7 必须绑定显式订单模式")
+    semantics_version = simulation_manifest.get("semantics", {}).get("contract_version")
+    if version in {"research-minute-financial-context-v6", "research-minute-financial-context-v7"}:
+        expected.add("corporate_action_context")
+    if version in {"research-minute-financial-context-v5", "research-minute-financial-context-v6", "research-minute-financial-context-v7"}:
+        expected.add("order_lifecycle_contract")
+        if (semantics_version != "research-simulation-result-semantics-v2"
+                or context.get("order_lifecycle_contract") != LIFECYCLE_DECLARATION
+                or simulation_manifest.get("order_lifecycle_contract") != LIFECYCLE_DECLARATION):
+            raise EvidenceContractError("分钟金融上下文必须绑定新生命周期合同")
+    elif semantics_version == "research-simulation-result-semantics-v2":
+        raise EvidenceContractError("新分钟仿真语义必须绑定含生命周期的金融上下文")
+    if set(context) != expected or version not in {
+        "research-minute-financial-context-v3", "research-minute-financial-context-v5",
+        "research-minute-financial-context-v6", "research-minute-financial-context-v7",
+    }:
         raise EvidenceContractError("分钟金融上下文 schema 无效")
     unsigned = {key: value for key, value in context.items() if key != "context_hash"}
     if typed_canonical_hash(unsigned) != context.get("context_hash"):
@@ -68,6 +92,30 @@ def verify_minute_financial_context(
         rule_bundle = MinuteRuleSnapshotBundle.from_dict(context["rule_bundle"])
     except Exception as exc:
         raise EvidenceContractError("分钟金融上下文规则 bundle 无效") from exc
+    execution_participation = None
+    if explicit:
+        execution_policy = context["execution_policy"]
+        fixed_fields = {
+            "contract_version": "intraday-execution-policy-v1",
+            "model_id": "next_bar_participation_v1", "model_version": "1.0.0",
+            "claim_ceiling": "bar_level_research_only",
+        }
+        if (not isinstance(execution_policy, Mapping)
+                or set(execution_policy) != set(fixed_fields) | {"participation_ppm"}
+                or any(execution_policy.get(key) != value for key, value in fixed_fields.items())):
+            raise EvidenceContractError("显式分钟执行策略合同无效")
+        execution_participation = execution_policy["participation_ppm"]
+        if type(execution_participation) is not int or not 1 <= execution_participation <= 1_000_000:
+            raise EvidenceContractError("显式分钟执行参与率无效")
+        timeline_identity = {
+            "explicit_orders": context["explicit_order_context"].get("commands"),
+            "stream_contract": "minute-target-timeline-v1",
+            "rule_bundle_hash": rule_bundle.bundle_hash,
+            "execution_policy_hash": typed_canonical_hash(execution_policy),
+            "target_count": 0, "target_stream_sha256": sha256(b"minute-prepared-target-stream-v1\0").hexdigest(),
+        }
+        if simulation_manifest["semantics"].get("timeline_semantics_hash") != typed_canonical_hash(timeline_identity):
+            raise EvidenceContractError("显式分钟执行策略未绑定正式仿真时间语义")
     try:
         session_bundle = SessionPolicyBundle.from_dict(
             context["session_policy_bundle"]
@@ -151,6 +199,20 @@ def verify_minute_financial_context(
     }
     if set(target_source.schema.names) != required_target_columns:
         raise EvidenceContractError("分钟 target 表 schema 无效")
+    stock_action_identity = None
+    if context.get("asset_class") == "cn_stock":
+        snapshot = target_artifact.get("adjustment_snapshot")
+        candidates = target_artifact.get("adjustment_candidates")
+        included_hashes = snapshot.get("included_action_hashes") if isinstance(snapshot, Mapping) else None
+        if not isinstance(candidates, list) or not isinstance(included_hashes, list):
+            raise EvidenceContractError("分钟股票缺少 PIT 公司行动载荷")
+        included = [item for item in candidates if isinstance(item, Mapping)
+                    and typed_canonical_hash(dict(item)) in included_hashes]
+        if sorted(typed_canonical_hash(dict(item)) for item in included) != included_hashes:
+            raise EvidenceContractError("分钟股票快照与纳入公司行动不一致")
+        stock_action_identity = typed_canonical_hash(sorted(
+            included, key=lambda item: (str(item["action_id"]), int(item["revision"])),
+        ))
     target_instrument_ids: set[str] = set()
     target_row_count = 0
     for batch in target_source.iter_batches():
@@ -182,6 +244,19 @@ def verify_minute_financial_context(
             ):
                 raise EvidenceContractError("分钟 target 标的与金融上下文不一致")
             target_instrument_ids.add(instrument_id)
+            if context.get("asset_class") == "cn_stock":
+                decision_at = _aware_datetime(target_payload.get("decision_time"), "target.decision_time")
+                _verify_stock_pit_binding(
+                    rule_bundle, target_artifact, instrument_id,
+                    decision_at.date(), decision_at, stock_action_identity,
+                )
+    if explicit:
+        raw_explicit = context.get("explicit_order_context")
+        if not isinstance(raw_explicit, Mapping) or not isinstance(raw_explicit.get("commands"), list):
+            raise EvidenceContractError("分钟显式订单缺少完整命令")
+        if target_row_count:
+            raise EvidenceContractError("分钟显式订单不能同时声明目标")
+        target_instrument_ids.update(str(item["instrument"]["instrument_id"]) for item in raw_explicit["commands"])
     if target_row_count != target_source.row_count:
         raise EvidenceContractError("分钟 target 表行数与 Result manifest 不一致")
     if context.get("asset_class") in {"cn_stock", "cn_etf"}:
@@ -221,6 +296,13 @@ def verify_minute_financial_context(
             closes_from_table = json.loads(str(stored["previous_closes_json"]))
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
             raise EvidenceContractError("分钟 ResultStore PIT 快照载荷无法读取") from exc
+        if version in {"research-minute-financial-context-v6", "research-minute-financial-context-v7"}:
+            try:
+                financial_actions_from_table = json.loads(str(stored["financial_corporate_actions_json"]))
+            except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise EvidenceContractError("分钟 ResultStore 缺少完整公司行动权益输入") from exc
+            if financial_actions_from_table != target_artifact.get("financial_corporate_actions"):
+                raise EvidenceContractError("分钟权益输入与 ResultStore 公司行动快照不一致")
         if any(
             stored_value != context_value
             for stored_value, context_value in (
@@ -302,6 +384,14 @@ def verify_minute_financial_context(
     if len(benchmark_by_order) != len(benchmark_rows):
         raise EvidenceContractError("分钟决策基准重复或 schema 无效")
     canonical_orders = minute_index(canonical["orders"], ("order_id",), "分钟订单")
+    if context.get("asset_class") == "cn_stock":
+        for order in canonical_orders.values():
+            _verify_stock_pit_binding(
+                rule_bundle, target_artifact, str(order["instrument_id"]),
+                _date_value(order["session"], "order.session"),
+                _aware_datetime(order["submitted_at"], "order.submitted_at"),
+                stock_action_identity,
+            )
     if isinstance(benchmark_by_order, MinuteIndexedRows):
         _require_no_external_rows(
             benchmark_rows.workspace,
@@ -365,6 +455,17 @@ def verify_minute_financial_context(
             )
         ):
             raise EvidenceContractError("分钟决策基准与 TCA oracle 不一致")
+        if explicit:
+            commands = [item for item in context["explicit_order_context"]["commands"]
+                        if item["action"] == "submit" and item["order_id"] == order.get("order_id")]
+            if len(commands) != 1:
+                raise EvidenceContractError("分钟决策基准没有唯一显式提交命令")
+            command = commands[0]
+            if (benchmark.get("source_hash") != typed_canonical_hash(dict(command))
+                    or benchmark.get("decision_price_units") != command["reference_price"]["units"]
+                    or _normalized(benchmark.get("available_at")) != command["reference_price_available_at"]):
+                raise EvidenceContractError("分钟显式决策基准未绑定命令可见价格")
+            continue
         benchmark_bar = bar_by_hash.get(str(benchmark.get("source_hash")))
         if (
             benchmark_bar is None
@@ -454,15 +555,97 @@ def verify_minute_financial_context(
         or declared_price_rules != expected_price_rules
     ):
         raise EvidenceContractError("分钟价格限制参考不属于已封存规则 bundle")
-    verify_minute_execution_rules(
-        asset_class=str(context["asset_class"]),
-        canonical=canonical,
-        bars=bars,
-        rule_bundle=rule_bundle,
-        policy=policy,
-        settlement_events=settlement_rows,
-        session_bundle=session_bundle,
-    )
+    corporate_context = None
+    if version in {"research-minute-financial-context-v6", "research-minute-financial-context-v7"}:
+        corporate_context = context.get("corporate_action_context")
+        if not isinstance(corporate_context, Mapping):
+            raise EvidenceContractError("分钟金融上下文缺少公司行动权益合同")
+        sealed_actions = corporate_context.get("actions")
+        target_actions = target_artifact.get("financial_corporate_actions", [])
+        if not isinstance(sealed_actions, list) or not isinstance(target_actions, list):
+            raise EvidenceContractError("分钟公司行动输入必须为完整行动列表")
+        if any(not isinstance(item, Mapping) for item in (*sealed_actions, *target_actions)):
+            raise EvidenceContractError("分钟公司行动输入项无效")
+        def action_key(item):
+            return str(item.get("action_id")), int(item.get("revision", 0))
+        if sorted(sealed_actions, key=action_key) != sorted(target_actions, key=action_key):
+            raise EvidenceContractError("分钟公司行动权益与目标工件输入不一致")
+        if context["asset_class"] == "cn_future":
+            if any(corporate_context.get(key) for key in ("actions", "records", "events")):
+                raise EvidenceContractError("期货分钟不能声明现货权益")
+            corporate_context = None
+    if explicit:
+        if context["asset_class"] == "cn_future":
+            from .explicit_futures import verify_explicit_futures_order_execution
+            verify_explicit_futures_order_execution(
+                context=context["explicit_order_context"], canonical=canonical,
+                rule_bundle=context["rule_bundle"], observations=bars,
+                settlement_events=settlement_rows, session_policy_bundle=session_bundle,
+                participation_cap_ppm=execution_participation,
+                simulation_manifest=simulation_manifest,
+            )
+        else:
+            has_actions = corporate_context is not None and any(
+                corporate_context.get(name) for name in ("actions", "records", "events")
+            )
+            if has_actions:
+                from .minute_corporate_actions import verify_minute_corporate_actions
+                from .minute_rules import verify_minute_cash_quantity
+                verify_minute_corporate_actions(
+                    corporate_action_context=corporate_context, canonical=canonical, bars=bars,
+                    rule_bundle=rule_bundle, asset_class=str(context["asset_class"]),
+                    price_scale=int(context["price_scale"]), order_index=canonical_orders,
+                    select_rule=visible_minute_rule, verify_quantity=verify_minute_cash_quantity,
+                )
+            from .explicit_orders import verify_explicit_order_execution
+            verify_explicit_order_execution(
+                context=context["explicit_order_context"], canonical=canonical,
+                rule_bundle=rule_bundle, asset_class=str(context["asset_class"]),
+                price_scale=int(context["price_scale"]), market_observations=bars,
+                participation_cap_ppm=execution_participation,
+                session_policy_bundle=session_bundle,
+                verified_account_events=corporate_context["events"] if has_actions else (),
+            )
+            if settlement_rows:
+                raise EvidenceContractError("显式现货上下文不能含期货结算事件")
+            if not has_actions:
+                from .minute_rules import verify_minute_spot_position_buckets
+                namespace = "cn_stock" if context["asset_class"] == "cn_stock" else "cn_fund"
+                verify_minute_spot_position_buckets(
+                    positions=canonical["positions"], fills=canonical["fills"],
+                    rule_bundle=rule_bundle, settlement_rule_id=f"rule.{namespace}.settlement.v1",
+                )
+    else:
+        verify_minute_execution_rules(
+            asset_class=str(context["asset_class"]), canonical=canonical, bars=bars,
+            rule_bundle=rule_bundle, policy=policy, settlement_events=settlement_rows,
+            session_bundle=session_bundle, corporate_action_context=corporate_context,
+            price_scale=int(context["price_scale"]),
+        )
+
+    if context["asset_class"] in {"cn_stock", "cn_etf"}:
+        verify_minute_spot_valuation(positions=canonical["positions"], bars=bars)
 
 
 __all__ = ["verify_minute_financial_context"]
+
+
+def _verify_stock_pit_binding(
+    bundle: MinuteRuleSnapshotBundle,
+    target_artifact: Mapping[str, object],
+    instrument_id: str,
+    session: date,
+    as_of: datetime,
+    action_identity: str,
+) -> None:
+    snapshot = target_artifact.get("adjustment_snapshot")
+    if not isinstance(snapshot, Mapping):
+        raise EvidenceContractError("分钟股票缺少 PIT 交易规则绑定")
+    rule = visible_minute_rule(
+        bundle, "rule.cn_stock.adjustment_factor_snapshot.v1", instrument_id,
+        session, as_of,
+    )
+    parameters = dict(rule.parameters)
+    if (parameters.get("adjustment_snapshot_identity_hash") != target_artifact.get("adjustment_snapshot_identity_hash")
+            or parameters.get("corporate_action_snapshot_hash") != action_identity):
+        raise EvidenceContractError("分钟股票规则与封存 PIT 快照不一致")

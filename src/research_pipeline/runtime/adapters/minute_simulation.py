@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 import json
 from pathlib import Path
@@ -11,16 +11,18 @@ from typing import Iterable, Iterator, Mapping, MutableMapping
 import pandas as pd
 from research_pipeline.platform import canonical_json, typed_canonical_hash
 from research_pipeline.data_plane import require_minute_price_mode
-from research_pipeline.domain import PortfolioTarget, load_minute_rule_snapshot_bundle, load_session_policy_bundle
+from research_pipeline.domain import CorporateAction, MinuteRuleSnapshotBundle, PortfolioTarget, load_minute_rule_snapshot_bundle, load_session_policy_bundle
+from research_pipeline.domain.order_stream import parse_order_commands
 from research_pipeline.platform.minute_operator_contracts import MINUTE_TARGET_PAYLOAD_SCHEMA_ID
 from research_pipeline.simulation import BarTcaFormalFill, BarTcaOrder, IntradayExecutionPolicy, MinuteExecutionBar, bar_tca_policy_from_parameters
 from research_pipeline.simulation.bar_tca import BarTcaArtifactWriter
+from research_pipeline.simulation.corporate_actions import corporate_action_snapshot_hash
 from research_pipeline.simulation.minute_execution import MinuteEventSimulationStateMachine, PreparedMinuteTarget
 from research_pipeline.simulation.result_contract import SimulationResultArtifactWriter
 from ..bar_tca_adapter import tca_metadata
 from ..operator_runtime import OperatorRuntimeContext, RuntimeCompletionMetadata, RuntimeNodeOutputs, RuntimeNodeValue
 from .common import _input_external_payload, _input_external_root, _json_ready, _parameters
-from .minute_io import _aware, _minute_adjustment_context, _minute_artifact_partitions, _minute_timestamp_type, _operator_bar_partitions, _write_minute_row_partition
+from .minute_io import _aware, _minute_adjustment_context, _minute_artifact_partitions, _minute_timestamp_type, _minute_target_schema, _operator_bar_partitions, _write_minute_row_partition
 
 
 def _minute_execution_bar_context_schema():
@@ -248,6 +250,69 @@ def _minute_context_session_rows(
     return [dict(row) for row in pq.read_table(path).to_pylist()]
 
 
+
+def _write_minute_decision_bars(
+    staging: Path,
+    *, session: date,
+    bars: Iterable[MinuteExecutionBar],
+    table_counts: MutableMapping[str, int],
+    partition_counts: MutableMapping[str, int],
+) -> tuple[datetime, datetime, Path]:
+    """封存当前输入会话，包含尚未读到目标的标的与原始质量状态。"""
+    prefix, _schema_id, schema_factory = _MINUTE_CONTEXT_TABLES["execution_bars"]
+    path = staging / prefix / f"session={session.isoformat()}" / (
+        f"part-{partition_counts['execution_bars']:05d}.parquet"
+    )
+    first_end = last_end = None
+
+    def rows():
+        nonlocal first_end, last_end
+        for bar in bars:
+            first_end = bar.bar_end if first_end is None else min(first_end, bar.bar_end)
+            last_end = bar.bar_end if last_end is None else max(last_end, bar.bar_end)
+            yield _minute_execution_bar_context_row(bar)
+
+    row_count = _write_minute_row_partition(path, rows=rows(), schema=schema_factory())
+    if first_end is None or last_end is None:
+        raise ValueError("分钟决策支持分区缺少已观察 bar")
+    table_counts["execution_bars"] += row_count
+    partition_counts["execution_bars"] += 1
+    return first_end, last_end, path
+
+
+def _read_minute_decision_bar(
+    partitions: Iterable[tuple[datetime, datetime, Path]],
+    target: PreparedMinuteTarget,
+    *, max_batch_bytes: int,
+) -> MinuteExecutionBar | None:
+    """只读取已闭合会话中目标绑定的一行，不缓存历史行情。"""
+    import pyarrow.dataset as ds
+
+    found = None
+    columns = tuple(MinuteExecutionBar.__dataclass_fields__)
+    for first_end, last_end, path in partitions:
+        if not first_end <= target.eligible_after <= last_end:
+            continue
+        source = ds.dataset(str(path), format="parquet")
+        scanner = source.scanner(
+            columns=list(columns),
+            filter=(
+                (ds.field("instrument_id") == target.instrument.instrument_id)
+                & (ds.field("bar_end") == target.eligible_after)
+            ),
+            batch_size=4_096, batch_readahead=1, fragment_readahead=1,
+            use_threads=False,
+        )
+        for batch in scanner.to_batches():
+            if int(batch.nbytes) > max_batch_bytes:
+                raise ValueError("分钟决策证据批次超过批准内存上限")
+            for row in batch.to_pylist():
+                if found is not None:
+                    raise ValueError("分钟决策 bar 在支持分区中重复")
+                found = MinuteExecutionBar(**row)
+    return found
+
+
 def _minute_tca_policy_dimensions(
     staging: Path,
     *,
@@ -430,6 +495,40 @@ def _write_minute_bar_tca(
     return writer.finalize()
 
 
+def _require_explicit_minute_session_ends(explicit_context, commands, session_bundle) -> None:
+    """发布前用正式日夜时段核对控制器的会话结束事实。"""
+    declared = explicit_context.get("session_ends") if isinstance(explicit_context, Mapping) else None
+    if not isinstance(declared, Mapping):
+        raise ValueError("分钟显式订单缺少正式交易会话结束事实")
+    if {command.trading_date.isoformat() for command in commands} - set(declared):
+        raise ValueError("分钟显式订单的交易会话尚未完成")
+    instruments = {command.instrument.instrument_id for command in commands}
+    for session_text, ended_at in declared.items():
+        try:
+            session = date.fromisoformat(session_text)
+            observed_end = datetime.fromisoformat(ended_at)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("分钟显式交易会话结束格式无效") from exc
+        endings = set()
+        for code in instruments:
+            policies = [policy for policy in session_bundle.policies
+                        if policy.instrument.instrument_id == code
+                        and policy.effective_from <= session <= policy.effective_to
+                        and session in policy.trading_dates]
+            if len(policies) != 1:
+                raise ValueError("分钟显式订单没有唯一正式日夜会话来源")
+            segments = [segment.build(session) for segment in policies[0].segments
+                        if segment.phase in {"day", "night"}]
+            if not segments:
+                raise ValueError("分钟显式会话缺少正式交易时段")
+            endings.add(max(segment.ends_at for segment in segments))
+        if len(endings) != 1 or observed_end not in endings:
+            raise ValueError("分钟显式 session_ends 与正式日夜会话来源不一致")
+        if any(command.submitted_at > observed_end for command in commands
+               if command.trading_date == session):
+            raise ValueError("分钟显式订单提交晚于正式交易会话结束")
+
+
 def execute_finance_simulation_intraday_v3(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeOutputs:
@@ -439,9 +538,30 @@ def execute_finance_simulation_intraday_v3(
     )
     target_payload = _input_external_payload(context, "targets")
     parameters = _parameters(context)
-    bundle = load_minute_rule_snapshot_bundle()
+    execution_mode = parameters.get("execution_mode", "target")
+    if execution_mode not in ("target", "explicit_orders"):
+        raise ValueError("分钟 execution_mode 只能是 target 或 explicit_orders")
+    encoded_commands = parameters.get("order_commands", "")
+    if not isinstance(encoded_commands, str):
+        raise ValueError("分钟 order_commands 必须是完整 JSON 字符串")
+    order_commands = parse_order_commands([] if encoded_commands == "" else encoded_commands)
+    if execution_mode == "target" and order_commands:
+        raise ValueError("分钟 target 模式不能声明非空 order_commands")
+    if execution_mode == "explicit_orders" and not any(command.action == "submit" for command in order_commands):
+        raise ValueError("分钟 explicit_orders 模式必须声明非空 order_commands，至少一条 submit")
+    bundle = (
+        MinuteRuleSnapshotBundle.from_dict(parameters["rule_bundle"])
+        if "rule_bundle" in parameters
+        else load_minute_rule_snapshot_bundle()
+    )
     if parameters["rule_bundle_hash"] != bundle.bundle_hash:
-        raise ValueError("分钟 simulation 声明的 rule bundle hash 与受信发布锚点不一致")
+        raise ValueError("分钟 simulation 声明的 rule bundle hash 与冻结规则不一致")
+
+    session_bundle = load_session_policy_bundle()
+    session_sources = [source for source in bundle.sources if source.source_kind == "repository_snapshot"]
+    if (len(session_sources) != 1
+            or not session_sources[0].locator.endswith(f"#{session_bundle.bundle_hash}")):
+        raise ValueError("分钟规则未绑定当前正式 session policy bundle")
 
     staging = context.external_store.prepare()
     try:
@@ -453,6 +573,14 @@ def execute_finance_simulation_intraday_v3(
         target_table_root = staging / "simulation/targets"
         for index, partition in enumerate(target_dataset.partitions):
             source_path = target_source_root / Path(partition.relative_path)
+            if execution_mode == "explicit_orders":
+                import pyarrow.parquet as pq
+
+                parquet = pq.ParquetFile(source_path)
+                if not parquet.schema_arrow.equals(_minute_target_schema(), check_metadata=False):
+                    raise ValueError("分钟显式订单必须保留有类型的空 target 工件")
+                if partition.row_count or parquet.metadata.num_rows:
+                    raise ValueError("分钟显式订单不能与实际非空 target 工件同时执行")
             target_path = target_table_root / f"part-{index:05d}.parquet"
             target_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source_path, target_path)
@@ -468,6 +596,28 @@ def execute_finance_simulation_intraday_v3(
         )
 
         target_instrument_hashes: dict[str, str] = {}
+        if execution_mode == "explicit_orders":
+            if set(target_dataset.allowed_columns) != set(_minute_target_schema().names):
+                raise ValueError("分钟显式订单必须保留有类型的空 target 工件")
+            for command in order_commands:
+                instrument = command.instrument
+                existing_hash = target_instrument_hashes.setdefault(
+                    instrument.instrument_id, instrument.instrument_hash
+                )
+                if existing_hash != instrument.instrument_hash:
+                    raise ValueError("分钟显式订单同一标的 InstrumentKey 身份漂移")
+                if instrument.asset_class == "cn_stock":
+                    for consumed_at in (command.decision_time, command.submitted_at):
+                        _require_stock_pit_rule_binding(
+                            bundle, target_payload, instrument.instrument_id, consumed_at,
+                        )
+        closed_bar_partitions: list[tuple[datetime, datetime, Path]] = []
+
+        def decision_bar_lookup(target: PreparedMinuteTarget) -> MinuteExecutionBar | None:
+            return _read_minute_decision_bar(
+                closed_bar_partitions, target,
+                max_batch_bytes=context.effective_resource_budget.memory_bytes // 4,
+            )
 
         def prepared_targets() -> Iterator[PreparedMinuteTarget]:
             for _partition, rows in target_partitions:
@@ -487,6 +637,9 @@ def execute_finance_simulation_intraday_v3(
                     if len(target.entries) != 1:
                         raise ValueError("分钟仿真 target 必须恰好包含一个标的")
                     instrument = target.entries[0].instrument
+                    if instrument.asset_class == "cn_stock":
+                        _require_stock_pit_rule_binding(bundle, target_payload, instrument.instrument_id,
+                                                       target.decision_time)
                     if (
                         str(row.get("instrument")) != instrument.instrument_id
                         or _aware(row.get("decision_time")) != target.decision_time
@@ -510,29 +663,32 @@ def execute_finance_simulation_intraday_v3(
             claim_ceiling=str(parameters["claim_ceiling"]),
         )
         machine = MinuteEventSimulationStateMachine(
-            prepared_targets(),
+            prepared_targets() if execution_mode == "target" else (),
+            order_commands=order_commands,
             rule_bundle=bundle,
             policy=policy,
             initial_cash_units=int(parameters["initial_cash_units"]),
+            decision_bar_lookup=decision_bar_lookup,
+            corporate_actions=tuple(
+                CorporateAction.from_dict(item)
+                for item in target_payload.get("financial_corporate_actions", [])
+            ),
         )
         asset_class = str(machine.asset_class)
         price_scale = 3 if asset_class == "cn_etf" else 2
         result_writer = SimulationResultArtifactWriter(
-            staging / "simulation/result-contract"
+            staging / "simulation/result-contract", require_order_lifecycle=True
         )
         context_table_counts = {name: 0 for name in _MINUTE_CONTEXT_TABLES}
         context_partition_counts = {name: 0 for name in _MINUTE_CONTEXT_TABLES}
 
         def consume_session(output) -> None:
             result_writer.append_rows(output.rows)
+            result_writer.append_order_lifecycle(output.session, output.order_lifecycle)
             _write_minute_context_session(
                 staging,
                 session=output.session,
                 rows_by_table={
-                    "execution_bars": (
-                        _minute_execution_bar_context_row(item)
-                        for item in output.execution_bars
-                    ),
                     "decision_benchmarks": output.decision_benchmarks,
                     "execution_observations": output.execution_observations,
                     "settlement_events": (
@@ -543,6 +699,14 @@ def execute_finance_simulation_intraday_v3(
                 table_counts=context_table_counts,
                 partition_counts=context_partition_counts,
             )
+
+        def close_decision_session() -> None:
+            session = machine.targets.decision_session
+            if session is not None:
+                closed_bar_partitions.append(_write_minute_decision_bars(
+                    staging, session=session, bars=machine.targets.session_decision_bars(),
+                    table_counts=context_table_counts, partition_counts=context_partition_counts,
+                ))
 
         _bar_dataset, bar_partitions = _operator_bar_partitions(
             context, bars_payload
@@ -581,8 +745,11 @@ def execute_finance_simulation_intraday_v3(
                     source_sequence,
                 )
                 source_sequence += 1
+                if machine.targets.decision_session != bar.trading_date:
+                    close_decision_session()
                 for session_output in machine.consume_bar(bar):
                     consume_session(session_output)
+        close_decision_session()
         for session_output in machine.finish():
             consume_session(session_output)
 
@@ -622,9 +789,14 @@ def execute_finance_simulation_intraday_v3(
             in _MINUTE_CONTEXT_TABLES.items()
         }
         financial_context = {
-            "contract_version": "research-minute-financial-context-v3",
+            "contract_version": (
+                "research-minute-financial-context-v7" if execution_mode == "explicit_orders"
+                else "research-minute-financial-context-v6"
+            ),
+            "order_lifecycle_contract": result_manifest["order_lifecycle_contract"],
             "asset_class": asset_class,
             "price_scale": price_scale,
+            "corporate_action_context": machine.corporate_action_context,
             "rule_bundle": bundle.to_dict(),
             "target_artifact": {
                 "schema_id": MINUTE_TARGET_PAYLOAD_SCHEMA_ID,
@@ -642,11 +814,20 @@ def execute_finance_simulation_intraday_v3(
                 bundle=bundle,
                 instrument_ids=set(target_instrument_hashes),
             ),
-            "session_policy_bundle": load_session_policy_bundle().to_dict(),
+            "session_policy_bundle": session_bundle.to_dict(),
             "source_simulation_hash": machine.source_simulation_hash,
             "simulation_result_hash": result_hash,
             "source_ledger_hash": ledger_hash,
         }
+        if execution_mode == "explicit_orders":
+            _require_explicit_minute_session_ends(
+                machine.explicit_order_context, order_commands, session_bundle,
+            )
+            financial_context.update({
+                "execution_mode": "explicit_orders",
+                "execution_policy": machine.policy.to_dict(),
+                "explicit_order_context": machine.explicit_order_context,
+            })
         financial_context["context_hash"] = typed_canonical_hash(
             _json_ready(financial_context)
         )
@@ -802,3 +983,28 @@ def _minute_price_limit_references(
     if not references:
         raise ValueError("分钟正式仿真缺少价格限制参考载荷")
     return references
+
+
+def _require_stock_pit_rule_binding(bundle, target_payload, instrument_id, decision_at):
+    """股票成交规则必须引用实际目标所消费的同一份 PIT 复权事实。"""
+    from research_pipeline.domain import MinuteRuleResolver
+    snapshot = target_payload.get("adjustment_snapshot")
+    identity = target_payload.get("adjustment_snapshot_identity_hash")
+    if not isinstance(snapshot, Mapping) or typed_canonical_hash(dict(snapshot)) != identity:
+        raise ValueError("分钟股票目标缺少有效 PIT 复权快照")
+    raw_candidates = target_payload.get("adjustment_candidates")
+    included_hashes = snapshot.get("included_action_hashes")
+    if not isinstance(raw_candidates, list) or not isinstance(included_hashes, list):
+        raise ValueError("分钟股票目标缺少有效 PIT 公司行动载荷")
+    candidates = tuple(CorporateAction.from_dict(item) for item in raw_candidates)
+    included = tuple(item for item in candidates if item.action_hash in included_hashes)
+    if sorted(item.action_hash for item in included) != included_hashes:
+        raise ValueError("分钟股票目标 PIT 快照与纳入公司行动不一致")
+    action_identity = corporate_action_snapshot_hash(included)
+    binding = MinuteRuleResolver(bundle).resolve(
+        rule_id="rule.cn_stock.adjustment_factor_snapshot.v1", instrument_id=instrument_id,
+        effective_on=decision_at.date(), as_of=decision_at,
+    )
+    parameters = dict(binding.rule.parameters)
+    if parameters.get("adjustment_snapshot_identity_hash") != identity or parameters.get("corporate_action_snapshot_hash") != action_identity:
+        raise ValueError("分钟股票交易规则与目标实际 PIT 复权工件不一致")

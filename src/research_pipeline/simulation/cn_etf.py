@@ -2,27 +2,15 @@
 
 from __future__ import annotations
 
-from research_pipeline.domain import MarketRuleSnapshot
+from datetime import date, datetime
 
-from .cash_market import CashMarketPolicy
+from research_pipeline.domain import MarketRuleSnapshot
+from .market_rules import (
+    CashMarketPolicy, ETF_CATEGORIES, etf_policy_from_rule,
+    require_cash_rule_applicable,
+)
 from .ledger import ExecutionGroup
 from .orders import SimulationContractError
-
-
-ETF_CATEGORIES = frozenset({"equity", "bond", "commodity", "cross_border", "money_market"})
-
-
-def etf_policy_from_rule(rule: MarketRuleSnapshot) -> CashMarketPolicy:
-    if (rule.market, rule.instrument_type) != ("cn_etf", "etf"):
-        raise SimulationContractError("ETF adapter 收到错误资产规则")
-    category = str(rule.parameter("etf_category"))
-    if category not in ETF_CATEGORIES:
-        raise SimulationContractError("ETF 品类必须由规则快照显式给出")
-    return CashMarketPolicy(
-        "cn_etf", rule, int(rule.parameter("lot_size")), int(rule.parameter("settlement_days")),
-        int(rule.parameter("commission_ppm")), int(rule.parameter("min_commission_units")),
-        int(rule.parameter("sell_tax_ppm")), int(rule.parameter("transfer_fee_ppm")),
-    )
 
 
 def group_etf_policies(policies: tuple[CashMarketPolicy, ...]) -> tuple[ExecutionGroup, ...]:
@@ -35,4 +23,13 @@ def require_visible_nav(*, nav_available_time, decision_time) -> None:
         raise SimulationContractError("NAV/IOPV 在决策时尚不可见")
 
 
-__all__ = ["ETF_CATEGORIES", "etf_policy_from_rule", "group_etf_policies", "require_visible_nav"]
+__all__ = ["ETF_CATEGORIES", "etf_policy_from_rule", "group_etf_policies", "require_visible_nav", "etf_policy_for_session"]
+
+
+def etf_policy_for_session(rule: MarketRuleSnapshot, *, trading_date: date, decision_at: datetime) -> CashMarketPolicy:
+    """按历史品类、生命周期和可见规则生成 ETF 会话政策。"""
+    require_cash_rule_applicable(rule, trading_date=trading_date, decision_at=decision_at)
+    parameters = dict(rule.parameters)
+    if "listed_date" not in parameters or "delisted_date" not in parameters:
+        raise SimulationContractError("ETF 会话政策缺少生命周期事实")
+    return etf_policy_from_rule(rule)

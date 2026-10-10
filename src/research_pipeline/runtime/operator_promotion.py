@@ -53,7 +53,7 @@ BUILTIN_ARTIFACT_TYPE_IDENTITIES = frozenset({
 
 # 公共定义集合经审查固定；有意修改实现需同步复核本常量。
 BUILTIN_OPERATOR_DEFINITION_SET_HASH = (
-    "1909723eda596260cc66f7ee60aee3e1f1cf0593205b245a01f955777fdae9a6"
+    "228be0b82eab75a56b1b6005cccb82f456274cda01b0a197fc15654a7a1196d5"
 )
 
 
@@ -224,12 +224,28 @@ DAILY_CASH_LOCAL_APPROVAL = MappingProxyType({
         "finance.simulation.daily-cash.v1",
         "research_pipeline.runtime.qlib_portfolio_execution",
     ),
-    "definition_hash": "b4f1c951bd2e9d6de85bd0def24d56f2f604462e5d46d76e6cf0853eee978b20",
+    "definition_hash": "75a1adce5000da19ae2e779b25dd46a6f78ca6448c4d8be080e74d8cd0ae4227",
     "approved_at": "2026-10-03",
     "approval_ref": "release/daily-cash-local-admission.md",
     "maximum_state": "local_only",
     "heterogeneous_reuse_confirmed": False,
 })
+
+
+SHARED_FUTURES_LOCAL_DEFINITION_HASHES = MappingProxyType({'daily': '34adb479505d698f1812c362aa1bd03daa6069b841b139a0a365ca1b2db1c775', 'intraday': 'f4314f11f1c56690bb49ffe37873854c6617840edb8f2dc9cbe37be9a96bd8e0'})
+
+SHARED_FUTURES_LOCAL_APPROVALS = tuple(MappingProxyType({
+    "operator_identity": (
+        f"finance.simulation.shared-futures.{frequency}", "1.0.0",
+        f"finance.simulation.shared-futures.{frequency}.v1",
+        "research_pipeline.simulation.shared_futures",
+    ),
+    "definition_hash": SHARED_FUTURES_LOCAL_DEFINITION_HASHES[frequency],
+    "approved_at": "2026-10-09",
+    "approval_ref": "release/shared-futures-local-admission.md",
+    "maximum_state": "local_only",
+    "heterogeneous_reuse_confirmed": False,
+}) for frequency in ("daily", "intraday"))
 
 
 def operator_identity(definition: OperatorDefinition) -> OperatorIdentity:
@@ -261,6 +277,18 @@ def operator_mainline_governance(
             "promotion_status": "approved_local_only",
             "maximum_state": "local_only",
             "approval_ref": DAILY_CASH_LOCAL_APPROVAL["approval_ref"],
+            "heterogeneous_reuse_confirmed": False,
+        }
+    approval = next((item for item in SHARED_FUTURES_LOCAL_APPROVALS
+                     if item["operator_identity"] == identity), None)
+    if approval is not None:
+        if definition.definition_hash != approval["definition_hash"]:
+            raise ExtensionError("共享期货 local_only 人工准入定义已漂移，需重新评审")
+        return {
+            "mainline_classification": "local_only",
+            "promotion_status": "approved_local_only",
+            "maximum_state": "local_only",
+            "approval_ref": approval["approval_ref"],
             "heterogeneous_reuse_confirmed": False,
         }
     disposition = LEGACY_OPERATOR_DISPOSITIONS.get(identity)

@@ -22,7 +22,7 @@ from .session_calendar import (
 
 FUTURES_SESSION_CLOSE_BUNDLE_VERSION = "futures-session-close-bundle-v2"
 FUTURES_SESSION_CLOSE_BUNDLE_RESOURCE = (
-    "session_policies/futures_session_close.v2.json"
+    "session_policies/futures_session_close.v4.json"
 )
 FUTURES_SESSION_CLOSE_POLICY_IDS = frozenset(
     {
@@ -104,10 +104,10 @@ class FuturesSessionCloseCalendarBinding:
         if self.session_policy_revision < 1 or self.calendar_policy_revision < 1:
             raise FuturesSessionCloseError("session-close calendar revision 无效")
         _hash(self.calendar_bundle_hash, "calendar bundle_hash")
-        if self.calendar_bundle_ref != (
-            "research_pipeline.domain.session_policies/"
-            "minute_reference_sessions.v4.json"
-        ):
+        if self.calendar_bundle_ref not in {
+            "research_pipeline.domain.session_policies/minute_reference_sessions.v5.json",
+            "research_pipeline.domain.session_policies/minute_reference_sessions.v6.json",
+        }:
             raise FuturesSessionCloseError("session-close calendar 来源无效")
         try:
             ZoneInfo(self.timezone)
@@ -223,14 +223,32 @@ class FuturesSessionClosePolicyBundle:
         except SessionCalendarError as exc:
             raise FuturesSessionCloseError("session-close 绑定日历无法验证") from exc
         for calendar in calendars:
+            bound_calendar = current_calendar
+            if calendar.calendar_bundle_hash != current_calendar.bundle_hash:
+                from importlib.resources import as_file
+
+                resource_name = calendar.calendar_bundle_ref.split("/", 1)[1]
+                resource = files("research_pipeline.domain").joinpath(
+                    "session_policies/" + resource_name
+                )
+                try:
+                    with as_file(resource) as calendar_path:
+                        bound_calendar = load_session_policy_bundle(
+                            calendar_path,
+                            expected_bundle_hash=calendar.calendar_bundle_hash,
+                        )
+                except (OSError, SessionCalendarError) as exc:
+                    raise FuturesSessionCloseError(
+                        "session-close 绑定日历无法验证"
+                    ) from exc
             calendar_policies = tuple(
                 item
-                for item in current_calendar.policies
+                for item in bound_calendar.policies
                 if item.policy_id == calendar.calendar_policy_id
                 and item.revision == calendar.calendar_policy_revision
                 and item.instrument.instrument_id == calendar.instrument_id
             )
-            if current_calendar.bundle_hash != calendar.calendar_bundle_hash or len(
+            if bound_calendar.bundle_hash != calendar.calendar_bundle_hash or len(
                 calendar_policies
             ) != 1:
                 raise FuturesSessionCloseError(

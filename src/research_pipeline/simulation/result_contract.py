@@ -28,10 +28,19 @@ from research_pipeline.domain.simulation_result import (
 )
 
 from .orders import SimulationContractError
+from .futures_financial_context import (
+    FUTURES_CONTEXT_DECLARATION, FuturesFinancialContext,
+    FUTURES_CONTEXT_VERSIONS, read_futures_financial_context, write_futures_financial_context,
+)
+from .order_lifecycle import (
+    ORDER_LIFECYCLE_DECLARATION, ORDER_LIFECYCLE_SCHEMA, lifecycle_table, read_order_lifecycle,
+    write_order_lifecycle, write_order_lifecycle_session,
+)
 
 
 SIMULATION_RESULT_CONTRACT_VERSION = "research-simulation-result-v1"
 SIMULATION_RESULT_SEMANTICS_VERSION = "research-simulation-result-semantics-v1"
+SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION = "research-simulation-result-semantics-v2"
 CANONICAL_SIMULATION_TABLES = (
     "orders",
     "fills",
@@ -105,7 +114,9 @@ class SimulationResultSemantics:
         _require_hash(self.timeline_semantics_hash, "timeline_semantics_hash")
         if type(self.negative_cash_allowed) is not bool:
             raise SimulationContractError("negative_cash_allowed 必须是布尔值")
-        if self.contract_version != SIMULATION_RESULT_SEMANTICS_VERSION:
+        if self.contract_version not in {
+            SIMULATION_RESULT_SEMANTICS_VERSION, SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION,
+        }:
             raise SimulationContractError("SimulationResultSemantics 版本无效")
 
     def to_dict(self) -> dict[str, object]:
@@ -131,6 +142,9 @@ class SimulationResultContract:
     semantics: SimulationResultSemantics
     source_simulation_hash: str
     contract_version: str = SIMULATION_RESULT_CONTRACT_VERSION
+    order_lifecycle: tuple[dict[str, object], ...] | None = None
+    futures_context: FuturesFinancialContext | None = None
+    account_valuation_adjustments: Mapping[str, int] | None = None
 
     def __post_init__(self) -> None:
         _require_hash(self.source_simulation_hash, "source_simulation_hash")
@@ -138,6 +152,22 @@ class SimulationResultContract:
             raise SimulationContractError("仿真结果合同版本无效")
         if set(self.tables) != set(CANONICAL_SIMULATION_TABLES):
             raise SimulationContractError("仿真结果必须完整包含六张规范表")
+        if (self.semantics.contract_version == SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION
+                and self.order_lifecycle is None):
+            raise SimulationContractError("新仿真语义合同必须提供订单生命周期")
+        if self.order_lifecycle is not None:
+            if self.semantics.contract_version != SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION:
+                raise SimulationContractError("订单生命周期必须绑定新仿真语义合同")
+            lifecycle_table(self.order_lifecycle)
+        if (self.semantics.asset_class == "cn_future" and self.semantics.frequency == "daily"
+                and self.semantics.contract_version == SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION
+                and self.futures_context is None):
+            raise SimulationContractError("新日频期货结果缺少金融上下文")
+        if self.futures_context is not None and (
+            self.semantics.asset_class != "cn_future" or self.semantics.frequency != "daily"
+            or self.futures_context.source_simulation_hash != self.source_simulation_hash
+        ):
+            raise SimulationContractError("日频期货金融上下文与仿真来源不一致")
         verify_simulation_result_contract(self)
 
     @property
@@ -149,29 +179,46 @@ class SimulationResultContract:
 
     @property
     def result_hash(self) -> str:
-        return typed_canonical_hash({
+        return self._result_hash(self.table_hashes)
+
+    def _result_hash(self, table_hashes: Mapping[str, str]) -> str:
+        body = {
             "contract_version": self.contract_version,
             "semantics_hash": self.semantics.semantics_hash,
             "source_simulation_hash": self.source_simulation_hash,
-            "table_hashes": self.table_hashes,
-        })
+            "table_hashes": dict(table_hashes),
+        }
+        if self.order_lifecycle is not None:
+            body["order_lifecycle_contract"] = dict(ORDER_LIFECYCLE_DECLARATION)
+        if self.futures_context is not None:
+            body["futures_context_contract"] = self.futures_context.declaration
+        if self.account_valuation_adjustments is not None:
+            body["account_valuation_adjustments"] = dict(self.account_valuation_adjustments)
+        return typed_canonical_hash(body)
 
     @property
     def manifest(self) -> dict[str, object]:
+        table_hashes = self.table_hashes
         body = {
             "contract_version": self.contract_version,
             "semantics": self.semantics.to_dict(),
             "semantics_hash": self.semantics.semantics_hash,
             "source_simulation_hash": self.source_simulation_hash,
-            "table_hashes": self.table_hashes,
+            "table_hashes": table_hashes,
             "table_rows": {
                 name: len(self.tables[name]) for name in CANONICAL_SIMULATION_TABLES
             },
             "table_schemas": {
                 name: _schema_payload(name) for name in CANONICAL_SIMULATION_TABLES
             },
-            "result_hash": self.result_hash,
+            "result_hash": self._result_hash(table_hashes),
         }
+        if self.order_lifecycle is not None:
+            body["order_lifecycle_contract"] = dict(ORDER_LIFECYCLE_DECLARATION)
+        if self.futures_context is not None:
+            body["futures_context_contract"] = self.futures_context.declaration
+        if self.account_valuation_adjustments is not None:
+            body["account_valuation_adjustments"] = dict(self.account_valuation_adjustments)
         return {**body, "manifest_hash": typed_canonical_hash(body)}
 
 
@@ -180,6 +227,9 @@ def build_simulation_result_contract(
     tables: Mapping[str, pd.DataFrame],
     semantics: SimulationResultSemantics,
     source_simulation_hash: str,
+    order_lifecycle: tuple[dict[str, object], ...] | None = None,
+    futures_context: FuturesFinancialContext | None = None,
+    account_valuation_adjustments: Mapping[str, int] | None = None,
 ) -> SimulationResultContract:
     """复制规范表并冻结列顺序，调用方不能在验证后原地改写事实。"""
 
@@ -188,7 +238,12 @@ def build_simulation_result_contract(
         if name not in tables or not isinstance(tables[name], pd.DataFrame):
             raise SimulationContractError(f"缺少规范表: {name}")
         normalized[name] = _normalize_table(name, tables[name])
-    return SimulationResultContract(normalized, semantics, source_simulation_hash)
+    return SimulationResultContract(
+        normalized, semantics, source_simulation_hash,
+        order_lifecycle=(None if order_lifecycle is None else tuple(dict(row) for row in order_lifecycle)),
+        futures_context=futures_context,
+        account_valuation_adjustments=account_valuation_adjustments,
+    )
 
 
 def canonical_simulation_table(
@@ -374,10 +429,14 @@ def project_cash_daily_result(
             "valuation_time": cash_row["valuation_time"],
             "nav_units": int(row.nav_units),
             "currency": "CNY",
-            "valuation_model": "cash_plus_position_market_value",
+            "valuation_model": ("cash_plus_positions_and_credit_liabilities_v1"
+                                if getattr(result, "credit_context", None) is not None
+                                else "cash_plus_position_market_value" if getattr(result, "account_context", None) is None
+                                else "cash_plus_positions_and_account_rights_v1"),
             "source_state_hash": str(row.state_hash),
         })
     semantics = SimulationResultSemantics(
+        contract_version=SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION,
         asset_class=asset_class,
         frequency="daily",
         decision_time_convention="declared_portfolio_target_time",
@@ -402,7 +461,28 @@ def project_cash_daily_result(
         },
         semantics=semantics,
         source_simulation_hash=str(result.simulation_hash),
+        order_lifecycle=result.order_lifecycle,
+        account_valuation_adjustments=_daily_account_adjustments(result),
     )
+
+
+def _daily_account_adjustments(result):
+    """投影已确认权益及信用负债，金融计算仍由各账户生产者负责。"""
+    account = getattr(result, "account_context", None)
+    credit = getattr(result, "credit_context", None)
+    if account is None:
+        if credit is not None:
+            raise SimulationContractError("信用估值缺少期初账户事实")
+        return None
+    adjustments = {item["session"]: item["pending_successor_units"] - item["liabilities_units"]
+                   for item in account["snapshots"]}
+    if credit is not None:
+        snapshots = {item["session"]: item for item in credit["snapshots"]}
+        if len(snapshots) != len(credit["snapshots"]) or set(snapshots) != set(adjustments):
+            raise SimulationContractError("信用快照与账户估值会话不一致")
+        for session, item in snapshots.items():
+            adjustments[session] -= item["principal_units"] + item["interest_units"]
+    return adjustments
 
 
 def project_futures_daily_result(
@@ -416,36 +496,76 @@ def project_futures_daily_result(
 ) -> SimulationResultContract:
     """把逐日盯市期货结果投影到公共合同，不改变成交或结算事实。"""
 
-    intents = result.intents.copy()
-    fills = result.fills.copy()
-    settlements = result.settlements.copy()
-    rejections = getattr(result, "rejections", pd.DataFrame()).copy()
+    lifecycle = getattr(result, "order_lifecycle", None)
+    futures_context = None if lifecycle is None else FuturesFinancialContext.from_result(result)
+    source_simulation_hash = (str(result.result_hash) if futures_context is None
+                              else futures_context.source_simulation_hash)
+    intents = result.intents
+    fills = result.fills
+    settlements = result.settlements
+    rejections = getattr(result, "rejections", pd.DataFrame())
     intent_by_order = {str(row.order_id): row for row in intents.itertuples(index=False)}
-    fills_by_order = {} if fills.empty else {
-        str(order_id): frame for order_id, frame in fills.groupby("order_id", sort=True)
-    }
+    fills_by_order = {}
+    for row in fills.itertuples(index=False):
+        order_id = str(row.order_id)
+        if order_id not in fills_by_order:
+            fills_by_order[order_id] = (row, int(row.quantity))
+        else:
+            first, quantity = fills_by_order[order_id]
+            fills_by_order[order_id] = (first, quantity + int(row.quantity))
     rejection_by_order = {} if rejections.empty else {
         str(row.order_id): row for row in rejections.itertuples(index=False)
     }
     order_rows = []
     instrument_hash_by_id: dict[str, str] = {}
+    explicit_context = getattr(result, "explicit_order_context", None)
+    explicit_submits = {}
+    if explicit_context is not None:
+        contexts = (explicit_context.get("products", {}).values()
+                    if explicit_context.get("account_model") == "independent_product_accounts"
+                    else (explicit_context,))
+        for account in contexts:
+            terminals = {row["order_id"]: row for row in account["order_states"]}
+            for command in account["commands"]:
+                if command["action"] != "submit":
+                    continue
+                order_id = command["order_id"]
+                if order_id in explicit_submits or order_id in intent_by_order:
+                    raise SimulationContractError("期货显式订单编号必须在结果内唯一")
+                explicit_submits[order_id] = command
+                instrument = command["instrument"]
+                code = instrument["instrument_id"]
+                instrument_hash = typed_canonical_hash(instrument)
+                instrument_hash_by_id[code] = instrument_hash
+                filled = fills_by_order.get(order_id, (None, 0))[1]
+                terminal = terminals.get(order_id)
+                if terminal is None or terminal["filled_quantity"] != filled:
+                    raise SimulationContractError("期货显式订单缺少一致的真实终态")
+                order_rows.append({
+                    "portfolio_id": "default", "order_id": order_id,
+                    "session": command["trading_date"], "instrument_hash": instrument_hash,
+                    "asset_class": "cn_future", "instrument_id": code, "side": command["side"],
+                    "requested_quantity": command["quantity"], "filled_quantity": filled,
+                    "status": _terminal_status(command["quantity"], filled),
+                    "terminal_reason": terminal["reason"], "decision_time": command["decision_time"],
+                    "submitted_at": command["submitted_at"], "source_order_hash": typed_canonical_hash(command),
+                })
     for order_id, raw in intent_by_order.items():
         payload = json.loads(str(raw.intent_json))
         instrument = payload["instrument"]
         instrument_id = str(instrument["instrument_id"])
         instrument_hash = typed_canonical_hash(instrument)
         instrument_hash_by_id[instrument_id] = instrument_hash
-        frame = fills_by_order.get(order_id)
-        filled = 0 if frame is None else int(frame["quantity"].sum())
+        first_fill, filled = fills_by_order.get(order_id, (None, 0))
         rejection = rejection_by_order.get(order_id)
-        status = "rejected" if rejection is not None and filled == 0 else _terminal_status(int(raw.quantity), filled)
-        first_fill = None if frame is None else frame.iloc[0]
+        requested_quantity = int(payload.get("quantity", getattr(raw, "quantity", None)))
+        status = "rejected" if rejection is not None and filled == 0 else _terminal_status(requested_quantity, filled)
         session = getattr(raw, "execution_session", None)
-        side = getattr(raw, "side", None)
+        side = payload.get("side", getattr(raw, "side", None))
         if session is None:
-            session = getattr(rejection, "trading_date", None) if first_fill is None else first_fill["trading_date"]
+            session = getattr(rejection, "trading_date", None) if first_fill is None else first_fill.trading_date
         if side is None:
-            side = getattr(rejection, "side", None) if first_fill is None else first_fill["side"]
+            side = getattr(rejection, "side", None) if first_fill is None else first_fill.side
         if session is None or side is None:
             raise SimulationContractError("期货订单缺少执行会话或方向")
         order_rows.append({
@@ -454,7 +574,7 @@ def project_futures_daily_result(
             "instrument_hash": instrument_hash, "asset_class": "cn_future",
             "instrument_id": instrument_id,
             "side": str(side),
-            "requested_quantity": int(raw.quantity),
+            "requested_quantity": requested_quantity,
             "filled_quantity": filled, "status": status,
             "terminal_reason": (
                 str(rejection.reason_code)
@@ -464,16 +584,14 @@ def project_futures_daily_result(
             "decision_time": payload["decision_time"], "submitted_at": payload["order_time"],
             "source_order_hash": _row_hash(raw),
         })
-    for order_id, frame in fills_by_order.items():
-        if order_id not in intent_by_order:
-            first = frame.iloc[0]
-            instrument_id = str(first["actual_contract"])
-            decision_time = first["fill_time"]
-            submitted_at = first["fill_time"]
-            requested = int(frame["quantity"].sum())
+    for order_id, (first, requested) in sorted(fills_by_order.items()):
+        if order_id not in intent_by_order and order_id not in explicit_submits:
+            instrument_id = str(first.actual_contract)
+            decision_time = first.fill_time
+            submitted_at = first.fill_time
             source_order_hash = typed_canonical_hash({
                 "formal_forced_liquidation_order": order_id,
-                "source_simulation_hash": result.result_hash,
+                "source_simulation_hash": source_simulation_hash,
             })
             instrument_hash = typed_canonical_hash({
                 "instrument_id": instrument_id, "asset_class": "cn_future"
@@ -481,20 +599,27 @@ def project_futures_daily_result(
             instrument_hash_by_id[instrument_id] = instrument_hash
             order_rows.append({
                 "portfolio_id": "default", "order_id": order_id,
-                "session": first["trading_date"], "instrument_id": instrument_id,
+                "session": first.trading_date, "instrument_id": instrument_id,
                 "instrument_hash": instrument_hash, "asset_class": "cn_future",
-                "side": str(first["side"]), "requested_quantity": requested,
+                "side": str(first.side), "requested_quantity": requested,
                 "filled_quantity": requested, "status": "filled", "terminal_reason": None,
                 "decision_time": decision_time, "submitted_at": submitted_at,
                 "source_order_hash": source_order_hash,
             })
     fill_rows = []
     cost_rows = []
+    trade_changes_by_session: dict[object, dict[str, int]] = {}
     for row in fills.itertuples(index=False):
         instrument_id = str(row.actual_contract)
+        changes = trade_changes_by_session.setdefault(row.trading_date, {})
+        signed = int(row.quantity) if str(row.side) == "buy" else -int(row.quantity)
+        changes[instrument_id] = changes.get(instrument_id, 0) + signed
         instrument_hash = instrument_hash_by_id[instrument_id]
         price_units = int(round(float(row.fill_price) * 100))
-        notional = price_units * int(row.quantity) * int(row.multiplier)
+        price_scale = int(getattr(row, "price_scale", 2))
+        price_units = int(getattr(row, "execution_price_units", price_units))
+        notional = int((Decimal(price_units) * int(row.quantity) * int(row.multiplier)
+                        * Decimal(100) / (Decimal(10) ** price_scale)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
         source_hash = _row_hash(row)
         fill_rows.append({
             "portfolio_id": "default", "fill_id": str(row.fill_id),
@@ -502,7 +627,7 @@ def project_futures_daily_result(
             "instrument_id": instrument_id, "instrument_hash": instrument_hash,
             "asset_class": "cn_future", "side": str(row.side),
             "quantity": int(row.quantity), "fill_time": row.fill_time,
-            "execution_price_units": price_units, "price_scale": 2,
+            "execution_price_units": price_units, "price_scale": price_scale,
             "contract_multiplier": int(row.multiplier), "notional_units": notional,
             "fee_units": int(row.fee_fen), "position_effect": str(row.position_effect),
             "realized_pnl_units": int(row.realized_pnl_fen),
@@ -520,10 +645,7 @@ def project_futures_daily_result(
     cash_rows = []
     valuation_rows = []
     previous_cash = initial_cash_units
-    fills_by_session = {} if fills.empty else {
-        session: frame
-        for session, frame in fills.groupby("trading_date", sort=False)
-    }
+    fills_by_session = {} if fills.empty else fills.groupby("trading_date", sort=False).indices
     nav = getattr(
         result,
         "nav",
@@ -531,36 +653,36 @@ def project_futures_daily_result(
             "equity_fen": "nav_fen",
             "required_margin_fen": "margin_fen",
         })[["trading_date", "nav_fen", "margin_fen"]],
-    ).copy()
+    )
+    nav_by_session = nav.groupby(pd.to_datetime(nav["trading_date"]).dt.date, sort=False).indices
+    empty_fills = fills.iloc[0:0]
     for session, settlement_group in settlements.sort_values(
         ["trading_date", "actual_contract"], kind="mergesort"
     ).groupby("trading_date", sort=True):
-        session_fills = fills_by_session.get(session, fills.iloc[0:0])
-        trade_change_by_id: dict[str, int] = {}
-        for fill in session_fills.itertuples(index=False):
-            signed = int(fill.quantity) if str(fill.side) == "buy" else -int(fill.quantity)
-            instrument = str(fill.actual_contract)
-            trade_change_by_id[instrument] = trade_change_by_id.get(instrument, 0) + signed
+        fill_indices = fills_by_session.get(session)
+        session_fills = empty_fills if fill_indices is None else fills.iloc[fill_indices]
+        trade_change_by_id = trade_changes_by_session.get(session, {})
+        settlement_rows = tuple(settlement_group.itertuples(index=False))
         previous_running = running.copy()
         for instrument, change in trade_change_by_id.items():
             running[instrument] = running.get(instrument, 0) + change
         expected_positions = {
             str(row.actual_contract): int(row.position)
-            for row in settlement_group.itertuples(index=False)
+            for row in settlement_rows
             if int(row.position) != 0
         }
         if {key: value for key, value in running.items() if value != 0} != expected_positions:
             raise SimulationContractError("期货逐合约持仓与结算持仓不一致")
         valuation_time = pd.Timestamp(session).tz_localize("Asia/Shanghai") + pd.Timedelta(hours=17)
         state_hash = typed_canonical_hash([
-            _row_hash(row) for row in settlement_group.itertuples(index=False)
+            _row_hash(row) for row in settlement_rows
         ])
         snapshot_id = _snapshot_id("default", session, valuation_time, state_hash)
         for instrument in sorted(set(previous_running) | set(running) | set(trade_change_by_id)):
             if (
                 running.get(instrument, 0) == 0
                 and previous_running.get(instrument, 0) == 0
-                and trade_change_by_id.get(instrument, 0) == 0
+                and instrument not in trade_change_by_id
             ):
                 continue
             position_rows.append({
@@ -581,10 +703,10 @@ def project_futures_daily_result(
             - int(session_fills["fee_fen"].sum())
         )
         mtm_change = int(settlement_group["mtm_pnl_fen"].sum())
-        nav_rows = nav.loc[pd.to_datetime(nav["trading_date"]).dt.date == pd.Timestamp(session).date()]
-        if len(nav_rows) != 1:
+        nav_indices = nav_by_session.get(pd.Timestamp(session).date(), ())
+        if len(nav_indices) != 1:
             raise SimulationContractError("期货组合会话净值缺失或重叠")
-        nav_row = nav_rows.iloc[0]
+        nav_row = nav.iloc[nav_indices[0]]
         equity = int(nav_row["nav_fen"])
         if equity != previous_cash + trade_cash_change + mtm_change:
             raise SimulationContractError("期货权益变化与逐日盯市、已实现盈亏和费用不一致")
@@ -607,8 +729,12 @@ def project_futures_daily_result(
         })
         previous_cash = equity
     semantics = SimulationResultSemantics(
+        contract_version=(SIMULATION_RESULT_SEMANTICS_VERSION if lifecycle is None
+                          else SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION),
         asset_class="cn_future", frequency="daily",
-        decision_time_convention="declared_portfolio_target_time",
+        decision_time_convention=("explicit_visible_order_stream"
+                                  if getattr(result, "explicit_order_context", None) is not None
+                                  else "declared_portfolio_target_time"),
         execution_time_convention="next_exchange_session_open_or_forced_settlement",
         valuation_time_convention="exchange_settlement_event",
         price_convention="integer_cny_cent_times_contract_multiplier",
@@ -627,7 +753,9 @@ def project_futures_daily_result(
             "valuations": pd.DataFrame(valuation_rows, columns=sorted(_REQUIRED_COLUMNS["valuations"])),
         },
         semantics=semantics,
-        source_simulation_hash=str(result.result_hash),
+        source_simulation_hash=source_simulation_hash,
+        order_lifecycle=(None if lifecycle is None else tuple(lifecycle.reindex(columns=ORDER_LIFECYCLE_SCHEMA.names).to_dict(orient="records"))),
+        futures_context=futures_context,
     )
 
 
@@ -657,6 +785,7 @@ def verify_simulation_result_contract(result: SimulationResultContract) -> None:
     _verify_snapshots(
         tables["fills"], tables["positions"], tables["cash"], tables["valuations"],
         semantics=result.semantics,
+        account_adjustments=result.account_valuation_adjustments,
     )
 
 
@@ -669,14 +798,15 @@ def write_simulation_result_contract(
     """原子写入六张规范表；manifest 绑定 schema、语义和逐表内容。"""
 
     root = Path(output_root).resolve()
+    manifest = result.manifest
     context = None
     if daily_etf_context is not None:
         from .daily_financial_context import build_daily_etf_financial_context
 
-        if result.semantics.asset_class != "cn_etf" or result.semantics.frequency != "daily":
+        if result.semantics.asset_class not in {"cn_etf", "cn_stock"} or result.semantics.frequency != "daily":
             raise SimulationContractError("日频 ETF 金融上下文只能随对应六表发布")
         context = build_daily_etf_financial_context(
-            **daily_etf_context, simulation_result_hash=result.result_hash,
+            **daily_etf_context, simulation_result_hash=manifest["result_hash"],
         )
         if context["source_simulation_hash"] != result.source_simulation_hash:
             raise SimulationContractError("日频 ETF 金融上下文与六表来源仿真不一致")
@@ -694,7 +824,12 @@ def write_simulation_result_contract(
                 _to_arrow_table(name, result.tables[name]),
                 directory / "part-00000.parquet",
             )
-        manifest = result.manifest
+        if result.order_lifecycle is not None:
+            write_order_lifecycle(root.parent, result.order_lifecycle)
+        if result.futures_context is not None:
+            write_futures_financial_context(
+                root.parent, result.futures_context, simulation_result_hash=manifest["result_hash"],
+            )
         (staging / "manifest.json").write_text(canonical_json(manifest), encoding="utf-8")
         (staging / "COMMITTED").write_text(str(manifest["manifest_hash"]), encoding="ascii")
         os.replace(staging, root)
@@ -721,7 +856,9 @@ def write_simulation_result_contract(
 class SimulationResultArtifactWriter:
     """逐交易日写入六表，避免 Runtime 为了发布工件重新合并完整结果。"""
 
-    def __init__(self, output_root: str | Path) -> None:
+    def __init__(self, output_root: str | Path, *, require_order_lifecycle: bool = False) -> None:
+        self._require_order_lifecycle = require_order_lifecycle
+        self._lifecycle_sessions: set[object] = set()
         self.root = Path(output_root).resolve()
         if self.root.exists():
             raise FileExistsError(f"仿真结果合同已存在: {self.root}")
@@ -754,8 +891,13 @@ class SimulationResultArtifactWriter:
             values = list(rows[name])
             if not values:
                 continue
-            frame = canonical_simulation_table(name, values)
-            table = _to_arrow_table(name, frame)
+            try:
+                table = _to_arrow_table(
+                    name, pd.DataFrame(values, columns=sorted(_REQUIRED_COLUMNS[name])),
+                )
+                frame = table.to_pandas().reset_index(drop=True)
+            except (pa.ArrowException, TypeError, ValueError) as exc:
+                raise SimulationContractError(f"{name} 字段类型与规范 schema 不一致") from exc
             part_index = self._part_counts[name]
             pq.write_table(
                 table,
@@ -770,6 +912,12 @@ class SimulationResultArtifactWriter:
             self._row_counts[name] += len(frame)
             self._part_counts[name] += 1
 
+    def append_order_lifecycle(self, session, rows) -> None:
+        if self._closed or not self._require_order_lifecycle:
+            raise SimulationContractError("生命周期 writer 未开启或已经关闭")
+        write_order_lifecycle_session(self.root.parent, session, rows)
+        self._lifecycle_sessions.add(session)
+
     def finalize(
         self,
         *,
@@ -779,6 +927,10 @@ class SimulationResultArtifactWriter:
         if self._closed:
             raise SimulationContractError("仿真结果 writer 只能 finalize 一次")
         _require_hash(source_simulation_hash, "source_simulation_hash")
+        if self._require_order_lifecycle and semantics.contract_version != SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION:
+            raise SimulationContractError("生命周期 writer 必须绑定新仿真语义合同")
+        if not self._require_order_lifecycle and semantics.contract_version == SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION:
+            raise SimulationContractError("新仿真语义合同必须开启生命周期 writer")
         self._closed = True
         try:
             for name in CANONICAL_SIMULATION_TABLES:
@@ -792,12 +944,19 @@ class SimulationResultArtifactWriter:
                 name: self._digests[name].hexdigest()
                 for name in CANONICAL_SIMULATION_TABLES
             }
-            result_hash = typed_canonical_hash({
+            identity = {
                 "contract_version": SIMULATION_RESULT_CONTRACT_VERSION,
                 "semantics_hash": semantics.semantics_hash,
                 "source_simulation_hash": source_simulation_hash,
                 "table_hashes": table_hashes,
-            })
+            }
+            if self._require_order_lifecycle:
+                if not self._lifecycle_sessions:
+                    if self._row_counts["orders"]:
+                        raise SimulationContractError("新仿真合同缺少订单生命周期")
+                    write_order_lifecycle_session(self.root.parent, None, ())
+                identity["order_lifecycle_contract"] = dict(ORDER_LIFECYCLE_DECLARATION)
+            result_hash = typed_canonical_hash(identity)
             body = {
                 "contract_version": SIMULATION_RESULT_CONTRACT_VERSION,
                 "semantics": semantics.to_dict(),
@@ -811,6 +970,8 @@ class SimulationResultArtifactWriter:
                 },
                 "result_hash": result_hash,
             }
+            if self._require_order_lifecycle:
+                body["order_lifecycle_contract"] = dict(ORDER_LIFECYCLE_DECLARATION)
             manifest = {**body, "manifest_hash": typed_canonical_hash(body)}
             (self._staging / "manifest.json").write_text(
                 canonical_json(manifest), encoding="utf-8"
@@ -855,7 +1016,35 @@ def verify_simulation_result_artifact(
     if committed != manifest.get("manifest_hash") or typed_canonical_hash(unsigned) != committed:
         raise SimulationContractError("仿真结果 manifest 或提交标记损坏")
     semantics = SimulationResultSemantics.from_dict(manifest.get("semantics", {}))
+    lifecycle_paths = ()
+    if semantics.contract_version == SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION:
+        if manifest.get("order_lifecycle_contract") != ORDER_LIFECYCLE_DECLARATION:
+            raise SimulationContractError("新仿真语义合同缺少订单生命周期声明")
+        lifecycle_paths = tuple(sorted(
+            (root.parent / "context-tables/order-lifecycle").glob("session=*/data.parquet")
+        ))
+        if not lifecycle_paths:
+            raise SimulationContractError("新仿真合同缺少订单生命周期分区")
+    elif "order_lifecycle_contract" in manifest:
+        raise SimulationContractError("订单生命周期必须绑定新仿真语义合同")
+    futures_paths = ()
+    if "futures_context_contract" in manifest:
+        declaration = manifest["futures_context_contract"]
+        version = declaration.get("contract_version")
+        if version not in FUTURES_CONTEXT_VERSIONS or declaration != {
+            **FUTURES_CONTEXT_DECLARATION, "contract_version": version,
+        }:
+            raise SimulationContractError("日频期货金融上下文声明无效")
+        pattern = "*/session=*/data.parquet" if version == FUTURES_CONTEXT_VERSIONS[0] else "*/part-*.parquet"
+        futures_paths = tuple((root.parent / "futures-context-tables").glob(pattern))
     uncompressed_bytes = 0
+    for lifecycle_path in (*lifecycle_paths, *futures_paths):
+        metadata = pq.read_metadata(lifecycle_path)
+        for index in range(metadata.num_row_groups):
+            group = metadata.row_group(index)
+            uncompressed_bytes += sum(
+                group.column(column).total_uncompressed_size for column in range(group.num_columns)
+            )
     for name, paths in partition_paths.items():
         for partition_path in paths:
             parquet = pq.ParquetFile(partition_path)
@@ -894,6 +1083,13 @@ def verify_simulation_result_artifact(
         tables=tables,
         semantics=semantics,
         source_simulation_hash=str(manifest.get("source_simulation_hash")),
+        order_lifecycle=(
+            None if "order_lifecycle_contract" not in manifest
+            else read_order_lifecycle(root.parent)
+        ),
+        futures_context=(None if "futures_context_contract" not in manifest
+                         else read_futures_financial_context(root.parent)),
+        account_valuation_adjustments=manifest.get("account_valuation_adjustments"),
     )
     if result.manifest != manifest:
         raise SimulationContractError("仿真结果表、语义或摘要与 manifest 不一致")
@@ -1026,6 +1222,7 @@ def _verify_snapshots(
     valuations: pd.DataFrame,
     *,
     semantics: SimulationResultSemantics,
+    account_adjustments: Mapping[str, int] | None = None,
 ) -> None:
     cash_keys = {(str(row.portfolio_id), str(row.snapshot_id)) for row in cash.itertuples(index=False)}
     valuation_keys = {
@@ -1088,7 +1285,7 @@ def _verify_snapshots(
         )
         if int(row.non_trade_cash_change_units) != 0 and source_hash == _EMPTY_NON_TRADE_SOURCE_HASH:
             raise SimulationContractError("非交易现金变化缺少来源事件")
-    _verify_cash_conservation(fills, cash, semantics=semantics)
+    _verify_cash_conservation(fills, cash, semantics=semantics, account_opening=account_adjustments is not None)
     for row in positions.itertuples(index=False):
         quantity = int(row.quantity)
         if row.asset_class != "cn_future" and quantity < 0:
@@ -1133,6 +1330,11 @@ def _verify_snapshots(
         expected = cash_by_key[key]
         if str(row.valuation_model) == "cash_plus_position_market_value":
             expected += int(position_values.get(key, 0))
+        elif str(row.valuation_model) in {"cash_plus_positions_and_account_rights_v1", "cash_plus_positions_and_credit_liabilities_v1"}:
+            session = str(row.session)[:10]
+            if account_adjustments is None or session not in account_adjustments or type(account_adjustments[session]) is not int:
+                raise SimulationContractError("账户净值缺少权益与负债调整事实")
+            expected += int(position_values.get(key, 0)) + account_adjustments[session]
         elif str(row.valuation_model) != "futures_settlement_equity":
             raise SimulationContractError("valuation_model 不受支持")
         if int(row.nav_units) != expected:
@@ -1169,6 +1371,7 @@ def _verify_cash_conservation(
     cash: pd.DataFrame,
     *,
     semantics: SimulationResultSemantics,
+    account_opening: bool = False,
 ) -> None:
     trade_changes: dict[tuple[str, object], int] = {}
     for row in fills.itertuples(index=False):
@@ -1185,7 +1388,7 @@ def _verify_cash_conservation(
         previous: int | None = None
         opening: int | None = None
         for row in frame.sort_values(["valuation_time", "snapshot_id"], kind="mergesort").itertuples(index=False):
-            declared_opening = _positive_int(row.opening_cash_units, "opening_cash_units")
+            declared_opening = (_nonnegative_int if account_opening else _positive_int)(row.opening_cash_units, "opening_cash_units")
             if opening is None:
                 opening = declared_opening
                 previous = opening
@@ -1349,6 +1552,7 @@ __all__ = [
     "CANONICAL_SIMULATION_TABLES",
     "SIMULATION_RESULT_CONTRACT_VERSION",
     "SIMULATION_RESULT_SEMANTICS_VERSION",
+    "SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION",
     "SimulationResultArtifactWriter",
     "SimulationResultContract",
     "SimulationResultSemantics",

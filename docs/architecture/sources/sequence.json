@@ -1,0 +1,132 @@
+{
+  "schema_version": 3,
+  "diagram_type": "sequence",
+  "title": "一次运行中，谁先调用谁",
+  "question": "普通列式取数示例；已缓存节点、分钟扫描与归档输入有各自取数入口。",
+  "width": 1120,
+  "height": 740,
+  "nodes": [
+    {
+      "id": "cli",
+      "label": "命令入口",
+      "sub": "run / verify",
+      "x": 20,
+      "y": 30,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "负责运行编排与最终封存。",
+      "source": "src/research_pipeline/cli/commands/research_run.py"
+    },
+    {
+      "id": "runtime",
+      "label": "运行主控",
+      "sub": "Runtime",
+      "x": 295,
+      "y": 30,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "调度算法步骤，验证并提交检查点。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
+    },
+    {
+      "id": "adapter",
+      "label": "节点适配器",
+      "sub": "计算 / 数据平面",
+      "x": 570,
+      "y": 30,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "数据节点调用数据平面，算法节点消费正式输入。",
+      "source": "src/research_pipeline/application/grid_data.py"
+    },
+    {
+      "id": "store",
+      "label": "结果与独立检查",
+      "sub": "Result / Verifier",
+      "x": 845,
+      "y": 30,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "Result 封存后，再执行独立检查。",
+      "source": "src/research_pipeline/results/assembler.py"
+    }
+  ],
+  "edges": [],
+  "notes": [
+    "每个箭头表示一条调用或返回。数据访问只在对应数据节点发生。",
+    "Result 封存位于 Runtime 返回之后；verify 是另一条正式命令。",
+    "Checkpoint 只复用完整、身份匹配的已提交节点，不复用半成品。"
+  ],
+  "messages": [
+    [
+      "cli",
+      "runtime",
+      "执行已准入计划",
+      175
+    ],
+    [
+      "runtime",
+      "adapter",
+      "调度数据节点与上下文",
+      225
+    ],
+    [
+      "adapter",
+      "runtime",
+      "取数后返回列式工件引用",
+      275
+    ],
+    [
+      "runtime",
+      "runtime",
+      "核验输出并提交 checkpoint",
+      325
+    ],
+    [
+      "runtime",
+      "adapter",
+      "调度因子、模型或仿真节点",
+      375
+    ],
+    [
+      "adapter",
+      "runtime",
+      "返回计算产出",
+      425
+    ],
+    [
+      "runtime",
+      "cli",
+      "全部节点完成，返回运行摘要",
+      475
+    ],
+    [
+      "cli",
+      "store",
+      "封存 Result，记录 finalize 状态",
+      525
+    ],
+    [
+      "store",
+      "cli",
+      "返回结果位置",
+      575
+    ],
+    [
+      "cli",
+      "store",
+      "另行执行 verify",
+      625
+    ],
+    [
+      "store",
+      "cli",
+      "返回 VerificationResult",
+      675
+    ]
+  ]
+}

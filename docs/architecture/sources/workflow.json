@@ -1,0 +1,183 @@
+{
+  "schema_version": 3,
+  "diagram_type": "workflow",
+  "title": "完成一次研究，要经过什么",
+  "question": "把准备、执行与验收分开，失败时知道回到哪一步。",
+  "width": 1120,
+  "height": 685,
+  "nodes": [
+    {
+      "id": "spec",
+      "label": "① 写清研究问题",
+      "sub": "数据范围 · 公式 · 评价办法",
+      "x": 60,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "可由人填写或由 AI 辅助起草；用 ResearchPackage 保存。",
+      "source": "src/research_pipeline/packages/lint.py"
+    },
+    {
+      "id": "lint",
+      "label": "② 检查声明",
+      "sub": "package lint",
+      "x": 440,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "检查必填项、算法步骤、输出要求和缺口。检查通过不等于获得数据准入。",
+      "source": "src/research_pipeline/packages/lint.py"
+    },
+    {
+      "id": "admit",
+      "label": "③ 检查数据与时点",
+      "sub": "package admit",
+      "x": 820,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "绑定已批准的数据说明、来源和 PIT 约定，发布不可变计划。",
+      "source": "src/research_pipeline/cli/commands/research_plan.py"
+    },
+    {
+      "id": "run",
+      "label": "④ 执行并保存进度",
+      "sub": "run",
+      "x": 820,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "Runtime 调度节点、控制资源、记录事件并提交检查点。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
+    },
+    {
+      "id": "result",
+      "label": "⑤ 封存研究结果",
+      "sub": "CLI finalize → Result",
+      "x": 440,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "节点全部成功后，CLI 独立封存结果；封存失败不能报作研究交付完成。",
+      "source": "src/research_pipeline/cli/commands/research_run.py"
+    },
+    {
+      "id": "verify",
+      "label": "⑥ 独立复核",
+      "sub": "verify → VerificationResult",
+      "x": 60,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "按声明的公式、金融和统计约定进行独立检查。",
+      "source": "src/research_pipeline/evidence/verification_result.py"
+    },
+    {
+      "id": "report",
+      "label": "⑦ 阅读与比较",
+      "sub": "report / compare",
+      "x": 60,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "验证失败也可有诊断报告，但不能作为有效开发指标反馈给 AI。",
+      "source": "src/research_pipeline/cli/report_output.py"
+    },
+    {
+      "id": "recover",
+      "label": "中断或可重试失败",
+      "sub": "inspect → resume / retry-node",
+      "x": 820,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "进程中断用 resume；paused 状态按诊断对指定节点 retry-node。不可恢复错误先修正问题并重新准入。",
+      "source": "src/research_pipeline/runtime/diagnostics.py"
+    }
+  ],
+  "edges": [
+    {
+      "from_id": "spec",
+      "to_id": "lint",
+      "label": "完整约定",
+      "kind": "main"
+    },
+    {
+      "from_id": "lint",
+      "to_id": "admit",
+      "label": "检查通过",
+      "kind": "main"
+    },
+    {
+      "from_id": "admit",
+      "to_id": "run",
+      "label": "已准入计划",
+      "kind": "main"
+    },
+    {
+      "from_id": "run",
+      "to_id": "result",
+      "label": "节点完成",
+      "kind": "main"
+    },
+    {
+      "from_id": "result",
+      "to_id": "verify",
+      "label": "已封存结果",
+      "kind": "main"
+    },
+    {
+      "from_id": "verify",
+      "to_id": "report",
+      "label": "检查结论",
+      "kind": "main"
+    },
+    {
+      "from_id": "run",
+      "to_id": "recover",
+      "label": "异常 / 中断",
+      "kind": "optional"
+    },
+    {
+      "from_id": "recover",
+      "to_id": "run",
+      "label": "按诊断恢复",
+      "kind": "optional",
+      "points": [
+        [
+          1060,
+          560
+        ],
+        [
+          1090,
+          560
+        ],
+        [
+          1090,
+          330
+        ],
+        [
+          1060,
+          330
+        ]
+      ],
+      "label_pos": [
+        1090,
+        445
+      ]
+    }
+  ],
+  "notes": [
+    "Workspace execute 会依次编排这些步骤；运行时本身不负责把独立验证自动判为成功。",
+    "检查或准入失败：补齐研究声明／数据条件，不产生可执行计划。",
+    "最终留出集单独管理。AI 开发循环不得读取 test / holdout 作为改进反馈。"
+  ]
+}

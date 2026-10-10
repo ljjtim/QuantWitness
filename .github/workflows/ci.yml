@@ -115,7 +115,7 @@ jobs:
       - name: 回归公开请求与多轮研究边界
         run: |
           "$RUNNER_TEMP/installed-env/bin/python" -m pip install 'pytest>=8,<10'
-          "$RUNNER_TEMP/installed-env/bin/python" -m pytest -o pythonpath= -q --basetemp "$RUNNER_TEMP/rdagent-tests" integrations/rdagent/tests/test_request_builder.py integrations/rdagent/tests/test_formula_spec.py integrations/rdagent/tests/test_source_materials.py integrations/rdagent/tests/test_campaign.py integrations/rdagent/tests/test_campaign_data.py integrations/rdagent/tests/test_package_campaign.py integrations/rdagent/tests/test_package_campaign_execution.py
+          "$RUNNER_TEMP/installed-env/bin/python" -m pytest -o pythonpath= -q --basetemp "$RUNNER_TEMP/rdagent-tests" integrations/rdagent/tests/test_volume_concentration_example.py integrations/rdagent/tests/test_request_builder.py integrations/rdagent/tests/test_formula_spec.py integrations/rdagent/tests/test_source_materials.py integrations/rdagent/tests/test_campaign.py integrations/rdagent/tests/test_campaign_data.py integrations/rdagent/tests/test_package_campaign.py integrations/rdagent/tests/test_package_campaign_execution.py
 
   ml-distribution:
     runs-on: ${{ matrix.os }}
