@@ -17,7 +17,7 @@
 
 ## 准备材料
 
-在已有RP Windows环境执行，依赖版本以示例声明和[集成安装说明](../../README.md)为准。RP源码和集成均需能被该环境导入；`prepare.py`会依据 `--windows-repo` 装入本次仓库源码。独立Verifier锁定 `pyarrow==21.0.0`，材料定位需要 `pypdf`。示例自带仅含分钟数据的最小Catalog声明，在输出目录编译，不依赖个人默认目录锁。Linux使用集成README规定的固定RD源码环境。
+在已有RP Windows环境执行，依赖版本以示例声明和[集成安装说明](../../README.md)为准。RP源码和集成均需能被该环境导入；`prepare.py`会依据 `--windows-repo` 装入本次仓库源码。独立Verifier锁定 `pyarrow==21.0.0`，材料定位需要 `pypdf`。示例自带仅含分钟数据的最小Catalog声明，在输出目录编译，不依赖个人默认目录锁。创建时读取所安装框架的当前分钟能力清单，并把清单身份和数据来源绑定写入本次 Catalog；后续执行与恢复继续使用这份固定记录。Linux使用集成README规定的固定RD源码环境。
 
 所有路径由调用者明确提供；`--output`必须尚不存在。仓库参数优先指向公开QuantWitness根（含 `src/` 和 `integrations/`），也支持包含 `research_pipeline/` 的原仓库根。Windows与Linux输出路径必须指向同一共享目录。
 

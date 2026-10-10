@@ -97,6 +97,14 @@ def test_prepare_is_database_free_and_pending_review(tmp_path, monkeypatch):
     assert receipt["status"] == "prepared_pending_review"
     assert receipt["raw_rows"] == 2400
     assert receipt["entity_sessions"] == 10
+    import yaml
+    from research_pipeline.platform import load_minute_capability_manifest
+    catalog = yaml.safe_load((root / "synthetic-catalog.yaml").read_text(encoding="utf-8"))
+    identity = load_minute_capability_manifest().downstream_identity("catalog.minute.contracts")
+    scope = next(policy for policy in catalog["policies"]
+                 if policy["policy_id"] == "scope.minute.catalog.v4")
+    assert scope["rules"] == identity
+    assert catalog["datasets"][0]["minute_source_semantics"]["scope_binding_hash"] == identity["binding_hash"]
     assert not (root / "confirmation.json").exists()
     assert not (root / "request.json").exists()
     from quantwitness_rdagent.contracts import FrozenRequest
