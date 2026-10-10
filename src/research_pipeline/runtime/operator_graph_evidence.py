@@ -6,6 +6,10 @@ from datetime import datetime
 from typing import Iterable, Mapping
 
 from research_pipeline.evidence.errors import EvidenceContractError
+from research_pipeline.evidence.minute_validity import (
+    MINUTE_SIMULATION_FACTS_VERSION,
+    recompute_minute_simulation_issues,
+)
 from research_pipeline.evidence.validity_recompute import (
     VALIDITY_FACTS_VERSION,
 )
@@ -282,20 +286,92 @@ def build_minute_intraday_validity_facts(
     if reported.get("trial_universe_hash") != trial_universe_hash:
         raise EvidenceContractError("分钟 validity 的 trial universe 身份无效")
 
-    if simulation.get("contract_version") != "minute-simulation-result-v2":
-        raise EvidenceContractError("分钟 validity 的 simulation 合同无效")
-    simulation_body = {
-        key: value for key, value in simulation.items() if key != "result_hash"
-    }
-    if simulation.get("result_hash") != typed_canonical_hash(simulation_body):
-        raise EvidenceContractError("分钟 validity 的 simulation 身份无效")
-    outcomes = simulation.get("outcomes")
-    ledger_hashes = simulation.get("ledger_hashes")
-    if not isinstance(outcomes, list) or not isinstance(ledger_hashes, Mapping):
-        raise EvidenceContractError("分钟 validity 的 simulation 载荷不完整")
-    for field in ("rule_bundle_hash", "policy_hash", "result_hash"):
-        if not _sha256_text(simulation.get(field)):
-            raise EvidenceContractError(f"分钟 validity 缺少 simulation {field}")
+    if simulation.get("status") == "simulation_succeeded":
+        manifest = simulation.get("simulation_result_contract")
+        tca = simulation.get("tca")
+        if not isinstance(manifest, Mapping) or not isinstance(tca, Mapping):
+            raise EvidenceContractError("分钟 validity 缺少六表 manifest 或 TCA 身份")
+        manifest_body = {key: value for key, value in manifest.items() if key != "manifest_hash"}
+        if manifest.get("manifest_hash") != typed_canonical_hash(manifest_body):
+            raise EvidenceContractError("分钟 validity 的六表 manifest 身份无效")
+        identity_fields = {
+            "contract_version", "semantics_hash", "source_simulation_hash", "table_hashes",
+        }
+        if "order_lifecycle_contract" in manifest:
+            identity_fields.add("order_lifecycle_contract")
+        identity = {field: manifest.get(field) for field in identity_fields}
+        names = {"orders", "fills", "positions", "cash", "costs", "valuations"}
+        rows = manifest.get("table_rows")
+        schemas = manifest.get("table_schemas")
+        if (
+            set(manifest) != identity_fields | {
+                "semantics", "table_rows", "table_schemas", "result_hash", "manifest_hash",
+            }
+            or not isinstance(rows, Mapping) or set(rows) != names
+            or any(type(value) is not int or value < 0 for value in rows.values())
+            or not isinstance(schemas, Mapping) or set(schemas) != names
+            or simulation.get("result_hash") != manifest.get("result_hash")
+            or simulation.get("source_simulation_hash") != manifest.get("source_simulation_hash")
+            or simulation.get("order_count") != rows["orders"]
+            or simulation.get("fill_count") != rows["fills"]
+        ):
+            raise EvidenceContractError("分钟 validity 的六表 manifest 与仿真摘要不一致")
+        # 只投影参与结果身份的字段；实际行数、schema 和金融上下文由 Result oracle 复核。
+        minute_simulation = {
+            "contract_version": MINUTE_SIMULATION_FACTS_VERSION,
+            "result_hash": simulation["result_hash"],
+            "semantics": manifest.get("semantics"),
+            "simulation_result_identity": identity,
+            "source_ledger_hash": simulation.get("source_ledger_hash"),
+            "rule_bundle_hash": simulation.get("rule_bundle_hash"),
+        }
+        financial = {
+            "rule_snapshot_hash": simulation.get("rule_bundle_hash"),
+            "order_audit_hash": (
+                identity["table_hashes"].get("orders")
+                if isinstance(identity["table_hashes"], Mapping) else None
+            ),
+            "ledger_hash": simulation.get("source_ledger_hash"),
+            "tradability_hash": simulation["result_hash"],
+            "minute_simulation": minute_simulation,
+            "bar_tca": {
+                **{field: tca.get(field) for field in (
+                    "tca_result_hash", "tca_artifact_manifest_hash", "tca_policy_hash",
+                    "tca_input_hash", "tca_implementation_digest", "tca_rule_snapshot_hash",
+                    "tca_source_simulation_hash", "tca_source_ledger_hash",
+                    "tca_source_fill_manifest_hash",
+                )},
+                "claim_ceiling": tca.get("tca_claim_ceiling"),
+                "reconciliation_delta_units": tca.get("tca_reconciliation_delta_units"),
+                "liquidity_attribution_status": tca.get("tca_liquidity_attribution_status"),
+            },
+        }
+        if recompute_minute_simulation_issues(
+            minute_simulation, financial_facts=financial, require_bar_tca_oracle=False,
+        ):
+            raise EvidenceContractError("分钟 validity 的六表仿真与 TCA 身份不闭合")
+    else:
+        if simulation.get("contract_version") != "minute-simulation-result-v2":
+            raise EvidenceContractError("分钟 validity 的 simulation 合同无效")
+        simulation_body = {
+            key: value for key, value in simulation.items() if key != "result_hash"
+        }
+        if simulation.get("result_hash") != typed_canonical_hash(simulation_body):
+            raise EvidenceContractError("分钟 validity 的 simulation 身份无效")
+        outcomes = simulation.get("outcomes")
+        ledger_hashes = simulation.get("ledger_hashes")
+        if not isinstance(outcomes, list) or not isinstance(ledger_hashes, Mapping):
+            raise EvidenceContractError("分钟 validity 的 simulation 载荷不完整")
+        for field in ("rule_bundle_hash", "policy_hash", "result_hash"):
+            if not _sha256_text(simulation.get(field)):
+                raise EvidenceContractError(f"分钟 validity 缺少 simulation {field}")
+        financial = {
+            "rule_snapshot_hash": str(simulation["rule_bundle_hash"]),
+            "order_audit_hash": typed_canonical_hash(outcomes),
+            "ledger_hash": typed_canonical_hash(dict(ledger_hashes)),
+            "tradability_hash": str(simulation["result_hash"]),
+            "minute_simulation": dict(simulation),
+        }
 
     return {
         "contract_version": VALIDITY_FACTS_VERSION,
@@ -326,13 +402,7 @@ def build_minute_intraday_validity_facts(
             "artifact_semantic_hash": str(rebuilt_statistics["artifact_hash"]),
             "minute_intraday": dict(rebuilt_statistics),
         },
-        "financial_tradability": {
-            "rule_snapshot_hash": str(simulation["rule_bundle_hash"]),
-            "order_audit_hash": typed_canonical_hash(outcomes),
-            "ledger_hash": typed_canonical_hash(dict(ledger_hashes)),
-            "tradability_hash": str(simulation["result_hash"]),
-            "minute_simulation": dict(simulation),
-        },
+        "financial_tradability": financial,
     }
 
 

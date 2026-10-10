@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from research_pipeline.extensions import (
     OperatorDefinition,
+    ParameterSpec,
     ParameterType,
 )
 
@@ -98,9 +99,10 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
                 _parameter("applicable_start", ParameterType.STRING),
                 _parameter("applicable_end", ParameterType.STRING),
                 _parameter("availability_policy_ref", ParameterType.STRING),
+                ParameterSpec("initial_listing_evidence", ParameterType.JSON, required=False),
             ),
             resource_profile={
-                "memory_bytes": 512 * _MIB,
+                "memory_bytes": _GIB,
                 "cpu_slots": 1,
                 "temp_bytes": 512 * _MIB,
                 "wall_seconds": 600,
@@ -147,7 +149,7 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             outputs=(("observation", "research.minute-observation.v1"),),
             parameters=(_parameter("request_id", ParameterType.STRING),),
             resource_profile={
-                "memory_bytes": 256 * _MIB,
+                "memory_bytes": _GIB,
                 "cpu_slots": 1,
                 "temp_bytes": 256 * _MIB,
                 "wall_seconds": 300,
@@ -171,7 +173,7 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             outputs=(("validity", "research.validity-facts.v1"),),
             parameters=(_parameter("request_id", ParameterType.STRING),),
             resource_profile={
-                "memory_bytes": 256 * _MIB,
+                "memory_bytes": _GIB,
                 "cpu_slots": 1,
                 "temp_bytes": 256 * _MIB,
                 "wall_seconds": 300,
@@ -196,7 +198,7 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             outputs=(("validity", "research.validity-facts.v1"),),
             parameters=(_parameter("request_id", ParameterType.STRING),),
             resource_profile={
-                "memory_bytes": 256 * _MIB,
+                "memory_bytes": _GIB,
                 "cpu_slots": 1,
                 "temp_bytes": 256 * _MIB,
                 "wall_seconds": 300,
@@ -352,6 +354,9 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             ),
             outputs=(("simulation", "research.minute-simulation.v1"),),
             parameters=(
+                ParameterSpec("execution_mode", ParameterType.STRING, required=False,
+                              allowed_values=("target", "explicit_orders")),
+                ParameterSpec("order_commands", ParameterType.STRING, required=False),
                 _choice_parameter(
                     "execution_model",
                     ParameterType.STRING,
@@ -362,6 +367,7 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
                     "claim_ceiling", ParameterType.STRING, ("bar_level_research_only",)
                 ),
                 _parameter("rule_bundle_hash", ParameterType.STRING),
+                ParameterSpec("rule_bundle", ParameterType.JSON, required=False),
                 _parameter("initial_cash_units", ParameterType.INTEGER),
                 *_bar_tca_parameters(claim_ceilings=("analysis_only",)),
             ),
@@ -377,6 +383,8 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             symbol_name="run_minute_event_simulation",
             implementation_scope="core",
             dependency_modules=(
+                "research_pipeline.domain.order_stream",
+                "research_pipeline.simulation.explicit_orders",
                 "research_pipeline.domain.minute_rule_snapshots",
                 "research_pipeline.simulation.cash_market",
                 "research_pipeline.simulation.ledger",
@@ -441,6 +449,7 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             inputs=(
                 ("data", "data.columnar-bundle.v1"),
                 ("minute_1m", "data.minute-bars.1m.v1"),
+                ("decision_minute_1m", "data.minute-bars.1m.v1"),
                 ("simulation", "research.minute-simulation.v1"),
                 ("statistics", "research.minute-statistics.v1"),
             ),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Generic, TypeVar
 
 from research_pipeline.domain.time import require_aware_datetime
 from research_pipeline.platform.canonical import typed_canonical_hash
@@ -13,7 +14,9 @@ from .orders import SimulationContractError
 
 FINANCIAL_EVENT_KINDS = frozenset({
     "cash_reserved", "position_reserved", "fill", "settlement", "mark_to_market",
-    "corporate_action", "margin_call", "forced_liquidation",
+    "corporate_action", "margin_call", "forced_liquidation", "tax_assessed", "tax_collected", "security_conversion", "successor_registered",
+    "credit_reserved", "credit_interest", "credit_repayment", "credit_sale_settled", "credit_extension", "credit_risk",
+    "external_cashflow_reserved", "external_cashflow", "external_cashflow_settlement",
 })
 
 
@@ -62,3 +65,15 @@ class FinancialEvent:
 
 
 __all__ = ["FINANCIAL_EVENT_KINDS", "FinancialEvent"]
+
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class ExecutionOutcome(Generic[T]):
+    """一次已执行撮合的成交量、原因和账本结果。"""
+
+    filled_quantity: int
+    reason: str | None
+    value: T

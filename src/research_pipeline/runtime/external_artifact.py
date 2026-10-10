@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 import uuid
 
+from research_pipeline.platform.atomic_directory import publish_directory
 from research_pipeline.data_plane.path_policy import PathRolePolicy
 from research_pipeline.data_plane.errors import DataPlaneError
 from research_pipeline.data_plane.verification_lifecycle import (
@@ -235,7 +236,7 @@ class ExternalArtifactStore:
         source_store: "ExternalArtifactStore",
         commit: ExternalArtifactCommit,
     ) -> ExternalArtifactCommit:
-        """复验父对象后以普通字节复制导入当前 store，保持稳定 ArtifactRef。"""
+        """复验父对象后保留分区文件元数据导入，保持稳定 ArtifactRef。"""
         verified = source_store.verify(commit.semantic_hash)
         if verified != commit:
             raise RuntimeIntegrityError("待导入 external artifact 引用漂移")
@@ -249,7 +250,7 @@ class ExternalArtifactStore:
                 source = source_root / relative_path
                 target = staging / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, target)
+                shutil.copy2(source, target)
             imported = self.commit(
                 staging,
                 artifact_name=commit.artifact_name,
@@ -312,7 +313,7 @@ class ExternalArtifactStore:
             if existing.semantic_payload() != manifest.semantic_payload():
                 raise RuntimeIntegrityError("同 external artifact key 出现冲突内容")
             return existing
-        os.replace(staging, target)
+        publish_directory(staging, target)
         if self.verification_session is None:
             return self.verify(manifest.semantic_hash)
         return self.verification_session.remember(

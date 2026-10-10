@@ -9,24 +9,18 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
-import research_pipeline.research.modeling.walk_forward as walk_forward_module
 import research_pipeline.runtime.walk_forward_model_execution as model_execution_module
 
 from research_pipeline.research.modeling import (
-    CandidateFitRejected,
-    ModelDependencyError,
     ModelMainlineError,
     assemble_daily_model_samples,
     evaluate_locked_holdout,
-    model_dependency_preflight,
 )
 from research_pipeline.research.validation import (
     ValidationError,
 )
 from research_pipeline.platform import canonical_json, typed_canonical_hash
 from research_pipeline.runtime.walk_forward_model_execution import (
-    execute_model_fit_artifact,
-    execute_model_fold_metrics_artifact,
     execute_model_split_artifact,
 )
 import research_pipeline.runtime.adapters.model as operator_adapters

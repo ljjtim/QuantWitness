@@ -112,14 +112,121 @@ def _minute_execution_bar(bars, order):
 
 
 def _minute_order_rules(order, bundle, rule_ids):
-    return {
-        name: _visible_minute_rule(
+    selected = {
+        name: visible_minute_rule(
             bundle, rule_id, str(order["instrument_id"]),
             _date_value(order["session"], "order.session"),
             _aware_datetime(order["submitted_at"], "order.submitted_at"),
         )
         for name, rule_id in rule_ids.items()
     }
+    lifecycle = selected.get("lifecycle")
+    if lifecycle is not None and lifecycle.asset_class in {"cn_stock", "cn_etf"}:
+        if _minute_explicit_cash_rules(selected):
+            namespace = "cn_stock" if lifecycle.asset_class == "cn_stock" else "cn_fund"
+            for name in ("suspension", "session"):
+                selected[name] = visible_minute_rule(
+                    bundle, f"rule.{namespace}.{name}.v1",
+                    str(order["instrument_id"]),
+                    _date_value(order["session"], "order.session"),
+                    _aware_datetime(order["submitted_at"], "order.submitted_at"),
+                )
+    return selected
+
+
+def _minute_explicit_cash_rules(selected) -> bool:
+    # 旧封存规则保留整手合同；P6 字段一旦出现就必须满足完整新合同。
+    grid = dict(selected["lot"].parameters)
+    lifecycle = dict(selected["lifecycle"].parameters)
+    return (
+        any(f"{side}_{suffix}" in grid for side in ("buy", "sell")
+            for suffix in ("min_quantity", "quantity_step", "max_quantity"))
+        or bool({"stock_board", "listing_phase", "is_st", "etf_category", "trading_status"}
+                & lifecycle.keys())
+        or "price_limit_mode" in dict(selected["price"].parameters)
+    )
+
+
+def _minute_cash_quantity_grid(parameters, side):
+    minimum = _integer(parameters.get(f"{side}_min_quantity"), f"{side}_min_quantity", minimum=1)
+    step = _integer(parameters.get(f"{side}_quantity_step"), f"{side}_quantity_step", minimum=1)
+    maximum = None
+    if f"{side}_max_quantity" in parameters:
+        maximum = _integer(parameters[f"{side}_max_quantity"], f"{side}_max_quantity", minimum=minimum)
+    allowed = parameters.get("sell_remainder_allowed")
+    if type(allowed) is not bool:
+        raise EvidenceContractError("分钟现货缺少明确零股政策")
+    return minimum, step, maximum, side == "sell" and allowed
+
+
+def verify_minute_cash_quantity(parameters, *, side, quantity, sellable=0):
+    minimum, step, maximum, remainder_allowed = _minute_cash_quantity_grid(parameters, side)
+    if maximum is not None and quantity > maximum:
+        raise EvidenceContractError("分钟 fill 或订单超过历史数量上限")
+    if quantity >= minimum and (quantity - minimum) % step == 0:
+        return
+    if remainder_allowed and quantity <= sellable:
+        if sellable < minimum and quantity == sellable:
+            return
+        if sellable >= minimum:
+            remainder = (sellable - minimum) % step
+            if remainder > 0 and quantity % step == remainder:
+                return
+    raise EvidenceContractError("分钟 fill 或订单不符合历史数量格点或零股余额")
+
+
+def _verify_minute_cash_qualification(selected, *, asset_class, instrument_id, session, has_fill=False):
+    lifecycle = dict(selected["lifecycle"].parameters)
+    fee = dict(selected["fee"].parameters)
+    if not _minute_explicit_cash_rules(selected):
+        if asset_class == "cn_etf":
+            if lifecycle.get("product_class") != "equity_etf":
+                raise EvidenceContractError("分钟 ETF 产品类别规则无效")
+            listed = _date_value(lifecycle.get("listed_date"), "listed_date")
+            delisted = _date_value(lifecycle.get("delisted_date"), "delisted_date")
+            if not listed <= session <= delisted:
+                raise EvidenceContractError("分钟 ETF 成交日不在生命周期内")
+            if fee.get("cost_model_scope") != "research_assumption":
+                raise EvidenceContractError("分钟 ETF 费用未声明为研究成本假设")
+        return
+    if "delisted_date" not in lifecycle:
+        raise EvidenceContractError("分钟现货缺少明确终止上市日期")
+    listed = _date_value(lifecycle.get("listed_date"), "listed_date")
+    delisted = (None if lifecycle["delisted_date"] is None
+                else _date_value(lifecycle["delisted_date"], "delisted_date"))
+    if session < listed or (delisted is not None and (listed > delisted or session > delisted)):
+        raise EvidenceContractError("分钟现货成交日不在生命周期内")
+    status = lifecycle.get("trading_status")
+    paused = dict(selected["suspension"].parameters).get("paused")
+    if status not in ("trading", "suspended") or type(paused) is not bool or paused != (status == "suspended"):
+        raise EvidenceContractError("分钟现货停牌事实缺失或与交易状态不一致")
+    if has_fill and paused:
+        raise EvidenceContractError("分钟停牌状态不得产生成交")
+    if asset_class == "cn_stock":
+        venues = {"sh_main": "XSHG", "sz_main": "XSHE", "chinext": "XSHE", "star": "XSHG", "bse": "XBSE"}
+        board = lifecycle.get("stock_board")
+        if not isinstance(board, str) or board not in venues or venues[board] != instrument_id.rpartition(".")[2]:
+            raise EvidenceContractError("分钟股票板块缺失或与交易所不一致")
+        if lifecycle.get("listing_phase") not in ("regular", "ipo", "relisting", "delisting"):
+            raise EvidenceContractError("分钟股票缺少明确上市阶段")
+        if type(lifecycle.get("is_st")) is not bool:
+            raise EvidenceContractError("分钟股票缺少明确 ST 状态")
+    else:
+        category = lifecycle.get("etf_category")
+        if category not in ("equity", "bond", "commodity", "cross_border", "money_market"):
+            raise EvidenceContractError("分钟 ETF 缺少明确产品类别")
+        if lifecycle.get("product_class") is not None and lifecycle["product_class"] != f"{category}_etf":
+            raise EvidenceContractError("分钟 ETF 产品类别与显式品类不一致")
+    if fee.get("cost_model_scope") not in {"market_rule", "research_assumption"}:
+        raise EvidenceContractError("分钟现货费用须声明历史来源或研究假设")
+    days = _integer(dict(selected["settlement"].parameters).get("settlement_days"), "settlement_days", minimum=0)
+    if days not in {0, 1} or (asset_class == "cn_stock" and days != 1):
+        raise EvidenceContractError("分钟现货结算制度与资产类别不一致")
+    if dict(selected["price"].parameters).get("price_limit_mode") not in {"bounded", "unbounded"}:
+        raise EvidenceContractError("分钟现货缺少明确价格限制模式")
+    grid = dict(selected["lot"].parameters)
+    for side in ("buy", "sell"):
+        _minute_cash_quantity_grid(grid, side)
 
 
 def minute_decode_settlement(row):
@@ -174,10 +281,14 @@ def verify_minute_execution_rules(
     policy: Mapping[str, object],
     settlement_events: object,
     session_bundle: SessionPolicyBundle,
+    corporate_action_context: Mapping[str, object] | None = None,
+    price_scale: int | None = None,
 ) -> None:
     """独立消费分钟规则，复算现货成交资格、费用和 T+1。"""
 
     if asset_class == "cn_future":
+        if corporate_action_context is not None:
+            raise EvidenceContractError("期货分钟不得携带现货公司行动上下文")
         _verify_minute_futures_execution_rules(
             canonical=canonical,
             bars=bars,
@@ -235,41 +346,12 @@ def verify_minute_execution_rules(
         session = _date_value(order["session"], "order.session")
         if str(bar.get("trading_date")) != session.isoformat():
             raise EvidenceContractError("分钟 order 会话与执行 bar 不一致")
-        selected = {
-            "price": _visible_minute_rule(
-                rule_bundle, price_rule_id, str(order["instrument_id"]),
-                session, submitted,
-            ),
-            "lot": _visible_minute_rule(
-                rule_bundle, lot_rule_id, str(order["instrument_id"]),
-                session, submitted,
-            ),
-            "settlement": _visible_minute_rule(
-                rule_bundle, settlement_rule_id, str(order["instrument_id"]),
-                session, submitted,
-            ),
-            "fee": _visible_minute_rule(
-                rule_bundle, fee_rule_id, str(order["instrument_id"]),
-                session, submitted,
-            ),
-            "lifecycle": _visible_minute_rule(
-                rule_bundle, lifecycle_rule_id, str(order["instrument_id"]),
-                session, submitted,
-            ),
-        }
+        selected = _minute_order_rules(order, rule_bundle, order_rule_ids)
         _verify_minute_price_rule(selected["price"], bar=bar, submitted=submitted)
-        lifecycle = dict(selected["lifecycle"].parameters)
-        if asset_class == "cn_etf":
-            if lifecycle.get("product_class") != "equity_etf":
-                raise EvidenceContractError("分钟 ETF 产品类别规则无效")
-            listed = _date_value(lifecycle.get("listed_date"), "listed_date")
-            delisted = _date_value(lifecycle.get("delisted_date"), "delisted_date")
-            if not listed <= session <= delisted:
-                raise EvidenceContractError("分钟 ETF 成交日不在生命周期内")
-            if dict(selected["fee"].parameters).get("cost_model_scope") != (
-                "research_assumption"
-            ):
-                raise EvidenceContractError("分钟 ETF 费用未声明为研究成本假设")
+        _verify_minute_cash_qualification(
+            selected, asset_class=asset_class,
+            instrument_id=str(order["instrument_id"]), session=session,
+        )
     bought_total: dict[str, int] = {}
     bought_today: dict[str, int] = {}
     active_session = None
@@ -289,6 +371,15 @@ def verify_minute_execution_rules(
         selected = _minute_order_rules(order, rule_bundle, order_rule_ids)
         if _normalized(fill["fill_time"]) != _normalized(bar.get("available_time")):
             raise EvidenceContractError("分钟 fill 时间与执行 bar 不一致")
+        if verify_minute_cash_bar_suspended(
+            rule_bundle, asset_class=asset_class,
+            instrument_id=str(fill["instrument_id"]),
+            session=_date_value(fill["session"], "fill.session"),
+            bar_start=bar["bar_start"],
+            bar_end=bar.get("bar_end", bar["available_time"]),
+            available_at=bar["available_time"],
+        ):
+            raise EvidenceContractError("分钟暂停或跨停牌执行 bar：停牌状态不得产生成交")
         expected_price = (
             bar.get("avg_units")
             if bar.get("avg_units") is not None
@@ -311,10 +402,21 @@ def verify_minute_execution_rules(
             raise EvidenceContractError("分钟 fill 超过已完成执行 bar 的参与率上限")
         used_capacity_by_bar[bar_hash] = used_capacity
         lot_parameters = dict(selected["lot"].parameters)
-        lot_key = "buy_lot_shares" if asset_class == "cn_stock" else "buy_lot_units"
-        lot_size = _integer(lot_parameters.get(lot_key), lot_key, minimum=1)
-        if str(fill["side"]) == "buy" and quantity % lot_size:
-            raise EvidenceContractError("分钟买入 fill 不符合交易单位")
+        explicit_rules = _minute_explicit_cash_rules(selected)
+        _verify_minute_cash_qualification(
+            selected, asset_class=asset_class,
+            instrument_id=str(fill["instrument_id"]),
+            session=_date_value(fill["session"], "fill.session"), has_fill=True,
+        )
+        lot_size = None
+        if not explicit_rules:
+            lot_key = "buy_lot_shares" if asset_class == "cn_stock" else "buy_lot_units"
+            lot_size = _integer(lot_parameters.get(lot_key), lot_key, minimum=1)
+            if str(fill["side"]) == "buy" and quantity % lot_size:
+                raise EvidenceContractError("分钟买入 fill 不符合交易单位")
+        elif str(fill["side"]) == "buy":
+            for checked_quantity in (quantity, _integer(order.get("requested_quantity"), "order.requested_quantity", minimum=1)):
+                verify_minute_cash_quantity(lot_parameters, side="buy", quantity=checked_quantity)
         fee_parameters = dict(selected["fee"].parameters)
         notional = _integer(fill["notional_units"], "fill.notional_units", minimum=1)
         commission = max(
@@ -356,25 +458,40 @@ def verify_minute_execution_rules(
         if str(fill["side"]) == "buy":
             bought_total[instrument_id] = bought_total.get(instrument_id, 0) + quantity
             bought_today[instrument_id] = bought_today.get(instrument_id, 0) + quantity
-        else:
+        elif corporate_action_context is None:
             eligible = bought_total.get(instrument_id, 0) - sold_total.get(instrument_id, 0)
             if settlement_days == 1:
                 eligible -= bought_today.get(instrument_id, 0)
             if quantity > eligible:
                 raise EvidenceContractError("分钟卖出 fill 绕过 T+1 可卖数量")
-            if quantity % lot_size:
+            if explicit_rules:
+                for checked_quantity in (quantity, _integer(order.get("requested_quantity"), "order.requested_quantity", minimum=1)):
+                    verify_minute_cash_quantity(
+                        lot_parameters, side="sell", quantity=checked_quantity, sellable=eligible,
+                    )
+            elif quantity % lot_size:
                 allowed = lot_parameters.get("sell_remainder_allowed")
                 if allowed is None:
                     allowed = instrument_id.rpartition(".")[2] in {"XSHG", "XSHE"} and session >= date(2006, 7, 1) and lot_size == 100
                 if allowed is not True or quantity % lot_size != eligible % lot_size:
                     raise EvidenceContractError("分钟卖出 fill 拆分零股或不符合历史交易单位")
             sold_total[instrument_id] = sold_total.get(instrument_id, 0) + quantity
-    _verify_minute_spot_position_buckets(
-        positions=canonical["positions"],
-        fills=fills,
-        rule_bundle=rule_bundle,
-        settlement_rule_id=settlement_rule_id,
-    )
+    if corporate_action_context is None:
+        verify_minute_spot_position_buckets(
+            positions=canonical["positions"],
+            fills=fills,
+            rule_bundle=rule_bundle,
+            settlement_rule_id=settlement_rule_id,
+        )
+    else:
+        from .minute_corporate_actions import verify_minute_corporate_actions
+
+        verify_minute_corporate_actions(
+            corporate_action_context=corporate_action_context,
+            canonical=canonical, bars=bars, rule_bundle=rule_bundle,
+            asset_class=asset_class, price_scale=price_scale, order_index=orders,
+            select_rule=visible_minute_rule, verify_quantity=verify_minute_cash_quantity,
+        )
 
 
 def _verify_minute_futures_execution_rules(
@@ -420,7 +537,7 @@ def _verify_minute_futures_execution_rules(
         if str(bar.get("trading_date")) != session_date.isoformat():
             raise EvidenceContractError("分钟期货 order 会话与执行 bar 不一致")
         selected = {
-            name: _visible_minute_rule(
+            name: visible_minute_rule(
                 rule_bundle, rule_id, instrument_id, session_date, submitted
             )
             for name, rule_id in order_rule_ids.items()
@@ -665,7 +782,7 @@ def _verify_minute_futures_execution_rules(
             continue
         expected_facts = []
         for instrument_id in sorted(instrument_ids):
-            settlement_rule = _visible_minute_rule(
+            settlement_rule = visible_minute_rule(
                 rule_bundle,
                 "rule.cn_futures.settlement.v1",
                 instrument_id,
@@ -677,7 +794,7 @@ def _verify_minute_futures_execution_rules(
             settlement_time = settlement_rule.available_at
             assert settlement_time is not None
             rules = tuple(
-                _visible_minute_rule(
+                visible_minute_rule(
                     rule_bundle, rule_id, instrument_id,
                     session_date, settlement_time,
                 )
@@ -846,7 +963,7 @@ def _minute_rules_identity(
     })
 
 
-def _verify_minute_spot_position_buckets(
+def verify_minute_spot_position_buckets(
     *,
     positions: list[dict[str, object]],
     fills: list[dict[str, object]],
@@ -879,7 +996,7 @@ def _verify_minute_spot_position_buckets(
             ) AS closing_quantity FROM matched ORDER BY instrument_id, session
         """)
         for position in rows:
-            rule = _visible_minute_rule(
+            rule = visible_minute_rule(
                 rule_bundle, settlement_rule_id, str(position["instrument_id"]),
                 _date_value(position["session"], "position.session"),
                 _aware_datetime(position["valuation_time"], "position.valuation_time"),
@@ -933,7 +1050,7 @@ def _verify_minute_spot_position_buckets(
         valuation_time = _aware_datetime(
             position["valuation_time"], "position.valuation_time"
         )
-        settlement_rule = _visible_minute_rule(
+        settlement_rule = visible_minute_rule(
             rule_bundle,
             settlement_rule_id,
             instrument_id,
@@ -971,7 +1088,7 @@ def _verify_minute_spot_position_buckets(
             raise EvidenceContractError("分钟现货持仓 bucket 与结算规则不一致")
 
 
-def _visible_minute_rule(
+def visible_minute_rule(
     bundle: MinuteRuleSnapshotBundle,
     rule_id: str,
     instrument_id: str,
@@ -984,19 +1101,89 @@ def _visible_minute_rule(
         and item.instrument_id == instrument_id
         and item.effective_from <= session <= item.effective_to
     ]
-    if (
-        len(matches) != 1
-        or matches[0].status != "supported"
-        or matches[0].available_at is None
-        or matches[0].available_at > as_of
-    ):
+    visible = [
+        item for item in matches
+        if item.status == "unsupported"
+        or (item.available_at is not None and item.available_at <= as_of)
+    ]
+    if not visible or len({(item.effective_from, item.effective_to) for item in visible}) != 1:
         raise EvidenceContractError(f"分钟规则不可唯一且及时使用: {rule_id}")
-    return matches[0]
+    chosen = max(visible, key=lambda item: item.revision)
+    if chosen.status != "supported" or chosen.available_at is None:
+        raise EvidenceContractError(f"分钟规则不可唯一且及时使用: {rule_id}")
+    return chosen
+
+
+def verify_minute_cash_bar_suspended(
+    bundle: MinuteRuleSnapshotBundle,
+    *,
+    asset_class: str,
+    instrument_id: str,
+    session: date,
+    bar_start: datetime,
+    bar_end: datetime,
+    available_at: datetime,
+) -> bool:
+    """从封存规则独立判断整根执行 Bar 及执行观察时点是否暂停。"""
+
+    if asset_class not in {"cn_stock", "cn_etf"}:
+        raise EvidenceContractError("分钟停牌复核只支持股票和 ETF")
+    session = _date_value(session, "执行 bar 交易日")
+    bar_start = _aware_datetime(bar_start, "执行 bar 开始时点")
+    bar_end = _aware_datetime(bar_end, "执行 bar 结束时点")
+    available_at = _aware_datetime(available_at, "执行 bar 可见时点")
+    if not bar_start < bar_end <= available_at:
+        raise EvidenceContractError("分钟停牌复核要求执行 bar 已结束且可见")
+    namespace = "cn_stock" if asset_class == "cn_stock" else "cn_fund"
+    lifecycle = visible_minute_rule(
+        bundle, f"rule.{namespace}.instrument_lifecycle.v1",
+        instrument_id, session, bar_start,
+    )
+    if "trading_status" not in dict(lifecycle.parameters):
+        return False
+    rule_id = f"rule.{namespace}.suspension.v1"
+    observations = {bar_start, bar_end, available_at}
+    observations.update(
+        item.available_at for item in bundle.rules
+        if item.rule_id == rule_id
+        and item.instrument_id == instrument_id
+        and item.asset_class == asset_class
+        and item.effective_from <= session <= item.effective_to
+        and item.status == "supported"
+        and item.available_at is not None
+        and bar_start < item.available_at <= bar_end
+        and item.available_at <= available_at
+    )
+    # 每个状态事件都重新选最高可见版本，晚到的低版本不能覆盖已知修订。
+    for observed_at in sorted(observations):
+        rule = visible_minute_rule(bundle, rule_id, instrument_id, session, observed_at)
+        paused = dict(rule.parameters).get("paused")
+        if type(paused) is not bool:
+            raise EvidenceContractError("分钟停牌规则缺少明确 paused 状态")
+        if paused:
+            return True
+    return False
 
 
 def _verify_minute_price_rule(rule, *, bar: Mapping[str, object], submitted: datetime) -> None:
     parameters = dict(rule.parameters)
     futures = rule.rule_id == "rule.cn_futures.price_limit.v1"
+    if not futures and "price_limit_mode" in parameters:
+        mode = parameters["price_limit_mode"]
+        scale = _integer(parameters.get("price_scale"), "price_scale", minimum=0)
+        if scale > 8:
+            raise EvidenceContractError("分钟现货报价精度超出支持范围")
+        if mode == "unbounded":
+            if any(parameters.get(key) is not None for key in (
+                "high_limit_units", "low_limit_units", "price_limit_ratio_ppm",
+            )):
+                raise EvidenceContractError("无涨跌幅限制阶段不能携带固定涨跌停值")
+            return
+        if mode != "bounded" or parameters.get("price_limit_rounding") != "half_up_to_quote_unit":
+            raise EvidenceContractError("分钟现货价格限制模式或报价舍入规则无效")
+        ratio_ppm = _integer(parameters.get("price_limit_ratio_ppm"), "price_limit_ratio_ppm", minimum=1)
+        if ratio_ppm >= 1_000_000:
+            raise EvidenceContractError("分钟现货价格限制比例无效")
     try:
         reference_available = datetime.fromisoformat(
             str(parameters["reference_price_available_at"]).replace("Z", "+00:00")
@@ -1064,3 +1251,46 @@ __all__ = [
     "minute_single_bar",
     "verify_minute_execution_rules",
 ]
+
+
+def verify_minute_spot_valuation(*, positions, bars) -> None:
+    """按估值时点可见的最新行情事件独立复算现货持仓市值。"""
+    if isinstance(positions, OracleTable) and isinstance(bars, OracleTable):
+        selected = positions.workspace.iter_query(f"""
+            SELECT p.quantity, p.market_value_units, b.close_units
+            FROM {positions.name} p
+            LEFT JOIN LATERAL (
+                SELECT close_units FROM {bars.name} b
+                WHERE b.instrument_id = p.instrument_id
+                  AND CAST(b.trading_date AS DATE) = CAST(p.session AS DATE)
+                  AND b.completed AND b.quality_status = 'pass'
+                  AND CAST(b.available_time AS TIMESTAMPTZ)
+                      <= CAST(p.valuation_time AS TIMESTAMPTZ)
+                ORDER BY CAST(b.bar_end AS TIMESTAMPTZ) DESC, b.source_sequence DESC
+                LIMIT 1
+            ) b ON TRUE
+        """)
+        for row in selected:
+            if row["close_units"] is None or (
+                int(row["market_value_units"]) != int(row["quantity"]) * int(row["close_units"])
+            ):
+                raise EvidenceContractError("分钟现货估值未使用当时可见的最新合格行情")
+        return
+    for position in positions:
+        instrument_id = str(position["instrument_id"])
+        session = _date_value(position["session"], "position.session")
+        as_of = _aware_datetime(position["valuation_time"], "position.valuation_time")
+        eligible = (
+            row for row in bars
+            if str(row["instrument_id"]) == instrument_id
+            and _date_value(row["trading_date"], "bar.trading_date") == session
+            and row["completed"] and row["quality_status"] == "pass"
+            and _aware_datetime(row["available_time"], "bar.available_time") <= as_of
+        )
+        last = max(eligible, key=lambda row: (
+            _aware_datetime(row["bar_end"], "bar.bar_end"), int(row["source_sequence"])
+        ), default=None)
+        if last is None or int(position["market_value_units"]) != (
+            int(position["quantity"]) * int(last["close_units"])
+        ):
+            raise EvidenceContractError("分钟现货估值未使用当时可见的最新合格行情")

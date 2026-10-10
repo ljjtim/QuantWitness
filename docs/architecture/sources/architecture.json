@@ -1,0 +1,525 @@
+{
+  "schema_version": 3,
+  "diagram_type": "architecture",
+  "title": "总体架构：核心模块与外部组件",
+  "question": "14 个核心模块如何分工，RD-Agent、Qlib 和研究数据从哪里接入。",
+  "width": 1500,
+  "height": 1260,
+  "nodes": [
+    {
+      "id": "data",
+      "label": "你的数据源",
+      "sub": "DuckDB / Parquet / 归档输入",
+      "x": 55,
+      "y": 70,
+      "w": 270,
+      "h": 90,
+      "kind": "data",
+      "source": "src/research_pipeline/data_plane/providers/duckdb.py",
+      "detail": "外部数据由使用者准备。数据库、分钟文件与已封存输入分别走适用入口；读取保持只读，来源与历史可见性必须有依据。"
+    },
+    {
+      "id": "human",
+      "label": "研究者",
+      "sub": "确认公式 · 样本 · 预算",
+      "x": 410,
+      "y": 70,
+      "w": 270,
+      "h": 90,
+      "kind": "human",
+      "source": "src/research_pipeline/packages/store.py",
+      "detail": "人确定研究问题、样本范围、时间约定与预算，填写研究包。普通研究不需要启用 AI。"
+    },
+    {
+      "id": "rd",
+      "label": "RD-Agent · 可选 AI",
+      "sub": "提案 · 代码生成 · 反思",
+      "x": 765,
+      "y": 70,
+      "w": 270,
+      "h": 90,
+      "kind": "ai",
+      "source": "integrations/rdagent/src/quantwitness_rdagent/package_campaign.py",
+      "detail": "位于核心之外，通过 Workspace 与研究包接口提交候选。公式复现先由人确认定义；探索只接收通过验证的开发指标，不接收最终 test/holdout 答案。"
+    },
+    {
+      "id": "qlib",
+      "label": "Qlib · 可选算法组件",
+      "sub": "模型 · 处理器 · 表达式",
+      "x": 1120,
+      "y": 70,
+      "w": 270,
+      "h": 90,
+      "kind": "ai",
+      "source": "src/research_pipeline/research/modeling/qlib.py",
+      "detail": "通过研究模型适配层及项目扩展调用。提供模型与处理器，以及项目侧表达式、风险模型和组合组件，不负责本框架的结果封存与独立验证。"
+    },
+    {
+      "id": "catalog",
+      "label": "Catalog · 数据说明",
+      "sub": "catalog/",
+      "x": 55,
+      "y": 320,
+      "w": 270,
+      "h": 90,
+      "kind": "check",
+      "source": "src/research_pipeline/catalog/declarative.py",
+      "detail": "描述数据集、字段、单位、物理绑定、可见性和修订政策；经明确确认编译为 Catalog Lock。packages 与数据准入会读取这份约定。"
+    },
+    {
+      "id": "cli",
+      "label": "CLI 与 Workspace",
+      "sub": "cli/ · workspace.py",
+      "x": 410,
+      "y": 320,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/cli/commands/workspace_flow.py",
+      "detail": "编排检查、准入、执行、封存、独立验证和报告。Runtime 完成后由命令层调用 ResultAssembler 封存，运行完成本身不等于验证通过。"
+    },
+    {
+      "id": "packages",
+      "label": "研究包与计划",
+      "sub": "packages/",
+      "x": 765,
+      "y": 320,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/packages/compiler.py",
+      "detail": "把研究声明、数据请求、算子图与结果要求编译为计划；结合 Catalog 和准入检查固定本次研究约定。"
+    },
+    {
+      "id": "extensions",
+      "label": "项目扩展接口",
+      "sub": "extensions/",
+      "x": 1120,
+      "y": 320,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/extensions/__init__.py",
+      "detail": "装载明确声明的项目算子包和相关接口，绑定实现及依赖。项目算法经运行时适配器调用，不能绕过正式输入与结果要求。"
+    },
+    {
+      "id": "data_plane",
+      "label": "数据平面",
+      "sub": "data_plane/",
+      "x": 55,
+      "y": 570,
+      "w": 270,
+      "h": 90,
+      "kind": "data",
+      "source": "src/research_pipeline/data_plane/admission.py",
+      "detail": "核对来源和数据约定，按请求读取数据并形成列式工件。普通读取、分钟扫描、归档输入有各自入口；与 Catalog 共同约束可见性。"
+    },
+    {
+      "id": "application",
+      "label": "数据应用编排",
+      "sub": "application/",
+      "x": 410,
+      "y": 570,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/application/grid_data.py",
+      "detail": "为普通网格化数据节点组织请求、读取和资源测量，通过数据平面获得正式输入工件。不是所有分钟或归档入口都经过同一函数。"
+    },
+    {
+      "id": "runtime",
+      "label": "运行时与资源调度",
+      "sub": "runtime/",
+      "x": 765,
+      "y": 570,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/runtime/execution_service.py",
+      "detail": "调度节点依赖、资源、进程和检查点，经适配器执行数据、研究与仿真节点。只复用完整提交且身份一致的产物。"
+    },
+    {
+      "id": "research",
+      "label": "因子、模型与统计",
+      "sub": "research/",
+      "x": 1120,
+      "y": 570,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/research/__init__.py",
+      "detail": "消费正式输入，执行已支持的因子、标签、模型和统计步骤。模型训练与选择遵守开发/最终留出划分，Qlib 是可选算法后端。"
+    },
+    {
+      "id": "domain",
+      "label": "金融领域约定",
+      "sub": "domain/",
+      "x": 55,
+      "y": 820,
+      "w": 270,
+      "h": 90,
+      "kind": "check",
+      "source": "src/research_pipeline/domain/spot_account.py",
+      "detail": "定义市场、订单、持仓、现金、信用、保证金和公司行动的数据类型与规则口径。账户和市场规则按实际资产、品种、日期及来源声明。"
+    },
+    {
+      "id": "simulation",
+      "label": "原生回测与账户",
+      "sub": "simulation/",
+      "x": 410,
+      "y": 820,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/simulation/engine.py",
+      "detail": "在声明范围内处理交易事件、撮合、费用和账户记账，产出正式金融事实。借鉴 RQAlpha 的职责划分，不调用其执行引擎。"
+    },
+    {
+      "id": "results",
+      "label": "结果封存与存储",
+      "sub": "results/",
+      "x": 765,
+      "y": 820,
+      "w": 270,
+      "h": 90,
+      "kind": "data",
+      "source": "src/research_pipeline/results/assembler.py",
+      "detail": "由 CLI 在 Runtime 返回后调用，封存输入、配置、实现信息和输出表为 Result。结果封存具有单独状态，不由节点成功自动代替。"
+    },
+    {
+      "id": "evidence",
+      "label": "独立验证与证据",
+      "sub": "evidence/",
+      "x": 1120,
+      "y": 820,
+      "w": 270,
+      "h": 90,
+      "kind": "check",
+      "source": "src/research_pipeline/evidence/verification_result.py",
+      "detail": "读取封存结果及支持事实，按声明的验证范围重新检查公式、时间和金融关系，生成 VerificationResult。报告由命令层读取结果及检查单；开发反馈只使用验证通过的指标。"
+    },
+    {
+      "id": "operations",
+      "label": "诊断与运维",
+      "sub": "operations/",
+      "x": 410,
+      "y": 1070,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/operations/__init__.py",
+      "detail": "提供能力查询、环境诊断、文档检查与维护入口，为正式主链提供操作支持，不承担项目策略算法。"
+    },
+    {
+      "id": "platform",
+      "label": "基础类型与公共约定",
+      "sub": "platform/",
+      "x": 765,
+      "y": 1070,
+      "w": 270,
+      "h": 90,
+      "kind": "core",
+      "source": "src/research_pipeline/platform/__init__.py",
+      "detail": "提供时间、单位、身份、原子目录及公共数据类型等底层机制，被上层模块复用。"
+    }
+  ],
+  "edges": [
+    {
+      "from_id": "data",
+      "to_id": "catalog",
+      "label": "结构与来源说明",
+      "kind": "main"
+    },
+    {
+      "from_id": "human",
+      "to_id": "cli",
+      "label": "直接发起研究",
+      "kind": "main"
+    },
+    {
+      "from_id": "rd",
+      "to_id": "cli",
+      "label": "提交候选",
+      "kind": "optional",
+      "points": [
+        [
+          900,
+          160
+        ],
+        [
+          900,
+          235
+        ],
+        [
+          545,
+          235
+        ],
+        [
+          545,
+          320
+        ]
+      ],
+      "label_pos": [
+        690,
+        220
+      ]
+    },
+    {
+      "from_id": "cli",
+      "to_id": "packages",
+      "label": "编译研究",
+      "kind": "main"
+    },
+    {
+      "from_id": "extensions",
+      "to_id": "packages",
+      "label": "算子定义",
+      "kind": "main"
+    },
+    {
+      "from_id": "catalog",
+      "to_id": "data_plane",
+      "label": "读取约定",
+      "kind": "main"
+    },
+    {
+      "from_id": "data",
+      "to_id": "data_plane",
+      "label": "只读取数",
+      "kind": "main",
+      "points": [
+        [
+          55,
+          115
+        ],
+        [
+          15,
+          115
+        ],
+        [
+          15,
+          615
+        ],
+        [
+          55,
+          615
+        ]
+      ],
+      "label_pos": [
+        73,
+        483
+      ]
+    },
+    {
+      "from_id": "packages",
+      "to_id": "runtime",
+      "label": "已准入计划",
+      "kind": "main"
+    },
+    {
+      "from_id": "runtime",
+      "to_id": "application",
+      "label": "数据节点",
+      "kind": "main"
+    },
+    {
+      "from_id": "application",
+      "to_id": "data_plane",
+      "label": "请求与工件",
+      "kind": "main"
+    },
+    {
+      "from_id": "runtime",
+      "to_id": "research",
+      "label": "研究节点",
+      "kind": "main"
+    },
+    {
+      "from_id": "research",
+      "to_id": "qlib",
+      "label": "调用组件",
+      "kind": "optional",
+      "points": [
+        [
+          1390,
+          615
+        ],
+        [
+          1430,
+          615
+        ],
+        [
+          1430,
+          115
+        ],
+        [
+          1390,
+          115
+        ]
+      ],
+      "label_pos": [
+        1394,
+        265
+      ]
+    },
+    {
+      "from_id": "runtime",
+      "to_id": "simulation",
+      "label": "调度仿真节点",
+      "kind": "main",
+      "points": [
+        [
+          865,
+          660
+        ],
+        [
+          865,
+          722
+        ],
+        [
+          545,
+          722
+        ],
+        [
+          545,
+          820
+        ]
+      ],
+      "label_pos": [
+        660,
+        710
+      ]
+    },
+    {
+      "from_id": "domain",
+      "to_id": "simulation",
+      "label": "金融约定",
+      "kind": "main"
+    },
+    {
+      "from_id": "simulation",
+      "to_id": "results",
+      "label": "金融事实",
+      "kind": "main"
+    },
+    {
+      "from_id": "research",
+      "to_id": "results",
+      "label": "研究产物",
+      "kind": "main",
+      "points": [
+        [
+          1255,
+          660
+        ],
+        [
+          1255,
+          755
+        ],
+        [
+          970,
+          755
+        ],
+        [
+          970,
+          820
+        ]
+      ],
+      "label_pos": [
+        1125,
+        742
+      ]
+    },
+    {
+      "from_id": "runtime",
+      "to_id": "results",
+      "label": "交命令层封存",
+      "kind": "main",
+      "points": [
+        [
+          925,
+          660
+        ],
+        [
+          925,
+          820
+        ]
+      ],
+      "label_pos": [
+        997,
+        689
+      ]
+    },
+    {
+      "from_id": "results",
+      "to_id": "evidence",
+      "label": "只读复核",
+      "kind": "main"
+    },
+    {
+      "from_id": "evidence",
+      "to_id": "rd",
+      "label": "验证后的开发反馈",
+      "kind": "optional",
+      "points": [
+        [
+          1390,
+          865
+        ],
+        [
+          1470,
+          865
+        ],
+        [
+          1470,
+          205
+        ],
+        [
+          970,
+          205
+        ],
+        [
+          970,
+          160
+        ]
+      ],
+      "label_pos": [
+        1200,
+        192
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "x": 8,
+      "y": 18,
+      "w": 1484,
+      "h": 168,
+      "label": "外部输入与可选组件",
+      "fill": "#f3f0ff"
+    },
+    {
+      "x": 8,
+      "y": 290,
+      "w": 1400,
+      "h": 650,
+      "label": "核心模块",
+      "fill": "#eff6ff"
+    },
+    {
+      "x": 390,
+      "y": 1025,
+      "w": 670,
+      "h": 170,
+      "label": "全链公共支持",
+      "fill": "#ecfdf5"
+    }
+  ],
+  "notes": [
+    "每个核心模块均可点击查看职责和源码；箭头表示主要工作交接或组件使用，不穷举 Python 导入关系。",
+    "研究包编译、数据准入和取数共同使用 Catalog 约定；为保持可读性，图中不重复画出每条校验依赖。",
+    "Runtime 交回执行产物，由 CLI 调用 results 封存；独立 verify 是另一执行步骤，报告不是 AI 开发反馈的前置条件。",
+    "operations 与 platform 为全链提供公共支持；图中没有把共用依赖展开为跨全图连线。",
+    "Qlib 的项目侧表达式与组合接口同样经扩展接入；原生回测通过 simulation 与 domain 实现，数据采集和实盘交易在图外。"
+  ]
+}

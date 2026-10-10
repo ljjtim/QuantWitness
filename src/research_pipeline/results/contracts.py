@@ -14,6 +14,9 @@ from research_pipeline.platform.metric_contracts import MetricReachabilityProof
 from .errors import ResultContractError
 
 
+ORDER_LIFECYCLE_SCHEMA_ID = "research.order-lifecycle.v1"
+ORDER_LIFECYCLE_PATH_PREFIX = "simulation/context-tables/order-lifecycle"
+
 RESULT_SPEC_VERSION = "research-result-spec-v1"
 RESULT_BUNDLE_VERSION = "research-result-v3"
 RESULT_TABLE_MANIFEST_VERSION = "research-result-table-manifest-v2"
@@ -387,7 +390,23 @@ class ResultSupportFile:
         sequence_window = source_path.endswith(tuple(
             f"/sequence/{name}.parquet" for name in ("context", "targets", "members")
         ))
-        if source_path.endswith(".parquet") and not sequence_window:
+        order_lifecycle = (
+            self.artifact_type == ORDER_LIFECYCLE_SCHEMA_ID
+            and re.fullmatch(
+                re.escape(ORDER_LIFECYCLE_PATH_PREFIX)
+                + r"/session=(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|empty)/data\.parquet",
+                source_path,
+            ) is not None
+        )
+        futures_context = (
+            self.artifact_type == "research.futures-daily-context.v1"
+            and re.fullmatch(
+                r"simulation/futures-context-tables/(?:intents|fills|settlements|nav|rule_snapshots|rejections|contributions|portfolio|market_inputs|settlement_inputs|tick_size_inputs)"
+                + r"/(?:session=[0-9]{4}-[0-9]{2}-[0-9]{2}/data|part-[0-9]{5,})\.parquet",
+                source_path,
+            ) is not None
+        )
+        if source_path.endswith(".parquet") and not (sequence_window or order_lifecycle or futures_context):
             raise ResultContractError("Result support file 不能代替正式 Parquet 表")
         if self.contract_version != RESULT_SUPPORT_FILE_VERSION:
             raise ResultContractError("ResultSupportFile 版本不受支持")

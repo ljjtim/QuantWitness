@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantwitness"
-version = "1.2.0"
-description = "PIT-safe quantitative research orchestration with independently verifiable results"
+version = "1.3.0"
+description = "AI-assisted quantitative research and backtesting with traceable, independently verifiable results"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -40,6 +40,9 @@ ml-sequence = ["pyqlib==0.9.7", "torch==2.5.1"]
 [project.scripts]
 quantwitness = "research_pipeline.cli:main"
 
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "licenses/*.txt"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -59,8 +62,12 @@ where = ["src"]
 "research_pipeline.domain" = [
   "session_policies/*.json",
   "rule_snapshots/minute_reference_rules.json",
+  "rule_snapshots/minute_reference_rules.v5.json",
 ]
-"research_pipeline.evidence" = ["result_dispositions.v1.json"]
+"research_pipeline.evidence" = ["result_dispositions.v1.json", "financial_oracle/README.md"]
+
+[tool.setuptools.exclude-package-data]
+"research_pipeline.platform" = ["minute_capabilities/minute_inventory.v3.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

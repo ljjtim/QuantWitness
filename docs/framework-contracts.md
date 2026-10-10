@@ -1,4 +1,10 @@
-# QuantWitness
+# 框架约定：从研究输入到结果交付
+
+这是一份面向进阶使用者和扩展开发者的完整参考。它说明数据、算法、运行和结果之间必须满足的约定；第一次运行不必逐条读完，可以先看 [文档导航](index.md)。
+
+关键原则只有三个：按当时可见的数据研究，按已经固定的配置执行，让结果保留来源并接受独立检查。
+
+## 参数与行为说明
 
 QuantWitness 是面向个人研究者和 AI 协作者的量化研究编排框架，Python import 名保留为 `research_pipeline`。它强调 PIT、防前视、可复现、typed DAG、不可变 Result、独立 VerificationResult 和项目扩展隔离；它不是交易执行平台，也不承诺任意研究都能直接运行。
 
@@ -209,7 +215,7 @@ FeatureSetArtifact、LabelArtifact 以及 Runtime 的旧 v1 合同不再兼容�
 
 能力状态只以 [`src/research_pipeline/capabilities.json`](../src/research_pipeline/capabilities.json) 为机器真相源。`planned` 只能发现，`local_only` 不能写成已经独立发布验收。
 
-完整能力表见[当前能力状态](index.md#能力状态)。
+完整能力表见[当前能力状态](index.md#精确能力状态)。
 
 ## 文档
 

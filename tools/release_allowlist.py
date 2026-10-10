@@ -32,6 +32,8 @@ BUILD_SUPPORT_FILES = (
     "release/gate-a-protocol.json",
 )
 UNIT_CORE_TEST_FILES = (
+    "tests/test_atomic_directory.py",
+    "tests/test_minute_public_inventory.py",
     "tests/test_project_operator_bundle.py",
     "tests/test_research_causal_time_contracts.py",
     "tests/test_runtime_checkpoint.py",
@@ -57,11 +59,50 @@ PUBLIC_ROOT_FILES = (
     "pyproject.toml",
 )
 PUBLIC_DOC_FILES = (
+    "docs/architecture/README.md",
+    "docs/architecture/render.mjs",
+    "docs/architecture/source-evidence.json",
+    "docs/architecture/sources/architecture.json",
+    "docs/architecture/sources/dataflow.json",
+    "docs/architecture/sources/lifecycle.json",
+    "docs/architecture/sources/sequence.json",
+    "docs/architecture/sources/workflow.json",
+    "docs/architecture/.gitignore",
+    "docs/architecture/research-pipeline-architecture.html",
+    "docs/architecture/dataflow-research-lineage.html",
+    "docs/architecture/workflow-research-task.html",
+    "docs/architecture/sequence-research-run.html",
+    "docs/architecture/lifecycle-research-run.html",
+    "docs/architecture/render-previews.mjs",
+    "docs/architecture/sources/detailed/overview.json",
+    "docs/architecture/sources/detailed/architecture.json",
+    "docs/architecture/sources/detailed/dataflow.json",
+    "docs/architecture/sources/detailed/workflow.json",
+    "docs/architecture/sources/detailed/sequence.json",
+    "docs/architecture/sources/detailed/lifecycle.json",
+    "licenses/ARCHIFY-MIT.txt",
+    "docs/architecture/overview.html",
+    "docs/architecture/sources/overview.json",
+    'docs/architecture/index.html',
+    'docs/architecture/overview.svg',
+    'docs/architecture/research-pipeline-architecture.svg',
+    'docs/architecture/dataflow-research-lineage.svg',
+    'docs/architecture/workflow-research-task.svg',
+    'docs/architecture/sequence-research-run.svg',
+    'docs/architecture/lifecycle-research-run.svg',
+    'licenses/QLIB-MIT.txt',
+    'licenses/RD-AGENT-MIT.txt',
+
     "release/daily-cash-local-admission.md",
     "project_extensions/dai_zhu_er_jiu_metrics.md",
     "docs/framework-contracts.md",
     "docs/ai_workflow.md",
     "docs/architecture.md",
+    "docs/financial_simulation.md",
+    "docs/spot_account.md",
+    "docs/explicit_orders.md",
+    "docs/minute_simulation.md",
+    "docs/bar_tca.md",
     "docs/catalog.md",
     "docs/cli.md",
     "docs/data_plane.md",
@@ -70,6 +111,8 @@ PUBLIC_DOC_FILES = (
     "docs/workspace-quickstart.md",
     "docs/index.md",
     "docs/minute_rule_provenance.md",
+    "docs/native_backtest_acceptance.md",
+    "docs/shared_futures.md",
     "docs/operations.md",
     "docs/release.md",
     "docs/external-acceptance.md",
@@ -147,6 +190,7 @@ PUBLIC_EXAMPLE_ROOT_FILES = (
 )
 _PUBLIC_EXAMPLE_SUFFIXES = frozenset({".md", ".py", ".yaml"})
 PUBLIC_GITHUB_FILES = (
+    ".github/workflows/architecture-pages.yml",
     ".github/CODEOWNERS.template",
     ".github/workflows/ci.yml",
     ".github/ISSUE_TEMPLATE/bug_report.yml",
@@ -456,8 +500,10 @@ def package_file_paths(project: Path) -> tuple[str, ...]:
             if (
                 package_name == "research_pipeline"
                 and package_relative[:2] == ("domain", "rule_snapshots")
-                and path.name != "minute_reference_rules.json"
+                and path.name not in {"minute_reference_rules.json", "minute_reference_rules.v5.json", "minute_reference_rules.v6.json"}
             ):
+                continue
+            if relative == "src/research_pipeline/platform/minute_capabilities/minute_inventory.v3.json":
                 continue
             if (
                 any(part.lower() in _FORBIDDEN_PARTS for part in PurePosixPath(relative).parts)

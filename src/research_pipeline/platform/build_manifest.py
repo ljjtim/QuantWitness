@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import csv
-import hashlib
 import io
 from importlib import metadata
 import json

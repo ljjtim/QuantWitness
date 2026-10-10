@@ -19,8 +19,7 @@ from research_pipeline.platform.asset_taxonomy import (
 )
 from research_pipeline.platform.canonical import typed_canonical_hash
 from research_pipeline.platform.minute_reference import (
-    load_minute_capability_manifest,
-    require_current_minute_capability_binding,
+    require_published_minute_capability_binding,
 )
 
 from .sessions import SessionSegment, TradingSession
@@ -33,7 +32,7 @@ SESSION_SEGMENT_TEMPLATE_VERSION = "minute-session-segment-template-v1"
 SESSION_INSTRUMENT_VERSION = "minute-session-instrument-v1"
 SESSION_CAPABILITY_CONSUMER = "domain.minute.session_calendar"
 CURRENT_SESSION_POLICY_BUNDLE_HASH = (
-    "ae4be8044e5c8bfdc07aed7d7a8b19d1066ea0eb1038e777b1b6f76fb439bac2"
+    "5ce40cd58a72703878f50471be5667a84919ccea5b095de209d00445252f65d8"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ZONE = ZoneInfo(CN_MARKET_TIMEZONE)
@@ -418,23 +417,24 @@ class SessionPolicyBundle:
         }:
             raise SessionCalendarError("session capability binding schema 无效")
         try:
-            require_current_minute_capability_binding(
+            manifest = require_published_minute_capability_binding(
                 consumer_id=binding["consumer_id"],
                 manifest_hash=binding["minute_capability_manifest_hash"],
                 contract_version=binding["contract_version"],
                 binding_hash=binding["binding_hash"],
             )
         except Exception as exc:
-            raise SessionCalendarError("session policy 未绑定当前分钟能力 manifest") from exc
+            raise SessionCalendarError("session policy 未绑定已发布分钟能力 manifest") from exc
         if binding["consumer_id"] != SESSION_CAPABILITY_CONSUMER:
             raise SessionCalendarError("session policy consumer 不一致")
-        ordered = tuple(sorted(self.policies, key=lambda item: (item.policy_id, item.revision)))
+        ordered = tuple(sorted(self.policies, key=lambda item: (item.policy_id, item.revision, item.instrument.instrument_id)))
         if not ordered or ordered != self.policies:
             raise SessionCalendarError("session policies 必须排序且非空")
-        keys = {(item.policy_id, item.revision) for item in ordered}
+        # 同一政策族覆盖多个标的，版本链只沿同一标的延续。
+        keys = {(item.policy_id, item.revision, item.instrument.instrument_id) for item in ordered}
         if len(keys) != len(ordered):
             raise SessionCalendarError("session policy id/revision 重复")
-        by_key = {(item.policy_id, item.revision): item for item in ordered}
+        by_key = {(item.policy_id, item.revision, item.instrument.instrument_id): item for item in ordered}
         for item in ordered:
             evidence = dict(item.evidence_hashes)
             if (
@@ -446,10 +446,9 @@ class SessionPolicyBundle:
                 raise SessionCalendarError("session policy 证据未闭合到能力 manifest")
             if item.revision == 1:
                 continue
-            previous = by_key.get((item.policy_id, item.revision - 1))
+            previous = by_key.get((item.policy_id, item.revision - 1, item.instrument.instrument_id))
             if previous is None or item.previous_policy_hash != previous.policy_hash:
                 raise SessionCalendarError("session policy revision chain 不闭合")
-        manifest = load_minute_capability_manifest()
         by_instrument = {
             item.instrument.instrument_id: item for item in manifest.coverages
         }
@@ -638,6 +637,19 @@ class SessionCalendarResolver:
         return matches
 
 
+def published_session_bundle_hash(manifest_hash: str) -> str:
+    """历史Result引用的会话来源仍绑定其原发布版本。"""
+    from research_pipeline.platform.minute_reference import CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH
+
+    if manifest_hash == CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH:
+        return CURRENT_SESSION_POLICY_BUNDLE_HASH
+    if manifest_hash == "73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033":
+        return "ae4be8044e5c8bfdc07aed7d7a8b19d1066ea0eb1038e777b1b6f76fb439bac2"
+    if manifest_hash == "a2d3bdebba11b28e72076a29cf9d6e10ca0650822822da387460abb62a560cf9":
+        return "9c2b4dd0489508e6fcbd7b3d81cf606c9770928101a51d053b00015ed0f156f0"
+    raise SessionCalendarError("分钟能力没有已发布的session bundle")
+
+
 def load_session_policy_bundle(
     path: str | Path | None = None,
     *,
@@ -646,7 +658,7 @@ def load_session_policy_bundle(
     is_default = path is None
     if path is None:
         resource = files("research_pipeline.domain").joinpath(
-            "session_policies/minute_reference_sessions.v4.json"
+            "session_policies/minute_reference_sessions.v6.json"
         )
         try:
             raw = resource.read_text(encoding="utf-8")

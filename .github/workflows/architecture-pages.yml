@@ -1,0 +1,46 @@
+name: Architecture pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "docs/architecture/*.html"
+      - "docs/architecture/*.svg"
+      - ".github/workflows/architecture-pages.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: architecture-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.repository == 'ljjtim/QuantWitness' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Prepare diagram site
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/quantwitness-pages"
+          for stem in index overview research-pipeline-architecture dataflow-research-lineage workflow-research-task sequence-research-run lifecycle-research-run; do
+            cp "docs/architecture/$stem.html" "$RUNNER_TEMP/quantwitness-pages/"
+          done
+          for stem in overview research-pipeline-architecture dataflow-research-lineage workflow-research-task sequence-research-run lifecycle-research-run; do
+            cp "docs/architecture/$stem.svg" "$RUNNER_TEMP/quantwitness-pages/"
+          done
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/quantwitness-pages
+      - name: Deploy diagrams
+        id: deployment
+        uses: actions/deploy-pages@v4

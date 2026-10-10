@@ -64,6 +64,9 @@ def _typed_canonical_parts(value: object) -> Iterator[str]:
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise CanonicalEncodingError("canonical payload 的 mapping key 必须是字符串")
+        if all(item is None or isinstance(item, (bool, int, float, str)) for item in value.values()):
+            yield canonical_json(_typed_canonical_value(value))
+            return
         yield '{"type":"object","value":{'
         for position, key in enumerate(sorted(value)):
             if position:

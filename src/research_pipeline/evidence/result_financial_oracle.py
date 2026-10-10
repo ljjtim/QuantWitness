@@ -26,7 +26,14 @@ from .financial_oracle.bar_tca import verify_tca
 from .financial_oracle.canonical import verify_canonical_tables
 from .financial_oracle.common import normalized as _normalized
 from .financial_oracle.daily_etf import verify_daily_etf_financial_context
+from .financial_oracle.daily_futures_support import (
+    FUTURES_DECLARATION, futures_support_sources, verify_sealed_futures,
+)
 from .financial_oracle.minute_context import verify_minute_financial_context
+from .financial_oracle.order_lifecycle import (
+    LIFECYCLE_DECLARATION, LIFECYCLE_SOURCE_ID, lifecycle_support_source,
+    verify_order_lifecycle,
+)
 from .oracle_workspace import (
     DEFAULT_FINANCIAL_ORACLE_MEMORY_BYTES,
     DEFAULT_FINANCIAL_ORACLE_TEMP_BYTES,
@@ -53,12 +60,18 @@ class FinancialOracleSemanticContract:
     required_control_paths: tuple[str, ...]
     minute_context_path: str
     daily_etf_context_path: str
+    shared_futures_schema_roles: tuple[tuple[str, str], ...]
+    shared_futures_path_bindings: tuple[tuple[str, str], ...]
+    daily_futures_context_path: str = "simulation/futures-context.json"
+    order_lifecycle_schema_id: str = LIFECYCLE_SOURCE_ID
+    order_lifecycle_path_prefix: str = "simulation/context-tables/order-lifecycle"
 
     def __post_init__(self) -> None:
         role_groups = (
             self.canonical_schema_roles,
             self.bar_tca_schema_roles,
             self.minute_context_schema_roles,
+            self.shared_futures_schema_roles,
         )
         if any(
             not items
@@ -74,6 +87,16 @@ class FinancialOracleSemanticContract:
             != len(self.bar_tca_path_bindings)
         ):
             raise EvidenceContractError("金融复核 Bar TCA 路径合同无效")
+        if (
+            set(dict(self.shared_futures_path_bindings))
+            != {schema_id for _, schema_id in self.shared_futures_schema_roles}
+            or len({path for _, path in self.shared_futures_path_bindings})
+            != len(self.shared_futures_path_bindings)
+        ):
+            raise EvidenceContractError("金融复核共享期货路径合同无效")
+        if (self.order_lifecycle_schema_id != LIFECYCLE_SOURCE_ID
+                or self.order_lifecycle_path_prefix != LIFECYCLE_DECLARATION["path_prefix"]):
+            raise EvidenceContractError("金融复核生命周期 schema 或路径合同无效")
         if len(self.required_control_paths) != 5:
             raise EvidenceContractError("金融复核控制文件合同无效")
 
@@ -94,6 +117,15 @@ class FinancialOracleSemanticContract:
         return dict(self.minute_context_schema_roles)
 
 
+    @property
+    def shared_futures_schema_ids(self) -> dict[str, str]:
+        return dict(self.shared_futures_schema_roles)
+
+    @property
+    def shared_futures_path_by_schema(self) -> dict[str, str]:
+        return dict(self.shared_futures_path_bindings)
+
+
 @dataclass(frozen=True)
 class FinancialOracleResult:
     oracle_hash: str
@@ -108,9 +140,15 @@ def verify_result_financial_oracle(
     snapshot: ResultSnapshot | None = None,
     budget: FinancialOracleBudget | None = None,
 ) -> FinancialOracleResult | None:
-    """只在 ResultBundle 声明 Bar TCA 时启动强制独立复验。"""
+    """从封存 Result 强制复验已声明的期货账户或 Bar TCA。"""
 
     declared = {table.schema_id for table in bundle.tables}
+    shared_ids = set(semantic_contract.shared_futures_schema_ids.values())
+    if declared & shared_ids:
+        return _verify_shared_futures_result(
+            store=store, bundle=bundle, snapshot=snapshot, budget=budget,
+            semantic_contract=semantic_contract,
+        )
     tca_schema_ids = semantic_contract.bar_tca_schema_ids
     canonical_schema_ids = semantic_contract.canonical_schema_ids
     minute_context_schema_ids = semantic_contract.minute_context_schema_ids
@@ -125,6 +163,8 @@ def verify_result_financial_oracle(
         item.source_path == semantic_contract.daily_etf_context_path
         for item in bundle.support_files
     )
+    has_futures_context = any(item.source_path == semantic_contract.daily_futures_context_path
+                              for item in bundle.support_files)
     required = tca_ids | set(canonical_schema_ids.values())
     if not required <= declared:
         raise EvidenceContractError("Bar TCA ResultBundle 缺少规范六表或 TCA 表")
@@ -152,6 +192,8 @@ def verify_result_financial_oracle(
         control_paths = (*control_paths, semantic_contract.minute_context_path)
     if has_daily_etf_context:
         control_paths = (*control_paths, semantic_contract.daily_etf_context_path)
+    if has_futures_context:
+        control_paths = (*control_paths, semantic_contract.daily_futures_context_path)
     if snapshot is None:
         snapshot = store.open_snapshot(
             store.result_directory(bundle),
@@ -164,11 +206,30 @@ def verify_result_financial_oracle(
     ):
         raise EvidenceContractError("金融复核缺少同一次 Result 验证快照")
     controls = dict(snapshot.support_bytes)
+    if has_daily_etf_context:
+        daily_context = _json_bytes(controls[semantic_contract.daily_etf_context_path], "日频金融上下文")
+        if "external_cashflow_context" in daily_context:
+            from .financial_oracle.external_cashflows import METRIC_SCHEMA_ID
+            if METRIC_SCHEMA_ID not in declared:
+                raise EvidenceContractError("资金流 Result 缺少正式日频指标表")
+            schema_ids = (*schema_ids, METRIC_SCHEMA_ID)
 
     sources = {
         schema_id: result_table_source(snapshot, schema_id)
         for schema_id in schema_ids
     }
+    lifecycle_source = lifecycle_support_source(
+        snapshot, _json_bytes(controls[control_paths[0]], "SimulationResult manifest"),
+    )
+    if lifecycle_source is not None:
+        sources[LIFECYCLE_SOURCE_ID] = lifecycle_source
+    futures_context = (
+        _json_bytes(controls[semantic_contract.daily_futures_context_path], "日频期货金融上下文")
+        if has_futures_context else None
+    )
+    sources.update(futures_support_sources(
+        snapshot, _json_bytes(controls[control_paths[0]], "SimulationResult manifest"), futures_context,
+    ))
     effective_budget = budget or FinancialOracleBudget()
     try:
         with OracleWorkspace(
@@ -191,6 +252,60 @@ def verify_result_financial_oracle(
         raise EvidenceContractError(
             f"金融独立复核资源不足或外部扫描失败: {exc}"
         ) from exc
+
+
+def _verify_shared_futures_result(*, store, bundle, snapshot, budget, semantic_contract):
+    """仅用 Result 内十张正式表复验，不读取运行目录或供应商数据库。"""
+    from .financial_oracle.shared_futures import verify_shared_futures
+
+    schema_roles = semantic_contract.shared_futures_schema_ids
+    path_by_schema = semantic_contract.shared_futures_path_by_schema
+    selected = {}
+    for role, schema_id in schema_roles.items():
+        items = [table for table in bundle.tables if table.schema_id == schema_id]
+        if len(items) != 1 or items[0].path_prefix != path_by_schema[schema_id]:
+            raise EvidenceContractError(f"共享期货 Result 缺少唯一正式表或路径绑定: {role}")
+        selected[role] = items[0]
+    if len({(item.source_node_id, item.source_port, item.artifact_key)
+            for item in selected.values()}) != 1:
+        raise EvidenceContractError("共享期货 Result 十表必须封存同一仿真工件")
+    if any(table.schema_id.startswith("research.simulation.") or
+           table.schema_id.startswith("research.bar-tca.") for table in bundle.tables):
+        raise EvidenceContractError("共享期货 Result 不得混用旧净仓六表或旧 Bar TCA")
+    if snapshot is None:
+        snapshot = store.open_snapshot(store.result_directory(bundle), support_paths=())
+    if snapshot.bundle != bundle:
+        raise EvidenceContractError("共享期货金融复核的 Result 快照身份不一致")
+    memory = (budget or FinancialOracleBudget()).memory_bytes
+    tables, used = {}, 0
+    for role, manifest in selected.items():
+        source = result_table_source(snapshot, manifest.schema_id)
+        batches = []
+        for batch in source.iter_batches():
+            used += batch.nbytes
+            if used * 8 > memory:
+                raise EvidenceContractError("共享期货独立复核超出 memory_bytes")
+            batches.append(batch)
+        tables[role] = pa.Table.from_batches(batches, schema=source.schema)
+        if tables[role].num_rows != sum(manifest.row_counts.values()):
+            raise EvidenceContractError("共享期货 Result 表行数与封存清单不一致")
+    context_table = tables.pop("context")
+    if context_table.column_names != ["payload"] or context_table.num_rows != 1:
+        raise EvidenceContractError("共享期货 Result 上下文必须为单行 payload")
+    payload = context_table.column("payload")[0].as_py()
+    if not isinstance(payload, str):
+        raise EvidenceContractError("共享期货 Result 上下文 payload 必须为 JSON 字符串")
+    context = _json_bytes(payload.encode("utf-8"), "共享期货金融上下文")
+    expectations = verify_shared_futures(tables, context)
+    return FinancialOracleResult(
+        oracle_hash=typed_canonical_hash({
+            "contract": "shared-futures-financial-oracle-v1",
+            "context": context,
+            "tables": {role: manifest.table_manifest_hash for role, manifest in selected.items()},
+            "expectations": expectations,
+        }),
+        bar_tca_expectations=None,
+    )
 
 
 def _verify_financial_workspace(
@@ -241,8 +356,45 @@ def _verify_financial_workspace(
         controls[control_paths[0]],
         "SimulationResult manifest",
     )
+    account_adjustments = None
+    cashflow_oracle = None
+    credit_oracle = None
+    if has_daily_etf_context:
+        daily_context = _json_bytes(controls[semantic_contract.daily_etf_context_path], "日频金融上下文")
+        if "credit_context" in daily_context:
+            from .financial_oracle.credit_account import CreditContextOracle
+            from .financial_oracle.daily_etf import daily_opening_observations
+            if (daily_context.get("contract_version") != "research-daily-cash-financial-context-v4"
+                    or daily_context.get("account_context") is None or "external_cashflow_context" not in daily_context):
+                raise EvidenceContractError("信用Result必须绑定v4账户与净NAV收益事实")
+            credit_oracle = CreditContextOracle(context=daily_context["credit_context"], canonical=canonical,
+                account_context=daily_context["account_context"], market_observations=daily_opening_observations(daily_context, daily_context["asset_class"]),
+                market_artifact_hash=daily_context.get("market_artifact_hash"))
+        if "external_cashflow_context" in daily_context:
+            from .financial_oracle.daily_etf import daily_opening_observations
+            from .financial_oracle.external_cashflows import ExternalCashflowOracle
+            if daily_context.get("contract_version") not in {"research-daily-cash-financial-context-v3", "research-daily-cash-financial-context-v4"}:
+                raise EvidenceContractError("资金流 Result 必须绑定 v3 日频金融上下文")
+            cashflow_oracle = ExternalCashflowOracle(
+                context=daily_context["external_cashflow_context"], canonical=canonical,
+                market_observations=daily_opening_observations(daily_context, daily_context["asset_class"]),
+                market_artifact_hash=daily_context.get("market_artifact_hash"),
+                account_context=daily_context.get("account_context"), explicit_context=daily_context.get("explicit_order_context"), asset_class=daily_context["asset_class"],
+                corporate_actions=daily_context["corporate_actions"], corporate_action_records=daily_context.get("corporate_action_records", ()), credit_oracle=credit_oracle,
+            )
+        if daily_context.get("account_context") is not None:
+            from .financial_oracle.spot_account import verify_spot_account_context
+            account_adjustments = verify_spot_account_context(context=daily_context["account_context"], canonical=canonical,
+                allow_zero_opening=cashflow_oracle is not None, cashflow_oracle=cashflow_oracle, credit_oracle=credit_oracle)
+        elif cashflow_oracle is not None:
+            cashflow_oracle.replay_plain_account()
+    if simulation_manifest.get("account_valuation_adjustments") != account_adjustments:
+        raise EvidenceContractError("账户估值调整未与独立金融事实绑定")
     verify_canonical_tables(
         canonical, frequency=simulation_manifest.get("semantics", {}).get("frequency"),
+        credit_adjustments=account_adjustments if credit_oracle is not None else None,
+        account_adjustments=(None if credit_oracle is not None else account_adjustments if account_adjustments is not None or cashflow_oracle is None
+                             else {str(row["session"]): 0 for row in canonical["cash"]}),
     )
     tca_manifest = _json_bytes(
         controls[control_paths[2]],
@@ -261,11 +413,11 @@ def _verify_financial_workspace(
         raise EvidenceContractError("分钟 Bar TCA Result 缺少金融上下文")
     if (
         isinstance(policy, Mapping)
-        and policy.get("asset_class") == "cn_etf"
+        and policy.get("asset_class") in {"cn_etf", "cn_stock"}
         and policy.get("bar_frequency") == "daily"
         and not has_daily_etf_context
     ):
-        raise EvidenceContractError("ETF 日频 Bar TCA Result 缺少受控规则上下文")
+        raise EvidenceContractError("现货日频 Bar TCA Result 缺少受控规则上下文")
     try:
         simulation_marker = controls[control_paths[1]].decode("ascii")
         tca_marker = controls[control_paths[3]].decode("ascii")
@@ -283,6 +435,25 @@ def _verify_financial_workspace(
         manifest=simulation_manifest,
         expected_names=set(canonical_schema_ids),
     )
+    if LIFECYCLE_SOURCE_ID in sources:
+        lifecycle_context = None
+        session_bundle = None
+        if has_minute_context:
+            control = _json_bytes(controls[semantic_contract.minute_context_path], "分钟金融上下文")
+            lifecycle_context = control.get("explicit_order_context")
+            if lifecycle_context is not None:
+                from research_pipeline.domain import SessionPolicyBundle
+                session_bundle = SessionPolicyBundle.from_dict(control["session_policy_bundle"])
+        elif has_daily_etf_context:
+            lifecycle_context = daily_context.get("explicit_order_context")
+        elif semantic_contract.daily_futures_context_path in controls:
+            control = _json_bytes(controls[semantic_contract.daily_futures_context_path], "日频期货金融上下文")
+            lifecycle_context = control.get("explicit_order_context")
+        verify_order_lifecycle(
+            lifecycle=workspace.table(LIFECYCLE_SOURCE_ID), canonical=canonical,
+            frequency=simulation_manifest["semantics"]["frequency"],
+            explicit_order_context=lifecycle_context, session_policy_bundle=session_bundle,
+        )
     tca_role_by_schema = {
         schema_id: role for role, schema_id in tca_schema_ids.items()
     }
@@ -337,10 +508,20 @@ def _verify_financial_workspace(
             canonical=canonical,
             simulation_manifest=simulation_manifest,
             oracle_input=oracle_input,
+            cashflow_oracle=cashflow_oracle, credit_oracle=credit_oracle,
+        )
+    if cashflow_oracle is not None:
+        from .financial_oracle.external_cashflows import METRIC_SCHEMA_ID, verify_cashflow_metrics
+        verify_cashflow_metrics(summary=cashflow_oracle.returns.summary(), canonical=canonical,
+                                metric_rows=workspace.table(METRIC_SCHEMA_ID))
+    if semantic_contract.daily_futures_context_path in controls:
+        verify_sealed_futures(
+            workspace=workspace, canonical=canonical,
+            context=_json_bytes(controls[semantic_contract.daily_futures_context_path], "日频期货金融上下文"),
         )
     return FinancialOracleResult(
         typed_canonical_hash({
-            "algorithm": "result-bundle-financial-oracle-v5",
+            "algorithm": "result-bundle-financial-oracle-v11",
             "result_id": bundle.result_id,
             "canonical_rows": {name: len(rows) for name, rows in canonical.items()},
             "tca_rows": {name: len(rows) for name, rows in tca_tables.items()},
@@ -359,6 +540,9 @@ def _verify_financial_workspace(
                 )["context_hash"]
             ),
             "bar_tca_expectations": dict(expectations),
+            "order_lifecycle_contract": simulation_manifest.get("order_lifecycle_contract"),
+            "futures_context_hash": (None if semantic_contract.daily_futures_context_path not in controls
+                else _json_bytes(controls[semantic_contract.daily_futures_context_path], "日频期货金融上下文")["context_hash"]),
         }),
         expectations,
     )
@@ -435,6 +619,26 @@ def _verify_simulation_identity(
         "contract_version", "semantics", "semantics_hash", "source_simulation_hash",
         "table_hashes", "table_rows", "table_schemas", "result_hash", "manifest_hash",
     }
+    semantics = manifest.get("semantics", {})
+    if (isinstance(semantics, Mapping)
+            and semantics.get("contract_version") == "research-simulation-result-semantics-v2"
+            and "order_lifecycle_contract" not in manifest):
+        raise EvidenceContractError("新仿真语义合同缺少订单生命周期声明")
+    if "order_lifecycle_contract" in manifest:
+        expected_fields.add("order_lifecycle_contract")
+        if manifest["order_lifecycle_contract"] != LIFECYCLE_DECLARATION:
+            raise EvidenceContractError("订单生命周期合同声明无效")
+    if "futures_context_contract" in manifest:
+        expected_fields.add("futures_context_contract")
+        declaration = manifest["futures_context_contract"]
+        version = declaration.get("contract_version") if isinstance(declaration, Mapping) else None
+        if (version not in {"research-futures-daily-context-v1", "research-futures-daily-context-v2", "research-futures-daily-context-v3"}
+                or declaration != {**FUTURES_DECLARATION, "contract_version": version}):
+            raise EvidenceContractError("日频期货金融上下文声明无效")
+    if "account_valuation_adjustments" in manifest:
+        expected_fields.add("account_valuation_adjustments")
+        if not isinstance(manifest["account_valuation_adjustments"], Mapping):
+            raise EvidenceContractError("账户估值调整必须是日期映射")
     if set(manifest) != expected_fields:
         raise EvidenceContractError("SimulationResult manifest schema 无效")
     semantics = manifest["semantics"]
@@ -474,12 +678,19 @@ def _verify_simulation_identity(
     semantics_hash = typed_canonical_hash(dict(semantics))
     if semantics_hash != manifest["semantics_hash"]:
         raise EvidenceContractError("SimulationResult semantics hash 漂移")
-    result_hash = typed_canonical_hash({
+    identity = {
         "contract_version": manifest["contract_version"],
         "semantics_hash": semantics_hash,
         "source_simulation_hash": manifest["source_simulation_hash"],
         "table_hashes": dict(actual_hashes),
-    })
+    }
+    if "order_lifecycle_contract" in manifest:
+        identity["order_lifecycle_contract"] = dict(LIFECYCLE_DECLARATION)
+    if "futures_context_contract" in manifest:
+        identity["futures_context_contract"] = dict(manifest["futures_context_contract"])
+    if "account_valuation_adjustments" in manifest:
+        identity["account_valuation_adjustments"] = dict(manifest["account_valuation_adjustments"])
+    result_hash = typed_canonical_hash(identity)
     if result_hash != manifest["result_hash"]:
         raise EvidenceContractError("SimulationResult result hash 漂移")
 

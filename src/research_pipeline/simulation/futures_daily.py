@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
 from datetime import date, datetime, time
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 import json
-from typing import Mapping, Sequence
+from fractions import Fraction
+from typing import Iterator, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from research_pipeline.domain.order_stream import ExplicitOrderCommand, parse_order_commands
 from research_pipeline.domain.trading import (
     InstrumentKey,
     OrderIntent,
@@ -18,16 +20,23 @@ from research_pipeline.domain.trading import (
     TradingRuleBinding,
 )
 from research_pipeline.platform import typed_canonical_hash
+from research_pipeline.platform.canonical import typed_canonical_hash_streamed
+from research_pipeline.simulation.costs import futures_fee_fen as _fee_fen
+from research_pipeline.simulation.margin import futures_margin_fen as _margin_fen
 from research_pipeline.simulation.intent_port import CN_FUTURES_DAILY_BACKEND, IntentToOrderPort
-from research_pipeline.simulation.orders import SimulationContractError
+from research_pipeline.simulation.engine import ExecutionEngine
+from research_pipeline.simulation.events import ExecutionOutcome, FinancialEvent
+from research_pipeline.simulation.ledger import (
+    ExecutionGroup, FuturesAccountCore, FuturesLedgerState, FuturesDailySessionLedger,
+)
+from research_pipeline.simulation.orders import ORDER_TERMINAL_STATES, SimulationContractError
 
 
-FUTURES_DAILY_SIMULATION_VERSION = "research-futures-daily-simulation-v1"
-FUTURES_DYNAMIC_ROLL_SIMULATION_VERSION = "research-futures-dynamic-roll-simulation-v2"
-FUTURES_PORTFOLIO_SIMULATION_VERSION = "research-futures-portfolio-simulation-v1"
+FUTURES_DAILY_SIMULATION_VERSION = "research-futures-daily-simulation-v2"
+FUTURES_DYNAMIC_ROLL_SIMULATION_VERSION = "research-futures-dynamic-roll-simulation-v3"
+FUTURES_PORTFOLIO_SIMULATION_VERSION = "research-futures-portfolio-simulation-v2"
 _TIMEZONE = ZoneInfo("Asia/Shanghai")
 _CENT = Decimal("0.01")
-_FEN = Decimal("1")
 
 
 @dataclass(frozen=True)
@@ -137,6 +146,14 @@ class FuturesRuleBook:
         )
 
     def settlement_margin(self, *, contract_code: str, trading_date: date, as_of: datetime) -> tuple[Decimal, str]:
+        rate, source_hash, _ = self.settlement_margin_details(
+            contract_code=contract_code, trading_date=trading_date, as_of=as_of,
+        )
+        return rate, source_hash
+
+    def settlement_margin_details(self, *, contract_code: str, trading_date: date,
+                                  as_of: datetime) -> tuple[Decimal, str, datetime]:
+        """结算费率与来源行实际可见时点，沿用同一规则选择。"""
         rows = self.margins.loc[
             (self.margins["code"] == contract_code)
             & (self.margins["day"] == trading_date)
@@ -147,7 +164,8 @@ class FuturesRuleBook:
             raise SimulationContractError("当日收盘结算保证金规则缺失或重叠")
         row = rows.iloc[0]
         rate = _positive_decimal(row["specul_buy_margin_rate"], "结算保证金率")
-        return rate, typed_canonical_hash(_row_payload(row, self.margins.columns))
+        available_at = max(_aware_local(row["addTime"]), _aware_local(row["modTime"]))
+        return rate, typed_canonical_hash(_row_payload(row, self.margins.columns)), available_at
 
     def _normalize(self) -> None:
         required = {
@@ -272,10 +290,19 @@ class FuturesSimulationResult:
     rejections: pd.DataFrame = dataclass_field(default_factory=pd.DataFrame)
     contributions: pd.DataFrame = dataclass_field(default_factory=pd.DataFrame)
     portfolio: pd.DataFrame = dataclass_field(default_factory=pd.DataFrame)
+    order_lifecycle: pd.DataFrame = dataclass_field(default_factory=pd.DataFrame)
+    initial_cash_fen: int = 0
+    market_inputs: pd.DataFrame = dataclass_field(default_factory=pd.DataFrame)
+    settlement_inputs: pd.DataFrame = dataclass_field(default_factory=pd.DataFrame)
+    slippage_ticks: int = 0
+    tick_size_inputs: pd.DataFrame = dataclass_field(default_factory=pd.DataFrame)
+    timing_policy: dict[str, object] = dataclass_field(default_factory=dict)
+
+    explicit_order_context: Mapping[str, object] | None = None
 
     @property
     def result_hash(self) -> str:
-        return typed_canonical_hash({
+        payload = {
             "intents": _frame_payload(self.intents),
             "fills": _frame_payload(self.fills),
             "settlements": _frame_payload(self.settlements),
@@ -287,7 +314,17 @@ class FuturesSimulationResult:
             "rejections": _frame_payload(self.rejections),
             "contributions": _frame_payload(self.contributions),
             "portfolio": _frame_payload(self.portfolio),
-        })
+            "order_lifecycle": _frame_payload(self.order_lifecycle),
+            "initial_cash_fen": self.initial_cash_fen,
+            "market_inputs": _frame_payload(self.market_inputs),
+            "settlement_inputs": _frame_payload(self.settlement_inputs),
+            "slippage_ticks": self.slippage_ticks,
+            "tick_size_inputs": _frame_payload(self.tick_size_inputs),
+            "timing_policy": self.timing_policy,
+        }
+        if self.explicit_order_context is not None:
+            payload["explicit_order_context"] = self.explicit_order_context
+        return typed_canonical_hash_streamed(payload)
 
 
 def build_futures_order_intents(
@@ -350,6 +387,7 @@ def build_futures_roll_order_intents(
             raise SimulationContractError("PortfolioTarget JSON 必须是对象")
         target = PortfolioTarget.from_dict(target_payload)
         target_quantity = int(target_row.target_quantity)
+        target_hash = target.target_hash
         instrument = _target_instrument(target, target_row)
         if (
             previous_instrument is not None
@@ -390,9 +428,10 @@ def build_futures_roll_order_intents(
                 trading_date=execution_date,
                 as_of=order_time,
             )
+            rule_snapshot_hash = rule.rule_snapshot_hash
             binding = TradingRuleBinding(
                 instrument_hash=leg_instrument.instrument_hash,
-                rule_snapshot_hash=rule.rule_snapshot_hash,
+                rule_snapshot_hash=rule_snapshot_hash,
                 available_at=rule.available_at,
                 multiplier_rule_hash=rule.multiplier_hash,
                 fee_rule_hash=rule.fee_hash,
@@ -406,10 +445,10 @@ def build_futures_roll_order_intents(
                 position_effect=position_effect,
                 decision_time=target.decision_time,
                 order_time=order_time,
-                portfolio_target_hash=target.target_hash,
+                portfolio_target_hash=target_hash,
                 market_data_artifact_hash=market_data_artifact_hash,
                 rule_binding=binding,
-                source_hashes=tuple(sorted({target.target_hash, rule.rule_snapshot_hash})),
+                source_hashes=tuple(sorted({target_hash, rule_snapshot_hash})),
             )
             order = IntentToOrderPort(CN_FUTURES_DAILY_BACKEND).to_order(intent, ordinal=ordinal)
             rows.append({
@@ -423,8 +462,8 @@ def build_futures_roll_order_intents(
                 "position_effect": position_effect,
                 "target_sequence": target_sequence,
                 "leg_ordinal": ordinal,
-                "target_hash": target.target_hash,
-                "rule_snapshot_hash": rule.rule_snapshot_hash,
+                "target_hash": target_hash,
+                "rule_snapshot_hash": rule_snapshot_hash,
             })
         previous_quantity = target_quantity
         previous_instrument = instrument
@@ -464,36 +503,53 @@ def run_futures_daily_simulation(
     active_contract_by_session: Mapping[date, str] | None = None,
     slippage_ticks: int = 0,
     tick_size_by_session_contract: Mapping[tuple[date, str], Decimal] | None = None,
+    execution_mode: str = "intents",
+    order_commands: Sequence[ExplicitOrderCommand] = (),
 ) -> FuturesSimulationResult:
-    """按订单、成交、收盘结算顺序重放单品种期货账本。
-
-    ``active_contract_by_session`` 为空时使用每日唯一实际合约模式；
-    传入时允许同日存在多个候选合约，但只有映射指定的合约可成为收盘持仓。
-    """
+    """由公共执行引擎推进单品种日频会话，结算后检查保证金并完成强平批次。"""
+    commands = parse_order_commands(order_commands)
+    if execution_mode not in {"intents", "explicit_orders"}:
+        raise SimulationContractError("execution_mode 必须是 intents 或 explicit_orders")
+    if (execution_mode == "intents" and commands) or (execution_mode == "explicit_orders" and not intents.empty):
+        raise SimulationContractError("intents 与显式命令模式不能混合执行")
+    if execution_mode == "explicit_orders" and not any(command.action == "submit" for command in commands):
+        raise SimulationContractError("显式订单模式至少需要一条 submit")
     if initial_cash_cny <= 0:
         raise SimulationContractError("初始资金必须为正")
     if type(slippage_ticks) is not int or slippage_ticks < 0:
         raise SimulationContractError("slippage_ticks 必须是非负整数")
+    market_input_frame = market.copy()
+    settlement_input_frame = settlements.copy()
     market = _normalize_market(market)
     settlement = _normalize_settlement(settlements)
     if market[["date", "code"]].duplicated().any() or settlement[["date", "code"]].duplicated().any():
         raise SimulationContractError("期货行情或结算存在重复主键")
-    cash_fen = cny_to_fen(initial_cash_cny)
-    position = 0
-    position_contract: str | None = None
-    basis_price: Decimal | None = None
-    opened_today = 0
-    fill_rows = []
-    rejection_rows = []
-    settle_rows = []
-    nav_rows = []
-    rule_rows = []
+    initial_fen = cny_to_fen(initial_cash_cny)
+    state = FuturesLedgerState(
+        ExecutionGroup("futures-daily", "cn_future", "CNY", "daily_settlement",
+                       "settlement_margin_check"), initial_fen,
+    )
+    engine = ExecutionEngine()
+    intent_port = IntentToOrderPort(CN_FUTURES_DAILY_BACKEND)
+    forced_intent_rows = []
+    fill_rows, rejection_rows, settle_rows, nav_rows, rule_rows, lifecycle_rows = [], [], [], [], [], []
+    fill_sequence = 0
     last_settlements: dict[str, Decimal] = {}
     intent_frame = intents.copy()
     market_sessions = set(market["date"])
-    if active_contract_by_session is None:
-        sessions = sorted(market_sessions)
-    else:
+    source_availability = {}
+    for role, frame, columns in (
+        ("market", market_input_frame, ("open_available_at", "available_at")),
+        ("settlement", settlement_input_frame, ("available_at",)),
+    ):
+        for row in frame.itertuples(index=False):
+            for column in columns:
+                value = getattr(row, column, None)
+                if value is not None and pd.notna(value):
+                    source_availability[(role, pd.Timestamp(row.date).date(), str(row.code))] = _aware_local(value)
+                    break
+    normalized_mapping = None
+    if active_contract_by_session is not None:
         normalized_mapping = {
             pd.Timestamp(session).date(): str(contract)
             for session, contract in active_contract_by_session.items()
@@ -502,26 +558,85 @@ def run_futures_daily_simulation(
             raise SimulationContractError("主动合约映射必须与执行行情交易日完全一致")
         if any(not _actual_future_contract(code) for code in normalized_mapping.values()):
             raise SimulationContractError("主动合约映射只能引用真实期货合约")
-        sessions = sorted(normalized_mapping)
-    for session in sessions:
-        day_market = market.loc[market["date"] == session]
-        if active_contract_by_session is None:
+    sessions = sorted(market_sessions)
+    explicit = (_DailyFuturesExplicitExecution(commands, engine, rule_book, initial_fen,
+                slippage_ticks, tick_size_by_session_contract or {})
+                if execution_mode == "explicit_orders" else None)
+    if explicit is not None:
+        explicit.require_window(market_input_frame)
+    market_positions = market.groupby("date", sort=False).indices
+    intent_positions = intent_frame.groupby("execution_session", sort=False).indices if not intent_frame.empty else {}
+    settlement_positions = {
+        (row.date, row.code): position
+        for position, row in enumerate(settlement.itertuples(index=False))
+    }
+
+    def before_open(session: date) -> tuple[dict[str, pd.Series], str, FuturesDailySessionLedger]:
+        nonlocal fill_sequence
+        fill_sequence = 0
+        day_market = {}
+        for position in market_positions[session]:
+            row = market.iloc[position]
+            day_market[row["code"]] = row
+        if normalized_mapping is None:
             if len(day_market) != 1:
                 raise SimulationContractError("期货每个交易日必须唯一实际合约行情")
-            contract = str(day_market.iloc[0]["code"])
+            contract = str(next(iter(day_market)))
         else:
             contract = normalized_mapping[session]
-        selected_rows = day_market.loc[day_market["code"] == contract]
-        if len(selected_rows) != 1:
+        if contract not in day_market:
             raise SimulationContractError("主动合约执行行情缺失或重叠")
-        settlement_time = datetime.combine(session, time(17, 0), _TIMEZONE)
-        rule = rule_book.resolve_order(
-            contract_code=contract,
-            trading_date=session,
-            as_of=settlement_time,
+        return day_market, contract, FuturesDailySessionLedger(state, session)
+
+    def append_fill(*, ledger: FuturesDailySessionLedger, instrument: InstrumentKey,
+                    side: str, quantity: int, effect: str, price: Decimal,
+                    rule: FuturesExecutionRule, rule_snapshot_hash: str,
+                    instrument_hash: str, intent_hash: str, fee: int, order_id: str,
+                    fill_id: str, at: datetime, intent: OrderIntent | None,
+                    execution_reason: str = "target_order",
+                    financial_event: FinancialEvent | None = None) -> None:
+        nonlocal fill_sequence
+        fill_sequence += 1
+        before = ledger.position
+        realized = ledger.apply_event(financial_event) if financial_event is not None else ledger.apply_fill(
+            instrument_hash=instrument_hash, contract_code=instrument.instrument_id,
+            side=side, quantity=quantity, position_effect=effect, price=price,
+            multiplier=rule.multiplier, fee_units=fee,
         )
-        day_intents = intent_frame.loc[intent_frame["execution_session"] == session]
-        opened_today = 0
+        after = ledger.position
+        fill_rows.append({
+            "fill_id": fill_id, "fill_time": at, "trading_date": ledger.trading_date,
+            "fill_sequence": fill_sequence,
+            "order_id": order_id, "intent_hash": intent_hash,
+            "source_target_hash": None if intent is None else intent.portfolio_target_hash,
+            "execution_reason": execution_reason,
+            "actual_contract": instrument.instrument_id, "side": side, "quantity": quantity,
+            "position_effect": effect, "fill_price": float(price), "multiplier": rule.multiplier,
+            "execution_price_units": int(Fraction(price) * 10 ** ledger.positions[instrument_hash].price_scale),
+            "fee_fen": fee, "realized_pnl_fen": realized,
+            "position_before": 0 if before is None else before.contracts,
+            "position_after": 0 if after is None else after.contracts,
+            "opened_today_before": 0 if before is None else before.opened_today,
+            "opened_today_after": 0 if after is None else after.opened_today,
+            "basis_before": None if before is None else float(before.cost_price / 10 ** before.price_scale),
+            "basis_after": None if after is None else float(after.cost_price / 10 ** after.price_scale),
+            "basis_before_numerator": None if before is None else before.cost_numerator,
+            "basis_before_denominator": None if before is None else before.cost_denominator,
+            "basis_before_price_scale": None if before is None else before.price_scale,
+            "basis_after_numerator": None if after is None else after.cost_numerator,
+            "basis_after_denominator": None if after is None else after.cost_denominator,
+            "price_scale": ledger.positions[instrument_hash].price_scale,
+            "pnl_rounding_policy": ledger.pnl_rounding_policy,
+            "rule_snapshot_hash": rule_snapshot_hash,
+        })
+
+    def reconcile(session: date, context: tuple[dict[str, pd.Series], str, FuturesDailySessionLedger]) -> None:
+        day_market, _, ledger = context
+        if explicit is not None:
+            explicit.reconcile(session, day_market, ledger, append_fill, rule_rows, rejection_rows)
+            return
+        settlement_time = datetime.combine(session, time(17, 0), _TIMEZONE)
+        day_intents = intent_frame.iloc[intent_positions.get(session, [])]
         blocked_target_sequences: set[int] = set()
         for raw in day_intents.itertuples(index=False):
             intent = OrderIntent.from_dict(json.loads(raw.intent_json))
@@ -531,256 +646,632 @@ def run_futures_daily_simulation(
             leg_contract = intent.instrument.instrument_id
             if not _actual_future_contract(leg_contract) or intent.instrument.contract_kind != "future_contract":
                 raise SimulationContractError("成交必须引用真实期货合约")
-            leg_rows = day_market.loc[day_market["code"] == leg_contract]
-            if len(leg_rows) != 1:
+            leg_row = day_market.get(leg_contract)
+            if leg_row is None:
                 raise SimulationContractError("订单腿执行行情缺失或重叠")
+            available_at = source_availability.get(("market", session, leg_contract))
+            if available_at is not None and available_at > intent.order_time:
+                raise SimulationContractError("开盘价在执行时点尚不可见")
             target_sequence = int(getattr(raw, "target_sequence", -1))
             rejection_reason = (
-                "prior_leg_unfilled"
-                if target_sequence in blocked_target_sequences
-                else _futures_unfilled_reason(leg_rows.iloc[0], side=intent.side)
+                "prior_leg_unfilled" if target_sequence in blocked_target_sequences
+                else _futures_unfilled_reason(leg_row, side=intent.side)
             )
+            order = intent_port.to_order(intent, ordinal=int(getattr(raw, "leg_ordinal", 0)))
+            if order.order_id != str(raw.order_id):
+                raise SimulationContractError("订单身份与正式意图端口不一致")
+            intent_hash = intent.intent_hash
+            if rejection_reason is None:
+                leg_open = _positive_decimal(leg_row["open"], "订单腿开盘价")
+                if slippage_ticks:
+                    if tick_size_by_session_contract is None:
+                        raise SimulationContractError("非零滑点必须绑定可信 tick size")
+                    tick_size = tick_size_by_session_contract.get((session, leg_contract))
+                    if tick_size is None:
+                        raise SimulationContractError("订单腿缺少执行日 tick size")
+                    tick = _positive_decimal(tick_size, "tick size")
+                    leg_open += tick * slippage_ticks if intent.side == "buy" else -tick * slippage_ticks
+                    if leg_open <= 0:
+                        raise SimulationContractError("tick 滑点后的执行价必须为正")
+                rejection_reason = _futures_execution_price_limit_reason(leg_row, price=leg_open)
             if rejection_reason is not None:
                 rejection_rows.append({
-                    "order_id": raw.order_id,
-                    "trading_date": session,
-                    "actual_contract": leg_contract,
-                    "side": intent.side,
-                    "quantity": intent.quantity,
-                    "position_effect": intent.position_effect,
-                    "reason_code": rejection_reason,
-                    "intent_hash": intent.intent_hash,
-                    "source_target_hash": intent.portfolio_target_hash,
-                    "decision_time": intent.decision_time,
-                    "order_time": intent.order_time,
+                    "order_id": raw.order_id, "trading_date": session,
+                    "actual_contract": leg_contract, "side": intent.side, "quantity": intent.quantity,
+                    "position_effect": intent.position_effect, "reason_code": rejection_reason,
+                    "intent_hash": intent_hash, "source_target_hash": intent.portfolio_target_hash,
+                    "decision_time": intent.decision_time, "order_time": intent.order_time,
                 })
+                engine.execute_order(order, trading_session=session, event_time=intent.order_time,
+                                     execute=lambda: ExecutionOutcome(filled_quantity=0, reason=rejection_reason, value=None))
                 if intent.position_effect in {"close", "close_yesterday", "close_today"}:
                     blocked_target_sequences.add(target_sequence)
                 continue
-            raw_open = _positive_decimal(leg_rows.iloc[0]["open"], "订单腿开盘价")
-            leg_open = raw_open
-            if slippage_ticks:
-                if tick_size_by_session_contract is None:
-                    raise SimulationContractError("非零滑点必须绑定可信 tick size")
-                tick_size = tick_size_by_session_contract.get((session, leg_contract))
-                if tick_size is None:
-                    raise SimulationContractError("订单腿缺少执行日 tick size")
-                tick = _positive_decimal(tick_size, "tick size")
-                leg_open = raw_open + (tick * slippage_ticks if intent.side == "buy" else -tick * slippage_ticks)
-                if leg_open <= 0:
-                    raise SimulationContractError("tick 滑点后的执行价必须为正")
-            leg_rule = rule_book.resolve_order(
-                contract_code=leg_contract,
-                trading_date=session,
-                as_of=intent.order_time,
-            )
-            if intent.rule_binding.rule_snapshot_hash != leg_rule.rule_snapshot_hash:
+            leg_rule = rule_book.resolve_order(contract_code=leg_contract, trading_date=session,
+                                                as_of=intent.order_time)
+            leg_rule_snapshot_hash = leg_rule.rule_snapshot_hash
+            if intent.rule_binding.rule_snapshot_hash != leg_rule_snapshot_hash:
                 raise SimulationContractError("订单规则快照与执行日规则漂移")
-            signed = intent.quantity if intent.side == "buy" else -intent.quantity
-            position_before = position
-            basis_before = basis_price
-            realized_fen = 0
-            if intent.position_effect == "open":
-                if position_contract not in {None, leg_contract}:
-                    raise SimulationContractError("换月必须先平旧合约再开新合约")
-                if position and (position > 0) != (signed > 0):
-                    raise SimulationContractError("open 不能隐式平掉反向持仓")
-                if position == 0:
-                    basis_price = leg_open
-                    position_contract = leg_contract
-                elif basis_price != leg_open:
-                    basis_price = (
-                        basis_price * abs(position) + leg_open * abs(signed)
-                    ) / Decimal(abs(position + signed))
-                position += signed
-                opened_today += abs(signed)
-            elif intent.position_effect in {"close", "close_yesterday", "close_today"}:
-                if position_contract != leg_contract:
-                    raise SimulationContractError("平仓腿与当前持仓合约不一致")
-                if position == 0 or (position > 0) == (signed > 0):
-                    raise SimulationContractError("平仓方向或持仓无效")
-                if intent.quantity > abs(position):
-                    raise SimulationContractError("平仓数量超过持仓")
-                if intent.position_effect == "close_today" and intent.quantity > opened_today:
-                    raise SimulationContractError("close_today 只能消费同交易日新仓")
-                if intent.position_effect == "close_yesterday" and intent.quantity > abs(position) - opened_today:
-                    raise SimulationContractError("close_yesterday 不能消费同交易日新仓")
-                realized_fen = _pnl_fen(
-                    side=1 if position > 0 else -1,
-                    quantity=intent.quantity,
-                    from_price=basis_price,
-                    to_price=leg_open,
-                    multiplier=leg_rule.multiplier,
-                )
-                cash_fen += realized_fen
-                position += signed
-                if intent.position_effect == "close_today":
-                    opened_today -= intent.quantity
-                if position == 0:
-                    basis_price = None
-                    position_contract = None
-                    opened_today = 0
-            else:
-                raise SimulationContractError("期货 position_effect 不受支持")
-            fee_rate = {
-                "open": leg_rule.open_fee_permyriad,
-                "close": leg_rule.close_fee_permyriad,
-                "close_yesterday": leg_rule.close_fee_permyriad,
-                "close_today": leg_rule.close_today_fee_permyriad,
-            }[intent.position_effect]
-            fee_fen = _fee_fen(
-                leg_open, leg_rule.multiplier, intent.quantity, fee_rate, fee_unit=leg_rule.fee_unit,
-            )
-            cash_fen -= fee_fen
-            fill_rows.append({
-                "fill_id": typed_canonical_hash({
-                    "formal_fill": raw.order_id,
-                    "trading_date": session.isoformat(),
-                    "position_effect": intent.position_effect,
-                }),
-                "fill_time": intent.order_time,
-                "trading_date": session,
-                "order_id": raw.order_id,
-                "intent_hash": intent.intent_hash,
-                "source_target_hash": intent.portfolio_target_hash,
-                "actual_contract": leg_contract,
-                "side": intent.side,
-                "quantity": intent.quantity,
-                "position_effect": intent.position_effect,
-                "fill_price": float(leg_open),
-                "multiplier": leg_rule.multiplier,
-                "fee_fen": fee_fen,
-                "realized_pnl_fen": realized_fen,
-                "position_before": position_before,
-                "position_after": position,
-                "basis_before": None if basis_before is None else float(basis_before),
-                "basis_after": None if basis_price is None else float(basis_price),
-                "rule_snapshot_hash": leg_rule.rule_snapshot_hash,
-            })
-            if active_contract_by_session is not None:
-                rule_rows.append({**leg_rule.to_dict(), "application": "order"})
-        settlement_contract = position_contract if position_contract is not None else contract
-        day_settlement = settlement.loc[
-            (settlement["date"] == session) & (settlement["code"] == settlement_contract)
-        ]
-        if len(day_settlement) != 1:
+            fee_rate = {"open": leg_rule.open_fee_permyriad, "close": leg_rule.close_fee_permyriad,
+                        "close_yesterday": leg_rule.close_fee_permyriad,
+                        "close_today": leg_rule.close_today_fee_permyriad}[intent.position_effect]
+            fee = _fee_fen(leg_open, leg_rule.multiplier, intent.quantity, fee_rate,
+                           fee_unit=leg_rule.fee_unit)
+
+            def execute() -> ExecutionOutcome:
+                append_fill(ledger=ledger, instrument=intent.instrument, side=intent.side,
+                            quantity=intent.quantity, effect=intent.position_effect, price=leg_open,
+                            rule=leg_rule, rule_snapshot_hash=leg_rule_snapshot_hash,
+                            instrument_hash=intent.instrument.instrument_hash, intent_hash=intent_hash,
+                            fee=fee, order_id=str(raw.order_id),
+                            fill_id=typed_canonical_hash({"formal_fill": raw.order_id,
+                                "trading_date": session.isoformat(), "position_effect": intent.position_effect}),
+                            at=intent.order_time, intent=intent)
+                return ExecutionOutcome(filled_quantity=intent.quantity, reason=None, value=None)
+
+            engine.execute_order(order, trading_session=session, event_time=intent.order_time,
+                                 execute=execute)
+            rule_rows.append({**leg_rule.to_dict(), "rule_snapshot_hash": leg_rule_snapshot_hash, "application": "order"})
+
+    def after_close(session: date, context: tuple[dict[str, pd.Series], str, FuturesDailySessionLedger]) -> datetime:
+        nonlocal state
+        _, contract, ledger = context
+        settlement_time = datetime.combine(session, time(17, 0), _TIMEZONE)
+        if explicit is not None:
+            explicit.close_session(session, settlement_time, ledger, rule_rows, rejection_rows)
+        before = ledger.position
+        settlement_contract = before.contract_code if before is not None else contract
+        settlement_position = settlement_positions.get((session, settlement_contract))
+        if settlement_position is None:
             raise SimulationContractError("收盘后结算价缺失或重叠")
-        settle_price = _positive_decimal(day_settlement.iloc[0]["settle_price"], "结算价")
-        margin_rate, settlement_margin_hash = rule_book.settlement_margin(
-            contract_code=settlement_contract,
-            trading_date=session,
-            as_of=settlement_time,
+        settle_price = _positive_decimal(settlement.iloc[settlement_position]["settle_price"], "结算价")
+        available_at = source_availability.get(("settlement", session, settlement_contract))
+        if available_at is not None and available_at > settlement_time:
+            raise SimulationContractError("结算价在日频结算时点尚不可见")
+        margin_rate, settlement_margin_hash, settlement_margin_available_at = rule_book.settlement_margin_details(
+            contract_code=settlement_contract, trading_date=session, as_of=settlement_time,
         )
-        settlement_rule = rule_book.resolve_order(
-            contract_code=settlement_contract,
-            trading_date=session,
-            as_of=settlement_time,
-        )
-        mtm_fen = 0
-        if position:
-            if basis_price is None:
-                raise SimulationContractError("非零期货持仓缺少结算基价")
-            mtm_fen = _pnl_fen(
-                side=1 if position > 0 else -1,
-                quantity=abs(position),
-                from_price=basis_price,
-                to_price=settle_price,
-                multiplier=settlement_rule.multiplier,
-            )
-            cash_fen += mtm_fen
-            basis_price = settle_price
-        margin_fen = _margin_fen(settle_price, settlement_rule.multiplier, abs(position), margin_rate)
-        forced = False
-        if margin_fen > cash_fen and position:
-            forced = True
-            fee_fen = _fee_fen(
-                settle_price,
-                settlement_rule.multiplier,
-                abs(position),
-                settlement_rule.close_today_fee_permyriad if opened_today else settlement_rule.close_fee_permyriad,
-                fee_unit=settlement_rule.fee_unit,
-            )
-            cash_fen -= fee_fen
-            fill_rows.append({
-                "fill_id": typed_canonical_hash({
-                    "formal_forced_fill": session.isoformat(),
-                    "contract": settlement_contract,
-                }),
-                "fill_time": settlement_time,
-                "trading_date": session,
-                "order_id": typed_canonical_hash({"forced": session.isoformat(), "contract": settlement_contract}),
-                "intent_hash": None,
-                "source_target_hash": None,
-                "actual_contract": settlement_contract,
-                "side": "sell" if position > 0 else "buy",
-                "quantity": abs(position),
-                "position_effect": "close_today" if opened_today else "close_yesterday",
-                "fill_price": float(settle_price),
-                "multiplier": settlement_rule.multiplier,
-                "fee_fen": fee_fen,
-                "realized_pnl_fen": 0,
-                "position_before": position,
-                "position_after": 0,
-                "basis_before": float(basis_price),
-                "basis_after": None,
-                "rule_snapshot_hash": settlement_rule.rule_snapshot_hash,
-            })
-            position = 0
-            position_contract = None
-            basis_price = None
-            opened_today = 0
-            margin_fen = 0
+        settlement_rule = rule_book.resolve_order(contract_code=settlement_contract,
+            trading_date=session, as_of=settlement_time)
+        settlement_rule_snapshot_hash = settlement_rule.rule_snapshot_hash
+        margin_before = _margin_fen(settle_price, settlement_rule.multiplier,
+                                   0 if before is None else abs(before.contracts), margin_rate)
+        mtm_fen = ledger.settle(price=settle_price, multiplier=settlement_rule.multiplier,
+                                margin_units=margin_before)
+        equity_before = ledger.equity_units
+        forced = before is not None and margin_before > equity_before
+        forced_fee = 0
+        settlement_source_hash = typed_canonical_hash({
+            "trading_date": session.isoformat(), "actual_contract": settlement_contract,
+            "settlement_time": settlement_time.isoformat(), "settlement_price": str(settle_price),
+            "settlement_margin_hash": settlement_margin_hash,
+            "rule_snapshot_hash": settlement_rule_snapshot_hash,
+        })
+        risk_target_hash = typed_canonical_hash({
+            "settlement_source_hash": settlement_source_hash,
+            "position": 0 if before is None else before.contracts,
+            "equity_fen": equity_before, "required_margin_fen": margin_before,
+            "target_quantity": 0, "reason": "required_margin_exceeds_equity",
+        })
+        if forced:
+            _, venue = settlement_contract.rsplit(".", 1)
+            instrument = InstrumentKey(settlement_contract, "cn_future", venue, "CNY", "future_contract")
+            instrument_hash = instrument.instrument_hash
+            for ordinal, (effect, quantity, rate) in enumerate((
+                ("close_yesterday", before.yesterday_contracts, settlement_rule.close_fee_permyriad),
+                ("close_today", before.opened_today, settlement_rule.close_today_fee_permyriad),
+            )):
+                if not quantity:
+                    continue
+                fee = _fee_fen(settle_price, settlement_rule.multiplier, quantity, rate,
+                               fee_unit=settlement_rule.fee_unit)
+                forced_fee += fee
+                side = "sell" if before.contracts > 0 else "buy"
+                binding = TradingRuleBinding(
+                    instrument_hash, settlement_rule_snapshot_hash,
+                    settlement_rule.available_at, multiplier_rule_hash=settlement_rule.multiplier_hash,
+                    fee_rule_hash=settlement_rule.fee_hash, margin_rule_hash=settlement_margin_hash,
+                    settlement_rule_hash=settlement_rule.settlement_policy_hash,
+                )
+                forced_intent = OrderIntent(
+                    instrument, side, quantity, effect, settlement_time, settlement_time,
+                    risk_target_hash, settlement_source_hash, binding,
+                    tuple(sorted({risk_target_hash, settlement_source_hash, settlement_rule_snapshot_hash})),
+                )
+                order = intent_port.to_order(forced_intent, ordinal=ordinal)
+                order_id = order.order_id
+                forced_intent_hash = forced_intent.intent_hash
+                forced_intent_rows.append({
+                    "execution_session": session, "intent_hash": forced_intent_hash,
+                    "intent_json": json.dumps(forced_intent.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    "order_id": order_id, "actual_contract": settlement_contract,
+                    "side": side, "quantity": quantity, "position_effect": effect,
+                    "target_sequence": -1, "leg_ordinal": ordinal, "target_hash": risk_target_hash,
+                    "rule_snapshot_hash": settlement_rule_snapshot_hash,
+                    "execution_reason": "settlement_margin_shortfall",
+                })
+
+                def execute_forced() -> ExecutionOutcome:
+                    append_fill(ledger=ledger, instrument=instrument, side=side, quantity=quantity,
+                                effect=effect, price=settle_price, rule=settlement_rule,
+                                rule_snapshot_hash=settlement_rule_snapshot_hash,
+                                instrument_hash=instrument_hash, intent_hash=forced_intent_hash, fee=fee,
+                                order_id=order_id, fill_id=typed_canonical_hash({"formal_forced_fill": order_id}),
+                                at=settlement_time, intent=forced_intent,
+                                execution_reason="settlement_margin_shortfall")
+                    return ExecutionOutcome(filled_quantity=quantity, reason=None, value=None)
+
+                engine.execute_order(order, trading_session=session, event_time=settlement_time,
+                                     execute=execute_forced)
+        state = ledger.publish()
+        after = ledger.position
         settle_rows.append({
-            "trading_date": session,
-            "actual_contract": settlement_contract,
-            "settlement_price": float(settle_price),
+            "trading_date": session, "settlement_time": settlement_time,
+            "actual_contract": settlement_contract, "settlement_price": float(settle_price),
             "previous_settlement_price": None if settlement_contract not in last_settlements else float(last_settlements[settlement_contract]),
-            "position": position,
-            "mtm_pnl_fen": mtm_fen,
-            "margin_rate_pct": float(margin_rate),
-            "required_margin_fen": margin_fen,
-            "equity_fen": cash_fen,
-            "free_equity_fen": cash_fen - margin_fen,
-            "forced_liquidation": forced,
+            "position": 0 if after is None else after.contracts,
+            "mtm_pnl_fen": mtm_fen, "margin_rate_pct": float(margin_rate),
+            "required_margin_fen": state.margin_units, "equity_fen": state.equity_units,
+            "free_equity_fen": state.free_equity_units, "forced_liquidation": forced,
             "settlement_margin_hash": settlement_margin_hash,
-            "settlement_policy_hash": rule.settlement_policy_hash,
+            "settlement_policy_hash": settlement_rule.settlement_policy_hash,
+            "settlement_rule_snapshot_hash": settlement_rule_snapshot_hash,
+            "settlement_source_hash": settlement_source_hash,
+            "opening_equity_fen": nav_rows[-1]["nav_fen"] if nav_rows else initial_fen,
+            "position_before_settlement": 0 if before is None else before.contracts,
+            "basis_before_settlement": None if before is None else float(before.cost_price / 10 ** before.price_scale),
+            "basis_before_settlement_numerator": None if before is None else before.cost_numerator,
+            "basis_before_settlement_denominator": None if before is None else before.cost_denominator,
+            "basis_before_settlement_price_scale": None if before is None else before.price_scale,
+            "opened_today_before_liquidation": 0 if before is None else before.opened_today,
+            "equity_before_liquidation_fen": equity_before,
+            "required_margin_before_liquidation_fen": margin_before,
+            "forced_liquidation_reason": "required_margin_exceeds_equity" if forced else None,
+            "forced_liquidation_fee_fen": forced_fee,
+            "margin_check_policy": ledger.margin_check_policy,
+            "close_bucket_order": "yesterday_then_today",
+            "pnl_rounding_policy": ledger.pnl_rounding_policy,
+            "position_opened_today": 0 if after is None else after.opened_today,
+            "basis_after_settlement": None if after is None else float(after.cost_price / 10 ** after.price_scale),
+            "basis_after_settlement_numerator": None if after is None else after.cost_numerator,
+            "basis_after_settlement_denominator": None if after is None else after.cost_denominator,
+            "basis_after_settlement_price_scale": None if after is None else after.price_scale,
+            "position_yesterday_contracts": 0 if after is None else after.yesterday_contracts,
+            "pnl_remainder_numerator": 0 if after is None else after.pnl_remainder_numerator,
+            "pnl_remainder_denominator": 1 if after is None else after.pnl_remainder_denominator,
         })
-        nav_rows.append({
-            "trading_date": session,
-            "nav_fen": cash_fen,
-            "margin_fen": margin_fen,
-            "free_equity_fen": cash_fen - margin_fen,
-            "position": position,
-        })
-        settlement_rule_row = {
-            **settlement_rule.to_dict(),
-            "settlement_margin_hash": settlement_margin_hash,
-            "settlement_margin_rate_pct": str(margin_rate),
-        }
-        if active_contract_by_session is not None:
-            settlement_rule_row["application"] = "settlement"
-        rule_rows.append(settlement_rule_row)
+        nav_rows.append({"trading_date": session, "nav_fen": state.equity_units,
+                         "margin_fen": state.margin_units, "free_equity_fen": state.free_equity_units,
+                         "position": 0 if after is None else after.contracts})
+        rule_rows.append({**settlement_rule.to_dict(), "rule_snapshot_hash": settlement_rule_snapshot_hash, "application": "settlement",
+                          "settlement_margin_available_at": settlement_margin_available_at,
+                          "settlement_margin_hash": settlement_margin_hash,
+                          "settlement_margin_rate_pct": str(margin_rate)})
         last_settlements[settlement_contract] = settle_price
+        return settlement_time
+
+    for lifecycle in engine.run_daily_sessions(sessions, before_open=before_open,
+                                               reconcile=reconcile, after_close=after_close):
+        lifecycle_rows.extend(lifecycle)
+    if explicit is not None:
+        explicit.require_finished()
+    intent_frame["execution_reason"] = "target_order"
+    if forced_intent_rows:
+        intent_frame = pd.concat([intent_frame, pd.DataFrame(forced_intent_rows)], ignore_index=True)
+    order_times: dict[tuple[date, str], datetime] = {}
+    for row in intents.itertuples(index=False):
+        intent = OrderIntent.from_dict(json.loads(row.intent_json))
+        key = (pd.Timestamp(row.execution_session).date(), intent.instrument.instrument_id)
+        order_times[key] = min(order_times.get(key, intent.order_time), intent.order_time)
+    if explicit is not None:
+        order_times.update(explicit.open_times)
+    timing_policy = {
+        "policy_id": "daily-futures-research-clock-v1",
+        "timezone": "Asia/Shanghai",
+        "execution": "explicit_order_time_at_daily_open_price",
+        "missing_open_time": "earliest_explicit_order_time_research_assumption",
+        "settlement_time": "17:00",
+        "missing_settlement_availability": "settlement_time_research_assumption",
+        "missing_tick_availability": "earliest_explicit_order_time_research_assumption",
+    }
+    if explicit is not None:
+        timing_policy.update(policy_id="daily-futures-explicit-opening-clock-v1",
+                             execution="strictly_after_submission_at_daily_open",
+                             missing_open_time="09:00_research_assumption",
+                             missing_tick_availability="daily_open_research_assumption")
+    for frame, is_market in ((market_input_frame, True), (settlement_input_frame, False)):
+        assumed_times = [
+            order_times.get((pd.Timestamp(row.date).date(), str(row.code)),
+                            datetime.combine(pd.Timestamp(row.date).date(), time(9), _TIMEZONE))
+            if is_market else datetime.combine(pd.Timestamp(row.date).date(), time(17), _TIMEZONE)
+            for row in frame.itertuples(index=False)
+        ]
+        time_column = "execution_time" if is_market else "settlement_time"
+        availability_column = "open_available_at" if is_market else "available_at"
+        for column in (time_column, availability_column):
+            values, bases = [], []
+            for row, assumption in zip(frame.itertuples(index=False), assumed_times):
+                value = getattr(row, column, None)
+                if column == "open_available_at" and (value is None or pd.isna(value)):
+                    value = getattr(row, "available_at", None)
+                supplied = value is not None and pd.notna(value)
+                values.append(_aware_local(value) if supplied else assumption)
+                bases.append("source_timestamp" if supplied else "research_timing_assumption")
+            frame[column] = values
+            frame[column + "_basis"] = bases
+        if is_market and "available_at" not in frame:
+            frame["available_at"] = frame["open_available_at"]
+        if not is_market:
+            frame["ledger_settlement_time"] = assumed_times
+    tick_input_frame = pd.DataFrame([
+        {"date": session, "code": code, "tick_size": str(tick),
+         "available_at": order_times.get((session, code), datetime.combine(session, time(9), _TIMEZONE)),
+         "tick_available_at": order_times.get((session, code), datetime.combine(session, time(9), _TIMEZONE)),
+         "available_at_basis": "research_timing_assumption"}
+        for (session, code), tick in sorted((tick_size_by_session_contract or {}).items())
+    ], columns=("date", "code", "tick_size", "available_at", "tick_available_at", "available_at_basis"))
+    snapshots_by_hash = {}
+    for row in rule_rows:
+        reference = row["rule_snapshot_hash"]
+        previous = snapshots_by_hash.get(reference)
+        if previous is not None:
+            combined = {**previous, **row}
+            if previous["application"] != row["application"]:
+                combined["application"] = "order_and_settlement"
+            snapshots_by_hash[reference] = combined
+        else:
+            snapshots_by_hash[reference] = row
+    fills_frame = pd.DataFrame(fill_rows)
+    settlements_frame = pd.DataFrame(settle_rows)
+    for frame, price_columns in (
+        (fills_frame, ("basis_before", "basis_after")),
+        (settlements_frame, ("previous_settlement_price", "basis_before_settlement", "basis_after_settlement")),
+    ):
+        for column in price_columns:
+            if column in frame.columns:
+                frame[column] = pd.array(frame[column], dtype="Float64")
+        for column in frame.columns:
+            if column.endswith(("_numerator", "_denominator", "_price_scale")):
+                frame[column] = pd.array([row.get(column) for row in (
+                    fill_rows if frame is fills_frame else settle_rows
+                )], dtype="Int64")
     result = FuturesSimulationResult(
-        intents=intent_frame.reset_index(drop=True),
-        fills=pd.DataFrame(fill_rows),
-        settlements=pd.DataFrame(settle_rows),
-        nav=pd.DataFrame(nav_rows),
-        rule_snapshots=pd.DataFrame(rule_rows),
-        rejections=pd.DataFrame(rejection_rows),
-        backend_id=(
-            "cn-futures-daily-v1"
-            if active_contract_by_session is None
-            else "cn-futures-dynamic-roll-v2"
-        ),
-        contract_version=(
-            FUTURES_DAILY_SIMULATION_VERSION
-            if active_contract_by_session is None
-            else FUTURES_DYNAMIC_ROLL_SIMULATION_VERSION
-        ),
+        intents=intent_frame.reset_index(drop=True), fills=fills_frame,
+        settlements=settlements_frame, nav=pd.DataFrame(nav_rows),
+        rule_snapshots=pd.DataFrame(snapshots_by_hash.values()), rejections=pd.DataFrame(rejection_rows),
+        order_lifecycle=pd.DataFrame(lifecycle_rows), initial_cash_fen=initial_fen,
+        market_inputs=market_input_frame, settlement_inputs=settlement_input_frame,
+        slippage_ticks=slippage_ticks, tick_size_inputs=tick_input_frame, timing_policy=timing_policy,
+        explicit_order_context=None if explicit is None else explicit.context,
+        backend_id="cn-futures-daily-v1" if normalized_mapping is None else "cn-futures-dynamic-roll-v2",
+        contract_version=FUTURES_DAILY_SIMULATION_VERSION if normalized_mapping is None else FUTURES_DYNAMIC_ROLL_SIMULATION_VERSION,
     )
-    _require_cash_conservation(result, cny_to_fen(initial_cash_cny))
+    _require_cash_conservation(result, initial_fen)
     return result
+
+
+class _DailyFuturesExplicitExecution:
+    """日开盘订单事件；费用、盈亏和保证金继续采用日频口径。"""
+
+    def __init__(self, commands, engine, rule_book, initial_fen, slippage_ticks, ticks):
+        self.commands, self.engine, self.rule_book = commands, engine, rule_book
+        self.slippage_ticks, self.ticks = slippage_ticks, ticks
+        self.cursor = 0
+        self.active = {}
+        self.terminal = {}
+        self.open_times = {}
+        self.context = {
+            "contract_version": "research-explicit-futures-daily-execution-v1",
+            "commands": [command.to_dict() for command in commands],
+            "events": [], "observations": [], "command_rules": [],
+            "cancel_results": [], "session_ends": [], "fee_facts": [],
+            "order_states": [], "initial_cash_fen": initial_fen, "cash_scale": 2,
+        }
+
+    def require_window(self, market):
+        keys = {(pd.Timestamp(row.date).date(), str(row.code)) for row in market.itertuples(index=False)}
+        for row in market.itertuples(index=False):
+            session = pd.Timestamp(row.date).date()
+            value = getattr(row, "execution_time", None)
+            at = (_aware_local(value) if value is not None and pd.notna(value)
+                  else datetime.combine(session, time(9), _TIMEZONE))
+            if at > datetime.combine(session, time(17), _TIMEZONE):
+                raise SimulationContractError("日开盘事件不能晚于结算时点")
+            self.open_times[(session, str(row.code))] = at
+        for command in self.commands:
+            if (command.trading_date, command.instrument.instrument_id) not in keys:
+                raise SimulationContractError("显式期货命令超出执行会话或实际合约行情窗口")
+            if (command.instrument.asset_class != "cn_future"
+                    or not _actual_future_contract(command.instrument.instrument_id)):
+                raise SimulationContractError("日频期货显式订单只能引用真实期货合约")
+            if command.submitted_at > datetime.combine(command.trading_date, time(17), _TIMEZONE):
+                raise SimulationContractError("显式期货命令晚于所属会话结算")
+            if command.action == "submit":
+                if command.position_effect not in {"open", "close_today", "close_yesterday"}:
+                    raise SimulationContractError("显式日频平仓必须明确 close_today 或 close_yesterday")
+        if any(left.trading_date > right.trading_date for left, right in zip(self.commands, self.commands[1:])):
+            raise SimulationContractError("显式期货命令会话必须按时间递增")
+
+    def _event(self, ledger, command, kind, at, rule_hash, payload, *, event_id=None):
+        return FinancialEvent(
+            event_id=event_id or typed_canonical_hash({"command_id": command.command_id,
+                "event_sequence": len(self.context["events"]), "kind": kind}),
+            kind=kind, effective_time=at, session=ledger.trading_date.isoformat(),
+            group_id=ledger.group.group_id, rule_hash=rule_hash,
+            payload=tuple(sorted(payload.items())), parent_id=command.command_id,
+        )
+
+    def _apply(self, ledger, event):
+        ledger.apply_event(event)
+        self.context["events"].append(event.to_dict())
+
+    def _release(self, ledger, command, at, rule_hash):
+        if any(item.order_id == command.order_id for item in ledger.order_reservations):
+            self._apply(ledger, self._event(ledger, command, "cash_reserved", at, rule_hash,
+                {"order_id": command.order_id, "action": "release"}))
+
+    @staticmethod
+    def _rate(command, rule):
+        return {"open": rule.open_fee_permyriad, "close_today": rule.close_today_fee_permyriad,
+                "close_yesterday": rule.close_fee_permyriad}[command.position_effect]
+
+    def _reservation(self, command, rule, quantity):
+        reference = Decimal(command.reference_price.units).scaleb(-command.reference_price.scale)
+        if command.limit_price is not None:
+            reference = max(reference, Decimal(command.limit_price.units).scaleb(-command.limit_price.scale))
+        fee = _fee_fen(reference, rule.multiplier, quantity, self._rate(command, rule), fee_unit=rule.fee_unit)
+        margin = _margin_fen(reference, rule.multiplier, quantity, rule.margin_rate_pct) if command.position_effect == "open" else 0
+        return fee, margin
+
+    def _reserve(self, ledger, command, rule, quantity, at):
+        fee, margin = self._reservation(command, rule, quantity)
+        self._apply(ledger, self._event(ledger, command, "cash_reserved", at, rule.rule_snapshot_hash,
+            {"order_id": command.order_id, "cash_units": fee, "margin_units": margin,
+             "quantity": quantity, "reference_price": command.reference_price.to_dict(),
+             "limit_price": None if command.limit_price is None else command.limit_price.to_dict()}))
+        if command.position_effect != "open":
+            self._apply(ledger, self._event(ledger, command, "position_reserved", at, rule.rule_snapshot_hash,
+                {"order_id": command.order_id, "instrument_hash": command.instrument.instrument_hash,
+                 "position_effect": command.position_effect, "quantity": quantity}))
+
+    @staticmethod
+    def _maximum(quantity, predicate):
+        low, high = 0, quantity
+        while low < high:
+            middle = (low + high + 1) // 2
+            if predicate(middle):
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    def _finish(self, ledger, command, at, reason, action="cancel"):
+        current = self.engine.broker.orders[command.order_id]
+        if current.status not in ORDER_TERMINAL_STATES:
+            current = self.engine.broker.advance(command.order_id, action, at, reason=reason)
+        rule = self.active[command.order_id][1]
+        self._release(ledger, command, at, rule.rule_snapshot_hash)
+        self.terminal[command.order_id] = current.status
+        self.context["order_states"].append({"order_id": command.order_id,
+            "status": current.status, "filled_quantity": current.filled_quantity,
+            "remaining_quantity": current.quantity - current.filled_quantity,
+            "reason": current.rejection_code, "at": at.isoformat()})
+        del self.active[command.order_id]
+
+    def _process(self, through, session, ledger, rule_rows, rejections):
+        while self.cursor < len(self.commands):
+            command = self.commands[self.cursor]
+            if command.trading_date != session or command.submitted_at > through:
+                break
+            self.cursor += 1
+            if command.action == "cancel":
+                original = self.active.get(command.order_id)
+                reason = "cancelled" if original is not None else "already_terminal"
+                if original is not None:
+                    self._finish(ledger, original[0], command.submitted_at, "user_cancel")
+                self.context["cancel_results"].append({"command_id": command.command_id,
+                    "order_id": command.order_id, "at": command.submitted_at.isoformat(), "reason": reason})
+                continue
+            rule = self.rule_book.resolve_order(contract_code=command.instrument.instrument_id,
+                trading_date=session, as_of=command.submitted_at)
+            if rule.available_at > command.submitted_at:
+                raise SimulationContractError("提交规则在命令时点尚不可见")
+            self.context["command_rules"].append({"command_id": command.command_id,
+                "rules_identity_hash": rule.rule_snapshot_hash, "parameters": rule.to_dict()})
+            rule_rows.append({**rule.to_dict(), "rule_snapshot_hash": rule.rule_snapshot_hash, "application": "order"})
+            self.engine.broker.submit_command(command, session)
+            quantity = command.quantity
+            reason = None
+            if command.position_effect != "open":
+                position = ledger.positions.get(command.instrument.instrument_hash)
+                if position is None or not position.contracts or (position.contracts > 0) == (command.side == "buy"):
+                    quantity, reason = 0, "invalid_close_direction"
+                else:
+                    available = ledger.publish().available_position_quantity(command.instrument.instrument_hash,
+                        position_effect=command.position_effect)
+                    quantity = min(quantity, available)
+                    if quantity < command.quantity:
+                        reason = "insufficient_close_bucket"
+            free = ledger.publish().free_equity_units
+            quantity = self._maximum(quantity, lambda count: sum(self._reservation(command, rule, count)) <= free)
+            if quantity < command.quantity:
+                reason = reason or "insufficient_free_equity"
+            self.active[command.order_id] = (command, rule, quantity)
+            if not quantity or (quantity < command.quantity and command.funds_policy == "reject"):
+                self.engine.broker.advance(command.order_id, "reject", command.submitted_at, reason=reason)
+                rejections.append({"order_id": command.order_id, "trading_date": session,
+                    "actual_contract": command.instrument.instrument_id, "side": command.side,
+                    "quantity": command.quantity, "position_effect": command.position_effect,
+                    "reason_code": reason, "intent_hash": command.command_hash, "source_target_hash": None})
+                self._finish(ledger, command, command.submitted_at, reason)
+                continue
+            self._reserve(ledger, command, rule, quantity, command.submitted_at)
+            self.engine.broker.advance(command.order_id, "accept", command.submitted_at)
+
+    def reconcile(self, session, market, ledger, append_fill, rule_rows, rejections):
+        capacities = {}
+        for code, row in market.items():
+            value = row.get("visible_capacity")
+            supplied = value is not None and pd.notna(value)
+            if supplied and (isinstance(value, bool) or int(value) != value or value < 0):
+                raise SimulationContractError("visible_capacity 必须是非负整数")
+            capacities[code] = int(value) if supplied else None
+        for at in sorted({self.open_times[(session, code)] for code in market}):
+            self._process(at, session, ledger, rule_rows, rejections)
+            for command, submitted_rule, accepted_quantity in tuple(self.active.values()):
+                code = command.instrument.instrument_id
+                if code not in market or self.open_times[(session, code)] != at or command.submitted_at >= at:
+                    continue
+                row = market[code]
+                availability = row.get("open_available_at")
+                if availability is None or pd.isna(availability):
+                    availability = row.get("available_at")
+                if availability is not None and pd.notna(availability) and _aware_local(availability) > at:
+                    raise SimulationContractError("日开盘价在开盘执行事件尚不可见")
+                raw_capacity = capacities[code]
+                supplied = raw_capacity is not None
+                capacity = raw_capacity if supplied else accepted_quantity
+                opening = _positive_decimal(row["open"], "日开盘价")
+                order = self.engine.broker.orders[command.order_id]
+                requested = min(order.quantity - order.filled_quantity, accepted_quantity)
+                rule = self.rule_book.resolve_order(contract_code=code, trading_date=session, as_of=at)
+                if rule.available_at > at:
+                    raise SimulationContractError("执行规则在开盘时点尚不可见")
+                rule_rows.append({**rule.to_dict(), "rule_snapshot_hash": rule.rule_snapshot_hash, "application": "order"})
+                reason = _futures_unfilled_reason(row, side=command.side)
+                tick_count = self.slippage_ticks + command.slippage_ticks
+                tick = self.ticks.get((session, code))
+                if tick_count and tick is None:
+                    raise SimulationContractError("显式日频滑点缺少当时可见 tick size")
+                if tick is not None:
+                    tick = _positive_decimal(tick, "tick size")
+                supplied_scale = row.get("price_scale")
+                if supplied_scale is not None and pd.notna(supplied_scale):
+                    if (isinstance(supplied_scale, bool) or int(supplied_scale) != supplied_scale
+                            or not 0 <= supplied_scale <= 18):
+                        raise SimulationContractError("行情 price_scale 必须是 0..18 的整数")
+                    quote_scale = int(supplied_scale)
+                    quote_scale_basis = "market_price_scale"
+                else:
+                    quote_scale = max(command.reference_price.scale, -opening.as_tuple().exponent)
+                    quote_scale_basis = "input_open_and_reference_scale"
+                direction = 1 if command.side == "buy" else -1
+                raw_price = opening * (1 + direction * Decimal(str(command.slippage_bps)) / 10000)
+                raw_price += direction * (tick or Decimal(0)) * tick_count
+                quote_step = tick if tick is not None else Decimal(1).scaleb(-quote_scale)
+                rounding = ROUND_CEILING if direction == 1 else ROUND_FLOOR
+                price = (raw_price / quote_step).to_integral_value(rounding=rounding) * quote_step
+                if price <= 0:
+                    raise SimulationContractError("滑点后日频成交价必须为正")
+                reason = reason or _futures_execution_price_limit_reason(row, price=price)
+                if command.limit_price is not None:
+                    limit = Decimal(command.limit_price.units).scaleb(-command.limit_price.scale)
+                    if (command.side == "buy" and price > limit) or (command.side == "sell" and price < limit):
+                        reason = reason or "limit_not_reached"
+                position = ledger.position
+                if command.position_effect == "open" and position is not None and (
+                    position.contract_code != code or (position.contracts > 0) != (command.side == "buy")
+                ):
+                    reason = reason or "open_requires_flat_or_same_direction"
+                quantity = 0 if reason else min(requested, capacity)
+                own = sum(item.cash_units + item.margin_units for item in ledger.order_reservations if item.order_id == command.order_id)
+                other = sum(item.cash_units + item.margin_units for item in ledger.order_reservations) - own
+                old = ledger.positions.get(command.instrument.instrument_hash)
+                def facts(count):
+                    fee = _fee_fen(price, rule.multiplier, count, self._rate(command, rule), fee_unit=rule.fee_unit)
+                    old_margin = 0 if old is None else old.margin_units
+                    if command.position_effect == "open":
+                        total = count + (0 if old is None else abs(old.contracts))
+                        margin = _margin_fen(price, rule.multiplier, total, rule.margin_rate_pct)
+                        pnl = 0
+                    else:
+                        margin = old_margin * (abs(old.contracts) - count) // abs(old.contracts)
+                        scale = max(old.price_scale, -price.as_tuple().exponent)
+                        pnl, _ = ledger._priced_position(instrument_hash=command.instrument.instrument_hash,
+                            contract_code=code, price=price)[0].realize(price_units=int(Fraction(price) * 10 ** scale),
+                            contracts=count if old.contracts > 0 else -count, multiplier=rule.multiplier)
+                    return fee, margin, pnl, old_margin
+                def affordable(count):
+                    fee, margin, pnl, old_margin = facts(count)
+                    return FuturesAccountCore.available(
+                        equity_units=ledger.equity_units + pnl - fee,
+                        margin_units=ledger.margin_units + margin - old_margin,
+                        frozen_units=other,
+                    ) >= 0
+                if quantity:
+                    affordable_quantity = self._maximum(quantity, affordable)
+                    if affordable_quantity < quantity:
+                        reason = "insufficient_free_equity"
+                        quantity = affordable_quantity if command.funds_policy == "resize" else 0
+                observation = {"order_id": command.order_id, "instrument": command.instrument.to_dict(),
+                    "trading_date": session.isoformat(), "event_start": at.isoformat(), "event_time": at.isoformat(),
+                    "reference_price": str(opening), "execution_price": str(price),
+                    "visible_capacity": int(row["visible_capacity"]) if supplied else None,
+                    "capacity_model": "visible_capacity" if supplied else "assumed_unbounded",
+                    "capacity_before": capacity if supplied else None,
+                    "rules_identity_hash": rule.rule_snapshot_hash, "parameters": rule.to_dict(),
+                    "market_status": {name: (bool(row[name]) if name in {"paused", "tradable", "no_trade"} else str(row[name]))
+                                      for name in ("paused", "tradable", "no_trade", "high_limit", "low_limit")
+                                      if name in row and pd.notna(row[name])},
+                    "slippage_bps": str(command.slippage_bps),
+                    "slippage_ticks": tick_count, "tick_size": None if tick is None else str(tick),
+                    "quote_price_scale": quote_scale, "quote_price_scale_basis": quote_scale_basis,
+                    "price_rounding_policy": "adverse_direction",
+                    "filled_quantity": quantity, "reason": reason or ("visible_capacity_exhausted" if not quantity else None)}
+                self.context["observations"].append(observation)
+                if quantity:
+                    self._release(ledger, command, at, rule.rule_snapshot_hash)
+                    fee, margin, _, _ = facts(quantity)
+                    scale = max(2, -price.as_tuple().exponent, 0 if old is None else old.price_scale)
+                    fill_id = typed_canonical_hash({"command_hash": command.command_hash,
+                        "event_time": at.isoformat(), "filled_before": order.filled_quantity})
+                    event = self._event(ledger, command, "fill", at, rule.rule_snapshot_hash,
+                        {"order_id": command.order_id, "instrument_hash": command.instrument.instrument_hash,
+                         "contract_code": code, "contracts_delta": quantity if command.side == "buy" else -quantity,
+                         "position_effect": command.position_effect, "settlement_price_units": int(Fraction(price) * 10 ** scale),
+                         "price_scale": scale, "multiplier": rule.multiplier, "fee_units": fee,
+                         "position_margin_units": margin}, event_id=fill_id)
+                    append_fill(ledger=ledger, instrument=command.instrument, side=command.side, quantity=quantity,
+                        effect=command.position_effect, price=price, rule=rule, rule_snapshot_hash=rule.rule_snapshot_hash,
+                        instrument_hash=command.instrument.instrument_hash, intent_hash=command.command_hash, fee=fee,
+                        order_id=command.order_id, fill_id=fill_id, at=at, intent=None,
+                        execution_reason="explicit_order", financial_event=event)
+                    self.context["events"].append(event.to_dict())
+                    self.context["fee_facts"].append({"fill_id": fill_id, "order_id": command.order_id,
+                        "quantity": quantity, "fee_fen": fee, "fee_rate": str(self._rate(command, rule)),
+                        "fee_unit": rule.fee_unit, "rules_identity_hash": rule.rule_snapshot_hash,
+                        "rounding_policy": "half_up_per_event"})
+                    capacity -= quantity
+                    if supplied:
+                        capacities[code] = capacity
+                    self.engine.broker.advance(command.order_id, "fill", at, quantity=quantity)
+                    remaining = accepted_quantity - quantity
+                    self.active[command.order_id] = (command, submitted_rule, remaining)
+                    if remaining and command.time_in_force == "DAY":
+                        free = ledger.publish().free_equity_units
+                        if sum(self._reservation(command, submitted_rule, remaining)) <= free:
+                            self._reserve(ledger, command, submitted_rule, remaining, at)
+                        else:
+                            self._finish(ledger, command, at, "insufficient_remainder_equity")
+                            continue
+                current = self.engine.broker.orders[command.order_id]
+                if current.status == "filled":
+                    self._finish(ledger, command, at, None)
+                elif command.time_in_force == "IOC":
+                    self._finish(ledger, command, at, reason or "ioc_remainder_cancelled")
+                elif self.active[command.order_id][2] == 0:
+                    self._finish(ledger, command, at, "funds_resized")
+
+    def close_session(self, session, at, ledger, rule_rows, rejections):
+        self._process(at, session, ledger, rule_rows, rejections)
+        for command, _, _ in tuple(self.active.values()):
+            self._finish(ledger, command, at, "session_end",
+                         "expire" if command.time_in_force == "DAY" else "cancel")
+        self.context["session_ends"].append({"trading_date": session.isoformat(), "at": at.isoformat()})
+
+    def require_finished(self):
+        if self.cursor != len(self.commands) or self.active:
+            raise SimulationContractError("日频期货显式命令没有完整消费")
 
 
 def _target_legs(previous: int, target: int) -> tuple[tuple[str, int, str], ...]:
@@ -804,12 +1295,23 @@ def _normalize_market(frame: pd.DataFrame) -> pd.DataFrame:
     if required - set(frame.columns):
         raise SimulationContractError("期货执行行情字段不完整")
     optional = [
-        column for column in ("paused", "tradable", "no_trade", "high_limit", "low_limit")
+        column for column in ("paused", "tradable", "no_trade", "high_limit", "low_limit",
+                              "visible_capacity", "execution_time", "open_available_at", "available_at", "price_scale")
         if column in frame.columns
     ]
     result = frame[list(required) + optional].copy()
     result["date"] = pd.to_datetime(result["date"]).dt.date
     return result.sort_values(["date", "code"], kind="mergesort").reset_index(drop=True)
+
+
+def _futures_execution_price_limit_reason(row: pd.Series, *, price: Decimal) -> str | None:
+    for column, upper in (("high_limit", True), ("low_limit", False)):
+        bound = row.get(column)
+        if bound is not None and pd.notna(bound):
+            bound = _positive_decimal(bound, "涨跌停价")
+            if (upper and price > bound) or (not upper and price < bound):
+                return "execution_price_outside_limit"
+    return None
 
 
 def _futures_unfilled_reason(row: pd.Series, *, side: str) -> str | None:
@@ -847,33 +1349,6 @@ def _require_cash_conservation(result: FuturesSimulationResult, initial_cash_fen
         raise SimulationContractError("期货现金、逐日盯市和费用不守恒")
 
 
-def _pnl_fen(*, side: int, quantity: int, from_price: Decimal | None, to_price: Decimal, multiplier: int) -> int:
-    if from_price is None:
-        raise SimulationContractError("期货盈亏缺少成本或前结算价")
-    return int(((to_price - from_price) * side * quantity * multiplier * 100).quantize(_FEN, rounding=ROUND_HALF_UP))
-
-
-def _fee_fen(
-    price: Decimal,
-    multiplier: int,
-    quantity: int,
-    fee_value: Decimal,
-    *,
-    fee_unit: str,
-) -> int:
-    if fee_unit == "notional_permyriad":
-        amount = price * multiplier * quantity * fee_value / 100
-    elif fee_unit == "per_lot_cny":
-        amount = fee_value * quantity * 100
-    else:
-        raise SimulationContractError("期货手续费单位未登记")
-    return int(amount.quantize(_FEN, rounding=ROUND_HALF_UP))
-
-
-def _margin_fen(price: Decimal, multiplier: int, quantity: int, rate_pct: Decimal) -> int:
-    return int((price * multiplier * quantity * rate_pct).quantize(_FEN, rounding=ROUND_HALF_UP))
-
-
 def cny_to_fen(value: Decimal) -> int:
     """按正式期货账本的半升规则把人民币转换为整数分。"""
 
@@ -899,11 +1374,13 @@ def _row_payload(row: pd.Series, columns: Sequence[str]) -> dict[str, object]:
     return {str(column): _scalar(row[column]) for column in columns}
 
 
-def _frame_payload(frame: pd.DataFrame) -> list[dict[str, object]]:
-    return [
-        {str(column): _scalar(row[column]) for column in frame.columns}
-        for _, row in frame.iterrows()
-    ]
+def _frame_payload(frame: pd.DataFrame) -> Iterator[dict[str, object]]:
+    columns = tuple(str(column) for column in frame.columns)
+    # 延续逐行读取的公共 dtype，保持纯数值混合列原有的身份字节。
+    values = frame.to_numpy(copy=False)
+    rows = frame.itertuples(index=False, name=None) if values.dtype.kind == "M" else values
+    for row in rows:
+        yield {column: _scalar(value) for column, value in zip(columns, row)}
 
 
 def _scalar(value: object) -> object:

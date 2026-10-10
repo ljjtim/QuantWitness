@@ -490,6 +490,71 @@ class ResultAssembler:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ResultContractError("SimulationResult manifest 无法读取") from exc
         semantics = simulation_manifest.get("semantics")
+        requires_lifecycle = (
+            isinstance(semantics, Mapping)
+            and semantics.get("contract_version") == "research-simulation-result-semantics-v2"
+        )
+        if requires_lifecycle and "order_lifecycle_contract" not in simulation_manifest:
+            raise ResultContractError("新仿真语义合同缺少订单生命周期声明")
+        lifecycle = simulation_manifest.get("order_lifecycle_contract")
+        if "order_lifecycle_contract" in simulation_manifest:
+            from .contracts import ORDER_LIFECYCLE_PATH_PREFIX
+
+            if lifecycle != {
+                "contract_version": "research-order-lifecycle-v1",
+                "path_prefix": ORDER_LIFECYCLE_PATH_PREFIX,
+            }:
+                raise ResultContractError("订单生命周期合同声明无效")
+            commit = financial_commits["simulation/result-contract/manifest.json"]
+            prefix = str(lifecycle["path_prefix"]) + "/"
+            paths = sorted(path for path in commit.files if path.startswith(prefix))
+            if not paths or any(
+                len(path.removeprefix(prefix).split("/")) != 2
+                or not path.removeprefix(prefix).startswith("session=")
+                or not path.endswith("/data.parquet")
+                for path in paths
+            ):
+                raise ResultContractError("新仿真 Result 缺少订单生命周期分区或路径无效")
+            selected.extend(ResultSupportFile(
+                artifact_key=commit.semantic_hash,
+                artifact_type="research.order-lifecycle.v1",
+                source_path=path,
+                relative_path=f"support/{commit.semantic_hash}/{path}",
+                content_hash=commit.files[path],
+            ) for path in paths)
+        semantics = simulation_manifest.get("semantics")
+        requires_futures_context = (
+            isinstance(semantics, Mapping)
+            and semantics.get("asset_class") == "cn_future"
+            and semantics.get("frequency") == "daily"
+            and semantics.get("contract_version") == "research-simulation-result-semantics-v2"
+        )
+        futures_declaration = simulation_manifest.get("futures_context_contract")
+        if requires_futures_context or futures_declaration is not None:
+            expected = {
+                "contract_version": "research-futures-daily-context-v1",
+                "path": "simulation/futures-context.json",
+                "path_prefix": "simulation/futures-context-tables",
+            }
+            version = (futures_declaration.get("contract_version")
+                       if isinstance(futures_declaration, Mapping) else None)
+            if (version not in {"research-futures-daily-context-v1", "research-futures-daily-context-v2", "research-futures-daily-context-v3"}
+                    or futures_declaration != {**expected, "contract_version": version}
+                    or not requires_futures_context):
+                raise ResultContractError("日频期货金融上下文声明缺失或无效")
+            commit = financial_commits["simulation/result-contract/manifest.json"]
+            control_path = expected["path"]
+            paths = sorted(path for path in commit.files
+                           if path.startswith(expected["path_prefix"] + "/"))
+            if control_path not in commit.files or not paths:
+                raise ResultContractError("日频期货结果缺少金融支持事实")
+            selected.extend(ResultSupportFile(
+                artifact_key=commit.semantic_hash,
+                artifact_type="research.financial-control.v1" if path == control_path else "research.futures-daily-context.v1",
+                source_path=path,
+                relative_path=f"support/{commit.semantic_hash}/{path}",
+                content_hash=commit.files[path],
+            ) for path in [control_path, *paths])
         requires_daily_etf_context = (
             isinstance(semantics, Mapping)
             and semantics.get("asset_class") == "cn_etf"

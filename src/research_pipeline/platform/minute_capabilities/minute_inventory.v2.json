@@ -1,0 +1,203 @@
+{
+  "source_stat_unchanged": true,
+  "schema_version": "minute-reference-inventory-v4",
+  "observed_at": "2026-10-09",
+  "previous_inventory": "0e35e70b0ffe0e755573ed5f91737ffc3c929861d9017782f315c249d30494d1",
+  "database_read_only": true,
+  "observations": [
+    {
+      "code": "511010.XSHG",
+      "source": "I:\\data\\jqdata_db\\kline\\fund\\year=2024\\month=01\\data.parquet",
+      "rows": 960,
+      "start": "2024-01-02 09:31:00",
+      "end": "2024-01-05 15:00:00",
+      "natural_day_counts": {
+        "2024-01-02": 240,
+        "2024-01-03": 240,
+        "2024-01-04": 240,
+        "2024-01-05": 240
+      },
+      "nulls": {
+        "code": 0,
+        "dt": 0,
+        "open": 0,
+        "close": 0,
+        "high": 0,
+        "low": 0,
+        "volume": 0,
+        "money": 0,
+        "avg": 0
+      },
+      "source_stat": [
+        36320953,
+        1787219054358248600
+      ]
+    },
+    {
+      "code": "600000.XSHG",
+      "source": "I:\\data\\jqdata_db\\kline\\stock\\year=2024\\month=01\\data.parquet",
+      "rows": 960,
+      "start": "2024-01-02 09:31:00",
+      "end": "2024-01-05 15:00:00",
+      "natural_day_counts": {
+        "2024-01-02": 240,
+        "2024-01-03": 240,
+        "2024-01-04": 240,
+        "2024-01-05": 240
+      },
+      "nulls": {
+        "code": 0,
+        "dt": 0,
+        "open": 0,
+        "close": 0,
+        "high": 0,
+        "low": 0,
+        "volume": 0,
+        "money": 0,
+        "avg": 0
+      },
+      "source_stat": [
+        313019834,
+        1787150271007605600
+      ]
+    },
+    {
+      "code": "300015.XSHE",
+      "source": "I:\\data\\jqdata_db\\kline\\stock\\year=2024\\month=01\\data.parquet",
+      "rows": 960,
+      "start": "2024-01-02 09:31:00",
+      "end": "2024-01-05 15:00:00",
+      "natural_day_counts": {
+        "2024-01-02": 240,
+        "2024-01-03": 240,
+        "2024-01-04": 240,
+        "2024-01-05": 240
+      },
+      "nulls": {
+        "code": 0,
+        "dt": 0,
+        "open": 0,
+        "close": 0,
+        "high": 0,
+        "low": 0,
+        "volume": 0,
+        "money": 0,
+        "avg": 0
+      },
+      "source_stat": [
+        313019834,
+        1787150271007605600
+      ]
+    },
+    {
+      "code": "688981.XSHG",
+      "source": "I:\\data\\jqdata_db\\kline\\stock\\year=2024\\month=01\\data.parquet",
+      "rows": 960,
+      "start": "2024-01-02 09:31:00",
+      "end": "2024-01-05 15:00:00",
+      "natural_day_counts": {
+        "2024-01-02": 240,
+        "2024-01-03": 240,
+        "2024-01-04": 240,
+        "2024-01-05": 240
+      },
+      "nulls": {
+        "code": 0,
+        "dt": 0,
+        "open": 0,
+        "close": 0,
+        "high": 0,
+        "low": 0,
+        "volume": 0,
+        "money": 0,
+        "avg": 0
+      },
+      "source_stat": [
+        313019834,
+        1787150271007605600
+      ]
+    },
+    {
+      "code": "AG2412.XSGE",
+      "source": "I:\\data\\jqdata_db\\kline\\futures\\year=2024\\month=01\\data.parquet",
+      "rows": 1110,
+      "start": "2024-01-02 21:01:00",
+      "end": "2024-01-04 15:00:00",
+      "natural_day_counts": {
+        "2024-01-02": 179,
+        "2024-01-03": 555,
+        "2024-01-04": 376
+      },
+      "nulls": {
+        "code": 0,
+        "dt": 0,
+        "open": 0,
+        "close": 0,
+        "high": 0,
+        "low": 0,
+        "volume": 0,
+        "money": 0,
+        "avg": 1110,
+        "open_interest": 0
+      },
+      "source_stat": [
+        57086415,
+        1778594848564084000
+      ]
+    },
+    {
+      "code": "IF2401.CCFX",
+      "source": "I:\\data\\jqdata_db\\kline\\futures\\year=2024\\month=01\\data.parquet",
+      "rows": 480,
+      "start": "2024-01-03 09:31:00",
+      "end": "2024-01-04 15:00:00",
+      "natural_day_counts": {
+        "2024-01-03": 240,
+        "2024-01-04": 240
+      },
+      "nulls": {
+        "code": 0,
+        "dt": 0,
+        "open": 0,
+        "close": 0,
+        "high": 0,
+        "low": 0,
+        "volume": 0,
+        "money": 0,
+        "avg": 480,
+        "open_interest": 0
+      },
+      "source_stat": [
+        57086415,
+        1778594848564084000
+      ]
+    },
+    {
+      "code": "T2403.CCFX",
+      "source": "I:\\data\\jqdata_db\\kline\\futures\\year=2024\\month=01\\data.parquet",
+      "rows": 510,
+      "start": "2024-01-03 09:31:00",
+      "end": "2024-01-04 15:15:00",
+      "natural_day_counts": {
+        "2024-01-03": 255,
+        "2024-01-04": 255
+      },
+      "nulls": {
+        "code": 0,
+        "dt": 0,
+        "open": 0,
+        "close": 0,
+        "high": 0,
+        "low": 0,
+        "volume": 0,
+        "money": 0,
+        "avg": 510,
+        "open_interest": 0
+      },
+      "source_stat": [
+        57086415,
+        1778594848564084000
+      ]
+    }
+  ]
+}

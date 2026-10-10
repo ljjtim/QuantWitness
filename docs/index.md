@@ -1,61 +1,82 @@
-# research_pipeline 现行文档
+# 文档导航
 
-本索引只列当前主链的操作资料。未列出的 Markdown 可以作为历史或专项研究材料保留，但不构成当前命令、能力或准入依据。
+第一次使用 QuantWitness，不必从接口表开始。先完成一项小研究，再按自己的目标选择数据、AI、模型或回测文档。
 
-项目扩展的多文件流式 ABI、输出/state writer、`causal_plan` 正式 Feature/Label 用法与
-当前不支持的时间来源见[项目扩展合同](../project_extensions/README.md)。
+## 从这里开始
 
-- [框架合同](framework-contracts.md)：完整流程、数据与金融口径、校验职责、扩展与恢复边界
-- [Workspace 合成研究入门](workspace-quickstart.md)：源码获取、首份验证报告、失败诊断、恢复与变体比较
-- [创建自己的研究](getting-started.md)：填写 ResearchPackage 并接入自有数据
-- [AI 工作协议](ai_workflow.md)
-- [架构与边界](architecture.md)
-- [Catalog 与 PIT 准入](catalog.md)
-- [列式数据平面](data_plane.md)
-- [ResearchPackage](research_package.md)
-- [Runtime 与恢复](runtime.md)
-- [滚动模型与样本外选择](walk_forward_model.md)：表格模型、GRU/LSTM/Transformer主链、完整序列窗口、滚动与多期限研究
-- [Qlib 因子表达式与标准特征](qlib-expressions.md)
-- [Qlib 量价与选定Alpha基线](qlib-factor-baselines.md)
-- [Qlib 组合与风险目标](qlib-portfolio-risk.md)
-- [Qlib 模型文件交付与恢复](qlib-model-results.md)
-- [Qlib 模型与组合研究报告](qlib-report.md)
-- [项目执行与独立复核资源预算](project_resource_budgets.md)
-- [Result 与 VerificationResult](evidence.md)：金融口径、准确性与验证边界
-- [命令行](cli.md)
-- [运维](operations.md)
-- [独立使用验收](external-acceptance.md)：同版本安装、远端 CI 与首次使用反馈
-- [安装与发布构建](release.md)
-- [分钟参考规则来源边界](minute_rule_provenance.md)
+1. [入门教程：第一项可验证研究](workspace-quickstart.md)：不依赖真实行情，跑通第一份结果、独立验证与报告。
+2. [创建自己的研究](getting-started.md)：把问题、样本、计算步骤和评价标准写成研究包。
+3. [基本数据接入](catalog.md)：说明字段含义和可见日期，让框架知道过去的某个时点能用什么。
+4. [读懂结果和检查单](evidence.md)：分清“程序跑完”“结果已保存”和“独立检查通过”。
 
-仓库根目录的 [架构边界](../ARCHITECTURE.md)、[项目扩展](../EXTENSIONS.md)、
-[参与贡献](../CONTRIBUTING.md)、[安全报告](../SECURITY.md)、
-[第三方材料边界](../THIRD_PARTY_NOTICES.md) 和 [Apache License 2.0](../LICENSE)
-共同定义公开项目的代码、协作与分发边界。
+## 我想用 AI 研究
 
-## 可选源码集成
+[AI 研究指南](ai_workflow.md)解释人、RD-Agent 与框架分别做什么。
 
-[RD-Agent 场景说明](../integrations/rdagent/README.md)与[公式复现指南](../integrations/rdagent/docs/formula-reproduction.md)面向完整源码副本，需单独安装；不属于核心 wheel 自带命令。研究执行仍委托同一 ResearchPackage 主链。可选集成的 wheel/sdist 构建、空环境安装与贡献任务见[安装验收](../integrations/rdagent/docs/installation.md)。比较已验证开发预测或执行新研究包变体的入口见[有界开发区研究](../integrations/rdagent/docs/research-campaign.md)与[两轮教学例](../integrations/rdagent/examples/prediction_campaign/README.md)。
+| 目标 | 指南 |
+| --- | --- |
+| 给一篇 PDF，复现其中的公式 | [公式复现](../integrations/rdagent/docs/formula-reproduction.md) |
+| 不付费调用模型，先体验流程 | [教学 PDF 与成交量集中度](../integrations/rdagent/examples/volume_concentration/README.md) |
+| 比较已有研究方案 | [开发研究循环](../integrations/rdagent/docs/research-campaign.md) |
+| 让 AI 提出新因子 | [因子研究](../integrations/rdagent/docs/factor-research.md) |
+| 让 AI 提出模型结构 | [生成式模型研究](../integrations/rdagent/docs/model-research.md) |
+| 联合探索因子与模型 | [联合研究](../integrations/rdagent/docs/joint-research.md) |
+| 准备独立的 AI 调度环境 | [RD-Agent 安装与场景](../integrations/rdagent/README.md) · [安装验收](../integrations/rdagent/docs/installation.md) |
 
-新因子研究见[文档基线后的提案与反思](../integrations/rdagent/docs/factor-research.md)，与有限参数菜单研究分别保留。模型结构提案见[生成式模型研究](../integrations/rdagent/docs/model-research.md)，统一方向、预算及恢复见[因子与模型联合研究](../integrations/rdagent/docs/joint-research.md)。
+## 我想做因子、模型与策略研究
 
-## 当前流程
+| 问题 | 文档 |
+| --- | --- |
+| 怎么避免拿最终样本反复挑模型 | [滚动训练与样本外选择](walk_forward_model.md) |
+| 怎么写价格、成交量等表达式 | [Qlib 因子表达式](qlib-expressions.md) |
+| 有哪些现成特征可作基线 | [量价与选定 Alpha 特征](qlib-factor-baselines.md) |
+| 预测如何转为带风险约束的组合 | [组合与风险目标](qlib-portfolio-risk.md) |
+| 训练好的模型怎样保存和恢复 | [模型文件交付](qlib-model-results.md) |
+| 怎么看预测或策略图表 | [模型与组合报告](qlib-report.md) |
+| 订单、持仓和资金如何模拟 | [交易与账户](explicit_orders.md) |
+| 分红、红利税、换股或融资如何处理 | [现货与信用账户](spot_account.md) |
+| 订单什么时候成交，资金怎样预占 | [显式订单](explicit_orders.md) |
+| 多个期货合约怎样共享资金 | [共享期货账户](shared_futures.md) |
+| 分钟级策略有哪些额外要求 | [分钟成交与订单](explicit_orders.md) · [分钟规则来源](minute_rule_provenance.md) |
+| 目前有哪些真实场景验收 | [真实覆盖与限制](native_backtest_acceptance.md) |
 
-```text
-capabilities / operator / artifact / recipe / catalog 发现
-  → package init
-  → package lint
-  → package admit
-  → run / inspect / resume / retry-node / rerun-from
-  → Result
-  → verify
-  → VerificationResult
-  → report / compare / analysis / export-result / Dashboard
-```
+## 我想理解系统，或解决运行问题
 
-## 能力状态
+- [六张交互图](architecture/README.md)：总体概览、总体架构、数据流、工作流、调用时序与运行状态。
+- [模块职责与边界](architecture.md)：从问题找到代码位置。
+- [研究包格式](research_package.md)：哪些约定需要固定下来。
+- [数据读取与输入归档](data_plane.md)：同一研究怎样使用数据库或已封存行情。
+- [运行与恢复](runtime.md)：什么时候用 resume，什么时候用 retry-node。
+- [资源预算](project_resource_budgets.md)：运行和独立验证如何分配内存与进程。
+- [命令行参考](cli.md)与[运维](operations.md)：查找、诊断、清理与恢复入口。
+- [完整框架约定](framework-contracts.md)：需要实现新接入或深查行为时再读。
 
-能力状态以 [`../src/research_pipeline/capabilities.json`](../src/research_pipeline/capabilities.json) 为唯一机器来源。
+## 我想扩展或发布
+
+- [项目扩展](../EXTENSIONS.md)与[多文件计算接口](../project_extensions/README.md)：把自己的算法接入已有流程。
+- [参与贡献](../CONTRIBUTING.md)、[安全报告](../SECURITY.md)。
+- [安装与发布](release.md)、[独立使用验收](external-acceptance.md)。
+- [第三方代码与数据许可](../THIRD_PARTY_NOTICES.md)、[Apache-2.0 许可证](../LICENSE)。
+
+## 看懂几个常见名称
+
+| 名称 | 用人话解释 |
+| --- | --- |
+| PIT / 时点一致性 | 在过去的某一时刻，只使用那时已经可获得的信息 |
+| Catalog Lock | 本次认可的数据说明版本：字段、来源及可见性约定 |
+| ResearchPackage | 一份可执行研究说明，记录要用什么数据、怎么算、怎么判断 |
+| DAG | 计算步骤的先后依赖关系；不是额外一种研究方法 |
+| checkpoint | 已完成步骤的保存点，通过检查后可以继续使用 |
+| Result | 一次研究的正式结果包及其来源与实现信息 |
+| VerificationResult | 绑定这份结果的独立检查单 |
+| holdout | 开发时留在一边，最后才用于评价的数据 |
+
+## 精确能力状态
+
+日常选功能先看上面的指南；做验收或集成时，再核对机器能力表。`local_only` 表示本地范围内已有实现与验收，不等于全市场、全历史或任意环境均已验证。
+
+<details>
+<summary>展开能力清单</summary>
 
 <!-- CAPABILITIES_TABLE:START -->
 | capability | 状态 | 命令 | 证据 / 信任 | 边界说明 |
@@ -74,6 +95,4 @@ capabilities / operator / artifact / recipe / catalog 发现
 | `resource.governance` | `local_only` | `run --resource-state-dir` | `local_acceptance` / `local_only` | 数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。合成探针不进入正式运行校准总体。 |
 <!-- CAPABILITIES_TABLE:END -->
 
-Qlib 表格模型的 Double Ensemble 样本重加权、四条执行路径与封存状态见 [模型研究](walk_forward_model.md)。确认公式的跨会话编码经验见 [RD-Agent公式复现](../integrations/rdagent/docs/formula-reproduction.md)。
-
-生成式模型入口见[模型结构、修复与开发反思](../integrations/rdagent/docs/model-research.md)。
+</details>

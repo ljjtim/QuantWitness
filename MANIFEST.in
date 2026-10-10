@@ -4,6 +4,7 @@ include NOTICE
 include README.md
 include pyproject.toml
 recursive-include src *.json *.py *.yaml
+exclude src/research_pipeline/platform/minute_capabilities/minute_inventory.v3.json
 prune .github
 prune docs
 prune examples
@@ -20,6 +21,24 @@ include SECURITY.md
 include THIRD_PARTY_NOTICES.md
 include docs/ai_workflow.md
 include docs/architecture.md
+include docs/architecture/README.md
+include docs/architecture/research-pipeline-architecture.html
+include docs/architecture/dataflow-research-lineage.html
+include docs/architecture/workflow-research-task.html
+include docs/architecture/sequence-research-run.html
+include docs/architecture/lifecycle-research-run.html
+include docs/architecture/source-evidence.json
+include docs/architecture/render.mjs
+include docs/architecture/sources/architecture.json
+include docs/architecture/sources/dataflow.json
+include docs/architecture/sources/workflow.json
+include docs/architecture/sources/sequence.json
+include docs/architecture/sources/lifecycle.json
+include docs/financial_simulation.md
+include docs/spot_account.md
+include docs/explicit_orders.md
+include docs/minute_simulation.md
+include docs/bar_tca.md
 include docs/catalog.md
 include docs/cli.md
 include docs/data_plane.md
@@ -29,6 +48,8 @@ include docs/getting-started.md
 include docs/workspace-quickstart.md
 include docs/index.md
 include docs/minute_rule_provenance.md
+include docs/native_backtest_acceptance.md
+include docs/shared_futures.md
 include docs/operations.md
 include docs/release.md
 include docs/external-acceptance.md
@@ -62,3 +83,27 @@ include integrations/rdagent/examples/model_research/README.md
 include integrations/rdagent/docs/joint-research.md
 include project_extensions/qlib_portfolio_risk/README.md
 include integrations/rdagent/docs/dai-daily-research.md
+
+include docs/architecture/index.html
+include docs/architecture/overview.svg
+include docs/architecture/research-pipeline-architecture.svg
+include docs/architecture/dataflow-research-lineage.svg
+include docs/architecture/workflow-research-task.svg
+include docs/architecture/sequence-research-run.svg
+include docs/architecture/lifecycle-research-run.svg
+include licenses/QLIB-MIT.txt
+include licenses/RD-AGENT-MIT.txt
+
+include docs/architecture/overview.html
+include docs/architecture/sources/overview.json
+
+include docs/architecture/render-previews.mjs
+include docs/architecture/sources/detailed/overview.json
+include docs/architecture/sources/detailed/architecture.json
+include docs/architecture/sources/detailed/dataflow.json
+include docs/architecture/sources/detailed/workflow.json
+include docs/architecture/sources/detailed/sequence.json
+include docs/architecture/sources/detailed/lifecycle.json
+include licenses/ARCHIFY-MIT.txt
+
+include docs/architecture/.gitignore

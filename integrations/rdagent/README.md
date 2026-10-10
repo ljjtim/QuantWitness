@@ -1,10 +1,40 @@
-# RD-Agent 公式复现与开发研究
+# RD-Agent：让 AI 参与量化研究
 
-本包将固定版本 RD-Agent 的 LoopBase 与 CoSTEER 接入 QuantWitness。Linux 负责研究循环；Windows RP 继续负责项目 bundle、ResearchPackage、准入、Runtime、Result 与独立 VerificationResult。普通 RP 命令不导入本包。
+这个可选集成让 AI 帮你提取论文定义、生成计算代码、提出因子或模型候选，再由 QuantWitness 正式执行与独立检查。它不直接接管数据库，也不以“代码运行了”代替“公式实现对了”。
 
-上游固定提交：`484776c211e4fbbeef03e0ec00d6bbee7362a4f4`。支持固定文本响应和live代码生成两种模式，公式复现场景为一个外层循环、最多三次编码尝试、一个并行任务。固定响应不调用模型；live模式显式声明模型、HTTPS接口地址、最多三次调用和总输出token预约预算，单次不超过8192。生成器不接触数据库，执行使用冻结归档输入。
+## 从哪种研究开始
 
-固定操作步骤、结果查看和恢复方法见[公式复现指南](docs/formula-reproduction.md)。本集成通过源码单独安装，不随 RP 核心 wheel 安装。
+| 你现在有什么 | 可以做什么 | 指南 |
+| --- | --- | --- |
+| 一篇 PDF 和想复现的公式 | 提取指定页，人工确认，再生成和验证代码 | [公式复现](docs/formula-reproduction.md) |
+| 想先体验，不调用付费模型 | 用教学 PDF、合成分钟行情和固定响应跑通流程 | [成交量集中度示例](examples/volume_concentration/README.md) |
+| 已有研究包与参数候选 | 在固定开发范围内比较方案 | [研究循环](docs/research-campaign.md) |
+| 想提出新因子 | 根据已验证开发指标提案和反思 | [因子研究](docs/factor-research.md) |
+| 想改变模型结构 | 在支持的前馈结构范围内生成和评价 | [模型研究](docs/model-research.md) |
+| 想同时探索因子和模型 | 共用开发范围与预算，保留候选来源 | [联合研究](docs/joint-research.md) |
+
+## 一轮 AI 研究怎样流转
+
+```text
+问题与人工确认的约定
+  → RD-Agent 提出或实现候选
+  → QuantWitness 检查数据、执行研究
+  → 独立验证 + Result
+  → 只返回允许的开发反馈
+  → 下一轮候选，或按预算停止
+```
+
+公式复现只根据实现正确性修复，不能为提高收益偷偷修改原定义。探索研究可以提出新候选，但最终 test/holdout 不进入开发反馈。
+
+## 运行前要准备什么
+
+- 完整公开源码、可读数据或已封存输入、研究包和对应的独立验证器。
+- 核心 QuantWitness 运行环境，以及本集成的 Python 3.11+ 环境。当前调度采用固定版本的 Linux RD-Agent 与指定 RP 执行环境；Windows 可通过 WSL 使用，细节见下文。
+- 实时生成时准备模型服务与明确预算。固定响应的教学流程不产生实时模型调用。
+
+本包复用上游 LoopBase 与 CoSTEER，固定提交为 `484776c211e4fbbeef03e0ec00d6bbee7362a4f4`。普通核心命令不自动安装或加载 RD-Agent。许可和来源见[第三方说明](../../THIRD_PARTY_NOTICES.md)。
+
+下面是安装、请求格式和运行约定。初次体验可以先照教学示例操作，需要调整接口时再阅读完整字段。
 
 ## 安装与入口
 

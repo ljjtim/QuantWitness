@@ -783,8 +783,6 @@ def run_bar_tca(
     _require_hash(source_ledger_hash, "source_ledger_hash")
     ordered_orders = tuple(sorted(orders, key=lambda item: item.order_id))
     ordered_fills = tuple(sorted(formal_fills, key=lambda item: item.source_fill_id))
-    if not ordered_orders:
-        raise SimulationContractError("Bar TCA 至少需要一个正式订单")
     if len({item.order_id for item in ordered_orders}) != len(ordered_orders):
         raise SimulationContractError("Bar TCA 正式 order_id 重复")
     if len({item.source_fill_id for item in ordered_fills}) != len(ordered_fills):
@@ -1045,11 +1043,12 @@ def write_bar_tca_artifact(
         }
         files: dict[str, str] = {}
         schemas: dict[str, str] = {}
+        arrow_schemas = _bar_tca_arrow_schemas()
         for name, rows in tables.items():
             directory = staging / name
             directory.mkdir()
             path = directory / "part-00000.parquet"
-            table = pa.Table.from_pylist(rows)
+            table = pa.Table.from_pylist(rows, schema=arrow_schemas[name])
             pq.write_table(table, path)
             files[f"{name}/part-00000.parquet"] = _sha256(path)
             schemas[name] = typed_canonical_hash(str(table.schema))

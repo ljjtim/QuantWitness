@@ -1,50 +1,50 @@
-# 架构与边界
+# 架构与代码边界
 
-## 主链
+这页帮助你定位代码：如果数据、公式、回测或验证出了问题，应从哪里查起。第一次使用框架，先看[总体介绍](../README.md)和[交互图册](architecture/README.md)，不必先记住所有目录。
 
-```text
-ResearchPackage
-  → Catalog/PIT Admission
-  → Typed Operator DAG
-  → Runtime
-  → self-contained Result
-  → independent VerificationResult
-```
+## 从问题找到模块
 
-项目 extension 和 core 算子只在实现来源处分叉；从 lint 起回到同一条主链。
+| 你要查的事情 | 模块 | 职责 |
+| --- | --- | --- |
+| 一个字段代表什么，什么时候可见 | `catalog/` | 描述数据、来源、历史可见性与固定的数据目录版本 |
+| 研究配置是否完整 | `packages/` | 检查研究包，把数据请求和计算步骤编译成计划 |
+| 实际读取了哪些行 | `data_plane/`、`application/` | 只读取数，生成有范围限制的列式输入工件 |
+| 计算顺序、中断和资源预算 | `runtime/` | 调度计算图，分配资源，保存和复验检查点 |
+| 因子、标签、模型或统计如何算 | `research/` | 研究算法与 Qlib 等模型接入，不自行查询研究数据库 |
+| 订单、成交、费用、资金和持仓 | `simulation/`、`domain/` | 原生金融仿真与历史市场规则 |
+| 结果包保存了什么 | `results/` | 封存正式输入、配置、实现信息与输出表 |
+| 如何独立判断结果是否合格 | `evidence/` | 从已封存结果重算检查，输出独立验证结果 |
+| 新研究算法怎样接入 | `extensions/` | 项目代码包、接口和依赖约定 |
+| 命令行、诊断和运维 | `cli/`、`operations/`、`platform/` | 命令编排、诊断、公共类型与约定 |
 
-## 模块职责
+## RD-Agent 与 Qlib 的位置
 
-- `catalog/`：数据集、字段、可见性、修订、binding 和漂移合同。
-- `packages/`：ResearchPackage schema、纯编译和 ResultSpec。
-- `data_plane/`：研究数据取数与列式工件边界；Catalog schema 观测、来源修订与因子发布绑定另有直接只读连接。
-- `extensions/`：受控项目 bundle、算子合同和准入。
-- `runtime/`：typed DAG、事件、checkpoint、资源租约和恢复。
-- `domain/`、`simulation/`：金融时间、市场规则、订单、成交和账本。
-- `research/`：研究算法、标签、统计、holdout 和负控制，不直接查库。
-- `results/`：自包含 Result 的选择、原子发布和只读快照。
-- `evidence/`：独立读取 Result，重算 validity 并生成 VerificationResult。
-- `cli/`：参数解析和编排，不复制领域算法。
+`integrations/rdagent/` 是可选集成，提出或生成候选，经正式 Workspace／研究包入口执行，并读取已经验证的开发指标。它不嵌入 Runtime 的调度循环，也不自行批准数据和公式。
 
-## 单一事实源
+Qlib 通过研究模型适配和项目侧表达式、风险组合接口提供算法组件。QuantWitness 管理外层的时间可见性、实验范围、执行记录、结果保存和独立验证。原生回测没有直接接入 RQAlpha 执行引擎。
 
-- 能力：`capabilities.json`
-- 数据：Catalog Lock
-- 研究：ResearchPackage
-- 通用算子：唯一 OperatorDefinition manifest
-- 项目实现：计划内已准入 bundle 闭包
-- 运行：当前 invocation、事件链和 checkpoint
-- 结果：ResultStore
-- 可消费结论：VerificationResult
+## 哪份记录说了算
 
-Markdown 只解释这些合同，不替代它们。
+| 问题 | 读取的正式记录 |
+| --- | --- |
+| 当前能做什么 | `capabilities.json` |
+| 本次允许使用什么数据 | Catalog Lock 与准入计划 |
+| 本次要做什么研究 | ResearchPackage |
+| 使用哪个算法与实现 | 已登记算子及计划中的项目代码包 |
+| 执行到哪里 | 事件记录与完整提交的 checkpoint |
+| 得到了什么 | Result |
+| 哪些检查通过 | VerificationResult |
 
-## 依赖方向
+文档解释这些记录，不替代它们。成功节点可以复用，但需要原有输入、实现和提交记录匹配。
 
-平台和领域层不反向依赖项目目录。core 实现不得读取 `project_extensions` 或某个研究包；项目 bundle 也不得反向导入框架内部、数据库兼容层、采集器或因子发布器。
+## 金融执行与独立检查
 
-Result 不执行研究算法，Verifier 不导入生产仿真实现。两者可共用纯 schema 合同，但金融守恒和 TCA 必须由独立实现重算。
+目标持仓或显式订单进入统一执行协调。订单、成交确认、账户记账和结果收集各自负责不同步骤；现金、持仓、保证金和信用债务按对应账户约定维护。
 
-## 数据安全
+独立金融检查从 Result 中的输入与支持事实重建关键数值，不调用生产仿真实现来证明自己正确。两者可以共享数据类型，但不能用同一笔生产账目直接冒充独立复算。详情见[金融仿真](financial_simulation.md)、[现货与信用账户](spot_account.md)和[共享期货账户](shared_futures.md)。
 
-研究数据库只读。准入和运行都记录 size/mtime 前后不变；任何采集、修复、建表、因子重算或发布属于另一条需单独授权的流程。
+## 代码依赖边界
+
+核心算法不读取某个具体研究目录，也不导入数据采集器、数据库兼容接口或因子发布器。项目扩展经固定接口与代码包接入，不能反向依赖框架内部实现。受信任项目代码不等于沙箱执行。
+
+研究数据只读。数据采集、建表、修复或正式因子发布需要走独立流程；归档输入、普通数据库输入和分钟扫描入口虽然不同，后续结果交付与验证约定相同。

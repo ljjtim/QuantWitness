@@ -129,6 +129,8 @@ def _stock_action_rows(
             source["fld_ca_mod_time"], "fld_ca_mod_time"
         )
         row["revision"] = int(source.get("__revision", 1))
+        if "fld_ca_transfer_arrival_date" in source:
+            row["transfer_arrival_date"] = source["fld_ca_transfer_arrival_date"]
         visible.append(row)
     return tuple(visible)
 
@@ -189,6 +191,7 @@ def _temporal_corporate_action_rows(
     applicable_start: datetime,
     applicable_end: datetime,
     as_of: datetime,
+    initial_listing_date: date | None = None,
 ) -> tuple[tuple[dict[str, object], ...], DatasetArtifactRef]:
     """从正式时态计划收集窗口内各次真实可见的公司行动版本。"""
 
@@ -230,6 +233,8 @@ def _temporal_corporate_action_rows(
     ):
         raise ValueError("公司行动 request 没有闭合公告、加入和修订可见性 policy")
     required = tuple(dict.fromkeys(role.values()))
+    if initial_listing_date is not None:
+        required += ("fld_ca_status", "fld_ca_plan_progress")
     if not set(required) <= set(plan.query.field_ids):
         raise ValueError("公司行动 QueryIR 没有公开构造真实版本时钟所需字段")
 
@@ -264,6 +269,13 @@ def _temporal_corporate_action_rows(
         if not matches:
             continue
         effective_date = _local_date(row[role["effective"]], role["effective"])
+        if (
+            initial_listing_date is not None
+            and effective_date <= initial_listing_date
+            and row["fld_ca_status"] in (None, 0)
+            and row["fld_ca_plan_progress"] == "实施方案"
+        ):
+            raise ValueError("IPO 归一化原点不支持上市前或上市当日生效的公司行动")
         effective_at = datetime.combine(
             effective_date,
             time(9, 31),
@@ -348,7 +360,11 @@ def _temporal_corporate_action_rows(
             if not applicable_start <= effective_at < applicable_end:
                 continue
             source_id = str(row[role["id"]])
-            identity = typed_canonical_hash(_json_ready(row))
+            # 供应商 DECIMAL 保留精确十进制，不先转换成二进制浮点数。
+            identity = typed_canonical_hash(_json_ready({
+                key: str(value) if isinstance(value, Decimal) else value
+                for key, value in row.items()
+            }))
             selected_history.setdefault(source_id, {}).setdefault(
                 identity,
                 (selection_at, dict(row)),
@@ -398,6 +414,37 @@ def _actions_in_applicable_range(
     }
 
 
+def _initial_listing_evidence(
+    value: object,
+    *,
+    instrument_id: str,
+    asset_class: str,
+    applicable_start: datetime,
+) -> dict[str, str] | None:
+    """上市证据只定义首日归一化原点，不提供当日收盘因子。"""
+
+    if value is None or value == {}:
+        return None
+    fields = {"instrument_id", "listed_date", "available_at", "source_reference"}
+    if not isinstance(value, Mapping) or set(value) != fields or any(
+        not isinstance(item, str) or not item.strip() for item in value.values()
+    ):
+        raise ValueError("initial_listing_evidence 必须精确提供四个非空字符串字段")
+    if asset_class != "cn_stock":
+        raise ValueError("IPO 归一化原点只支持 cn_stock")
+    if value["instrument_id"] != instrument_id:
+        raise ValueError("IPO 上市证据 instrument_id 与当前标的不一致")
+    listed_date = _local_date(value["listed_date"], "listed_date")
+    local_start = applicable_start.astimezone(ZoneInfo("Asia/Shanghai"))
+    if listed_date != local_start.date():
+        raise ValueError("IPO listed_date 必须等于适用起点的本地日期")
+    available_at = _local_datetime(value["available_at"], "available_at")
+    market_open = datetime.combine(listed_date, time(9, 30), local_start.tzinfo)
+    if available_at > applicable_start or available_at >= market_open:
+        raise ValueError("IPO 上市证据必须在适用起点及当日开盘前可见")
+    return dict(value)
+
+
 def execute_data_minute_adjustment_snapshot_v1(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeOutputs:
@@ -412,6 +459,12 @@ def execute_data_minute_adjustment_snapshot_v1(
     if applicable_end > as_of:
         raise ValueError("复权快照适用区间不能晚于研究时钟")
 
+    listing_evidence = _initial_listing_evidence(
+        parameters.get("initial_listing_evidence"),
+        instrument_id=instrument_id,
+        asset_class=asset_class,
+        applicable_start=applicable_start,
+    )
     factor_rows, factor_reference = _columnar_request_rows(context, factor_request_id)
     daily_fields = {
         "cn_stock": (
@@ -429,7 +482,7 @@ def execute_data_minute_adjustment_snapshot_v1(
     filtered_daily = tuple(
         row for row in factor_rows if str(row.get(code_field, "")) == instrument_id
     )
-    if not filtered_daily or any(
+    if (not filtered_daily and listing_evidence is None) or any(
         field not in row
         for row in filtered_daily
         for field in (date_field, close_field, factor_field)
@@ -438,15 +491,25 @@ def execute_data_minute_adjustment_snapshot_v1(
     daily_by_date = {
         _local_date(row[date_field], date_field): row for row in filtered_daily
     }
-    prior_dates = tuple(
-        item for item in sorted(daily_by_date) if item < applicable_start.date()
+    start_date = (
+        date.fromisoformat(listing_evidence["listed_date"])
+        if listing_evidence is not None else applicable_start.date()
     )
-    if not prior_dates:
-        raise ValueError("复权快照缺少适用区间前一已完成日 factor")
-    initial_date = prior_dates[-1]
-    initial_row = daily_by_date[initial_date]
+    prior_dates = tuple(item for item in sorted(daily_by_date) if item < start_date)
+    if listing_evidence is not None:
+        if prior_dates:
+            raise ValueError("已有前日 factor，不能同时声明 IPO 归一化原点")
+        initial_date = start_date
+        initial_factor = Decimal(1)
+    else:
+        if not prior_dates:
+            raise ValueError("复权快照缺少适用区间前一已完成日 factor")
+        initial_date = prior_dates[-1]
+        initial_factor = Decimal(str(daily_by_date[initial_date][factor_field]))
 
-    trading_sessions = tuple(sorted(daily_by_date))
+    trading_sessions = tuple(sorted(
+        set(daily_by_date) | ({initial_date} if listing_evidence is not None else set())
+    ))
     action_rows, action_reference = _temporal_corporate_action_rows(
         context,
         action_request_id,
@@ -456,6 +519,7 @@ def execute_data_minute_adjustment_snapshot_v1(
         applicable_start=applicable_start,
         applicable_end=applicable_end,
         as_of=as_of,
+        initial_listing_date=initial_date if listing_evidence is not None else None,
     )
     if asset_class == "cn_stock":
         actions = compile_cn_stock_corporate_action_rows(
@@ -476,6 +540,28 @@ def execute_data_minute_adjustment_snapshot_v1(
             as_of=as_of,
             allow_post_effective_visibility=True,
         )
+    financial_rows = tuple(
+        {**row, "source_ref": f"{action_reference.physical_snapshot_id}#{row['action_id']}"}
+        for row in (
+            _stock_action_rows(action_rows, instrument_id=instrument_id)
+            if asset_class == "cn_stock"
+            else _etf_action_rows(action_rows, instrument_id=instrument_id)
+        )
+    )
+    financial_actions = (
+        compile_cn_stock_corporate_action_rows(
+            financial_rows, trading_sessions=trading_sessions,
+            allow_post_effective_visibility=True, contract_version=2,
+        )
+        if asset_class == "cn_stock" else compile_cn_etf_corporate_action_rows(
+            financial_rows, trading_sessions=trading_sessions, as_of=as_of,
+            allow_post_effective_visibility=True, contract_version=2,
+        )
+    )
+    financial_actions = tuple(
+        action for action in financial_actions
+        if applicable_start.date() <= action.effective_date <= applicable_end.date()
+    )
     actions, effective_times = _actions_in_applicable_range(
         actions,
         applicable_start=applicable_start,
@@ -489,10 +575,16 @@ def execute_data_minute_adjustment_snapshot_v1(
         previous_closes[effective_date] = Decimal(
             str(daily_by_date[candidates[-1]][close_field])
         )
-    source_revision_hash = typed_canonical_hash({
+    input_references = {
         factor_request_id: factor_reference.to_dict(),
         action_request_id: action_reference.to_dict(),
-    })
+    }
+    source_revision_hash = typed_canonical_hash(
+        input_references if listing_evidence is None else {
+            "input_references": input_references,
+            "initial_listing_evidence": listing_evidence,
+        }
+    )
     snapshot = build_adjustment_factor_snapshot(
         instrument_id=instrument_id,
         asset_class=asset_class,
@@ -500,7 +592,7 @@ def execute_data_minute_adjustment_snapshot_v1(
         applicable_start=applicable_start,
         applicable_end=applicable_end,
         initial_factor_date=initial_date,
-        initial_factor=Decimal(str(initial_row[factor_field])),
+        initial_factor=initial_factor,
         source_revision_hash=source_revision_hash,
         corporate_actions=actions,
         effective_times=effective_times,
@@ -520,6 +612,7 @@ def execute_data_minute_adjustment_snapshot_v1(
         "snapshot": snapshot.to_dict(),
         "included_actions": [item.to_dict() for item in included],
         "candidate_actions": [item.to_dict() for item in actions],
+        "financial_corporate_actions": [item.to_dict() for item in financial_actions],
         "effective_times": {
             item.isoformat(): value.isoformat(timespec="seconds")
             for item, value in sorted(effective_times.items())
@@ -528,10 +621,8 @@ def execute_data_minute_adjustment_snapshot_v1(
             item.isoformat(): str(value)
             for item, value in sorted(previous_closes.items())
         },
-        "input_references": {
-            factor_request_id: factor_reference.to_dict(),
-            action_request_id: action_reference.to_dict(),
-        },
+        "input_references": input_references,
+        **({"initial_listing_evidence": listing_evidence} if listing_evidence is not None else {}),
         "corporate_action_snapshot_hash": corporate_action_snapshot_hash(included),
         "adjustment_audit": audit.to_dict(),
     }
@@ -545,6 +636,9 @@ def execute_data_minute_adjustment_snapshot_v1(
                 "included_actions_json": canonical_json(
                     [item.to_dict() for item in included]
                 ),
+                "financial_corporate_actions_json": canonical_json(
+                    [item.to_dict() for item in financial_actions]
+                ),
                 "candidate_actions_json": canonical_json(
                     [item.to_dict() for item in actions]
                 ),
@@ -557,6 +651,9 @@ def execute_data_minute_adjustment_snapshot_v1(
                 "input_references_json": canonical_json(
                     payload["input_references"]
                 ),
+                **({
+                    "initial_listing_evidence_json": canonical_json(listing_evidence),
+                } if listing_evidence is not None else {}),
                 "corporate_action_snapshot_hash": str(
                     payload["corporate_action_snapshot_hash"]
                 ),
@@ -720,6 +817,7 @@ def execute_research_bars_minute_adjust_v1(
             "price_mode": mode,
             "partitioned_dataset": dataset.to_dict(),
             "partition_receipts": receipts,
+            "financial_corporate_actions": snapshot_payload.get("financial_corporate_actions", []),
             "adjustment_snapshot_identity_hash": snapshot.snapshot_identity_hash,
             "adjustment_candidates": [
                 item.to_dict() for item in candidate_actions

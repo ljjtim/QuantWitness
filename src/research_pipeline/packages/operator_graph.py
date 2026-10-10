@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
+import json
 from typing import Mapping, Protocol, runtime_checkable
 
 from research_pipeline.platform import typed_canonical_hash
@@ -142,6 +143,10 @@ def compile_operator_graph_package(
             admission=admission,
             request_ids=frozenset(query_result.request_ids),
         )
+        _validate_shared_futures_query_bindings(
+            recipe, dict(zip(query_result.request_ids, query_result.queries, strict=True)),
+            fixed_clock=run_clock,
+        )
         from .project_causal_admission import validate_project_causal_recipe
 
         validate_project_causal_recipe(
@@ -172,6 +177,7 @@ def compile_operator_graph_package(
             resolver=admission,
         )
         _validate_adjustment_result_closure(recipe, result_spec)
+        _validate_shared_futures_result_closure(recipe, result_spec)
     except Exception as exc:
         raise ResearchPackageError(f"ResultSpec 编译失败: {exc}") from exc
     producers = []
@@ -473,6 +479,167 @@ def _thaw_mapping(value: object, field: str) -> dict[str, object]:
     return {str(key): thaw(item) for key, item in value.items()}
 
 
+def _validate_explicit_order_parameters(parameters: Mapping[str, object]) -> None:
+    """编译层只检查订单 JSON 形状与模式，金融合同由运行时验证。"""
+    mode = parameters.get("execution_mode", "target")
+    if mode not in ("target", "explicit_orders"):
+        raise ResearchPackageError("execution_mode 只能是 target 或 explicit_orders")
+    encoded = parameters.get("order_commands", "")
+    if not isinstance(encoded, str):
+        raise ResearchPackageError("order_commands 必须是完整 JSON 字符串")
+    if encoded == "":
+        commands = []
+    else:
+        try:
+            commands = json.loads(encoded)
+        except ValueError as exc:
+            raise ResearchPackageError("order_commands 必须是完整 JSON 数组字符串") from exc
+        if not isinstance(commands, list):
+            raise ResearchPackageError("order_commands 必须是 JSON 数组")
+    if mode == "target":
+        if commands:
+            raise ResearchPackageError("target 模式不能声明非空 order_commands")
+        return
+    if not commands:
+        raise ResearchPackageError("explicit_orders 模式必须声明非空 order_commands")
+    expected = {
+        "command_id", "action", "order_id", "instrument", "decision_time", "submitted_at",
+        "available_at", "source_sequence", "source_hashes", "trading_date", "side", "quantity",
+        "position_effect", "order_type", "time_in_force", "limit_price", "reference_price",
+        "reference_price_available_at", "funds_policy", "slippage_bps", "slippage_ticks",
+    }
+    instrument_fields = {
+        "instrument_id", "asset_class", "venue", "currency", "contract_kind", "contract_version",
+    }
+    for command in commands:
+        if not isinstance(command, dict) or set(command) != expected:
+            raise ResearchPackageError("order_commands 命令 schema 不匹配")
+        instrument = command["instrument"]
+        if not isinstance(instrument, dict) or set(instrument) != instrument_fields:
+            raise ResearchPackageError("order_commands instrument schema 不匹配")
+        if not isinstance(command["source_hashes"], list):
+            raise ResearchPackageError("order_commands source_hashes 必须是数组")
+        for name in ("limit_price", "reference_price"):
+            value = command[name]
+            if value is not None and (
+                not isinstance(value, dict) or set(value) != {"units", "scale", "currency"}
+            ):
+                raise ResearchPackageError(f"order_commands {name} schema 不匹配")
+    if not any(command["action"] == "submit" for command in commands):
+        raise ResearchPackageError("explicit_orders 模式至少需要一条 submit 命令")
+
+
+def _validate_external_cashflow_parameters(encoded: object) -> None:
+    """检查冻结参数形状和声明时序；账户余额与金融执行由 Runtime 验证。"""
+    if not isinstance(encoded, str):
+        raise ResearchPackageError("external_cashflows 必须是完整 JSON 数组字符串")
+    try:
+        rows = [] if encoded == "" else json.loads(encoded)
+    except ValueError as exc:
+        raise ResearchPackageError("external_cashflows 必须是完整 JSON 数组字符串") from exc
+    if not isinstance(rows, list):
+        raise ResearchPackageError("external_cashflows 必须是 JSON 数组")
+    required = {"event_id", "account_id", "currency", "direction", "amount_units", "requested_at",
+                "available_at", "effective_at", "source_ref"}
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or required - set(row) or set(row) - required - {"status", "reason"}:
+            raise ResearchPackageError("外部资金流字段缺失或包含未知字段")
+        if any(not isinstance(row[key], str) or not row[key].strip()
+               for key in ("event_id", "account_id", "source_ref")):
+            raise ResearchPackageError("外部资金流身份和来源必须为非空字符串")
+        if row["event_id"] in seen:
+            raise ResearchPackageError("外部资金流 event_id 重复")
+        seen.add(row["event_id"])
+        if (row["direction"] not in {"deposit", "withdrawal"} or row["currency"] != "CNY"
+                or type(row["amount_units"]) is not int or row["amount_units"] <= 0):
+            raise ResearchPackageError("外部资金流方向、币种或金额无效")
+        status, reason = row.get("status", "settled"), row.get("reason", "")
+        if status not in {"settled", "cancelled", "failed"} or not isinstance(reason, str) or (status != "settled" and not reason.strip()):
+            raise ResearchPackageError("外部资金流状态或终态原因无效")
+        try:
+            stamps = [datetime.fromisoformat(row[key]) for key in ("requested_at", "available_at", "effective_at")]
+            valid = all(value.tzinfo is not None and value.utcoffset() is not None for value in stamps)
+            valid = valid and max(stamps[:2]) <= stamps[2]
+        except (ValueError, TypeError):
+            valid = False
+        if not valid:
+            raise ResearchPackageError("外部资金流时点须带时区且生效不得早于申请或可见时点")
+
+
+def _validate_credit_account_parameters(parameters: Mapping) -> None:
+    """检查账户选择与冻结声明；金融规则计算由执行及独立验证负责。"""
+    model = parameters.get("account_model", "cash")
+    credit = parameters.get("credit_account")
+    if model not in {"cash", "financing_credit"}:
+        raise ResearchPackageError("account_model 只能是 cash 或 financing_credit")
+    if model == "cash":
+        if credit is not None:
+            raise ResearchPackageError("普通现金账户不能携带 credit_account")
+        return
+    if (not isinstance(credit, Mapping) or not isinstance(parameters.get("account"), Mapping)
+            or parameters.get("execution_mode") != "explicit_orders"):
+        raise ResearchPackageError("融资信用账户必须声明 credit_account、account 及显式订单模式")
+    if credit.get("contract_version") != "research-credit-account-v1":
+        raise ResearchPackageError("信用账户输入版本不受支持")
+    fields = {"contract_version", "account_id", "currency", "cash_scale", "as_of", "rules",
+              "contracts", "position_links", "order_allocations", "instructions", "profile_id",
+              "repayment_link_policy", "interest_policy", "risk_sell_policy", "sale_settlement_policy"}
+    if set(credit) != fields:
+        raise ResearchPackageError("credit_account 字段不完整或包含未知字段")
+    if (credit["currency"] != "CNY" or type(credit["cash_scale"]) is not int
+            or credit["cash_scale"] != 2 or not isinstance(credit["account_id"], str)
+            or not credit["account_id"].strip()):
+        raise ResearchPackageError("信用账户身份、币种或金额精度无效")
+    account = parameters["account"].get("opening_snapshot", {})
+    if (not isinstance(account, Mapping)
+            or any(credit[key] != account.get(key) for key in ("account_id", "currency"))):
+        raise ResearchPackageError("融资与现货期初账户身份和时点必须一致")
+    try:
+        as_of = datetime.fromisoformat(credit["as_of"])
+        started_at = datetime.fromisoformat(account.get("started_at"))
+        valid = as_of.tzinfo is not None and as_of.utcoffset() is not None and as_of == started_at
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        raise ResearchPackageError("融资期初时点必须带时区并与现货期初一致")
+    identities = {"rules": "rule_id", "contracts": "contract_id", "position_links": "link_id",
+                  "order_allocations": "order_id", "instructions": "instruction_id"}
+    for field, identity in identities.items():
+        rows = credit[field]
+        if not isinstance(rows, (list, tuple)) or any(not isinstance(row, Mapping) for row in rows):
+            raise ResearchPackageError(f"credit_account {field} 必须是对象数组")
+        ids = [row.get(identity) for row in rows]
+        if any(not isinstance(value, str) or not value.strip() for value in ids) or len(ids) != len(set(ids)):
+            raise ResearchPackageError(f"融资 {identity} 缺失或重复")
+    if not credit["rules"]:
+        raise ResearchPackageError("融资账户必须声明规则历史")
+    for rule in credit["rules"]:
+        if any(not isinstance(rule.get(key), str) or not rule[key].strip()
+               for key in ("source_ref", "assumption_source_ref")):
+            raise ResearchPackageError("融资规则必须声明市场来源和协议来源")
+        try:
+            available = datetime.fromisoformat(rule["available_at"])
+            start = date.fromisoformat(rule["effective_start"])
+            end = None if rule["effective_end"] is None else date.fromisoformat(rule["effective_end"])
+            valid = available.tzinfo is not None and available.utcoffset() is not None and (end is None or end >= start)
+        except (KeyError, ValueError, TypeError):
+            valid = False
+        if not valid:
+            raise ResearchPackageError("融资规则有效区间或可见时点无效")
+    for instruction in credit["instructions"]:
+        try:
+            stamps = [datetime.fromisoformat(instruction[key]) for key in ("requested_at", "available_at", "effective_at")]
+            valid = all(value.tzinfo is not None and value.utcoffset() is not None for value in stamps) and max(stamps[:2]) <= stamps[2]
+            if instruction.get("kind") == "extend" and instruction.get("status") == "approved":
+                approved = datetime.fromisoformat(instruction["approval_at"])
+                valid = valid and approved.tzinfo is not None and approved <= stamps[2]
+        except (KeyError, ValueError, TypeError):
+            valid = False
+        if not valid:
+            raise ResearchPackageError("融资指令或展期批准在生效时点尚不可见")
+
+
 def _validate_operator_graph_special_contracts(
     recipe: OperatorGraphRecipe,
     *,
@@ -488,6 +655,12 @@ def _validate_operator_graph_special_contracts(
     node_by_id = {item.node_id: item for item in recipe.nodes}
     for node in recipe.nodes:
         parameters = node.parameters
+        if node.operator_id in {"finance.simulation.intraday", "finance.simulation.daily-cash"}:
+            _validate_explicit_order_parameters(parameters)
+        if node.operator_id == "finance.simulation.daily-cash":
+            _validate_credit_account_parameters(parameters)
+        if node.operator_id == "finance.simulation.daily-cash" and "external_cashflows" in parameters:
+            _validate_external_cashflow_parameters(parameters["external_cashflows"])
         if node.operator_id in {
             "research.bars.minute_resample", "research.features.intraday",
             "research.labels.intraday", "research.signals.intraday",
@@ -541,6 +714,47 @@ def _validate_operator_graph_special_contracts(
                 or any(char not in "0123456789abcdef" for char in rule_hash)
             ):
                 raise ResearchPackageError("分钟 simulation rule_bundle_hash 必须是 sha256")
+            if "rule_bundle" in parameters:
+                from research_pipeline.platform.minute_reference import (
+                    load_minute_capability_manifest,
+                    require_current_minute_capability_binding,
+                )
+
+                bundle = _thaw_mapping(parameters["rule_bundle"], "rule_bundle")
+                if (bundle.get("bundle_hash") != rule_hash or typed_canonical_hash(
+                    {key: value for key, value in bundle.items() if key != "bundle_hash"}
+                ) != rule_hash):
+                    raise ResearchPackageError("分钟 rule_bundle 与 rule_bundle_hash 不一致")
+                binding = bundle.get("capability_binding")
+                if not isinstance(binding, Mapping):
+                    raise ResearchPackageError("规则 bundle 未绑定当前分钟能力 manifest")
+                try:
+                    require_current_minute_capability_binding(
+                        consumer_id=binding.get("consumer_id"),
+                        manifest_hash=binding.get("minute_capability_manifest_hash"),
+                        contract_version=binding.get("contract_version"),
+                        binding_hash=binding.get("binding_hash"),
+                    )
+                except ValueError as exc:
+                    raise ResearchPackageError("规则 bundle 未绑定当前分钟能力 manifest") from exc
+                if binding.get("consumer_id") != "domain.minute.market_rule_snapshots":
+                    raise ResearchPackageError("分钟规则 consumer 不一致")
+                instruments = bundle.get("instruments")
+                rules = bundle.get("rules")
+                if not isinstance(instruments, list) or not isinstance(rules, list) or any(
+                    not isinstance(item, Mapping) for item in (*instruments, *rules)
+                ):
+                    raise ResearchPackageError("分钟显式规则 instrument/rules schema 无效")
+                manifest = load_minute_capability_manifest()
+                if {item.get("instrument_id") for item in instruments} != {
+                    item.instrument.instrument_id for item in manifest.coverages
+                }:
+                    raise ResearchPackageError("规则 instrument 未完整覆盖平台分钟能力")
+                for coverage in manifest.coverages:
+                    if {item.get("rule_id") for item in rules
+                        if item.get("instrument_id") == coverage.instrument.instrument_id
+                    } != set(coverage.required_rule_ids):
+                        raise ResearchPackageError("规则矩阵缺少能力 manifest 声明的覆盖")
         if node.operator_id in {"research.features.intraday", "research.signals.intraday"}:
             ancestors = [binding.source_node_id for binding in node.inputs]
             visited: set[str] = set()
@@ -698,3 +912,75 @@ __all__ = [
     "OperatorGraphPlan",
     "compile_operator_graph_package",
 ]
+
+
+def _validate_shared_futures_parameters(node, *, request_ids=None) -> None:
+    """冻结方向账户声明及市场字段绑定，金融规则由正式领域校验。"""
+    from research_pipeline.domain.shared_futures import validate_shared_futures_spec
+    from research_pipeline.platform.operator_contracts import _plain_json
+    from research_pipeline.platform.shared_futures_contracts import SHARED_FUTURES_OPERATOR_FREQUENCIES
+
+    parameters = node.parameters
+    frequency = SHARED_FUTURES_OPERATOR_FREQUENCIES.get(node.operator_id)
+    if frequency is None:
+        raise ResearchPackageError("共享期货算子身份无效")
+    try:
+        spec = validate_shared_futures_spec(_plain_json(parameters.get("spec")))
+    except Exception as exc:
+        raise ResearchPackageError(f"共享期货 spec 无效: {exc}") from exc
+    if spec["frequency"] != frequency:
+        raise ResearchPackageError("共享期货算子与 spec.frequency 不一致")
+    request_id = parameters.get("market_request_id")
+    if not isinstance(request_id, str) or not request_id or (request_ids is not None and request_id not in request_ids):
+        raise ResearchPackageError("共享期货 market_request_id 必须绑定已声明请求")
+    bindings = parameters.get("event_field_bindings")
+    required = {"kind", "instrument_id", "event_time", "available_at", "source_sequence", "trading_date", "source_ref", "price_units", "capacity", "bar_start", "completed"}
+    allowed = required | {"limit_up_units", "limit_down_units"}
+    if (not isinstance(bindings, Mapping) or required - set(bindings) or set(bindings) - allowed
+            or any(not isinstance(value, str) or not value for value in bindings.values())):
+        raise ResearchPackageError("共享期货 event_field_bindings 缺少正式事件字段或含未知字段")
+    limit = parameters.get("max_event_rows")
+    if type(limit) is not int or limit <= 0:
+        raise ResearchPackageError("共享期货 max_event_rows 必须是正整数")
+
+
+def _validate_shared_futures_query_bindings(recipe, queries, *, fixed_clock) -> None:
+    """只让正式请求的公开列进入事件，并限制到冻结研究时钟。"""
+    from research_pipeline.domain.shared_futures import aware_time
+    from research_pipeline.platform.operator_contracts import _plain_json
+    from research_pipeline.platform.shared_futures_contracts import SHARED_FUTURES_OPERATOR_FREQUENCIES
+
+    clock = aware_time(fixed_clock, "fixed_clock")
+    for node in recipe.nodes:
+        if node.operator_id not in SHARED_FUTURES_OPERATOR_FREQUENCIES:
+            continue
+        query = queries[node.parameters["market_request_id"]]
+        if str(getattr(query.purpose, "value", query.purpose)) != "feature":
+            raise ResearchPackageError("共享期货市场请求必须是 feature，不能消费 AUDIT 或未来标签")
+        if not set(node.parameters["event_field_bindings"].values()) <= set(query.field_ids):
+            raise ResearchPackageError("共享期货事件字段未被 QueryIR 显式请求")
+        spec = _plain_json(node.parameters["spec"])
+        for section in ("instruments", "rules", "sessions", "commands", "targets", "roll_plans"):
+            for row in spec[section]:
+                if aware_time(row["available_at"], "available_at") > clock:
+                    raise ResearchPackageError("共享期货声明来源晚于固定研究时钟")
+                if "event_time" in row and aware_time(row["event_time"], "event_time") > clock:
+                    raise ResearchPackageError("共享期货决策晚于固定研究时钟")
+
+
+def _validate_shared_futures_result_closure(recipe, result_spec) -> None:
+    """共享账户必须封存完整十表，不能使用旧净仓字段替代方向桶。"""
+    from research_pipeline.platform.shared_futures_contracts import (
+        SHARED_FUTURES_ARTIFACT_TYPE, SHARED_FUTURES_OPERATOR_FREQUENCIES,
+        shared_futures_result_tables,
+    )
+
+    for node in recipe.nodes:
+        if node.operator_id not in SHARED_FUTURES_OPERATOR_FREQUENCIES:
+            continue
+        expected = {(item["schema_id"], item["path_prefix"]) for item in shared_futures_result_tables(node.node_id)}
+        selected = [table for table in result_spec.tables if table.source_node_id == node.node_id]
+        actual = {(table.schema_id, table.path_prefix) for table in selected
+                  if table.source_port == "simulation" and table.artifact_type == SHARED_FUTURES_ARTIFACT_TYPE}
+        if actual != expected or len(selected) != len(expected):
+            raise ResearchPackageError("共享期货 ResultSpec 必须按新版 schema 和路径完整封存九表及 context")

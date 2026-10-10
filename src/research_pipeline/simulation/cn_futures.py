@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from research_pipeline.domain import Instrument, require_integer_quantity
+from research_pipeline.domain import Instrument
 from research_pipeline.domain.time import require_aware_datetime
 
+from .costs import FuturesFeePolicy
 from .events import FinancialEvent
 from .ledger import FuturesLedgerState, reduce_futures
 from .margin import MarginPolicy, deterministic_liquidation_order
@@ -26,26 +27,6 @@ class ContinuousMapping:
         if not self.continuous_code.strip() or self.actual_instrument.continuous_signal_only:
             raise SimulationContractError("mapping 必须指向真实期货合约")
         require_aware_datetime(self.source_available_time, "source_available_time")
-
-
-@dataclass(frozen=True)
-class FuturesFeePolicy:
-    policy_id: str
-    open_units: int
-    close_today_units: int
-    close_yesterday_units: int
-
-    def __post_init__(self) -> None:
-        if not self.policy_id.strip() or min(self.open_units, self.close_today_units, self.close_yesterday_units) < 0:
-            raise SimulationContractError("期货费用 policy 无效")
-
-    def fee(self, *, offset: str, contracts: int) -> int:
-        quantity = require_integer_quantity(abs(contracts), "contracts")
-        rates = {"open": self.open_units, "close_today": self.close_today_units, "close_yesterday": self.close_yesterday_units}
-        try:
-            return quantity * rates[offset]
-        except KeyError as exc:
-            raise SimulationContractError("offset 必须是 open/close_today/close_yesterday") from exc
 
 
 @dataclass(frozen=True)

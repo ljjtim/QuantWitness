@@ -1,0 +1,626 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "QuantWitness 总体架构",
+    "output": "research-pipeline-architecture.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "all",
+      "entries": {
+        "backend": {
+          "label": "框架核心 Framework Core"
+        },
+        "messagebus": {
+          "label": "适配器 Adapter"
+        },
+        "external": {
+          "label": "外部系统 External"
+        },
+        "security": {
+          "label": "市场口径 Research-specific"
+        }
+      }
+    },
+    "subtitle": "箭头表示调用或依赖：调用方 → 被调用方",
+    "animation": "trace",
+    "visual_preset": "classic"
+  },
+  "components": [
+    {
+      "id": "research_mod",
+      "type": "backend",
+      "label": "研究引擎 research",
+      "sublabel": "modeling · statistics",
+      "pos": [
+        650,
+        480
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "ext_ml",
+      "type": "external",
+      "label": "ML 后端",
+      "sublabel": "Qlib · PyTorch · XGBoost",
+      "pos": [
+        970,
+        480
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "proposer",
+      "type": "external",
+      "label": "RD-Agent 集成",
+      "sublabel": "LLM 提案 · 研究包变体",
+      "pos": [
+        970,
+        100
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "catalog_defs",
+      "type": "security",
+      "label": "Catalog 声明",
+      "sublabel": "显式 YAML · 物理绑定",
+      "pos": [
+        70,
+        1490
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "cn_rules",
+      "type": "security",
+      "label": "中国市场口径",
+      "sublabel": "cn_stock · cn_etf · cn_future",
+      "pos": [
+        360,
+        1490
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "CLI / Workspace",
+      "sublabel": "命令编排 · 工作区执行",
+      "pos": [
+        70,
+        100
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "packages",
+      "type": "backend",
+      "label": "ResearchPackage",
+      "sublabel": "lint · 声明编译",
+      "pos": [
+        360,
+        100
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "runtime_ctx",
+      "type": "backend",
+      "label": "运行上下文",
+      "sublabel": "RuntimeNodeContext",
+      "pos": [
+        70,
+        290
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "engine_adapters",
+      "type": "messagebus",
+      "label": "运行时适配器",
+      "sublabel": "runtime/adapters/*",
+      "pos": [
+        360,
+        480
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "运行时 runtime",
+      "sublabel": "RuntimeExecutionService",
+      "pos": [
+        360,
+        290
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "simulation",
+      "type": "backend",
+      "label": "回测仿真 simulation",
+      "sublabel": "event_loop · ledger · cost",
+      "pos": [
+        360,
+        670
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "data_plane",
+      "type": "backend",
+      "label": "数据平面 data_plane",
+      "sublabel": "admit_query · 列式物化",
+      "pos": [
+        70,
+        670
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "extensions",
+      "type": "messagebus",
+      "label": "项目扩展 extensions",
+      "sublabel": "受控 bundle · 依赖锁",
+      "pos": [
+        650,
+        290
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "domain",
+      "type": "backend",
+      "label": "领域合同 domain",
+      "sublabel": "session_calendar · rules",
+      "pos": [
+        650,
+        670
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "catalog",
+      "type": "backend",
+      "label": "目录与 PIT catalog",
+      "sublabel": "compile_catalog · 漂移证明",
+      "pos": [
+        650,
+        100
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "results",
+      "type": "backend",
+      "label": "结果 results",
+      "sublabel": "ResultAssembler · ResultStore",
+      "pos": [
+        360,
+        860
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "evidence",
+      "type": "backend",
+      "label": "证据与复核 evidence",
+      "sublabel": "verify_result · VerificationResult",
+      "pos": [
+        360,
+        1050
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "operations",
+      "type": "backend",
+      "label": "运维 operations",
+      "sublabel": "doctor · gc · 边界审计",
+      "pos": [
+        650,
+        1050
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "platform",
+      "type": "backend",
+      "label": "合同底座 platform",
+      "sublabel": "canonical · metric_contracts",
+      "pos": [
+        650,
+        860
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "providers",
+      "type": "messagebus",
+      "label": "数据适配器 providers",
+      "sublabel": "duckdb · parquet · sql",
+      "pos": [
+        70,
+        860
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "report",
+      "type": "backend",
+      "label": "报告与比较",
+      "sublabel": "report / compare",
+      "pos": [
+        70,
+        1050
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "ext_duckdb",
+      "type": "external",
+      "label": "DuckDB 数据库",
+      "sublabel": "read_only=True",
+      "pos": [
+        970,
+        860
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "ext_parquet",
+      "type": "external",
+      "label": "Parquet 文件",
+      "sublabel": "输入快照 · 列式工件",
+      "pos": [
+        970,
+        1240
+      ],
+      "size": [
+        200,
+        90
+      ]
+    },
+    {
+      "id": "application",
+      "type": "messagebus",
+      "label": "数据节点 application",
+      "sublabel": "grid_data · measurement",
+      "pos": [
+        70,
+        480
+      ],
+      "size": [
+        200,
+        90
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "框架核心 Framework Core",
+      "wraps": [
+        "research_mod",
+        "cli",
+        "packages",
+        "runtime_ctx",
+        "engine_adapters",
+        "runtime",
+        "simulation",
+        "data_plane",
+        "extensions",
+        "domain",
+        "catalog",
+        "results",
+        "evidence",
+        "operations",
+        "platform",
+        "providers",
+        "report",
+        "application"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "外部依赖与可选集成",
+      "wraps": [
+        "proposer",
+        "ext_ml",
+        "ext_duckdb",
+        "ext_parquet"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "市场声明与规则（框架可配置）",
+      "wraps": [
+        "catalog_defs",
+        "cn_rules"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "proposer-cli",
+      "from": "proposer",
+      "to": "cli",
+      "label": "Workspace 执行",
+      "variant": "dashed"
+    },
+    {
+      "id": "cli-packages",
+      "from": "cli",
+      "to": "packages",
+      "label": "lint / 编译",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cli-runtime",
+      "from": "cli",
+      "to": "runtime",
+      "label": "run / 恢复",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cli-results",
+      "from": "cli",
+      "to": "results",
+      "label": "CLI 封存 Result",
+      "variant": "dashed"
+    },
+    {
+      "id": "runtime-context",
+      "from": "runtime",
+      "to": "runtime_ctx",
+      "label": "构建上下文",
+      "variant": "dashed"
+    },
+    {
+      "id": "runtime-adapters",
+      "from": "runtime",
+      "to": "engine_adapters",
+      "label": "调度核心算子",
+      "variant": "emphasis"
+    },
+    {
+      "id": "runtime-extensions",
+      "from": "runtime",
+      "to": "extensions",
+      "label": "项目 Worker",
+      "variant": "dashed"
+    },
+    {
+      "id": "runtime-application",
+      "from": "runtime",
+      "to": "application",
+      "label": "调度数据节点",
+      "variant": "emphasis"
+    },
+    {
+      "id": "adapters-research",
+      "from": "engine_adapters",
+      "to": "research_mod",
+      "label": "研究 / 模型",
+      "variant": "emphasis"
+    },
+    {
+      "id": "adapters-simulation",
+      "from": "engine_adapters",
+      "to": "simulation",
+      "label": "金融仿真",
+      "variant": "emphasis"
+    },
+    {
+      "id": "application-plane",
+      "from": "application",
+      "to": "data_plane",
+      "label": "普通数据物化",
+      "variant": "emphasis"
+    },
+    {
+      "id": "plane-catalog",
+      "from": "data_plane",
+      "to": "catalog",
+      "label": "Lock / 漂移 / PIT",
+      "variant": "dashed"
+    },
+    {
+      "id": "plane-providers",
+      "from": "data_plane",
+      "to": "providers",
+      "label": "列式取数",
+      "variant": "emphasis"
+    },
+    {
+      "id": "providers-duckdb",
+      "from": "providers",
+      "to": "ext_duckdb",
+      "label": "只读源库",
+      "variant": "emphasis"
+    },
+    {
+      "id": "providers-parquet",
+      "from": "providers",
+      "to": "ext_parquet",
+      "label": "读取 Parquet",
+      "variant": "dashed"
+    },
+    {
+      "id": "catalog-duckdb",
+      "from": "catalog",
+      "to": "ext_duckdb",
+      "label": "只读漂移观测",
+      "variant": "dashed"
+    },
+    {
+      "id": "catalog-definitions",
+      "from": "catalog",
+      "to": "catalog_defs",
+      "label": "声明加载 / 编译",
+      "variant": "dashed"
+    },
+    {
+      "id": "research-ml",
+      "from": "research_mod",
+      "to": "ext_ml",
+      "label": "可选 ML 后端",
+      "variant": "dashed"
+    },
+    {
+      "id": "simulation-domain",
+      "from": "simulation",
+      "to": "domain",
+      "label": "金融合同",
+      "variant": "emphasis"
+    },
+    {
+      "id": "simulation-rules",
+      "from": "simulation",
+      "to": "cn_rules",
+      "label": "市场 / 时段规则",
+      "variant": "dashed"
+    },
+    {
+      "id": "results-parquet",
+      "from": "results",
+      "to": "ext_parquet",
+      "label": "封存结果文件",
+      "variant": "dashed"
+    },
+    {
+      "id": "evidence-results",
+      "from": "evidence",
+      "to": "results",
+      "label": "只读 Result",
+      "variant": "emphasis"
+    },
+    {
+      "id": "report-evidence",
+      "from": "report",
+      "to": "evidence",
+      "label": "读取验证结果",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "箭头与主链",
+      "items": [
+        "箭头统一表示调用或依赖；数据的流向见数据血缘图",
+        "ResearchPackage → lint → admit → 已准入计划 → run → Result → verify → VerificationResult → report",
+        "CLI 编排准入、运行与 Result finalize；RuntimeExecutionService 负责节点调度、资源与 checkpoint"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "框架核心与依赖边界",
+      "items": [
+        "核心模块目录：cli、application、packages、catalog、data_plane、runtime、research、simulation、results、evidence、platform、domain、operations、extensions",
+        "research 是框架内的算法层，研究算法不直接读取研究数据库",
+        "operations/framework_boundary.py 扫描核心源码；项目依赖锁由 extensions/governance.py 校验",
+        "application/grid_data.py 是 Runtime 登记的数据适配器；研究计划存储位于 cli/research_plan_store.py",
+        "platform 提供共享合同；图中保留主要依赖，不逐条展开共享 schema、日志和运维调用",
+        "Workspace 服务位于 workspace.py；报告编排位于 cli/commands/evidence_lifecycle.py，输出由 cli/report_output.py 负责。"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "数据与独立复核",
+      "items": [
+        "Catalog 从使用者提供的显式 YAML 编译 Lock；公开仓库不附带本机数据声明或物理绑定。",
+        "研究源库只读；providers 负责主取数，catalog/discovery 负责 schema 观测，data_plane/revision 与 factor_publication 负责来源与发布绑定",
+        "ResultAssembler / ResultStore 封存结果，Verifier 只读封存输入并另存 VerificationResult",
+        "金融 oracle 用内存 DuckDB 独立复算；模型与统计按各自验证合同复核，不回连研究库"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "适用范围",
+      "items": [
+        "图展示核心模块及可选 RD-Agent / ML 接入，不展开每个算子和项目 Worker",
+        "中国市场声明、交易时段与资产规则属于可配置口径；能力状态以 capabilities.json 和当前 Catalog Lock 为准",
+        "普通列式物化、分钟扫描和归档快照由各自数据入口接入同一 Typed DAG"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "RD-Agent 的位置与反馈边界",
+      "items": [
+        "RD-Agent 位于核心之外的研究提案层，通过 Workspace 进入正式研究主链。",
+        "公式复现沿用人确认的定义；探索只接收独立验证通过的开发指标，test/holdout 不进入反馈。",
+        "Qlib 位于计算层；运行完成、CLI 封存 Result 与独立验证分别判断成功状态。"
+      ]
+    }
+  ]
+}

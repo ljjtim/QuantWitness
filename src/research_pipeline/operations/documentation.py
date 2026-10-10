@@ -35,6 +35,10 @@ REQUIRED_DOCS = frozenset(
         "qlib-factor-baselines.md",
         "qlib-portfolio-risk.md",
         "project_resource_budgets.md",
+        "spot_account.md",
+        "explicit_orders.md",
+        "shared_futures.md",
+        "native_backtest_acceptance.md",
     }
 )
 

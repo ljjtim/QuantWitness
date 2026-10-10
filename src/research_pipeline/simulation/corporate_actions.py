@@ -1,4 +1,9 @@
-"""公司行为到真实现金和数量账本事件的编译器。"""
+"""公司行为到真实现金和数量账本事件的编译器。
+
+v2 分红及数量权益使用登记日收盘快照，到账事件仅记录股份交付事实；
+可卖日继续由权益结算转桶。退市清算扣除三个持仓桶并注销待可卖权益，
+清算到账前记应收现金。事件不提供行情替代价或市场成交。
+"""
 
 from __future__ import annotations
 
@@ -7,14 +12,63 @@ from datetime import date, datetime, time
 from decimal import Decimal, ROUND_HALF_UP
 from fractions import Fraction
 from math import gcd
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from research_pipeline.domain import CorporateAction, InstrumentKey
+from research_pipeline.domain.time import require_aware_datetime
 from research_pipeline.platform import typed_canonical_hash
 
 from .events import FinancialEvent
 from .orders import SimulationContractError
+
+if TYPE_CHECKING:
+    from .ledger import SpotLedgerState
+
+
+@dataclass(frozen=True)
+class CorporateActionRecordPosition:
+    """登记日收盘的持仓事实，独立于后续行动修订及当前持仓。"""
+
+    instrument_hash: str
+    record_time: datetime
+    quantity: int
+    source_ref: str
+
+    def __post_init__(self) -> None:
+        require_aware_datetime(self.record_time, "record_time")
+        local_time = self.record_time.astimezone(ZoneInfo("Asia/Shanghai"))
+        if len(self.instrument_hash) != 64 or type(self.quantity) is not int or self.quantity < 0:
+            raise SimulationContractError("登记持仓身份或数量无效")
+        if local_time.time() != time(15):
+            raise SimulationContractError("登记持仓必须来自登记日收盘时点")
+        if not isinstance(self.source_ref, str) or not self.source_ref.strip():
+            raise SimulationContractError("登记持仓必须有 source_ref")
+
+    @property
+    def record_date(self) -> date:
+        return self.record_time.astimezone(ZoneInfo("Asia/Shanghai")).date()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "instrument_hash": self.instrument_hash,
+            "record_time": self.record_time.isoformat(),
+            "quantity": self.quantity,
+            "source_ref": self.source_ref,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "CorporateActionRecordPosition":
+        if set(payload) != {"instrument_hash", "record_time", "quantity", "source_ref"}:
+            raise SimulationContractError("登记持仓载荷字段无效")
+        try:
+            record_time = datetime.fromisoformat(str(payload["record_time"]))
+        except ValueError as exc:
+            raise SimulationContractError("登记持仓日期无效") from exc
+        return cls(
+            str(payload["instrument_hash"]), record_time,
+            payload["quantity"], str(payload["source_ref"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -29,8 +83,17 @@ def compile_cn_stock_corporate_action_rows(
     *,
     trading_sessions: Sequence[date],
     allow_post_effective_visibility: bool = False,
+    contract_version: int = 1,
 ) -> tuple[CorporateAction, ...]:
-    """把聚宽 A 股实施方案行编译成带可见时间和到账日的通用事件。"""
+    """编译聚宽 A 股实施方案。
+
+    v2 的现金、红股、转增分别生成 :cash、:stock、:transfer 身份；
+    cash_arrival_date、stock_arrival_date、transfer_arrival_date 分别来自
+    a_bonus_date、dividend_arrival_date、a_transfer_arrival_date。
+    只要求非零分配对应的到账字段，股份可卖日使用 listing_date。
+    """
+    if contract_version not in {1, 2}:
+        raise SimulationContractError("公司行动编译 contract_version 不受支持")
     sessions = tuple(sorted(set(trading_sessions)))
     if not sessions:
         raise SimulationContractError("公司行动编译缺少交易日历")
@@ -75,7 +138,11 @@ def compile_cn_stock_corporate_action_rows(
                         ZoneInfo("Asia/Shanghai"),
                     ),
                 )
-        if available_time.date() > ex_date and not allow_post_effective_visibility:
+        visibility_deadline = datetime.combine(ex_date, time(9, 15), ZoneInfo("Asia/Shanghai"))
+        if (
+            available_time > visibility_deadline if contract_version == 2
+            else available_time.date() > ex_date
+        ) and not allow_post_effective_visibility:
             raise SimulationContractError("公司行动实施方案在除权日前不可见")
         if revision < 1:
             raise SimulationContractError("公司行动修订序号必须为正整数")
@@ -90,9 +157,11 @@ def compile_cn_stock_corporate_action_rows(
             "stock",
         ).instrument_hash
         if cash_per_ten:
-            cash_due = max(
-                ex_date,
-                _optional_date(row.get("cash_arrival_date")) or ex_date,
+            cash_due = (
+                _required_date(row.get("cash_arrival_date"), "cash_arrival_date")
+                if contract_version == 2 else max(
+                    ex_date, _optional_date(row.get("cash_arrival_date")) or ex_date,
+                )
             )
             per_share_microunits = _exact_scaled_integer(
                 cash_per_ten,
@@ -110,29 +179,32 @@ def compile_cn_stock_corporate_action_rows(
                 cash_due,
                 ex_date,
                 cash_per_share_microunits=per_share_microunits,
+                **_row_contract_fields(row, contract_version),
             ))
-        extra_shares = stock_per_ten + transfer_per_ten
-        if extra_shares:
-            extra_scaled = _exact_scaled_integer(
-                extra_shares,
-                10_000,
-                "share_per_ten",
+        if contract_version == 2:
+            # 红股和转增分别按登记数量确认，不能把不同来源与到账日合并。
+            share_distributions = (
+                ("stock", stock_per_ten, "stock_arrival_date"),
+                ("transfer", transfer_per_ten, "transfer_arrival_date"),
             )
+        else:
+            share_distributions = (("stock", stock_per_ten + transfer_per_ten, "stock_arrival_date"),)
+        for suffix, extra_shares, arrival_field in share_distributions:
+            if not extra_shares:
+                continue
+            extra_scaled = _exact_scaled_integer(extra_shares, 10_000, "share_per_ten")
             numerator, denominator = 100_000 + extra_scaled, 100_000
             divisor = gcd(numerator, denominator)
-            stock_due = max((
-                ex_date,
-                *(
-                    value
-                    for value in (
-                        _optional_date(row.get("stock_arrival_date")),
-                        _optional_date(row.get("listing_date")),
-                    )
-                    if value is not None
-                ),
-            ))
+            if contract_version == 2:
+                arrival = _required_date(row.get(arrival_field), arrival_field)
+                sellable = _required_date(row.get("listing_date"), "listing_date")
+                stock_due = arrival
+            else:
+                arrival = _optional_date(row.get("stock_arrival_date"))
+                sellable = _optional_date(row.get("listing_date"))
+                stock_due = max(ex_date, arrival or ex_date, sellable or ex_date)
             actions.append(CorporateAction(
-                f"{source_id}:stock",
+                f"{source_id}:{suffix}",
                 revision,
                 "stock_dividend",
                 instrument_hash,
@@ -143,6 +215,7 @@ def compile_cn_stock_corporate_action_rows(
                 ex_date,
                 ratio_numerator=numerator // divisor,
                 ratio_denominator=denominator // divisor,
+                **_row_contract_fields(row, contract_version, arrival=arrival, sellable=sellable),
             ))
     return tuple(sorted(actions, key=lambda item: (item.effective_date, item.action_id)))
 
@@ -153,8 +226,11 @@ def compile_cn_etf_corporate_action_rows(
     trading_sessions: Sequence[date],
     as_of: datetime,
     allow_post_effective_visibility: bool = False,
+    contract_version: int = 1,
 ) -> tuple[CorporateAction, ...]:
     """把基金分红实施记录编译为 ETF 现金应收或数量调整事件。"""
+    if contract_version not in {1, 2}:
+        raise SimulationContractError("公司行动编译 contract_version 不受支持")
     sessions = tuple(sorted(set(trading_sessions)))
     if not sessions:
         raise SimulationContractError("ETF 公司行动编译缺少交易日历")
@@ -201,7 +277,11 @@ def compile_cn_etf_corporate_action_rows(
             raise SimulationContractError("ETF 公司行动在 as_of 时尚不可见")
         record = _required_date(row.get("record_date"), "record_date")
         ex_date = _required_date(row.get("ex_date"), "ex_date")
-        if available_session > ex_date and not allow_post_effective_visibility:
+        visibility_deadline = datetime.combine(ex_date, time(9, 15), timezone)
+        if (
+            available_time > visibility_deadline if contract_version == 2
+            else available_session > ex_date
+        ) and not allow_post_effective_visibility:
             raise SimulationContractError("ETF 公司行动在除息日前不可见")
         if revision < 1:
             raise SimulationContractError("ETF 公司行动修订序号必须为正整数")
@@ -224,11 +304,12 @@ def compile_cn_etf_corporate_action_rows(
                 available_time,
                 record,
                 ex_date,
-                max(ex_date, pay_date),
+                pay_date if contract_version == 2 else max(ex_date, pay_date),
                 ex_date,
                 cash_per_share_microunits=_exact_scaled_integer(
                     cash_per_share, 1_000_000, "cash_per_share"
                 ),
+                **_row_contract_fields(row, contract_version),
             ))
         if split_ratio:
             ratio = Fraction(split_ratio)
@@ -245,6 +326,13 @@ def compile_cn_etf_corporate_action_rows(
                 ex_date,
                 ratio_numerator=ratio.numerator,
                 ratio_denominator=ratio.denominator,
+                **_row_contract_fields(
+                    row, contract_version,
+                    arrival=_required_date(row.get("shares_arrival_date"), "shares_arrival_date")
+                    if contract_version == 2 else None,
+                    sellable=_required_date(row.get("shares_sellable_date"), "shares_sellable_date")
+                    if contract_version == 2 else None,
+                ),
             ))
     return tuple(sorted(actions, key=lambda item: (item.effective_date, item.action_id)))
 
@@ -263,7 +351,16 @@ def compile_corporate_action(
     group_id: str,
     rule_hash: str,
     instruction: RightsExerciseInstruction | None = None,
+    record_position: CorporateActionRecordPosition | None = None,
+    position_buckets: Mapping[str, int] | None = None,
 ) -> tuple[FinancialEvent, ...]:
+    require_aware_datetime(effective_time, "effective_time")
+    if action.contract_version == 2:
+        return _compile_v2_corporate_action(
+            action, held_quantity=held_quantity, effective_time=effective_time,
+            group_id=group_id, rule_hash=rule_hash, instruction=instruction,
+            record_position=record_position, position_buckets=position_buckets,
+        )
     if action.announcement_available_time > effective_time:
         raise SimulationContractError("公司行为在落账时尚不可见")
     if held_quantity < 0:
@@ -291,8 +388,7 @@ def compile_corporate_action(
         cash_delta = -instruction.quantity * action.exercise_price_units
         sellable_delta = instruction.quantity
     elif action.kind == "delisting_cash":
-        cash_delta = held_quantity * action.cash_per_share_units
-        sellable_delta = -held_quantity
+        raise SimulationContractError("退市现金清算必须使用有清算来源的 v2 合同")
     elif action.kind == "code_change":
         return ()
     values = {
@@ -326,6 +422,211 @@ def compile_corporate_action(
         parent_id=action.action_id,
     )
     return (event,)
+
+
+
+def capture_corporate_action_record_positions(
+    state: "SpotLedgerState", *, record_time: datetime, source_ref: str,
+    instrument_hashes: Sequence[str] = (),
+) -> tuple[CorporateActionRecordPosition, ...]:
+    """收盘交易和结算完成后封存登记事实，显式标的还保留零持仓。"""
+    quantities = {key: 0 for key in instrument_hashes}
+    for lot in state.positions:
+        quantities[lot.instrument_hash] = quantities.get(lot.instrument_hash, 0) + (
+            lot.sellable + lot.unsettled + lot.frozen
+        )
+    return tuple(
+        CorporateActionRecordPosition(key, record_time, quantity, source_ref)
+        for key, quantity in sorted(quantities.items())
+    )
+
+
+def _row_contract_fields(
+    row: Mapping[str, object], contract_version: int,
+    *, arrival: date | None = None, sellable: date | None = None,
+) -> dict[str, object]:
+    if contract_version == 1:
+        return {}
+    source_ref = str(row.get("source_ref") or "").strip()
+    if not source_ref:
+        raise SimulationContractError("v2 公司行动源记录必须提供 source_ref")
+    return {
+        "contract_version": 2, "source_ref": source_ref,
+        "shares_arrival_date": arrival, "shares_sellable_date": sellable,
+    }
+
+
+def _record_quantity(
+    action: CorporateAction, record_position: CorporateActionRecordPosition | None,
+    effective_time: datetime,
+) -> int:
+    if record_position is None:
+        raise SimulationContractError("v2 公司行动缺少登记持仓，不能以生效时持仓代替")
+    if (
+        record_position.instrument_hash != action.instrument_hash
+        or record_position.record_date != action.record_date
+        or record_position.record_time > effective_time
+    ):
+        raise SimulationContractError("登记持仓标的、登记日或可见时点与公司行动不一致")
+    return record_position.quantity
+
+
+def _position_buckets(
+    held_quantity: int, position_buckets: Mapping[str, int] | None,
+) -> dict[str, int]:
+    if position_buckets is None or set(position_buckets) != {"sellable", "unsettled", "frozen"}:
+        raise SimulationContractError("数量转换或退市清算必须提供三个当前持仓桶")
+    result = dict(position_buckets)
+    if any(type(value) is not int or value < 0 for value in result.values()):
+        raise SimulationContractError("当前持仓桶必须是非负整数")
+    if sum(result.values()) != held_quantity:
+        raise SimulationContractError("当前持仓桶与 held_quantity 不一致")
+    return result
+
+
+def _cash_entitlement_units(action: CorporateAction, quantity: int) -> int:
+    if action.cash_per_share_microunits:
+        return int(
+            (Decimal(quantity * action.cash_per_share_microunits) / Decimal(10_000))
+            .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+    return quantity * action.cash_per_share_units
+
+
+def _compile_v2_corporate_action(
+    action: CorporateAction, *, held_quantity: int, effective_time: datetime,
+    group_id: str, rule_hash: str, instruction: RightsExerciseInstruction | None,
+    record_position: CorporateActionRecordPosition | None,
+    position_buckets: Mapping[str, int] | None,
+) -> tuple[FinancialEvent, ...]:
+    local_date = effective_time.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    if local_date != action.effective_date:
+        raise SimulationContractError("v2 公司行动落账日与生效日不一致")
+    if action.announcement_available_time > effective_time:
+        raise SimulationContractError("公司行为在落账时尚不可见")
+    if type(held_quantity) is not int or held_quantity < 0:
+        raise SimulationContractError("held_quantity 必须是非负整数")
+    if action.kind in {"rights", "code_change"}:
+        raise SimulationContractError("v2 配股或证券承接必须由专属指令与换股内核处理")
+    registered = (
+        held_quantity if action.kind == "delisting_cash"
+        else _record_quantity(action, record_position, effective_time)
+    )
+    values: dict[str, object] = {
+        "contract_version": 2, "action_hash": action.action_hash,
+        "action_kind": action.kind, "action_revision": action.revision,
+        "action_phase": "effective", "source_ref": action.source_ref,
+        "instrument_hash": action.instrument_hash,
+        "cash_delta_units": 0, "sellable_delta": 0, "unsettled_delta": 0,
+        "frozen_delta": 0, "registered_quantity": registered,
+        "record_date": action.record_date.isoformat(),
+        "ex_date": action.ex_date.isoformat(),
+        "pay_date": action.pay_date.isoformat(),
+    }
+    if record_position is not None and action.kind != "delisting_cash":
+        values["record_position"] = record_position.to_dict()
+    cash_amount = 0
+    entitlement_quantity = 0
+    if action.kind == "cash_dividend":
+        cash_amount = _cash_entitlement_units(action, registered)
+    elif action.kind == "delisting_cash":
+        if action.settlement_available_time > effective_time:
+            raise SimulationContractError("退市清算价格在落账时尚不可见")
+        buckets = _position_buckets(held_quantity, position_buckets)
+        for key, quantity in buckets.items():
+            values[f"{key}_delta"] = -quantity
+        values["cancel_position_entitlements"] = True
+        values["trading_termination_date"] = action.trading_termination_date.isoformat()
+        values["settlement_available_time"] = action.settlement_available_time.isoformat()
+        cash_amount = _cash_entitlement_units(action, held_quantity)
+    elif action.kind == "stock_dividend":
+        entitlement_quantity = (
+            registered * action.ratio_numerator // action.ratio_denominator - registered
+        )
+    elif action.kind in {"split", "reverse_split"}:
+        buckets = _position_buckets(held_quantity, position_buckets)
+        if registered != held_quantity:
+            raise SimulationContractError("拆并股当前数量与登记持仓不一致，需先解释中间数量变动")
+        target = registered * action.ratio_numerator // action.ratio_denominator
+        if target >= held_quantity:
+            entitlement_quantity = target - held_quantity
+        elif action.shares_sellable_date > local_date:
+            for key, quantity in buckets.items():
+                values[f"{key}_delta"] = -quantity
+            entitlement_quantity = target
+        else:
+            converted = {
+                key: quantity * action.ratio_numerator // action.ratio_denominator
+                for key, quantity in buckets.items()
+            }
+            remaining = target - sum(converted.values())
+            allocation = sorted(
+                buckets,
+                key=lambda key: (-(buckets[key] * action.ratio_numerator % action.ratio_denominator), key),
+            )
+            for key in allocation[:remaining]:
+                converted[key] += 1
+            for key, quantity in converted.items():
+                values[f"{key}_delta"] = quantity - buckets[key]
+    if cash_amount:
+        if action.pay_date > local_date:
+            values.update({
+                "cash_receivable_units": cash_amount,
+                "cash_due_date": action.pay_date.isoformat(),
+                "receivable_id": f"cash:{action.action_hash}",
+            })
+        else:
+            values["cash_delta_units"] = cash_amount
+    if action.shares_arrival_date is not None:
+        values["shares_arrival_date"] = action.shares_arrival_date.isoformat()
+        values["shares_sellable_date"] = action.shares_sellable_date.isoformat()
+    if entitlement_quantity:
+        if action.shares_sellable_date > local_date:
+            values.update({
+                "position_entitlement_quantity": entitlement_quantity,
+                "position_due_date": action.shares_sellable_date.isoformat(),
+                "entitlement_id": f"position:{action.action_hash}",
+            })
+        else:
+            values["sellable_delta"] = int(values["sellable_delta"]) + entitlement_quantity
+    return (FinancialEvent(
+        f"corporate:{action.action_hash}", "corporate_action", effective_time,
+        local_date.isoformat(), group_id, rule_hash, tuple(sorted(values.items())),
+        parent_id=action.action_id,
+    ),)
+
+
+def compile_corporate_action_share_arrival(
+    action: CorporateAction, *, record_position: CorporateActionRecordPosition,
+    effective_time: datetime, group_id: str, rule_hash: str,
+) -> tuple[FinancialEvent, ...]:
+    """登记股份到账事实；除权时已确认经济权益，到账不再增加数量或估值。"""
+    require_aware_datetime(effective_time, "effective_time")
+    local_date = effective_time.astimezone(ZoneInfo("Asia/Shanghai")).date()
+    if action.contract_version != 2 or action.shares_arrival_date != local_date:
+        raise SimulationContractError("股份到账事件必须匹配 v2 股份到账日")
+    if action.announcement_available_time > effective_time:
+        raise SimulationContractError("股份到账行动在当时尚不可见")
+    registered = _record_quantity(action, record_position, effective_time)
+    quantity = registered * action.ratio_numerator // action.ratio_denominator
+    if action.kind == "stock_dividend" or action.ratio_numerator >= action.ratio_denominator:
+        quantity -= registered
+    values = {
+        "contract_version": 2, "action_hash": action.action_hash,
+        "action_kind": action.kind, "action_revision": action.revision,
+        "action_phase": "shares_arrival", "source_ref": action.source_ref,
+        "instrument_hash": action.instrument_hash, "arrived_quantity": quantity,
+        "shares_arrival_date": action.shares_arrival_date.isoformat(),
+        "shares_sellable_date": action.shares_sellable_date.isoformat(),
+        "record_position": record_position.to_dict(),
+        "cash_delta_units": 0, "sellable_delta": 0, "unsettled_delta": 0,
+        "frozen_delta": 0,
+    }
+    return (FinancialEvent(
+        f"corporate:{action.action_hash}:shares-arrival", "corporate_action",
+        effective_time, local_date.isoformat(), group_id, rule_hash,
+        tuple(sorted(values.items())), parent_id=action.action_id,
+    ),)
 
 
 def _nonnegative_decimal(value: object, field: str) -> Decimal:

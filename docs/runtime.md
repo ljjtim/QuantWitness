@@ -1,4 +1,10 @@
-# Runtime 与恢复
+# 运行、中断与恢复
+
+长时间研究不应因为一次中断就全部重跑。框架把研究分成有依赖顺序的步骤，完成一步就保存可核验的检查点。
+
+进程意外中断时先用 inspect 查看，再按建议 resume；如果某个节点失败并允许重试，用 retry-node。恢复会确认输入与实现是否匹配，不能用旧结果冒充新研究。
+
+## 参数与行为说明
 
 Runtime 只执行已经准入的 typed operator DAG。调用方不能传入 callable、动态模块或另一套 action dispatcher。
 
@@ -7,6 +13,8 @@ Runtime 只执行已经准入的 typed operator DAG。调用方不能传入 call
 项目扩展在可信本地代码前提下使用独立 worker。框架保留正式输入输出路径、内容完整性、超时和进程树清理，不用全局文件/导入 monkeypatch 或 audit hook 伪装安全沙箱。正常临时文件和替换操作可用；staging 外任意副作用由可信代码负责。受控 junction 和 hardlink 不因链接形态拒绝，正式路径仍按解析后的真实位置校验。
 
 ExternalArtifact提交时，staging内部的链接项会先复制为普通内容，再原子移动，避免绝对junction因目录改名失效；hardlink保持原有内容校验，不重复复制。越出工件根或形成目录循环仍拒绝。随机发布事务令牌只用于 staging 与原子提交，不参与内容身份；相同正式文件、schema、行数、名称和类型在不同目录、进程或调度方式下生成相同 ArtifactRef。耗时、RSS、scratch 和进程数属于运行资源观测，不写入正式数据工件，也不改变下游节点、checkpoint 或 Result 身份。
+
+项目算子bundle和ExternalArtifact的同盘目录发布在Windows遇到暂时拒绝访问或共享冲突时，最多重试5次，总等待0.31秒。每次仍使用原子重命名；目标已经存在、源目录消失或其他错误立即失败，持续占用则保留原异常。该处理不改变工件内容身份、恢复校验或已封存结果。
 
 ## 不可变身份
 
@@ -29,6 +37,8 @@ ExternalArtifact提交时，staging内部的链接项会先复制为普通内容
 `run --reuse-failed-run-root <失败run>` 用于修正 ResultSpec 等不改变计算 DAG 的计划后继续执行。来源必须是失败终态；新旧 DAG、节点身份环境、clock 和 seed 必须完全一致。Runtime 只导入事件状态为成功的 checkpoint，并重新验证 checkpoint 内容、typed 输出和 ExternalArtifact；首个未成功节点及其下游在新 run 中重新执行。该参数不能与 `--reuse-run-root` 或 `rerun-from` 混用，也不会放宽普通跨运行缓存的 `pure/cacheable` 合同。
 
 失败来源也可配合重复的 `--require-reused-node <节点>` 使用。此时允许修改其余 DAG，但指定节点及其全部上游必须在原事件链中成功，且局部节点合同、当前输入、实现、definition、cache profile、clock、seed、checkpoint、typed 输出和 ExternalArtifact 全部通过预检。环境兼容性仍使用各节点原有画像，`byte_exact` 不降级。全部指定节点导入后才进入 Runtime；缺少任何一个即拒绝整次运行，不回退执行。目标 `recovery-plan.json` 记录原 run、每个来源 checkpoint 和目标 run，来源记录保持只读。`resume` 与 `retry-node` 从冻结 invocation 恢复同一来源和强制节点列表，并重新完成复验。
+
+日频期货的 `research-futures-daily-context-v1` 随规范结果封存初始资金、时序政策、成交、结算、规则与来源行情；独立金融验证使用 `result-bundle-financial-oracle-v9`。分钟上下文为 `research-minute-financial-context-v6`，execution_bars 按来源交易会话分区保存全部已观察事实，`corporate_action_context` 封存完整 v2 公司行动、登记持仓及权益事件。这些源码和证据合同参与定义身份，旧 checkpoint 不跨身份复用；历史 Result 不改写，缺少新合同必需事实的结果不能按新验证范围宣称通过。
 
 ## 执行记录
 
@@ -75,6 +85,14 @@ child ExternalArtifactStore。目标节点及后继只消费这些导入工件�
 验证直接拒绝。rerun 后代继续使用最初运行的持久 holdout 账本位置；已经打开、失败消耗或退役的
 holdout 不会因为 child 输出目录变化而重新获得读取资格。根锚点作为 invocation 的不可变字段逐代
 继承并核对；父 invocation 缺失、血缘循环或任一层锚点冲突时，在 Runtime 节点启动前拒绝。
+
+## 分钟规则、权益与金融事实交接
+
+分钟仿真从准入计划读取显式 JSON `parameters.rule_bundle` 和 `rule_bundle_hash`，复核完整规则载荷、内容身份及当前平台覆盖；未提供时使用随包参考规则，缺少必需事实仍拒绝。更改规则或权益输入后须重新准入，恢复不能替换冻结载荷。
+
+复权快照生产节点保留完整 v2 `financial_corporate_actions`，与研究用 PIT 复权事实一起沿调整后行情、Feature、Signal、Target 传递。仿真只从目标工件取得实际金融行动，按可见修订、登记持仓及生效／到账／可卖时点推进唯一账本；股票和 ETF 分别保持 `price_scale=2`、`price_scale=3`。v6 金融上下文封存目标中的完整行动及实际执行证据，由独立 v9 oracle 对齐并重算。
+
+`simulation_succeeded` 输出携带六表 manifest、结果与账本身份、TCA metadata 及金融上下文身份。分钟 validity 从这些实际输出生成 `minute-simulation-facts-v3`，不以运行状态代替验证；`verifier.minute-financial.v4` 必须与正式 Result 金融 oracle 的 `bar_tca_expectations` 一致。缺少独立 oracle 时，正式金融门禁不能通过。已封存 v2 仿真载荷仍按原合同读取。
 
 ## 恢复选择
 
@@ -217,3 +235,15 @@ Package MetricContract 实际选择的项目指标；其余定义保留在 Verif
 聚合方式。这些字段进入定义摘要；公式实现仍由独立 Verifier 从正式成员表重算，字符串元数据
 不冒充公式证明。历史 v2 Result 继续只读验证和消费，但不自动补写口径。
 项目算子默认只能在同一个 run 内恢复。薄声明只有显式写入 `reuse_scope: cross_run`，并同时满足确定性或固定 seed、`artifact_write_scope: output_only` 和完整 bundle 身份时，才会编译为跨运行可复用节点。该声明也承诺正式输出不依赖 project/run/node/attempt 等易变 ID；公共 Runtime 不按项目名放行。
+
+内建低内存节点默认采用 1 GiB 内存预算，原有较高档位保持；项目显式预算与运行容量仍由调用方声明。节点有效预算继续受节点声明和资源租约共同约束，超限仍失败。具体档位及独立复核范围见[资源预算](project_resource_budgets.md)。
+
+显式订单通过原有准入与节点提交链执行，命令流、执行模式和实现闭包共同参与身份。分钟显式上下文为 v7，日频现金为 `research-daily-cash-financial-context-v2`，日频期货为 `research-futures-daily-context-v3`；独立金融 oracle v9 与分钟金融 verifier v4 消费对应合同。账户预占和订单状态随本次节点的完整金融事实封存，恢复仍遵守同一不可变计划与 checkpoint。
+
+## 原生回测验收范围
+
+真实ETF融资和现金分红／资金流场景在当前执行身份下完成金融checkpoint后的故障恢复，要求复用已提交金融节点；导出Result重新独立验证，并禁止离线报告读取来源Result。证据范围与资源声明见[真实覆盖与验收](native_backtest_acceptance.md)。旧计划和历史证据继续保留原身份，不因阶段名称变化自动升级。
+
+### 分区工件跨运行复制
+
+恢复导入外部工件时保留已封存文件的修改时间与内容。分钟分区身份包含`mtime_ns`，导入后仍按原分区身份复验，不重写分区引用或放宽漂移检查。原工件保持只读，ArtifactRef不因复制改变。

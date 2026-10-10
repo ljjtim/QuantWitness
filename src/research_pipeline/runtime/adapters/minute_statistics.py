@@ -207,7 +207,9 @@ def execute_research_validity_minute_v1(
     simulation = _input_external_payload(context, "simulation")
     statistics = _input_external_payload(context, "statistics")
     statistics_root = _input_external_root(context, "statistics")
-    data_bundle = _input_merged_data_bundle(context, "data", "minute_1m")
+    data_bundle = _input_merged_data_bundle(
+        context, "data", "minute_1m", "decision_minute_1m",
+    )
     facts = build_minute_intraday_validity_facts(
         admitted_plans=_input_admitted_plans(environment, data_bundle),
         data_bundle=data_bundle,

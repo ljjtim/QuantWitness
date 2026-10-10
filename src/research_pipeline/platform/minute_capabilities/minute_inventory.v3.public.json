@@ -1,0 +1,195 @@
+{
+  "schema_version": "minute-inventory-public-projection-v1",
+  "source_inventory_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9",
+  "inventory": {
+    "source_stat_unchanged": true,
+    "schema_version": "minute-reference-inventory-v4",
+    "observed_at": "2026-10-10",
+    "previous_inventory": "00676ae8b86313d77326baa80d71a1fe0c6aee467b1b5f24acefd1b77dc77d8b",
+    "database_read_only": true,
+    "observations": [
+      {
+        "code": "511010.XSHG",
+        "rows": 960,
+        "start": "2024-01-02 09:31:00",
+        "end": "2024-01-05 15:00:00",
+        "natural_day_counts": {
+          "2024-01-02": 240,
+          "2024-01-03": 240,
+          "2024-01-04": 240,
+          "2024-01-05": 240
+        },
+        "nulls": {
+          "code": 0,
+          "dt": 0,
+          "open": 0,
+          "close": 0,
+          "high": 0,
+          "low": 0,
+          "volume": 0,
+          "money": 0,
+          "avg": 0
+        }
+      },
+      {
+        "code": "600000.XSHG",
+        "rows": 960,
+        "start": "2024-01-02 09:31:00",
+        "end": "2024-01-05 15:00:00",
+        "natural_day_counts": {
+          "2024-01-02": 240,
+          "2024-01-03": 240,
+          "2024-01-04": 240,
+          "2024-01-05": 240
+        },
+        "nulls": {
+          "code": 0,
+          "dt": 0,
+          "open": 0,
+          "close": 0,
+          "high": 0,
+          "low": 0,
+          "volume": 0,
+          "money": 0,
+          "avg": 0
+        }
+      },
+      {
+        "code": "300015.XSHE",
+        "rows": 960,
+        "start": "2024-01-02 09:31:00",
+        "end": "2024-01-05 15:00:00",
+        "natural_day_counts": {
+          "2024-01-02": 240,
+          "2024-01-03": 240,
+          "2024-01-04": 240,
+          "2024-01-05": 240
+        },
+        "nulls": {
+          "code": 0,
+          "dt": 0,
+          "open": 0,
+          "close": 0,
+          "high": 0,
+          "low": 0,
+          "volume": 0,
+          "money": 0,
+          "avg": 0
+        }
+      },
+      {
+        "code": "688981.XSHG",
+        "rows": 960,
+        "start": "2024-01-02 09:31:00",
+        "end": "2024-01-05 15:00:00",
+        "natural_day_counts": {
+          "2024-01-02": 240,
+          "2024-01-03": 240,
+          "2024-01-04": 240,
+          "2024-01-05": 240
+        },
+        "nulls": {
+          "code": 0,
+          "dt": 0,
+          "open": 0,
+          "close": 0,
+          "high": 0,
+          "low": 0,
+          "volume": 0,
+          "money": 0,
+          "avg": 0
+        }
+      },
+      {
+        "code": "AG2412.XSGE",
+        "rows": 1110,
+        "start": "2024-01-02 21:01:00",
+        "end": "2024-01-04 15:00:00",
+        "natural_day_counts": {
+          "2024-01-02": 179,
+          "2024-01-03": 555,
+          "2024-01-04": 376
+        },
+        "nulls": {
+          "code": 0,
+          "dt": 0,
+          "open": 0,
+          "close": 0,
+          "high": 0,
+          "low": 0,
+          "volume": 0,
+          "money": 0,
+          "avg": 1110,
+          "open_interest": 0
+        }
+      },
+      {
+        "code": "IF2401.CCFX",
+        "rows": 480,
+        "start": "2024-01-03 09:31:00",
+        "end": "2024-01-04 15:00:00",
+        "natural_day_counts": {
+          "2024-01-03": 240,
+          "2024-01-04": 240
+        },
+        "nulls": {
+          "code": 0,
+          "dt": 0,
+          "open": 0,
+          "close": 0,
+          "high": 0,
+          "low": 0,
+          "volume": 0,
+          "money": 0,
+          "avg": 480,
+          "open_interest": 0
+        }
+      },
+      {
+        "code": "T2403.CCFX",
+        "rows": 510,
+        "start": "2024-01-03 09:31:00",
+        "end": "2024-01-04 15:15:00",
+        "natural_day_counts": {
+          "2024-01-03": 255,
+          "2024-01-04": 255
+        },
+        "nulls": {
+          "code": 0,
+          "dt": 0,
+          "open": 0,
+          "close": 0,
+          "high": 0,
+          "low": 0,
+          "volume": 0,
+          "money": 0,
+          "avg": 510,
+          "open_interest": 0
+        }
+      },
+      {
+        "code": "300784.XSHE",
+        "rows": 240,
+        "start": "2024-06-07 09:31:00",
+        "end": "2024-06-07 15:00:00",
+        "natural_day_counts": {
+          "2024-06-07": 240
+        },
+        "nulls": {
+          "code": 0,
+          "dt": 0,
+          "open": 0,
+          "close": 0,
+          "high": 0,
+          "low": 0,
+          "volume": 0,
+          "money": 0,
+          "avg": 0
+        },
+        "database_read_only": true,
+        "frozen_slice_matches_query_facts": true,
+        "completed_bar_grid": "09:31—11:30、13:01—15:00"
+      }
+    ]
+  }
+}

@@ -1,0 +1,264 @@
+{
+  "schema_version": 3,
+  "diagram_type": "overview",
+  "title": "总体概览：从研究想法，到可验证结果",
+  "question": "RD-Agent 提出候选；QuantWitness 负责按约定执行、保留证据并独立复核。",
+  "width": 1120,
+  "height": 690,
+  "nodes": [
+    {
+      "id": "human",
+      "label": "你：问题与研究约定",
+      "sub": "确认公式 · 数据范围 · 预算",
+      "x": 55,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "人确认公式含义、窗口、可用时点、研究范围与预算。AI 草稿不能代替人的确认。",
+      "source": "integrations/rdagent/src/quantwitness_rdagent/formula_spec.py"
+    },
+    {
+      "id": "rd",
+      "label": "AI 研究助手 · RD-Agent",
+      "sub": "提取定义 · 提案 · 代码与反思",
+      "x": 430,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "ai",
+      "detail": "可选集成，位于框架核心之外。公式复现固定定义；探索模式仅使用通过验证的开发指标，test/holdout 不进入反馈。",
+      "source": "integrations/rdagent/src/quantwitness_rdagent/package_campaign.py"
+    },
+    {
+      "id": "data",
+      "label": "你的研究数据",
+      "sub": "只读数据库 / 已封存行情",
+      "x": 805,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "数据由使用者提供。归档快照与数据库是互斥来源；历史可见性必须有相应字段和来源说明。",
+      "source": "src/research_pipeline/data_plane/providers/duckdb.py"
+    },
+    {
+      "id": "entry",
+      "label": "研究入口 · Workspace",
+      "sub": "研究包检查 → 准入 → 执行",
+      "x": 55,
+      "y": 275,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "人或 RD-Agent 均通过正式入口执行研究包。ResearchPackage 描述数据请求、算法步骤、参数和结果要求。",
+      "source": "src/research_pipeline/cli/commands/workspace_flow.py"
+    },
+    {
+      "id": "pit",
+      "label": "数据与时点检查",
+      "sub": "数据目录 · 可见日期 · 来源变化",
+      "x": 430,
+      "y": 275,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "Catalog 描述字段及来源；准入绑定来源和时点。取数时复查来源，按决策时点限制数据。PIT 不证明供应商没有修订历史。",
+      "source": "src/research_pipeline/data_plane/admission.py"
+    },
+    {
+      "id": "compute",
+      "label": "计算与原生回测",
+      "sub": "Qlib 模型 · 原生交易与账户",
+      "x": 805,
+      "y": 275,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "Runtime 调度依赖图、资源与检查点。Qlib 是可选模型与表达式后端；原生仿真处理声明范围内的订单、费用、仓位和现金。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
+    },
+    {
+      "id": "result",
+      "label": "完整结果包 · Result",
+      "sub": "输入 · 配置 · 代码 · 数值表",
+      "x": 805,
+      "y": 495,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "Runtime 完成后由 CLI 调用 ResultAssembler 封存。保留正式输入、实现与结果引用；封存有独立成功状态。",
+      "source": "src/research_pipeline/cli/commands/research_run.py"
+    },
+    {
+      "id": "verify",
+      "label": "独立检查 · Verifier",
+      "sub": "重新核算已声明的研究关系",
+      "x": 430,
+      "y": 495,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "独立读取 Result 及其支持事实，产生 VerificationResult。项目公式验证器与金融 oracle 的检查范围需要显式声明。 开发探索只从验证通过的开发指标生成 AI 反馈，报告展示不是反馈的前置步骤。",
+      "source": "src/research_pipeline/evidence/verification_result.py"
+    },
+    {
+      "id": "report",
+      "label": "报告与实验比较",
+      "sub": "读结论，也能追到来源",
+      "x": 55,
+      "y": 495,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "报告读取结果包和验证结果。开发探索反馈仅从验证通过的开发指标中提取，不把执行成功当作验证通过。",
+      "source": "src/research_pipeline/cli/report_output.py"
+    }
+  ],
+  "edges": [
+    {
+      "from_id": "human",
+      "to_id": "rd",
+      "label": "确认约定",
+      "kind": "main"
+    },
+    {
+      "from_id": "human",
+      "to_id": "entry",
+      "label": "直接研究也可",
+      "kind": "main"
+    },
+    {
+      "from_id": "rd",
+      "to_id": "entry",
+      "label": "提交候选",
+      "kind": "optional",
+      "points": [
+        [
+          430,
+          100
+        ],
+        [
+          330,
+          100
+        ],
+        [
+          330,
+          247
+        ],
+        [
+          175,
+          247
+        ],
+        [
+          175,
+          275
+        ]
+      ],
+      "label_pos": [
+        272,
+        212
+      ]
+    },
+    {
+      "from_id": "entry",
+      "to_id": "pit",
+      "label": "检查数据",
+      "kind": "main"
+    },
+    {
+      "from_id": "data",
+      "to_id": "pit",
+      "label": "来源与历史信息",
+      "kind": "main",
+      "points": [
+        [
+          925,
+          145
+        ],
+        [
+          925,
+          207
+        ],
+        [
+          550,
+          207
+        ],
+        [
+          550,
+          275
+        ]
+      ],
+      "label_pos": [
+        775,
+        190
+      ]
+    },
+    {
+      "from_id": "pit",
+      "to_id": "compute",
+      "label": "准入后执行",
+      "kind": "main"
+    },
+    {
+      "from_id": "compute",
+      "to_id": "result",
+      "label": "封存",
+      "kind": "main"
+    },
+    {
+      "from_id": "result",
+      "to_id": "verify",
+      "label": "只读复核",
+      "kind": "main"
+    },
+    {
+      "from_id": "verify",
+      "to_id": "report",
+      "label": "结果 + 检查单",
+      "kind": "main"
+    },
+    {
+      "from_id": "verify",
+      "to_id": "rd",
+      "label": "仅验证通过的开发反馈",
+      "kind": "optional",
+      "points": [
+        [
+          550,
+          585
+        ],
+        [
+          550,
+          640
+        ],
+        [
+          25,
+          640
+        ],
+        [
+          25,
+          190
+        ],
+        [
+          550,
+          190
+        ],
+        [
+          550,
+          145
+        ]
+      ],
+      "label_pos": [
+        245,
+        175
+      ]
+    }
+  ],
+  "notes": [
+    "主线箭头表示工作交接；虚线表示可选 AI 路径，不是 Python import 图。",
+    "Qlib 位于计算层，负责已接入的模型、处理器和表达式；RD-Agent 位于提案层，两者职责不同。",
+    "市场规则按 cn_stock / cn_etf / cn_future 等实际资产类别、品种与日期声明；并非全市场自动覆盖。",
+    "采集与实盘下单在本图范围外。AI 不拥有数据写入、确认自身公式或绕过验证的权限。"
+  ]
+}

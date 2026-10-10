@@ -1,0 +1,253 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "一次研究任务的完整流程",
+    "output": "workflow-research-task.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "animation": "trace",
+    "visual_preset": "classic"
+  },
+  "lanes": [
+    {
+      "id": "author",
+      "label": "研究声明（package lint / admit）"
+    },
+    {
+      "id": "runtime",
+      "label": "执行、封存与独立验证（run → verify → report）"
+    },
+    {
+      "id": "exception",
+      "label": "例外与恢复",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p-plan",
+      "label": "准入与计划",
+      "fromCol": 2,
+      "toCol": 3
+    },
+    {
+      "id": "p-exec",
+      "label": "执行与证据",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "spec"
+    ],
+    "allowedTerminals": [
+      "holdout",
+      "retry_policy",
+      "report"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "spec",
+      "lane": "author",
+      "col": 0,
+      "type": "backend",
+      "label": "研究声明",
+      "sublabel": "ResearchPackage"
+    },
+    {
+      "id": "lint",
+      "lane": "author",
+      "col": 1,
+      "type": "security",
+      "label": "package lint",
+      "sublabel": "声明检查"
+    },
+    {
+      "id": "admit",
+      "lane": "author",
+      "col": 2,
+      "type": "security",
+      "label": "package admit",
+      "sublabel": "材料 / Catalog / PIT"
+    },
+    {
+      "id": "plan",
+      "lane": "author",
+      "col": 3,
+      "type": "backend",
+      "label": "不可变运行计划",
+      "sublabel": "OperatorGraphPlan"
+    },
+    {
+      "id": "execute",
+      "lane": "runtime",
+      "col": 2,
+      "type": "backend",
+      "label": "run 执行 DAG",
+      "sublabel": "调度 / 取数前复查"
+    },
+    {
+      "id": "report",
+      "lane": "runtime",
+      "col": 5,
+      "type": "backend",
+      "label": "report",
+      "sublabel": "报告与比较"
+    },
+    {
+      "id": "result",
+      "lane": "runtime",
+      "col": 3,
+      "type": "backend",
+      "label": "自包含 Result",
+      "sublabel": "CLI 封存 Result"
+    },
+    {
+      "id": "verify",
+      "lane": "runtime",
+      "col": 4,
+      "type": "security",
+      "label": "独立 verify",
+      "sublabel": "VerificationResult"
+    },
+    {
+      "id": "holdout",
+      "lane": "runtime",
+      "col": 0,
+      "type": "security",
+      "label": "holdout 账本",
+      "sublabel": "消费后不可回退"
+    },
+    {
+      "id": "node_failed",
+      "lane": "exception",
+      "col": 2,
+      "type": "security",
+      "label": "节点失败",
+      "sublabel": "run 转 paused 或 failed"
+    },
+    {
+      "id": "retry_policy",
+      "lane": "exception",
+      "col": 3,
+      "type": "security",
+      "label": "重试策略",
+      "sublabel": "max_attempts / 错误码"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-spec-lint",
+      "from": "spec",
+      "to": "lint",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-lint-admit",
+      "from": "lint",
+      "to": "admit",
+      "label": "检查通过",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-admit-plan",
+      "from": "admit",
+      "to": "plan",
+      "label": "发布计划",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-plan-execute",
+      "from": "plan",
+      "to": "execute",
+      "label": "已准入计划",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-execute-result",
+      "from": "execute",
+      "to": "result",
+      "label": "CLI 封存结果",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-execute-holdout",
+      "from": "execute",
+      "to": "holdout",
+      "label": "消费 holdout",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "e-result-verify",
+      "from": "result",
+      "to": "verify",
+      "label": "独立复核",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-verify-report",
+      "from": "verify",
+      "to": "report",
+      "label": "只读已封存证据",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-execute-failed",
+      "from": "execute",
+      "to": "node_failed",
+      "label": "节点异常",
+      "variant": "dashed",
+      "role": "error"
+    },
+    {
+      "id": "e-failed-retry",
+      "from": "node_failed",
+      "to": "retry_policy",
+      "label": "可重试",
+      "variant": "dashed",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "准入、运行、验证与报告",
+      "items": [
+        "ResearchPackage 声明研究问题、数据请求、算子图与结果合同；lint 检查声明完整性",
+        "package admit 内完成 Catalog 物理绑定、schema 漂移与 PIT 预检，通过后发布不可变计划",
+        "run 执行 Typed DAG；数据节点取数前复查来源，每个成功节点提交 checkpoint",
+        "CLI 在 Runtime 成功后封存 Result；verify 独立生成 VerificationResult，再由 report 消费"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败与恢复",
+      "items": [
+        "声明或准入条件不满足时返回诊断，不产生可运行计划",
+        "节点错误可重试且次数未耗尽时 run 转 paused，否则转 failed",
+        "paused 必须用 retry-node 指定失败节点；恢复先进入 running，再继续执行",
+        "进程中断的 running 用 resume 恢复；已提交节点复验后复用"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "留出数据与结果封存",
+      "items": [
+        "仅声明 holdout 的节点访问留出数据；opened 后不可重新预检，失败也消耗该次访问",
+        "Runtime 成功、Result finalize 成功与独立验证通过是三个不同状态",
+        "checkpoint 复用需要完整提交标记与身份复验；跨运行复用须显式提供来源"
+      ]
+    }
+  ]
+}

@@ -16,6 +16,7 @@ from .operator_definition_factory import (
     _resolve_source_module as _resolve_source_module,
 )
 from .operator_families import (
+    build_shared_futures_operator_definitions,
     build_daily_cash_operator_definitions,
     build_daily_model_operator_definitions,
     build_data_event_daily_operator_definitions,
@@ -30,6 +31,7 @@ def build_mainline_operator_manifest() -> CompiledOperatorManifest:
         *build_data_event_daily_operator_definitions(),
         *build_daily_model_operator_definitions(),
         *build_daily_cash_operator_definitions(),
+        *build_shared_futures_operator_definitions(),
     )
     manifest = compile_operator_manifest(definitions)
     from .operator_promotion import validate_mainline_operator_promotions

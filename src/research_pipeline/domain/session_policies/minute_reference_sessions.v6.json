@@ -1,0 +1,851 @@
+{
+  "bundle_id": "minute-reference-session-policies",
+  "inventory_evidence_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9",
+  "policies": [
+    {
+      "policy_id": "session.cn_fund.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "510300.XSHG",
+        "asset_class": "cn_etf",
+        "instrument_class": "etf",
+        "exchange": "XSHG",
+        "product_class": "exchange_traded_fund",
+        "role": "tradable",
+        "metadata_hash": "ac3e35f36d187575cc02e7fd874f7cac3aff92904ba8c0d86e553389e9f49a01",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "trading_dates": [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.a_share_calendar.v1",
+          "content_hash": "7f17e9ba65416e92568d0c9410757d180cc3b4dd1b06c0ecc53447731fb2fcc7"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "no_independent_auction_bar_observed",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_fund.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "511010.XSHG",
+        "asset_class": "cn_etf",
+        "instrument_class": "etf",
+        "exchange": "XSHG",
+        "product_class": "exchange_traded_fund",
+        "role": "tradable",
+        "metadata_hash": "7d9b313b1f665a89e6c11f63309cb88275ad76d964135aacf75144950c438c06",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "trading_dates": [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.a_share_calendar.v1",
+          "content_hash": "7f17e9ba65416e92568d0c9410757d180cc3b4dd1b06c0ecc53447731fb2fcc7"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "no_independent_auction_bar_observed",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_futures.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "AG2406.XSGE",
+        "asset_class": "cn_future",
+        "instrument_class": "future_contract",
+        "exchange": "XSGE",
+        "product_class": "silver",
+        "role": "tradable",
+        "metadata_hash": "e8e186fc0cd0ec0df5b21244bdcb251574f8af0cdff74c5425b1b86fbed50cd5",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "trading_dates": [
+        "2024-01-03",
+        "2024-01-04"
+      ],
+      "segments": [
+        {
+          "segment_id": "night",
+          "start_day_offset": -1,
+          "start_time": "21:00:00",
+          "end_day_offset": 0,
+          "end_time": "02:30:00",
+          "phase": "night",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": -1,
+          "bucket_anchor_time": "21:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_morning_1",
+          "start_day_offset": 0,
+          "start_time": "09:00:00",
+          "end_day_offset": 0,
+          "end_time": "10:15:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_morning_2",
+          "start_day_offset": 0,
+          "start_time": "10:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "10:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:30:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.futures_calendar_store.v1",
+          "content_hash": "265410d81d848a7c05c1534ec42eb580e3dae7b782ed55c2aa09f5ab00507d5c"
+        },
+        {
+          "source_id": "jqdata.futures_trade_time_guide.v1",
+          "content_hash": "08db948126301bf605b801ed34c6e6d544264e0484c1ed1082da80012a1d6dd5"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "not_in_reference_scope",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_futures.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "AG2412.XSGE",
+        "asset_class": "cn_future",
+        "instrument_class": "future_contract",
+        "exchange": "XSGE",
+        "product_class": "silver",
+        "role": "tradable",
+        "metadata_hash": "792d9f66df709e0249087e077976256218f162af6b2909b95c0129c7e3d2139d",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "trading_dates": [
+        "2024-01-03",
+        "2024-01-04"
+      ],
+      "segments": [
+        {
+          "segment_id": "night",
+          "start_day_offset": -1,
+          "start_time": "21:00:00",
+          "end_day_offset": 0,
+          "end_time": "02:30:00",
+          "phase": "night",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": -1,
+          "bucket_anchor_time": "21:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_morning_1",
+          "start_day_offset": 0,
+          "start_time": "09:00:00",
+          "end_day_offset": 0,
+          "end_time": "10:15:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_morning_2",
+          "start_day_offset": 0,
+          "start_time": "10:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "10:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:30:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.futures_calendar_store.v1",
+          "content_hash": "265410d81d848a7c05c1534ec42eb580e3dae7b782ed55c2aa09f5ab00507d5c"
+        },
+        {
+          "source_id": "jqdata.futures_trade_time_guide.v1",
+          "content_hash": "08db948126301bf605b801ed34c6e6d544264e0484c1ed1082da80012a1d6dd5"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "not_in_reference_scope",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_futures.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "IF2401.CCFX",
+        "asset_class": "cn_future",
+        "instrument_class": "future_contract",
+        "exchange": "CCFX",
+        "product_class": "stock_index",
+        "role": "tradable",
+        "metadata_hash": "215ea9b6ddaa5f66d7f953b5323ec7001f6655e901b3642ab50c613f7c05ffef",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "trading_dates": [
+        "2024-01-03",
+        "2024-01-04"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "cffex.if.session.2016",
+          "content_hash": "64d578bad21b30eba5bd51c22ebea51c1bda7512d8a8df12d622408910c1f96e"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "not_in_reference_scope",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_futures.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "T2403.CCFX",
+        "asset_class": "cn_future",
+        "instrument_class": "future_contract",
+        "exchange": "CCFX",
+        "product_class": "treasury_bond",
+        "role": "tradable",
+        "metadata_hash": "01512a802b1c7b788d64957d615c8603f048bd8a2e0ef8ce17e92b25dad052a2",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-03",
+      "effective_to": "2024-01-04",
+      "trading_dates": [
+        "2024-01-03",
+        "2024-01-04"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:15:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "cffex.t.session.2020",
+          "content_hash": "1221bd17962406d2cd659bf2c9b1d8e66a8af88b96f6e9578ca89bfc1fbeee5f"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "not_in_reference_scope",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_index.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "000300.XSHG",
+        "asset_class": "cn_index",
+        "instrument_class": "index",
+        "exchange": "XSHG",
+        "product_class": "broad_market_index",
+        "role": "benchmark",
+        "metadata_hash": "72035fb4bbb6f7d1ac4ef6ba8163fcab99f28bf90160c0011df52ab953b28f55",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "trading_dates": [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.a_share_calendar.v1",
+          "content_hash": "7f17e9ba65416e92568d0c9410757d180cc3b4dd1b06c0ecc53447731fb2fcc7"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "no_independent_auction_bar_observed",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_stock.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "000001.XSHE",
+        "asset_class": "cn_stock",
+        "instrument_class": "stock",
+        "exchange": "XSHE",
+        "product_class": "a_share",
+        "role": "tradable",
+        "metadata_hash": "0d6fe168e64842d51caf51b54c6d4cc53fe451a49fdc4f6277ce34f2b807717a",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "trading_dates": [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.a_share_calendar.v1",
+          "content_hash": "7f17e9ba65416e92568d0c9410757d180cc3b4dd1b06c0ecc53447731fb2fcc7"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "no_independent_auction_bar_observed",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_stock.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "300015.XSHE",
+        "asset_class": "cn_stock",
+        "instrument_class": "stock",
+        "exchange": "XSHE",
+        "product_class": "a_share",
+        "role": "tradable",
+        "metadata_hash": "a827e646b2c4cd5542529fbeb7d00a4d9605d43af28f46a1943258fe36be5600",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "trading_dates": [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.a_share_calendar.v1",
+          "content_hash": "7f17e9ba65416e92568d0c9410757d180cc3b4dd1b06c0ecc53447731fb2fcc7"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "no_independent_auction_bar_observed",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_stock.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "300784.XSHE",
+        "asset_class": "cn_stock",
+        "instrument_class": "stock",
+        "exchange": "XSHE",
+        "product_class": "a_share",
+        "role": "tradable",
+        "metadata_hash": "6c75e9a91c2bf8b75895e7f24894b079f9b2723204d97ddccac567909339f15d",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-06-07",
+      "effective_to": "2024-06-07",
+      "trading_dates": [
+        "2024-06-07"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.a_share_calendar.v1",
+          "content_hash": "7f17e9ba65416e92568d0c9410757d180cc3b4dd1b06c0ecc53447731fb2fcc7"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "no_independent_auction_bar_observed",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_stock.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "600000.XSHG",
+        "asset_class": "cn_stock",
+        "instrument_class": "stock",
+        "exchange": "XSHG",
+        "product_class": "a_share",
+        "role": "tradable",
+        "metadata_hash": "153174d2be2354447523ede9e01402228d91e67757ad2a4c04a4f472ee5dd1a5",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "trading_dates": [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.a_share_calendar.v1",
+          "content_hash": "7f17e9ba65416e92568d0c9410757d180cc3b4dd1b06c0ecc53447731fb2fcc7"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "no_independent_auction_bar_observed",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    },
+    {
+      "policy_id": "session.cn_stock.minute.v1",
+      "revision": 1,
+      "instrument": {
+        "instrument_id": "688981.XSHG",
+        "asset_class": "cn_stock",
+        "instrument_class": "stock",
+        "exchange": "XSHG",
+        "product_class": "a_share",
+        "role": "tradable",
+        "metadata_hash": "dc078360da133f2afb50359c786ca2c08077a72e52036262fdab0ec26d626f8a",
+        "contract_version": "minute-session-instrument-v1"
+      },
+      "effective_from": "2024-01-02",
+      "effective_to": "2024-01-05",
+      "trading_dates": [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05"
+      ],
+      "segments": [
+        {
+          "segment_id": "day_morning",
+          "start_day_offset": 0,
+          "start_time": "09:30:00",
+          "end_day_offset": 0,
+          "end_time": "11:30:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "09:30:00",
+          "contract_version": "minute-session-segment-template-v1"
+        },
+        {
+          "segment_id": "day_afternoon",
+          "start_day_offset": 0,
+          "start_time": "13:00:00",
+          "end_day_offset": 0,
+          "end_time": "15:00:00",
+          "phase": "day",
+          "bar_eligible": true,
+          "bucket_anchor_day_offset": 0,
+          "bucket_anchor_time": "13:00:00",
+          "contract_version": "minute-session-segment-template-v1"
+        }
+      ],
+      "evidence_hashes": [
+        {
+          "source_id": "jq.a_share_calendar.v1",
+          "content_hash": "7f17e9ba65416e92568d0c9410757d180cc3b4dd1b06c0ecc53447731fb2fcc7"
+        },
+        {
+          "source_id": "minute.capability.inventory.v1",
+          "content_hash": "7bc4c6a62f58c024bfb44c53bfd4eacd7cfdfa9a864a5fdcfac4da88caf51de9"
+        },
+        {
+          "source_id": "minute.capability.manifest.v1",
+          "content_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+        }
+      ],
+      "auction_bar_policy": "no_independent_auction_bar_observed",
+      "previous_policy_hash": null,
+      "claim_ceiling": "research_observation",
+      "contract_version": "minute-session-policy-v1"
+    }
+  ],
+  "contract_version": "minute-session-policy-bundle-v1",
+  "bundle_hash": "5ce40cd58a72703878f50471be5667a84919ccea5b095de209d00445252f65d8",
+  "capability_binding": {
+    "consumer_id": "domain.minute.session_calendar",
+    "minute_capability_manifest_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838",
+    "contract_version": "minute-capability-binding-v1",
+    "binding_hash": "6f968f7f47896dcf6024559b4625216312bf205cf25a2389ca8dce176cd39d3a"
+  }
+}

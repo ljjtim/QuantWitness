@@ -816,9 +816,10 @@ def _verify_external_tca(
         f"SELECT count(DISTINCT source_ledger_hash), min(source_ledger_hash) "
         f"FROM {formal.fills}"
     ).fetchone()
-    if ledger_hashes is None or ledger_hashes[0] != 1 or (
-        str(ledger_hashes[1]) != str(oracle_input.get("source_ledger_hash"))
-    ):
+    if ledger_hashes is None or (len(external_canonical["fills"]) > 0 and (
+        ledger_hashes[0] != 1
+        or str(ledger_hashes[1]) != str(oracle_input.get("source_ledger_hash"))
+    )):
         raise EvidenceContractError("Bar TCA source ledger 身份不闭合")
     source_simulation_hash = str(oracle_input.get("source_simulation_hash"))
     if source_simulation_hash != str(simulation_manifest.get("result_hash")):
@@ -1130,7 +1131,7 @@ def verify_tca(
     ):
         raise EvidenceContractError("Bar TCA oracle fills 与 canonical fills 集合不一致")
     ledger_hashes = {str(row.get("source_ledger_hash")) for row in formal_fills}
-    if len(ledger_hashes) != 1 or ledger_hashes != {str(oracle_input.get("source_ledger_hash"))}:
+    if formal_fills and ledger_hashes != {str(oracle_input.get("source_ledger_hash"))}:
         raise EvidenceContractError("Bar TCA source ledger 身份不闭合")
     for fill_id, formal in oracle_fills.items():
         canonical_fill = canonical_fills[fill_id]

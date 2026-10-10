@@ -1,0 +1,233 @@
+{
+  "schema_version": 3,
+  "diagram_type": "dataflow",
+  "title": "结果从哪里来，如何追溯",
+  "question": "把数据来源、执行约定、正式输入和验证结果串起来。",
+  "width": 1120,
+  "height": 730,
+  "nodes": [
+    {
+      "id": "source",
+      "label": "原始研究数据",
+      "sub": "数据库 / Parquet 归档",
+      "x": 60,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "只读使用。已提交快照不会自动变成历史版本完整的数据。",
+      "source": "src/research_pipeline/data_plane/providers/duckdb.py"
+    },
+    {
+      "id": "catalog",
+      "label": "数据说明与历史可见性",
+      "sub": "Catalog + PIT",
+      "x": 440,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "字段、物理绑定、可见日期和修订来源组成数据约定。",
+      "source": "src/research_pipeline/catalog/compiler.py"
+    },
+    {
+      "id": "plan",
+      "label": "已准入的查询计划",
+      "sub": "来源与时间边界固定",
+      "x": 820,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "绑定查询、预算、输入来源与可见时点。",
+      "source": "src/research_pipeline/data_plane/admission.py"
+    },
+    {
+      "id": "input",
+      "label": "正式输入工件",
+      "sub": "按约定取数并保存",
+      "x": 60,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "普通路径经 provider 与数据平面生成列式工件；分钟扫描和归档快照使用各自入口。",
+      "source": "src/research_pipeline/application/grid_data.py"
+    },
+    {
+      "id": "compute",
+      "label": "因子、模型与仿真",
+      "sub": "消费正式输入",
+      "x": 440,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "研究计算不自行回查未来数据。处理器拟合、信号与交易时点各有可见性约定。",
+      "source": "src/research_pipeline/runtime/adapters/model.py"
+    },
+    {
+      "id": "result",
+      "label": "Result：封存研究",
+      "sub": "输入 + 输出 + 实现与参数",
+      "x": 820,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "数值表及其支持事实一起封存，按结果身份查阅。",
+      "source": "src/research_pipeline/results/assembler.py"
+    },
+    {
+      "id": "verify",
+      "label": "独立 Verifier",
+      "sub": "读取 Result 后重新检查",
+      "x": 820,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "结果与输入都来自封存材料；验证不直接沿用生产算法的正确性结论。",
+      "source": "src/research_pipeline/evidence/verification_result.py"
+    },
+    {
+      "id": "vr",
+      "label": "VerificationResult",
+      "sub": "明确 pass / fail 及发现",
+      "x": 440,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "单独保存并绑定对应 Result。检查通过仅适用于声明过的验证范围。",
+      "source": "src/research_pipeline/evidence/verification_result.py"
+    },
+    {
+      "id": "report",
+      "label": "报告 / 开发反馈",
+      "sub": "同一份研究证据的不同读法",
+      "x": 60,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "报告使用 Result 和 VerificationResult；反馈投影只允许已验证开发指标。",
+      "source": "integrations/rdagent/src/quantwitness_rdagent/package_campaign.py"
+    }
+  ],
+  "edges": [
+    {
+      "from_id": "source",
+      "to_id": "catalog",
+      "label": "字段与修订",
+      "kind": "main"
+    },
+    {
+      "from_id": "catalog",
+      "to_id": "plan",
+      "label": "准入",
+      "kind": "main"
+    },
+    {
+      "from_id": "source",
+      "to_id": "input",
+      "label": "实际记录",
+      "kind": "main"
+    },
+    {
+      "from_id": "plan",
+      "to_id": "input",
+      "label": "取数约定",
+      "kind": "main",
+      "points": [
+        [
+          940,
+          145
+        ],
+        [
+          940,
+          215
+        ],
+        [
+          180,
+          215
+        ],
+        [
+          180,
+          285
+        ]
+      ],
+      "label_pos": [
+        560,
+        201
+      ]
+    },
+    {
+      "from_id": "input",
+      "to_id": "compute",
+      "label": "列式输入",
+      "kind": "main"
+    },
+    {
+      "from_id": "compute",
+      "to_id": "result",
+      "label": "输出与来源",
+      "kind": "main"
+    },
+    {
+      "from_id": "result",
+      "to_id": "verify",
+      "label": "只读",
+      "kind": "main"
+    },
+    {
+      "from_id": "verify",
+      "to_id": "vr",
+      "label": "独立检查单",
+      "kind": "main"
+    },
+    {
+      "from_id": "vr",
+      "to_id": "report",
+      "label": "验证状态",
+      "kind": "main"
+    },
+    {
+      "from_id": "result",
+      "to_id": "report",
+      "label": "数值与来源",
+      "kind": "optional",
+      "points": [
+        [
+          1060,
+          330
+        ],
+        [
+          1090,
+          330
+        ],
+        [
+          1090,
+          658
+        ],
+        [
+          180,
+          658
+        ],
+        [
+          180,
+          605
+        ]
+      ],
+      "label_pos": [
+        670,
+        648
+      ]
+    }
+  ],
+  "notes": [
+    "数据进入计算的方向与模块依赖方向不是一回事。",
+    "Report 不把 VerificationResult 当作数值表；它同时读取结果与检查单。",
+    "普通列式路径、分钟扫描与归档输入在取数入口不同，之后遵守相同结果和验证约定。"
+  ]
+}
