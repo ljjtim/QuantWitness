@@ -11,8 +11,7 @@ from .inputs import ModelMainlineError, assemble_daily_feature_context
 
 
 TARGET_COLUMNS = ("sample_id", "entity_id", "observation_session", "decision_time")
-MEMBER_COLUMNS = ("sample_id", "step", "entity_id", "observation_session",
-                  "observation_time", "feature_available_time", "feature_lineage_hash")
+MEMBER_COLUMNS = ("sample_id", "step", "context_index")
 
 
 @dataclass(frozen=True)
@@ -62,7 +61,9 @@ def build_sequence_windows(
     if context.duplicated(["entity_id", "observation_session"]).any():
         raise ModelMainlineError("历史特征证券会话必须唯一")
     context = context.loc[context["observation_session"].isin(calendar)].reset_index(drop=True)
-    records = {(row["entity_id"], row["observation_session"]): row for row in context.to_dict("records")}
+    context.insert(0, "context_index", np.arange(len(context), dtype=np.int64))
+    records = {(row.entity_id, row.observation_session): row
+               for row in context.itertuples(index=False)}
     positions = {day: index for index, day in enumerate(calendar)}
     members, exclusions = [], []
     for target in endpoints.to_dict("records"):
@@ -75,10 +76,10 @@ def build_sequence_windows(
         if reason is None:
             for member_day in calendar[end - step_len + 1:end + 1]:
                 row = records.get((target["entity_id"], member_day))
-                if row is None or row["feature_count"] != len(columns):
+                if row is None or row.feature_count != len(columns):
                     reason = "missing_feature"
                     break
-                if row["feature_available_time"] > target["decision_time"]:
+                if row.feature_available_time > target["decision_time"]:
                     reason = "feature_not_visible"
                     break
                 history.append(row)
@@ -86,10 +87,10 @@ def build_sequence_windows(
             exclusions.append({"sample_id": target["sample_id"], "reason_code": reason})
             continue
         for step, row in enumerate(history):
-            members.append({"sample_id": target["sample_id"], "step": step,
-                            **{key: row[key] for key in MEMBER_COLUMNS[2:]}})
+            members.append((target["sample_id"], step, row.context_index))
     return SequenceWindows(context=context, targets=endpoints,
-        members=pd.DataFrame(members, columns=MEMBER_COLUMNS),
+        members=pd.DataFrame(members, columns=MEMBER_COLUMNS).astype(
+            {"step": "int64", "context_index": "int64"}),
         exclusions=pd.DataFrame(exclusions, columns=("sample_id", "reason_code")),
         feature_columns=columns, calendar_sessions=calendar, step_len=step_len)
 
@@ -129,7 +130,11 @@ def qlib_sequence_dataset(
             raise ModelMainlineError("处理后的序列特征必须保持上下文索引和特征顺序")
         values = transformed_features.copy()
     members = windows.members.loc[windows.members["sample_id"].isin(selected)]
-    keys = pd.MultiIndex.from_frame(members[["observation_session", "entity_id"]].drop_duplicates())
+    if "context_index" in members:
+        used = windows.context.loc[windows.context.context_index.isin(members.context_index)]
+    else:
+        used = members
+    keys = pd.MultiIndex.from_frame(used[["observation_session", "entity_id"]].drop_duplicates())
     values = values.reindex(keys).sort_index()
     if not np.isfinite(values.to_numpy(dtype=float)).all():
         raise ModelMainlineError("序列完整窗口经处理后仍有非有限特征")

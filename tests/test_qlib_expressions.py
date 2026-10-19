@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from research_pipeline.research.modeling.qlib import QlibModelError, fit_bundle, normalize_candidates, predict_bundle
+
 SOURCE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio/extension/expressions.py"
 _spec = importlib.util.spec_from_file_location("public_qlib_expressions", SOURCE)
 _expressions = importlib.util.module_from_spec(_spec)
@@ -19,7 +21,6 @@ QlibExpressionError = _expressions.QlibExpressionError
 baseline_expressions = _expressions.baseline_expressions
 evaluate_expressions = _expressions.evaluate_expressions
 validate_expression = _expressions.validate_expression
-from research_pipeline.research.modeling.qlib import QlibModelError, fit_bundle, normalize_candidates, predict_bundle
 
 
 def _frame():

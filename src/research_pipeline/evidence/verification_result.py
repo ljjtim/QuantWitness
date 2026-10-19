@@ -51,7 +51,7 @@ from research_pipeline.results import (
     ResultStore,
     metrics_from_snapshot,
 )
-from research_pipeline.results.adjustment_snapshot import (
+from research_pipeline.evidence.financial_oracle.minute_adjustment import (
     verify_adjustment_anchor_result_tables,
     verify_adjustment_snapshot_result_table,
 )
@@ -60,7 +60,11 @@ from .causal_uniqueness import verify_causal_key_uniqueness
 from .errors import EvidenceContractError
 from .facets import ArtifactIntegrityFacet, ReproducibilityFacet, require_sha256, strict_fields
 from .minute_validity import MINUTE_VERIFIER_ALGORITHM_VERSIONS
-from .model_validity import MODEL_VERIFIER_ALGORITHM_VERSIONS, verify_model_result_binding
+from .model_validity import (
+    MODEL_VERIFIER_ALGORITHM_VERSIONS, MODEL_REFERENCE_VERIFIER_ALGORITHM_VERSIONS,
+    MODEL_RESULT_TABLE_STORAGE, LEGACY_MODEL_RESULT_TABLE_STORAGE,
+    LEGACY_MODEL_REFERENCE_VERIFIER_ALGORITHM_VERSIONS, verify_model_result_binding,
+)
 from .model_result_binding import model_verification_support_paths
 from research_pipeline.domain.shared_futures_result import SHARED_FUTURES_SCHEMA_IDS
 from .result_financial_oracle import (
@@ -211,7 +215,7 @@ _ADJUSTMENT_HANDLER = _ResultSemanticHandler(
     ),
     artifact_types=("data.adjustment-factor-snapshot.v1",),
     verifier_identity=(
-        "result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v2"
+        "result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v3"
     ),
 )
 _ORDER_LIFECYCLE_HANDLER = _ResultSemanticHandler(
@@ -312,7 +316,7 @@ BUILTIN_VERIFIER_IDENTITIES = frozenset({
     "default:statistics:verifier.statistics.v2",
     "model:data.pit:verifier.data-pit.v1",
     "model:label.split:verifier.model-label-split.v2",
-    "model:search.holdout:verifier.model-search-holdout.v2",
+    "model:search.holdout:verifier.model-search-holdout.v3",
     "model:statistics:verifier.model-statistics.v1",
     "model:financial.tradability:verifier.model-financial-scope.v2",
     "minute:data.pit:verifier.minute-data-pit.v2",
@@ -320,7 +324,7 @@ BUILTIN_VERIFIER_IDENTITIES = frozenset({
     "minute:label.split:verifier.minute-label-split.v3",
     "minute:search.holdout:verifier.minute-trial-universe.v2",
     "minute:statistics:verifier.minute-statistics.v3",
-    "result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v2",
+    "result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v3",
     "result-semantic:financial_oracle:result-bundle-financial-oracle-v11",
 })
 
@@ -483,6 +487,7 @@ class VerificationResult:
             tuple(sorted(GATE_ALGORITHM_VERSIONS.items())),
             tuple(sorted(MINUTE_VERIFIER_ALGORITHM_VERSIONS.items())),
             tuple(sorted(MODEL_VERIFIER_ALGORITHM_VERSIONS.items())),
+            tuple(sorted(MODEL_REFERENCE_VERIFIER_ALGORITHM_VERSIONS.items())),
         }:
             raise EvidenceContractError("VerificationResult verifier 算法组不受支持")
         if tuple(sorted(set(self.limitations))) != self.limitations:
@@ -968,7 +973,7 @@ def verify_result(
     if not isinstance(facts, Mapping):
         raise EvidenceContractError("Result validity facts 必须是对象")
     _verify_input_claim_lineage(bundle, facts)
-    verify_model_result_binding(snapshot, facts)
+    facts = verify_model_result_binding(snapshot, facts)
     research_cost_assumption = _research_cost_assumption_from_facts(facts)
 
     policy = load_claim_policy(closure.policy_id)
@@ -1041,7 +1046,13 @@ def verify_result(
         external_claim_ceiling=simulation_claim_ceiling_from_facts(facts),
     )
     algorithms = (
-        MODEL_VERIFIER_ALGORITHM_VERSIONS
+        MODEL_REFERENCE_VERIFIER_ALGORITHM_VERSIONS
+        if isinstance(facts.get("model_diagnostics"), Mapping)
+        and facts["model_diagnostics"].get("table_storage") == MODEL_RESULT_TABLE_STORAGE
+        else LEGACY_MODEL_REFERENCE_VERIFIER_ALGORITHM_VERSIONS
+        if isinstance(facts.get("model_diagnostics"), Mapping)
+        and facts["model_diagnostics"].get("table_storage") == LEGACY_MODEL_RESULT_TABLE_STORAGE
+        else MODEL_VERIFIER_ALGORITHM_VERSIONS
         if isinstance(facts.get("model_diagnostics"), Mapping)
         else MINUTE_VERIFIER_ALGORITHM_VERSIONS
         if isinstance(facts.get("statistics"), Mapping)

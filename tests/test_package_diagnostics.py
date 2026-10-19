@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from research_pipeline.cli import main
-from research_pipeline.cli.commands import research_package as command
+from research_pipeline.application import research_package as command
 from research_pipeline.packages import store
 from research_pipeline.packages.lint import diagnose_research_package, validate_lint_declarations
 from research_pipeline.packages.models import ResearchPackageError

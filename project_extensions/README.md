@@ -57,6 +57,7 @@ package lint/admit 会在数据库打开和正式运行前用真实冻结 contex
 分钟输入保留 `ProjectPartitionInput.iter_batches()` 与普通跨月 state。非分钟 Parquet
 输入支持同一已验证工件下的多个文件，按稳定文件顺序调用 `iter_batches(columns=...,
 batch_size=...)`，必须完整消费；未允许的列、过大批次或漏读会失败。
+普通同构 request 句柄在构造时核对各文件 schema，并在该句柄首次消费时复用；新句柄重新核对，实际数据仍逐文件读取。异构表按确切路径读取时各自检查 schema。
 `output_root` 保留 Path 行为，并提供 `write_batches(port=..., artifact_type=...,
 relative_path=..., schema=..., batches=...)` 与 `write_state(relative_path=...,
 schema_hash=..., chunks=...)`；每批或块最多 32 MiB，返回原 commit 字典。
@@ -164,6 +165,6 @@ sources:
 
 `qlib_prediction_validity/` 从已提交的 Feature、Label、切分、拟合审计、预测、选模、模型配置和 holdout 账本收集预测诊断事实。数据观察算子不适用于包含模型训练和候选选择的研究。
 
-该扩展输出 `research-validity-facts-v1`，其中 `model_diagnostics.mode` 为 `walk_forward_prediction_v1`。事实明确绑定 Result 的表 schema 与模型配置；框架独立复核时间切分、拟合范围、逐时点选模、唯一 holdout 收据和 MSE。研究公式与原始输入的对应关系仍由研究包冻结的项目 Verifier 检查。正式指标从独立的 `project.stage3.prediction-metrics.v1` 端口输出，保留汇总MSE原值，并从封存预测补齐单位、观察日期范围、样本数和计算状态；这些字段由核心统计门禁核对。
+该扩展输出 `research-validity-facts-v1`，其中 `model_diagnostics.mode` 为 `walk_forward_prediction_v1` 或 `walk_forward_development_v1`，新写 `table_storage=result_tables_v2`。JSON 仅保留正式表绑定和控制事实，正式表、模型配置、序列窗口及账本由独立 verifier 从已验证 Result 读取；框架独立复核时间切分、拟合范围、逐时点选模、唯一 holdout 收据和 MSE。研究公式与原始输入的对应关系仍由研究包冻结的项目 Verifier 检查。正式指标从独立的 `project.stage3.prediction-metrics.v1` 端口输出，保留汇总MSE原值，并从封存预测补齐单位、观察日期范围、样本数和计算状态；这些字段由核心统计门禁核对。
 
 Result 显式交付模型清单及 holdout 表时，模型诊断同时封存四阶段 holdout 账本。验证从 Result 读取，不访问原运行目录。该合同用于原始收益标签的回归诊断，只有交易仿真门禁不适用；标签、选模、holdout和统计诊断均需实际通过，结论上限为 `research_observation`。

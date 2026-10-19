@@ -13,7 +13,7 @@ import pytest
 from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle, normalize_candidates, QlibModelError
 from research_pipeline.research.modeling.sequence import build_sequence_windows
 from test_qlib_gru_contract import gru_candidate
-from test_qlib_model_integration import synthetic_samples
+from test_qlib_model_integration import synthetic_samples, research_series
 
 pytestmark = pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="需要 ml-sequence 可选依赖")
 
@@ -72,7 +72,7 @@ def test_cpu_gru_round_trip_one_sample_prediction_and_no_target_access(tmp_path,
     single = predict_bundle(tmp_path, row, test.iloc[:1], sequence_context=windows)
     assert single.shape == (1,) and single[0] == prediction[0]
     config = json.loads((tmp_path / row["config_path"]).read_text())
-    assert config["schema"] == "research.qlib-sequence-model-bundle.v1"
+    assert config["schema"] == "research.qlib-sequence-model-bundle.v2"
     assert config["versions"]["torch"].split("+")[0] == "2.5.1"
     assert config["effective_model_kwargs"]["GPU"] == -1
     assert config["effective_model_kwargs"]["d_feat"] == 2
@@ -114,7 +114,8 @@ def test_direct_qlib_same_weights_and_predictions_including_single_batch(tmp_pat
     train, valid, test, windows, spec = inputs(model_class)
     spec["processors"]["infer"] = []
     # 对照使用无缺失第二特征，直接构造上游DataHandler，不复用生产数据集构建器。
-    for frame in (train, valid, test): frame["x2__w1"] = frame["x2__w1"].fillna(0)
+    for frame in (train, valid, test):
+        frame["x2__w1"] = frame["x2__w1"].fillna(0)
     windows.context["x2__w1"] = windows.context["x2__w1"].fillna(0)
     row = fit(tmp_path / "managed", train, valid, windows, spec)
     config = json.loads((tmp_path / "managed" / row["config_path"]).read_text())
@@ -156,13 +157,21 @@ def test_gru_rejects_changed_prediction_context(tmp_path, change):
     train, valid, test, windows, spec = inputs()
     row = fit(tmp_path, train, valid, windows, spec)
     sid = test.iloc[0].sample_id
-    if change == "step": windows = replace(windows, step_len=4)
-    elif change == "calendar": windows = replace(windows, calendar_sessions=windows.calendar_sessions[:-1])
-    elif change == "decision": windows.targets.loc[windows.targets.sample_id == sid, "decision_time"] += pd.Timedelta(minutes=1)
-    elif change == "entity": windows.members.loc[windows.members.sample_id == sid, "entity_id"] = "OTHER"
-    elif change == "available": windows.members.loc[windows.members.sample_id == sid, "feature_available_time"] += pd.Timedelta(minutes=1)
-    else: test.loc[test.sample_id == sid, "x1__w1"] += 1
-    with pytest.raises(QlibModelError): predict_bundle(tmp_path, row, test, sequence_context=windows)
+    if change == "step":
+        windows = replace(windows, step_len=4)
+    elif change == "calendar":
+        windows = replace(windows, calendar_sessions=windows.calendar_sessions[:-1])
+    elif change == "decision":
+        windows.targets.loc[windows.targets.sample_id == sid, "decision_time"] += pd.Timedelta(minutes=1)
+    elif change == "entity":
+        windows.members.loc[windows.members.sample_id == sid, "context_index"] = -1
+    elif change == "available":
+        indexes = windows.members.loc[windows.members.sample_id == sid, "context_index"]
+        windows.context.loc[windows.context.context_index.isin(indexes), "feature_available_time"] += pd.Timedelta(days=20)
+    else:
+        test.loc[test.sample_id == sid, "x1__w1"] += 1
+    with pytest.raises(QlibModelError):
+        predict_bundle(tmp_path, row, test, sequence_context=windows)
 
 
 def test_gru_rejects_weight_and_model_mismatch(tmp_path):
@@ -195,7 +204,8 @@ def test_gru_cpu_context_restores_state_on_training_exception(tmp_path, monkeypa
     state, threads = torch.get_rng_state(), torch.get_num_threads()
     def failed_fit(*args, **kwargs): raise RuntimeError("training failed")
     monkeypatch.setattr(GRU, "fit", failed_fit)
-    with pytest.raises(RuntimeError, match="training failed"): fit(tmp_path, train, valid, windows, spec)
+    with pytest.raises(RuntimeError, match="training failed"):
+        fit(tmp_path, train, valid, windows, spec)
     assert torch.equal(state, torch.get_rng_state()) and torch.get_num_threads() == threads
     assert not (tmp_path / "bundles/gru/config.json").exists()
 
@@ -203,9 +213,12 @@ def test_gru_cpu_context_restores_state_on_training_exception(tmp_path, monkeypa
 @pytest.mark.parametrize("mutation", ["batch_size", "cross_sectional"])
 def test_gru_rejects_unsupported_tail_batches_or_feature_universe(mutation):
     spec = gru_candidate()
-    if mutation == "batch_size": spec["model"]["kwargs"]["batch_size"] = 2
-    else: spec["processors"]["infer"] = [{"class":"CSZScoreNorm", "kwargs":{"fields_group":"feature"}}]
-    with pytest.raises(QlibModelError): normalize_candidates([spec])
+    if mutation == "batch_size":
+        spec["model"]["kwargs"]["batch_size"] = 2
+    else:
+        spec["processors"]["infer"] = [{"class":"CSZScoreNorm", "kwargs":{"fields_group":"feature"}}]
+    with pytest.raises(QlibModelError):
+        normalize_candidates([spec])
 
 @pytest.mark.parametrize("model_class", ["GRU", "LSTM"])
 @pytest.mark.parametrize("fail_loading", [False, True])
@@ -216,7 +229,7 @@ def test_gru_locked_holdout_trains_before_open_and_consumes_only_once(tmp_path, 
     from research_pipeline.research.validation import ValidationError
     train, valid, holdout, windows, spec = inputs(model_class)
     development = pd.concat([train, valid])
-    ledger = tmp_path / "ledger"
+    ledger = tmp_path / "test-model" / "ledgers"
     output = tmp_path / "final"
     fit_calls, load_calls = [], []
     original_fit = models.fit_bundle
@@ -232,7 +245,8 @@ def test_gru_locked_holdout_trains_before_open_and_consumes_only_once(tmp_path, 
     def load_windows():
         assert load_calls == ["labels"] and list(ledger.glob("*/opened.json"))
         load_calls.append("windows")
-        if fail_loading: raise RuntimeError("window unavailable")
+        if fail_loading:
+            raise RuntimeError("window unavailable")
         return windows
     arguments = dict(development_samples=development, holdout_preflight=lambda:{"format":"dataframe"},
         holdout_loader=load_labels, development_ids=development.sample_id.tolist(), holdout_ids=holdout.sample_id.tolist(),
@@ -241,9 +255,10 @@ def test_gru_locked_holdout_trains_before_open_and_consumes_only_once(tmp_path, 
         validation_sessions=3, output_root=output, research_identity_hash="2"*64, data_snapshot_hash="3"*64,
         selection_hash="4"*64, package_hash="5"*64, implementation_hash="6"*64, actor="framework", reason="locked_holdout_primary",
         unlock_at=datetime(2024,1,1,tzinfo=timezone.utc), fixed_clock=datetime(2024,6,1,tzinfo=timezone.utc),
-        ledger_root=ledger, root_seed=7, development_sequence_context=windows, holdout_sequence_loader=load_windows)
+        ledger_root=ledger, research_series=research_series(tmp_path), root_seed=7, development_sequence_context=windows, holdout_sequence_loader=load_windows)
     if fail_loading:
-        with pytest.raises(RuntimeError, match="window unavailable"): evaluate_locked_holdout(**arguments)
+        with pytest.raises(RuntimeError, match="window unavailable"):
+            evaluate_locked_holdout(**arguments)
     else:
         result = evaluate_locked_holdout(**arguments)
         assert result["status"] == "committed" and len(result["predictions"]) == len(holdout)
@@ -251,7 +266,8 @@ def test_gru_locked_holdout_trains_before_open_and_consumes_only_once(tmp_path, 
     assert terminal["status"] == ("consumed_failed" if fail_loading else "committed")
     config = json.loads((output / "bundles/holdout/0/config.json").read_text())
     assert not set(holdout.sample_id) & set(config["train_ids"] + config["valid_ids"])
-    with pytest.raises(ValidationError): evaluate_locked_holdout(**arguments)
+    with pytest.raises(ValidationError, match="已经 prepared/opened|已暴露区间重叠"):
+        evaluate_locked_holdout(**arguments)
     assert fit_calls == [1] and load_calls == ["labels", "windows"]
 
 
@@ -286,3 +302,31 @@ def test_gru_bundle_works_without_explicit_d_feat_and_preserves_rank_label_scope
     assert np.isfinite(rank).all()
     pd.testing.assert_series_equal(test.target, before)
     assert np.isfinite(predict_bundle(tmp_path, row, test, sequence_context=windows)).all()
+
+
+def test_historical_v1_sealed_model_keeps_explicit_prediction(tmp_path):
+    """历史模型及展开窗口只读加载，预测使用原处理器与权重。"""
+    train, valid, test, windows, spec = inputs()
+    row = fit(tmp_path, train, valid, windows, spec)
+    expected = predict_bundle(tmp_path, row, test, sequence_context=windows)
+    config_path = tmp_path / row["config_path"]
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for name, source in config["sequence"]["files"].items():
+        frame = pd.read_parquet(tmp_path / source)
+        if name == "context":
+            context = frame
+    for name, source in config["sequence"]["files"].items():
+        frame = pd.read_parquet(tmp_path / source)
+        if name == "members":
+            frame = frame.merge(context.drop(columns=list(windows.feature_columns) + ["feature_count"]),
+                                on="context_index", validate="many_to_one").drop(columns="context_index")
+        elif name == "context":
+            frame = frame.drop(columns="context_index")
+        frame.to_parquet(tmp_path / source, index=False)
+    config["schema"] = "research.qlib-sequence-model-bundle.v1"
+    config["sequence"]["schema"] = "research.qlib-sequence-input.v1"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    old_members = windows.members.merge(windows.context.drop(columns=list(windows.feature_columns) + ["feature_count"]),
+        on="context_index", validate="many_to_one").drop(columns="context_index")
+    historical = replace(windows, context=windows.context.drop(columns="context_index"), members=old_members)
+    np.testing.assert_array_equal(expected, predict_bundle(tmp_path, row, test, sequence_context=historical))

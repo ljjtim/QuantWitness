@@ -1,18 +1,9 @@
 """Windows RP 执行桥：候选关联持久化，执行事实由 Workspace 持有。"""
-import importlib
 import json
 from pathlib import Path
 import shutil
 import sys
 from .contracts import FrozenRequest, write_json
-
-
-def _command(argv):
-    from research_pipeline.cli.parser import build_parser
-    from research_pipeline.cli.commands import COMMAND_MODULES
-    args = build_parser().parse_args(argv)
-    module = importlib.import_module(COMMAND_MODULES[args.command])
-    return module._execute(args)
 
 
 def find_or_allocate(workspace, label, *, clock, root_seed, execution_id=None):
@@ -49,36 +40,27 @@ def find_or_build(root, source, spec):
         if manifest.source_tree_hash != project_source_hash(source):
             raise ValueError("已提交 bundle 与冻结候选源码不一致")
         return {"bundle_path": str(bundle)}
-    return _command(["operator", "build", "--spec", spec, "--source", str(source),
-                     "--output", str(root / "bundles"), "--format", "json"])
+    from research_pipeline.extensions import compile_project_operator_bundle, load_project_operator_declaration
+    from research_pipeline.runtime.operator_definitions import build_mainline_operator_manifest
+    declaration = load_project_operator_declaration(spec, source_root=source)
+    bundle = compile_project_operator_bundle(
+        source_root=source, output_root=root / "bundles", project_id=declaration.project_id,
+        operator_spec=declaration.operator_spec, entry_module=declaration.entry_module,
+        entry_function=declaration.entry_function, dependency_lock=declaration.dependency_lock,
+        registered_operator_specs=tuple(item.operator_spec for item in build_mainline_operator_manifest().definitions),
+        project_artifact_types=declaration.project_artifact_types, permissions=declaration.permissions,
+        reuse_scope=declaration.reuse_scope,
+        parameter_preflight_module=declaration.parameter_preflight_module,
+        parameter_preflight_function=declaration.parameter_preflight_function,
+    )
+    return {"bundle_path": str(bundle)}
 
-
-def _options(mapping):
-    argv = []
-    for name, value in mapping.items():
-        if name in {"data_db", "source_db", "plan", "run_root", "artifact_root", "result_store", "handoff_out"}:
-            raise ValueError("runtime_options 不得覆盖来源或执行位置")
-        if value is None:
-            continue
-        for part in value if isinstance(value, list) else [value]:
-            argv.extend(["--" + name.replace("_", "-"), str(part)])
-    return argv
 
 
 def runtime_options(mapping, *, plan, execution, clock):
     """沿用正式 run 的解析默认值，执行位置仍由 Workspace 分配。"""
-    from research_pipeline.cli.parser import build_parser
-    from research_pipeline.cli.commands.workspace_flow import _RUNTIME_OPTIONS
-    allowed = set(_RUNTIME_OPTIONS) - {"source_db", "input_snapshot_manifest"}
-    if set(mapping) - allowed:
-        raise ValueError("runtime_options 含非运行参数或覆盖冻结来源")
-    args = build_parser().parse_args([
-        "run", "--plan", str(plan), "--clock", clock,
-        "--artifact-root", str(execution / "artifacts"), "--handoff-out", str(execution / "handoff.json"),
-        "--run-root", str(execution / "run"), "--result-store", str(execution / "results"),
-        *_options(mapping),
-    ])
-    return {name: getattr(args, name) for name in sorted(allowed)}
+    from research_pipeline.application.workspace_flow import normalize_runtime_options
+    return normalize_runtime_options(mapping)
 
 
 
@@ -96,7 +78,9 @@ def failure_diagnostics(error, *, stage, execution=None, bundle=None):
     if not (run / "operator-dag-invocation.json").exists():
         return result
     try:
-        inspection = _command(["inspect", "--run-root", str(run), "--json"])
+        from argparse import Namespace
+        from research_pipeline.application import runtime_lifecycle
+        inspection = runtime_lifecycle._execute(Namespace(command="inspect", run_root=str(run)))
         candidate_nodes = set()
         if bundle is not None:
             manifest = json.loads((Path(bundle) / "manifest.json").read_text(encoding="utf-8"))
@@ -126,9 +110,6 @@ def failure_diagnostics(error, *, stage, execution=None, bundle=None):
     return result
 
 def evaluate(request, candidate_id):
-    from research_pipeline.workspace import initialize_workspace, load_workspace
-    from research_pipeline.packages import load_research_package
-    from research_pipeline.workspace import run_workspace_execution, resume_workspace_execution
     binding = request.payload["runtime_binding"]
     from research_pipeline.data_plane import PathRolePolicy
     from research_pipeline.data_plane.archived_inputs import load_archived_input_manifest

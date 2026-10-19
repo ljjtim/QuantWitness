@@ -56,7 +56,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Workspace 初始化失败' }
 
 ## 4. 执行研究并打开报告
 
-`workspace execute` 依次执行静态检查、分配 execution、只读准入、运行、独立验证和报告。时点与种子取自研究包；显式传入不同的 `--clock` 或 `--root-seed` 会在分配前被拒绝。Catalog、数据库和 bundle 只需提供一次。
+`workspace execute` 依次执行静态检查、分配 execution、只读准入、运行、独立验证和报告。时点与种子取自研究包；显式传入不同的 `--clock` 或 `--root-seed` 会在分配前被拒绝。Catalog、数据库和 bundle 只需提供一次。同一次 execute 读取四份包 YAML 后，lint、加载和准入各自复验同一组声明；下一次命令重新读取。Workspace 与 RD-Agent 正式包执行共用应用层流程。
 
 ```powershell
 $flowText = python -m research_pipeline workspace execute --workspace $workspace --catalog-lock $environment.catalog_lock --data-db $environment.database --extension-bundle $project.operator_bundle --verifier-bundle $project.verifier_bundle --verification-process-slots 3 --label '股票横截面' --json

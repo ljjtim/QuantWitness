@@ -6,7 +6,7 @@
 
 ## 正式因子库发布绑定
 
-因子源计划使用`admitted-query-plan-v5`。计划内的`factor_publication`保存当前表实际引用的
+当前准入计划使用`admitted-query-plan-v6`，同时冻结快照布局策略。因子源计划的`factor_publication`保存当前表实际引用的
 publication、compute run、Catalog、实现记录、整表内容身份和覆盖日期；这些字段参与
 `plan_hash`及后续DatasetArtifact身份。只存在表或Catalog声明不足以准入：publication必须为
 `published`，计算运行必须为`validated`，Catalog快照正文须能复算到同一哈希，请求日期必须
@@ -20,7 +20,7 @@ publication、compute run、Catalog、实现记录、整表内容身份和覆盖
 因子准入只短暂取得共享读租约。物化时由`data_plane.service`持有完整租约，依次完成发布身份
 复验、只读Arrow查询、提交前源与发布复验、不可变工件提交、引用验证和最终复验，再释放租约。
 研究端不导入因子 Publisher，也不写因子数据库；锁侧文件是发布协议的一部分。
-旧v4计划明确拒绝，必须重新admit并建立新run，不修改旧checkpoint或历史Result。
+新物化使用含布局声明的 v6 计划，旧计划不能自动采用新布局，必须重新 admit 并建立新 run；历史 Result 与已提交来源快照保持只读。
 
 数据平面是研究主链唯一打开数据库的层。它只接受已经通过 Catalog/PIT 准入的 QueryIR，并把查询结果写成带来源身份的 Arrow/Parquet 工件。
 
@@ -44,6 +44,8 @@ Runtime 只消费当前列式引用，不重新打开研究数据库。
 在正式 Runtime 中，Supervisor 对每个引用首次完整验证后冻结 manifest 与文件列表；同一 run
 的后续 resolver 和 iterator 只复用这份内存绑定，并继续执行列、分区、路径和时态选择约束。
 独立调用数据平面验证器时仍逐次完整验证。新的 run 或新的 resume 进程不会继承该内存绑定。
+
+同次目录遍历只解析一次根目录，复用已经核实的祖先路径；每个候选文件仍核对真实位置和类型，随后执行原有内容、schema 与文件集合检查。遍历结束不保存路径信任。小表文件布局与读取 batch 分开控制，具体上限和恢复规则见[快照布局](snapshot-layout.md)。
 
 同一 data 节点的多 request 物化以单个 request 的 DatasetArtifactRef 为最小恢复单位。每项提交后
 只在 run 内记录 request id、当前 admitted plan hash、引用和只读数据库指纹；恢复时逐项复验，
@@ -133,9 +135,13 @@ DatasetArtifactRef 或 raw 分钟 PartitionedDatasetRef、明确允许根以及�
 声明独立物理绑定并完成审批；投影快照不能证明原数据库整表 schema。来源原有可见性、修订
 政策和 claim 上限继续适用，不因离线文件存在而获得新的 PIT 保证。
 
-普通快照通过 Arrow 在节点预算内按主键排序，再发布绑定新准入的正式快照；超预算拒绝。
+归档准入在有界投影中同时检查全局键顺序和字符串宽度。已按主键及版本字段严格递增的来源逐批重放，
+不预留全量排序工作集；无序来源继续在批准内存内排序，超预算拒绝。发布门禁仍检查每批顺序、唯一性和 PIT。
 逐决策时态快照保留全部已封存版本及隐藏可见性字段，按主键和版本顺序重新发布。
 原计划与新准入的时态选择合同必须一致；业务读取仍通过逐决策接口绑定观察时间，不能直接读取未来版本。
 分钟沿用现有文件引用扫描，并与冻结清单的文件、范围和股票池核对。该分支不连接 DuckDB
 或 SQLite，结果报告 `input_source=archived_snapshot`、`database_opened=false`，不报告
 未经执行的 `database_unchanged`。清单内容冻结进正式计划；恢复使用同一来源，清单变化须重新准入。
+
+归档物化失败保留 request 级诊断，包括本次请求、已打开状态、批准预算和已完成请求列表。
+原恢复入口复验并复用已提交快照，失败请求按原冻结来源继续；不创建另一份恢复索引。

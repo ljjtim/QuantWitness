@@ -52,7 +52,7 @@ from research_pipeline.evidence import (
 )
 from research_pipeline.evidence.errors import EvidenceContractError
 from research_pipeline.evidence.verification_result import _verify_input_claim_lineage
-from research_pipeline.cli.research_plan_store import (
+from research_pipeline.application.research_plan_store import (
     _copy_verifier_bundle_closure,
     _verify_plan_verifier_bundle,
 )

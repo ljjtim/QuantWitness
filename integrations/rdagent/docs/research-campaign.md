@@ -102,3 +102,12 @@ outcome包含来源引用、每轮状态、父候选、开发误差、选择和�
 参数研究要求基包、数据口径和独立Verifier已经准备完成。它支持在有限、可审阅范围内探索，不代表任意论文都能无人确认地转换为研究；固定公式复现仍以确认过的定义为准，不因开发指标更好而改写论文公式。
 
 Qlib开发起点见[模型参数研究](../examples/package_campaign/README.md#qlib模型参数研究)。它每轮重新训练一个预声明模型，并封存处理器、模型和validation结果。允许2.0.0版split、fit、predict、fold-metrics，split显式采用development；最终selection/holdout节点不进入循环。
+
+
+## 查看中断与请求差异
+
+`campaign-inspect --request REQUEST.json` 只读查看已有会话，不创建文件、不调用模型或重跑正式评价。`not_started` 表示尚未建立会话，`incomplete` 表示已冻结但尚无终态，`interrupted` 列出未记录完的轮次及已有执行引用、诊断；原执行锁仍存活时返回 `running` 和 `next_action=wait`。已保存 outcome 保留原状态。
+
+`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `campaign-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入已验证开发指标反馈，test/holdout 不参与研究循环。
+
+未取得确定结果的模型调用预约显示在 `unresolved_model_calls`；`next_action=review_model_calls` 要求核对原调用收据，不自动重复调用或释放已预约预算。

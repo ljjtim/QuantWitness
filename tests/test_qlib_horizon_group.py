@@ -20,6 +20,18 @@ def read(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@pytest.fixture(autouse=True)
+def database_boundary(monkeypatch):
+    import duckdb
+    import sqlite3
+
+    def reject(*args, **kwargs):
+        pytest.fail("多期限组示例测试不得连接数据库")
+
+    monkeypatch.setattr(duckdb, "connect", reject)
+    monkeypatch.setattr(sqlite3, "connect", reject)
+
+
 @pytest.fixture
 def entry(monkeypatch):
     monkeypatch.syspath_prepend(str(EXAMPLE))
@@ -41,7 +53,7 @@ def stubbed(entry, monkeypatch):
     days = [day.isoformat() for day in horizons.synthetic.sessions()]
 
     def prepare(root, mode="model", input_config=None, sequence_step_len=None,
-            model_candidates=None, horizon_sessions=1, window_config=None):
+            model_candidates=None, horizon_sessions=1, window_config=None, research_series=None):
         root = Path(root)
         events.append(("prepare", horizon_sessions))
         assert not (root / "bundle-paths.json").exists()
@@ -51,6 +63,8 @@ def stubbed(entry, monkeypatch):
             "root_seed": horizons.SEED, **window_config,
             "calendar_id": "public_synthetic_weekdays", "calendar_source": "synthetic.py deterministic weekdays",
             "snapshot_scope": "public_synthetic_no_market_claim", "entities": list(horizons.synthetic.instruments())}
+        if research_series is not None:
+            design["research_series"] = deepcopy(research_series)
         if sequence_step_len is not None:
             design["sequence"] = {"step_len": sequence_step_len}
         save(root / "request.json", {"design": design, "model_parameters": {
@@ -89,7 +103,7 @@ def test_group_freezes_every_member_before_running_and_preserves_candidates(tmp_
     candidates = [first, second]
     original = deepcopy(candidates)
     root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5], model_candidates=candidates,
+    horizons.prepare_horizons(root, [1, 5], mode="development", model_candidates=candidates,
         window_config={"expanding": False, "train_sessions": 32})
     frozen = read(root / horizons.GROUP_FILE)
     assert events == [("prepare", 1), ("prepare", 5)]
@@ -113,7 +127,7 @@ def test_group_freezes_every_member_before_running_and_preserves_candidates(tmp_
 def test_group_resume_only_runs_unfinished_members_then_verifies(tmp_path, stubbed, monkeypatch):
     _, horizons, events, holds, execute = stubbed
     root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5])
+    horizons.prepare_horizons(root, [1, 5], mode="development")
     attempt = {"failed": False}
 
     def interrupted(child, stage, **kwargs):
@@ -143,7 +157,7 @@ def test_group_resume_only_runs_unfinished_members_then_verifies(tmp_path, stubb
 def test_group_resume_runs_unstarted_member_without_repreparing(tmp_path, stubbed):
     _, horizons, events, holds, execute = stubbed
     root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5])
+    horizons.prepare_horizons(root, [1, 5], mode="development")
     execute(root / "h1", "run")
     events.clear()
     horizons.execute_horizons(root, "resume")
@@ -155,7 +169,7 @@ def test_group_resume_runs_unstarted_member_without_repreparing(tmp_path, stubbe
 def test_group_verify_failure_never_returns_pass_or_reports(tmp_path, stubbed, monkeypatch):
     _, horizons, events, _, execute = stubbed
     root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5])
+    horizons.prepare_horizons(root, [1, 5], mode="development")
     horizons.execute_horizons(root, "run")
 
     def verify(child, stage, **kwargs):
@@ -178,9 +192,9 @@ def test_group_verify_failure_never_returns_pass_or_reports(tmp_path, stubbed, m
 def test_group_rejects_reused_output_and_changed_member(tmp_path, stubbed):
     _, horizons, events, _, _ = stubbed
     root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5])
+    horizons.prepare_horizons(root, [1, 5], mode="development")
     with pytest.raises(ValueError, match="未用目录"):
-        horizons.prepare_horizons(root, [1, 5])
+        horizons.prepare_horizons(root, [1, 5], mode="development")
     request = read(root / "h5" / "request.json")
     request["design"]["horizon_sessions"] = 10
     save(root / "h5" / "request.json", request)
@@ -194,7 +208,7 @@ def test_group_rejects_reused_output_and_changed_member(tmp_path, stubbed):
 def test_group_requires_distinct_positive_horizons(tmp_path, stubbed, horizons_list):
     _, horizons, events, _, _ = stubbed
     with pytest.raises(ValueError):
-        horizons.prepare_horizons(tmp_path / "group", horizons_list)
+        horizons.prepare_horizons(tmp_path / "group", horizons_list, mode="development")
     assert events == []
 
 
@@ -220,15 +234,21 @@ def test_single_cli_keeps_defaults_and_passes_explicit_window(tmp_path, entry, m
     run, _ = entry
     calls = []
     monkeypatch.setattr(run, "execute", lambda *args, **kwargs: calls.append((args, kwargs)) or {})
-    run.main(["--output", str(tmp_path / "single"), "--stage", "prepare"])
+    series = {"series_id": "single-study", "root": str(tmp_path / "series"),
+        "purpose": "窗口接线", "legacy_ledger_roots": []}
+    series_args = ["--research-series-id", series["series_id"], "--research-series-root", series["root"],
+        "--research-series-purpose", series["purpose"]]
+    run.main(["--output", str(tmp_path / "single"), "--stage", "prepare", *series_args])
     assert calls[0][0][2] == "model"
-    assert calls[0][1] == {"horizon_sessions": 1, "window_config": None}
+    assert calls[0][1] == {"horizon_sessions": 1, "window_config": None,
+        "feature_suite": None, "resource_state_dir": None, "research_series": series}
     run.main(["--output", str(tmp_path / "other"), "--stage", "prepare", "--horizon-sessions", "5",
         "--window-mode", "rolling", "--train-sessions", "32", "--validation-sessions", "12",
-        "--test-sessions", "8", "--step-sessions", "4", "--embargo-sessions", "2"])
+        "--test-sessions", "8", "--step-sessions", "4", "--embargo-sessions", "2", *series_args])
     assert calls[1][1] == {"horizon_sessions": 5, "window_config": {
         "expanding": False, "train_sessions": 32, "validation_sessions": 12,
-        "test_sessions": 8, "step_sessions": 4, "embargo_sessions": 2}}
+        "test_sessions": 8, "step_sessions": 4, "embargo_sessions": 2},
+        "feature_suite": None, "resource_state_dir": None, "research_series": series}
     with pytest.raises(SystemExit):
         run.main(["--output", str(tmp_path / "other"), "--horizon-sessions", "1", "--horizons", "1", "5"])
 
@@ -236,7 +256,7 @@ def test_single_cli_keeps_defaults_and_passes_explicit_window(tmp_path, entry, m
 def test_group_run_also_skips_finalized_members(tmp_path, stubbed):
     _, horizons, events, holds, execute = stubbed
     root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5])
+    horizons.prepare_horizons(root, [1, 5], mode="development")
     execute(root / "h1", "run")
     events.clear()
     result = horizons.execute_horizons(root, "run")
@@ -248,7 +268,7 @@ def test_group_run_also_skips_finalized_members(tmp_path, stubbed):
 def test_group_does_not_accept_verification_for_another_result(tmp_path, stubbed):
     _, horizons, _, _, _ = stubbed
     root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5])
+    horizons.prepare_horizons(root, [1, 5], mode="development")
     horizons.execute_horizons(root, "run")
     save(root / "h1" / "verification.json", {"status": "pass", "result_reference": {"result_id": "unrelated"}})
     with pytest.raises(ValueError, match="当前正式Result"):
@@ -262,7 +282,7 @@ def test_group_real_prepare_freezes_shared_source_and_sequence_candidates(tmp_pa
     from prepare import gru_candidate, lstm_candidate
     root = tmp_path / "group"
     candidates = [gru_candidate(3), lstm_candidate(3)]
-    horizons.prepare_horizons(root, [1, 5], sequence_step_len=3,
+    horizons.prepare_horizons(root, [1, 5], mode="development", sequence_step_len=3,
         model_candidates=candidates, window_config={"expanding": False, "step_sessions": 5})
     group = read(root / horizons.GROUP_FILE)
     assert group["plan"]["horizons"] == [1, 5]
@@ -324,7 +344,7 @@ def test_member_subprocess_failure_propagates(tmp_path, entry, monkeypatch):
 def test_group_subprocess_failure_keeps_finalized_member_for_resume(tmp_path, stubbed, monkeypatch):
     _, horizons, events, holds, execute = stubbed
     root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5])
+    horizons.prepare_horizons(root, [1, 5], mode="development")
     interrupted = {"failed": False}
 
     def member(child, stage, **kwargs):

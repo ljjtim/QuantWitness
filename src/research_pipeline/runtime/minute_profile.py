@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import date
 import hashlib
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -456,20 +457,31 @@ class MinutePartitionRuntime:
                     metrics[spec.key.partition_id] = item_metrics
             else:
                 with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="minute-runtime") as pool:
-                    futures = {
-                        pool.submit(
-                            self._run_one, spec, manifest, action, store,
-                            checkpoint_root, budget, worker_count, phase_hook,
-                            resource_governor, parent_resource_lease,
-                            resource_timeout_seconds,
-                        ): spec
-                        for spec in pending
-                    }
-                    for future in as_completed(futures):
-                        spec = futures[future]
-                        commit, item_metrics = future.result()
-                        commits[spec.key.partition_id] = commit
-                        metrics[spec.key.partition_id] = item_metrics
+                    remaining = iter(pending)
+                    futures = {}
+                    try:
+                        while True:
+                            for spec in islice(remaining, worker_count - len(futures)):
+                                future = pool.submit(
+                                    self._run_one, spec, manifest, action, store,
+                                    checkpoint_root, budget, worker_count, phase_hook,
+                                    resource_governor, parent_resource_lease,
+                                    resource_timeout_seconds,
+                                )
+                                futures[future] = spec
+                            if not futures:
+                                break
+                            completed, _ = wait(futures, return_when=FIRST_COMPLETED)
+                            # 整批结果成功后才能补交，避免同批失败被成功结果掩盖。
+                            for future in completed:
+                                spec = futures.pop(future)
+                                commit, item_metrics = future.result()
+                                commits[spec.key.partition_id] = commit
+                                metrics[spec.key.partition_id] = item_metrics
+                    except BaseException:
+                        for future in futures:
+                            future.cancel()
+                        raise
             elapsed = time.monotonic() - started
             self._require_limit("wall_seconds", elapsed, budget.max_wall_seconds)
             self._require_limit("rows_scanned", sum(item.rows_scanned for item in metrics.values()), budget.max_returned_rows)
@@ -520,10 +532,14 @@ class MinutePartitionRuntime:
         parent_resource_lease: ResourceLease | None,
         resource_timeout_seconds: float | None,
     ) -> tuple[ExternalArtifactCommit, MinutePartitionMetrics]:
+        # 临时空间是并发共享额度；单分区验收须与分配的额度一致。
+        temp_limit = budget.max_temp_bytes // worker_count
         if resource_governor is None or worker_count == 1:
+            if parent_resource_lease is not None:
+                temp_limit = min(temp_limit, parent_resource_lease.vector.scratch_bytes)
             return self._run_one_unleased(
                 spec, manifest, action, store, checkpoint_root, budget,
-                worker_count, phase_hook,
+                worker_count, phase_hook, max_temp_bytes=temp_limit,
             )
         child = ResourceVector(
             max(1, parent_resource_lease.vector.memory_bytes // worker_count),
@@ -542,6 +558,7 @@ class MinutePartitionRuntime:
                 return self._run_one_unleased(
                     spec, manifest, action, store, checkpoint_root, budget,
                     worker_count, phase_hook,
+                    max_temp_bytes=min(temp_limit, lease.vector.scratch_bytes),
                 )
         finally:
             resource_governor.release(lease)
@@ -556,6 +573,8 @@ class MinutePartitionRuntime:
         budget: MinuteRuntimeBudget,
         worker_count: int,
         phase_hook: MinutePartitionPhaseHook | None,
+        *,
+        max_temp_bytes: int,
     ) -> tuple[ExternalArtifactCommit, MinutePartitionMetrics]:
         staging = store.prepare()
         start = time.monotonic()
@@ -585,7 +604,7 @@ class MinutePartitionRuntime:
             self._require_limit("record_batch_bytes", work.peak_batch_bytes, budget.max_batch_bytes)
             if rss_measurement_status == "available":
                 self._require_limit("peak_rss_bytes", peak_rss, budget.max_rss_bytes)
-            self._require_limit("temp_bytes", temp_bytes, budget.max_temp_bytes)
+            self._require_limit("temp_bytes", temp_bytes, max_temp_bytes)
             self._require_limit("partition_wall_seconds", elapsed, budget.max_wall_seconds)
             commit = store.commit(
                 staging,

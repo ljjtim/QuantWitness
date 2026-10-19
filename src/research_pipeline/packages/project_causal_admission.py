@@ -35,8 +35,8 @@ def project_causal_request_ids(parameters: Mapping[str, object]) -> set[str]:
     """只解释已约定的因果声明，不递归猜测任意项目参数。"""
     if "causal_plan" not in parameters:
         return set()
-    plan = parse_causal_plan(parameters["causal_plan"]).to_dict()
-    return {source["request_id"] for source in plan["sources"]}
+    plan = parse_causal_plan(parameters["causal_plan"])
+    return {source.request_id for source in plan.sources}
 
 
 def validate_project_causal_recipe(
@@ -154,8 +154,9 @@ def validate_project_causal_admitted_sources(
     for node in recipe.nodes:
         if "causal_plan" not in node.parameters:
             continue
-        causal = parse_causal_plan(node.parameters["causal_plan"]).to_dict()
-        for source in causal["sources"]:
+        causal = parse_causal_plan(node.parameters["causal_plan"])
+        for source_spec in causal.sources:
+            source = source_spec.to_dict()
             admitted = admitted_plans.get(source["request_id"])
             if admitted is None:
                 raise ResearchPackageError("项目 causal_plan 缺少已准入请求")

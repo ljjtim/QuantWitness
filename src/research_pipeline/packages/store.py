@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from types import MappingProxyType
 from importlib.resources import files
 from pathlib import Path
 import shutil
@@ -16,12 +18,33 @@ from .constants import OPERATOR_GRAPH_BUILDER_ID
 PACKAGE_FILES = ("package.yaml", "sources/sources.yaml", "localization.yaml", "spec/research.yaml")
 
 
-def load_research_package(root: str | Path) -> ResearchPackage:
+@dataclass(frozen=True)
+class PackageDocuments:
+    """一次包处理的 YAML 事实，仅供读取；不授予加载或准入资格。"""
+
+    root: Path
+    _payloads: Mapping[str, dict[str, object]]
+    _errors: Mapping[str, str]
+
+
+def read_package_documents(root: str | Path) -> PackageDocuments:
+    """各文件只解析一次，保留所有读取错误供 lint 聚合。"""
     directory = Path(root).resolve()
-    package = _load_yaml(directory, "package.yaml")
-    source_payload = _load_yaml(directory, "sources/sources.yaml")
-    localization_payload = _load_yaml(directory, "localization.yaml")
-    spec_payload = _load_yaml(directory, "spec/research.yaml")
+    payloads, errors = {}, {}
+    for name in PACKAGE_FILES:
+        try:
+            payloads[name] = _load_yaml(directory, name)
+        except ResearchPackageError as exc:
+            errors[name] = str(exc)
+    return PackageDocuments(directory, MappingProxyType(payloads), MappingProxyType(errors))
+
+
+def load_research_package(root: str | Path, *, documents: PackageDocuments | None = None) -> ResearchPackage:
+    directory = Path(root).resolve()
+    package = _load_yaml(directory, "package.yaml", documents=documents)
+    source_payload = _load_yaml(directory, "sources/sources.yaml", documents=documents)
+    localization_payload = _load_yaml(directory, "localization.yaml", documents=documents)
+    spec_payload = _load_yaml(directory, "spec/research.yaml", documents=documents)
     _exact(package, _PACKAGE_KEYS, "package.yaml")
     if package.get("builder_id") == OPERATOR_GRAPH_BUILDER_ID:
         _validate_declarative_layout(directory)
@@ -86,7 +109,13 @@ def default_research_package_template() -> Mapping[str, str]:
         raise ResearchPackageError("安装包内 ResearchPackage 模板缺失") from exc
 
 
-def _load_yaml(root: Path, relative_path: str) -> dict[str, object]:
+def _load_yaml(root: Path, relative_path: str, *, documents: PackageDocuments | None = None) -> dict[str, object]:
+    if documents is not None:
+        if documents.root != root:
+            raise ResearchPackageError("YAML 读取会话与研究包目录不一致")
+        if relative_path in documents._errors:
+            raise ResearchPackageError(documents._errors[relative_path])
+        return documents._payloads[relative_path]
     path = (root / relative_path).resolve()
     try:
         path.relative_to(root)
@@ -182,4 +211,4 @@ _METRIC_KEYS = {"contract_id", "version", "metrics", "semantics"}
 _CLAIM_KEYS = {"allowed_claim_levels", "max_claim_level"}
 
 
-__all__ = ["PACKAGE_FILES", "default_research_package_template", "initialize_research_package", "load_research_package"]
+__all__ = ["PACKAGE_FILES", "PackageDocuments", "read_package_documents", "default_research_package_template", "initialize_research_package", "load_research_package"]

@@ -8,7 +8,7 @@ import time
 import pytest
 
 from research_pipeline.cli import main
-from research_pipeline.cli.commands import evidence_lifecycle
+from research_pipeline.application import evidence_lifecycle
 from research_pipeline.evidence import project_verifier_runtime as runtime
 from research_pipeline.platform import error_code_for_exception
 from research_pipeline.platform.resource_budget import ResourceBudget

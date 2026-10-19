@@ -8,6 +8,8 @@ from heapq import merge
 from itertools import groupby
 from zoneinfo import ZoneInfo
 
+from research_pipeline.domain import InstrumentKey
+
 from ..errors import EvidenceContractError
 from .common import aware_datetime, ceil_ratio, date_value, integer, ordered_rows
 
@@ -52,7 +54,27 @@ def verify_daily_etf_holdings(
         for row in ordered_rows(canonical[name], order_by=("instrument_id", "session", *suffix)):
             yield (str(row["instrument_id"]), date_value(row["session"], "session"), phase, row)
 
-    events = merge(records("fills", 0), records("positions", 1), key=lambda item: item[:3])
+    # 正式持仓表省略零数量且无变化的行；登记日仍需从成交历史证明零持仓。
+    sparse_records = []
+    if records_by_key:
+        code_by_hash = {}
+        for code, category in category_by_code.items():
+            market = "cn_stock" if category == "cn_stock" else "cn_etf"
+            kind = "stock" if market == "cn_stock" else "etf"
+            key = InstrumentKey(code, market, code.rsplit(".", 1)[-1], "CNY", kind)
+            code_by_hash[key.instrument_hash] = code
+        present_records = set()
+        for row in ordered_rows(canonical["positions"], order_by=("instrument_id", "session")):
+            key = (str(row["instrument_hash"]), date_value(row["session"], "position.session"))
+            code_by_hash[key[0]] = str(row["instrument_id"])
+            if key in records_by_key:
+                present_records.add(key)
+        cash_sessions = {date_value(row["session"], "cash.session") for row in canonical["cash"]}
+        for key, row in records_by_key.items():
+            if (key not in present_records and key[0] in code_by_hash
+                    and key[1] in cash_sessions):
+                sparse_records.append((code_by_hash[key[0]], key[1], 2, row))
+    events = merge(records("fills", 0), records("positions", 1), sorted(sparse_records, key=lambda item: item[:3]), key=lambda item: item[:3])
     for code, instrument_events in groupby(events, key=lambda item: item[0]):
         category = category_by_code.get(code)
         if category is None:
@@ -69,6 +91,7 @@ def verify_daily_etf_holdings(
         instrument_hash = None
         actions = []
         for session, session_events in groupby(instrument_events, key=lambda item: item[1]):
+            session_events = tuple(session_events)
             sellable += trade_unsettled
             trade_unsettled = 0
             pending = []
@@ -79,7 +102,7 @@ def verify_daily_etf_holdings(
                     pending.append((due, quantity))
             entitlements = pending
             preopen = datetime.combine(session, time(9, 15), ZoneInfo("Asia/Shanghai"))
-            if rule_parameters_for is not None:
+            if rule_parameters_for is not None and any(item[2] < 2 for item in session_events):
                 parameters = rule_parameters_for(code, session, datetime.combine(session, time(9, 30), ZoneInfo("Asia/Shanghai")))
             non_trade = 0
             initialized = False
@@ -137,7 +160,12 @@ def verify_daily_etf_holdings(
                         if sellable < 0:
                             raise EvidenceContractError("日频现货公司行动消耗了尚未到账的持仓")
                     initialized = True
-                if phase == 0:
+                if phase == 2:
+                    if row["quantity"] != 0 or sellable + trade_unsettled + sum(value for _, value in entitlements) != 0 or non_trade != 0:
+                        raise EvidenceContractError("省略的登记日持仓必须经独立复算确认为零且无变动")
+                    observed_records.add((row_hash, session))
+                    seen_position = True
+                elif phase == 0:
                     quantity = integer(row["quantity"], "fill.quantity", minimum=1)
                     fill_time = aware_datetime(row["fill_time"], "fill.fill_time")
                     if rule_parameters_for is None and not (profile.effective_start <= session <= profile.effective_end and profile.rule_available_at <= fill_time):

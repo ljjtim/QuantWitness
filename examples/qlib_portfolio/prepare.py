@@ -7,6 +7,7 @@ from importlib.metadata import version
 import json
 import shutil
 from pathlib import Path
+from typing import Mapping
 import yaml
 
 from research_pipeline.platform import canonical_json, typed_canonical_hash
@@ -14,6 +15,7 @@ from research_pipeline.platform.metric_contracts import MetricDefinition
 from research_pipeline.research import (ResearchSemantics, ResearchTimeWindow, FeatureSetArtifact,
     LabelArtifact, EstimandSpec, HypothesisSpec)
 from research_pipeline.research.validation import build_search_manifest
+from research_pipeline.research.validation.holdout_series import normalize_series_declaration
 from research_pipeline.extensions import load_project_operator_declaration, compile_project_operator_bundle, compile_project_verifier_bundle
 from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
 from inputs import prepare_inputs, PRICE_FIELDS
@@ -94,7 +96,36 @@ def declaration(name, inputs, outputs, parameters, types=(), module="operator", 
         "permissions": {"artifact_write_scope": "output_only"}}
 
 
-def prepare(root, mode="model", input_config=None, feature_expressions=None, sequence_step_len=None, model_candidates=None, horizon_sessions=1, window_config=None, feature_suite=None):
+def normalize_research_series(research_series, *, required=False):
+    """冻结持久系列声明，不从候选、期限或输出目录推导系列身份。"""
+    if research_series is None:
+        if required:
+            raise ValueError("最终评价必须显式提供research_series的series_id、root和purpose")
+        return None
+    return normalize_series_declaration(research_series)
+
+
+def add_research_series_arguments(parser):
+    parser.add_argument("--research-series-id", help="同一研究问题持久复用的安全slug")
+    parser.add_argument("--research-series-root", help="独立于运行输出的绝对持久系列目录")
+    parser.add_argument("--research-series-purpose", help="非空研究问题说明")
+    parser.add_argument("--research-series-legacy-root", action="append", default=[],
+        help="该研究问题已有的绝对旧ledger根目录，可重复")
+
+
+def research_series_from_arguments(args, parser):
+    if not any(value is not None for value in (args.research_series_id,
+            args.research_series_root, args.research_series_purpose)) and not args.research_series_legacy_root:
+        return None
+    try:
+        return normalize_research_series({"series_id": args.research_series_id,
+            "root": args.research_series_root, "purpose": args.research_series_purpose,
+            "legacy_ledger_roots": args.research_series_legacy_root})
+    except ValueError as error:
+        parser.error(str(error))
+
+
+def prepare(root, mode="model", input_config=None, feature_expressions=None, sequence_step_len=None, model_candidates=None, horizon_sessions=1, window_config=None, feature_suite=None, research_series: Mapping | None = None):
     root = Path(root).resolve()
     if mode not in {"model", "development", "portfolio"}:
         raise ValueError("不支持的公开起点")
@@ -108,6 +139,7 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
         raise ValueError("horizon_sessions必须为正整数")
     if mode == "portfolio" and (horizon_sessions != 1 or window_config is not None):
         raise ValueError("组合示例保持原单日期限和窗口；滚动多期限请使用development或model")
+    research_series = normalize_research_series(research_series, required=mode != "development")
     windows = {"train_sessions": 30, "validation_sessions": 10, "test_sessions": 10,
                "step_sessions": 10, "embargo_sessions": 1, "expanding": True}
     if window_config is not None:
@@ -205,11 +237,13 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
     design["metric_ref"] = metric_ref
     design["candidate_ids"] = [item.candidate_id for item in search.candidates]
     design["candidate_parameters_json"] = canonical_json({item.candidate_id: dict(item.parameters) for item in search.candidates})
+    if research_series is not None:
+        design["research_series"] = research_series
     identity = typed_canonical_hash(design)
     parameters = {"candidate_jsons": [canonical_json(item) for item in candidates], "target_kind": "regression",
         "objective": "neg_mean_squared_error", "direction": "maximize", "search_id": research_id,
         "search_frozen_at": stamp(days[0], "09:00:00").isoformat(), "research_identity_hash": identity, "thread_count": 1}
-    (root / "request.json").write_text(json.dumps({"design": design, "model_parameters": parameters, "root_seed": SEED}, indent=2), encoding="utf-8")
+    (root / "request.json").write_text(json.dumps({"design": design, "model_parameters": parameters, "root_seed": SEED, "research_series": research_series}, indent=2), encoding="utf-8")
     package = root / "package"
     metric_semantics = {metric_ref: "开发validation价格变化预测均方误差" if mode == "development" else "冻结选择后单次holdout的价格变化预测均方误差"}
     if mode == "portfolio":
@@ -293,6 +327,7 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
         node("model_selection","research.model.selection",[("metrics","model_metrics","metrics"),("splits","model_split","splits"),("models","model_fit","models")],{"target_kind":"regression","objective":"neg_mean_squared_error","direction":"maximize"}),
         node("model_holdout","research.model.locked-holdout",[("features","feature","features"),("labels","label","labels"),("selection","model_selection","selection"),("splits","model_split","splits")],
             {**parameters,"package_hash":identity,"implementation_hash":typed_canonical_hash((HERE/"extension/operator.py").read_text(encoding="utf-8")),
+             "research_series_json":canonical_json(research_series),
              "holdout_actor":research_id,"holdout_reason":"final_locked_holdout","holdout_unlock_at":clock,"fixed_clock":clock}),
         node("summary","project.qlib_demo.summary",[("data","data_plane","data"),("fit","model_fit","models"),("holdout","model_holdout","holdout")],{"design":design,"price_request_id":"daily_feature"},"1.0.0"),
     ])
@@ -306,7 +341,8 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
     tables=[]
     def table(name, source, port, kind, schema=None, role="diagnostic"):
         tables.append({"table_id":name,"role":role,"source_node_id":source,"source_port":port,"artifact_type":kind,"schema_id":schema or "project.qlib_demo."+name+".v1","path_prefix":name})
-    for name,source,port,kind in [("features","feature","features","research.feature-set.v1"),("labels","label","labels","research.label.v1")]: table(name,source,port,kind)
+    for name,source,port,kind in [("features","feature","features","research.feature-set.v1"),("labels","label","labels","research.label.v1")]:
+        table(name,source,port,kind)
     for source,port,kind,names in [
         ("model_split","splits","research.model-split-manifest.v2",("samples","split_audit","holdout_index")),
         ("model_fit","models","research.model-fits.v2",("fit_audit",)),
@@ -314,20 +350,21 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
         ("model_selection","selection","research.model-selection.v2",("selection","test_predictions","fold_selections")),
         ("model_holdout","holdout","research.model-locked-holdout.v2",("holdout_predictions","holdout_receipt")),
         ("summary","result",summary_type,("raw_prices","study_design"))]:
-        for name in names: table(name,source,port,kind)
+        for name in names:
+            table(name,source,port,kind)
     if sequence_step_len is not None:
         for name in ("context", "targets", "members", "exclusions"):
-            table("sequence_" + name, "model_split", "splits", "research.model-split-manifest.v2")
+            table("sequence_" + name, "model_split", "splits", "research.model-split-manifest.v2",
+                  "project.qlib_demo.sequence_" + name + (".v2" if name in {"context", "members"} else ".v1"))
     table("metrics","validity","metrics","project.qlib_demo.prediction-metrics.v1",role="primary")
     table("models","summary","result",summary_type,"research.qlib-model-inventory.v1")
-    validity_ports=[("data","data_plane","data","data.columnar-bundle.v1"),("features","feature","features","research.feature-set.v1"),
-        ("labels","label","labels","research.label.v1"),("splits","model_split","splits","research.model-split-manifest.v2"),
-        ("fits","model_fit","models","research.model-fits.v2"),("predictions","model_predict","predictions","research.model-validation-predictions.v2"),
-        ("selection","model_selection","selection","research.model-selection.v2"),("holdout","model_holdout","holdout","research.model-locked-holdout.v2"),
+    validity_ports=[("data","data_plane","data","data.columnar-bundle.v1"),
         ("summary","summary","result",summary_type)]
     if mode == "development":
         tables = [item for item in tables if item["source_node_id"] not in {"model_selection", "model_holdout"}]
-        validity_ports = [item for item in validity_ports if item[0] not in {"selection", "holdout"}]
+        validity_ports.append(("predictions","model_predict","predictions","research.model-validation-predictions.v2"))
+    else:
+        validity_ports.append(("holdout","model_holdout","holdout","research.model-locked-holdout.v2"))
     nodes.append(node("validity","project.qlib_demo.validity",[(a,b,c) for a,b,c,_ in validity_ports],
         {"data_request_ids":["daily_feature","daily_label"],"table_bindings":{item["table_id"]:item["schema_id"] for item in tables},"metric_ref":metric_ref},"1.0.0"))
     declarations.append(("validity",declaration("validity",[(a,d) for a,_,_,d in validity_ports],[("validity","research.validity-facts.v1"),("metrics","project.qlib_demo.prediction-metrics.v1")],
@@ -376,5 +413,7 @@ if __name__ == "__main__":
     parser.add_argument("--input-config")
     parser.add_argument("--sequence-step-len",type=int)
     parser.add_argument("--factor-suite", choices=("volume_price_v1", "alpha158_selected_v1", "alpha360_selected_v1"))
+    add_research_series_arguments(parser)
     args=parser.parse_args()
-    print(json.dumps(prepare(args.output,args.mode,args.input_config,sequence_step_len=args.sequence_step_len,feature_suite=args.factor_suite),ensure_ascii=False,indent=2))
+    research_series = research_series_from_arguments(args, parser)
+    print(json.dumps(prepare(args.output,args.mode,args.input_config,sequence_step_len=args.sequence_step_len,feature_suite=args.factor_suite,research_series=research_series),ensure_ascii=False,indent=2))

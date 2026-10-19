@@ -46,11 +46,19 @@ def verify_sequence_window_facts(
         require(not pd.isna(observed) and not pd.isna(available) and observed <= available,
                 "原始 Feature 观察和可见时间无效")
         by_day[key][name] = row
+    compact = "context_index" in context
+    indexed_context = {}
+    if compact:
+        require(pd.api.types.is_integer_dtype(context.context_index)
+                and not context.context_index.duplicated().any()
+                and (context.context_index >= 0).all(), "上下文索引必须为唯一非负整数")
     actual_context = {}
     for row in context.to_dict("records"):
         key = (str(row["entity_id"]), pd.Timestamp(row["observation_session"]).date())
         require(key not in actual_context, "上下文证券会话重复")
         actual_context[key] = row
+        if compact:
+            indexed_context[row["context_index"]] = key
     require(set(actual_context) == set(by_day), "上下文未闭合原始 Feature")
     expected_context = {}
     for key, feature_rows in by_day.items():
@@ -90,14 +98,27 @@ def verify_sequence_window_facts(
             window.append(row)
         if sid not in expected_exclusions:
             for step, row in enumerate(window):
-                expected_members[(sid, step)] = {name: value for name, value in row.items() if name != "feature_count"}
+                if compact:
+                    expected_members[(sid, step)] = actual_context[(row["entity_id"], row["observation_session"])]["context_index"]
+                else:
+                    expected_members[(sid, step)] = {name: value for name, value in row.items() if name != "feature_count"}
     actual_members = {}
-    require(set(members.columns) == {"sample_id", "step", "entity_id", "observation_session", "observation_time",
-                                     "feature_available_time", "feature_lineage_hash"}, "窗口事实列不完整")
-    for row in members.to_dict("records"):
+    expected_columns = ({"sample_id", "step", "context_index"} if compact else
+                        {"sample_id", "step", "entity_id", "observation_session", "observation_time",
+                         "feature_available_time", "feature_lineage_hash"})
+    require(set(members.columns) == expected_columns, "窗口事实列不完整")
+    require(pd.api.types.is_integer_dtype(members.step), "窗口步序必须为整数")
+    if compact:
+        require(pd.api.types.is_integer_dtype(members.context_index), "成员上下文索引必须为整数")
+    for member in members.itertuples(index=False):
+        row = member._asdict()
         key = (str(row.pop("sample_id")), row.pop("step"))
         require(key not in actual_members, "窗口成员重复")
-        actual_members[key] = row
+        if compact:
+            require(row["context_index"] in indexed_context, "成员引用不存在的上下文")
+            actual_members[key] = row["context_index"]
+        else:
+            actual_members[key] = row
     require(actual_members == expected_members, "窗口成员、证券、会话、可见时间或来源不一致")
     actual_exclusions = {}
     for row in exclusions.to_dict("records"):

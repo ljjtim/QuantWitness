@@ -1,6 +1,4 @@
 """正式运行诊断决定是否可修复代码，资源与输出阶段失败保持原候选。"""
-import json
-from pathlib import Path
 
 import pytest
 
@@ -31,17 +29,17 @@ def test_formula_fail_repairs_only_after_command_complete():
 
 
 def test_runtime_error_code_preserved_with_formal_node_inspection(tmp_path, monkeypatch):
-    from quantwitness_rdagent import worker
+    from research_pipeline.application import runtime_lifecycle
     write_json(tmp_path / "execution/run/operator-dag-invocation.json", {})
     write_json(tmp_path / "execution/plan/admitted/operator-graph-plan.json", {"recipe": {"nodes": [
         {"node_id": "formula", "operator_id": "candidate", "operator_version": "2.0.0"},
         {"node_id": "analysis", "operator_id": "analysis", "operator_version": "1.0.0"}]}})
     write_json(tmp_path / "bundle/manifest.json", {"operator_spec": {"operator_id": "candidate", "operator_version": "2.0.0"}})
-    def inspect(argv):
-        assert argv[:2] == ["inspect", "--run-root"]
+    def inspect(args):
+        assert args.command == "inspect"
         return {"recommended_action": "retry-node", "nodes": {"formula": {"status": "exhausted", "last_error": {
             "error_code": "resource_measurement_unavailable", "exception_type": "RuntimeWorkerError", "message": "measurement unavailable"}}}}
-    monkeypatch.setattr(worker, "_command", inspect)
+    monkeypatch.setattr(runtime_lifecycle, "_execute", inspect)
     error = RuntimeWorkerError("operator 节点执行失败", error_code="resource_measurement_unavailable", failure_payload={"code": "resource_measurement_unavailable"})
     diagnostics = failure_diagnostics(error, stage="run", execution=tmp_path / "execution", bundle=tmp_path / "bundle")
     assert diagnostics[0]["error_code"] == "resource_measurement_unavailable"
@@ -50,11 +48,11 @@ def test_runtime_error_code_preserved_with_formal_node_inspection(tmp_path, monk
 
 
 def test_unknown_inspect_failure_stops_code_repair(tmp_path, monkeypatch):
-    from quantwitness_rdagent import worker
+    from research_pipeline.application import runtime_lifecycle
     write_json(tmp_path / "execution/run/operator-dag-invocation.json", {})
     def inspect(argv):
         raise OSError("cannot inspect")
-    monkeypatch.setattr(worker, "_command", inspect)
+    monkeypatch.setattr(runtime_lifecycle, "_execute", inspect)
     diagnostics = failure_diagnostics(RuntimeWorkerError("unknown"), stage="run", execution=tmp_path / "execution")
     assert diagnostics[1]["stage"] == "inspect"
     assert not candidate_needs_repair({"command_status": "failed", "diagnostics": diagnostics})

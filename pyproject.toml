@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantwitness"
-version = "1.3.0"
+version = "1.4.0"
 description = "AI-assisted quantitative research and backtesting with traceable, independently verifiable results"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -63,6 +63,7 @@ where = ["src"]
   "session_policies/*.json",
   "rule_snapshots/minute_reference_rules.json",
   "rule_snapshots/minute_reference_rules.v5.json",
+  "rule_snapshots/minute_reference_rules.v6.json",
 ]
 "research_pipeline.evidence" = ["result_dispositions.v1.json", "financial_oracle/README.md"]
 

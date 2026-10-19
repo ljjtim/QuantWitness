@@ -6,7 +6,7 @@ from research_pipeline.results import QLIB_MODEL_INVENTORY_SCHEMA_ID
 
 _MODEL_HOLDOUT_ARTIFACT_TYPE = "research.model-locked-holdout.v2"
 _HOLDOUT_LEDGER_PATHS = frozenset(
-    f"holdout-ledger/{name}.json" for name in ("plan", "prepared", "opened", "terminal")
+    f"holdout-ledger/{name}.json" for name in ("plan", "prepared", "opened", "terminal", "series")
 )
 
 

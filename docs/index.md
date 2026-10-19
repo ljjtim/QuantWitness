@@ -42,12 +42,21 @@
 
 ## 我想理解系统，或解决运行问题
 
+- [研究执行与验证改进](research-execution-improvements.md)：进度、接续、列式验证和证据复用。
+- [Workspace 模板复用与执行接续](workspace-continuation.md)：显式接续原 execution，统一执行与验证服务，修改完整模板中已声明的参数。
+- [真实运行进度](runtime-progress.md)：有效完成量、最近进展和当前阶段 ETA。
+- [Verifier 输入列投影](verifier-input-projection.md)：减少独立输入复制并保留原表完整性检查。
+- [实现身份的影响范围](implementation-identity-scope.md)：区分局部源码、共享依赖与恢复环境。
+
 - [六张交互图](architecture/README.md)：总体概览、总体架构、数据流、工作流、调用时序与运行状态。
 - [模块职责与边界](architecture.md)：从问题找到代码位置。
 - [研究包格式](research_package.md)：哪些约定需要固定下来。
 - [数据读取与输入归档](data_plane.md)：同一研究怎样使用数据库或已封存行情。
-- [运行与恢复](runtime.md)：什么时候用 resume，什么时候用 retry-node。
-- [资源预算](project_resource_budgets.md)：运行和独立验证如何分配内存与进程。
+- [快照布局](snapshot-layout.md)：小表合并、月份分区、有界缓冲和冻结策略。
+- [中间产物保留与回收](artifact-lifecycle.md)：成功副本交接、失败暂存保护和只读回收预览。
+- [运行与恢复](runtime.md)：什么时候用 resume、retry-node，以及因果事实列式传输与固定键批边界。
+- [资源预算](project_resource_budgets.md)：运行和独立验证如何分配内存与进程，日频模型的完整证据投影与 16 GiB 声明。
+- [资源历史](resource-history.md)：共享池 v3 活动状态、冷日志提交与 Worker 采样交接。
 - [命令行参考](cli.md)与[运维](operations.md)：查找、诊断、清理与恢复入口。
 - [完整框架约定](framework-contracts.md)：需要实现新接入或深查行为时再读。
 
@@ -96,3 +105,11 @@
 <!-- CAPABILITIES_TABLE:END -->
 
 </details>
+
+## 退市零回收假设
+
+v2 `delisting_cash` 可显式声明 `recovery_assumption: zero_recovery`，将退市剩余持仓核销且现金回收为零。该字段属于研究假设，必须封存来源说明、公告可见时间、终止交易日和生效日；它不代表实际清算结果。未声明假设时仍要求正清算金额，普通行情价格仍必须为正。核销记录进入金融事件及独立复核，不能生成卖出成交，也不能在公告可见或终止交易前生效。
+
+日频独立持仓复核按成交与公司行动重建零持仓登记。正式持仓表省略零数量且无变化的行时，复核仍要求登记会话存在、数量独立重建为零；非零持仓缺行或伪造零登记继续拒绝。
+
+- [研究系列与最终留出集](holdout-series.md)：持久系列声明、真实暴露、旧账本与恢复。

@@ -1,4 +1,4 @@
-"""运行时 checkpoint v3：绑定节点、实现、输入、完整端口输出和缓存画像。"""
+"""运行时 checkpoint v4：资源验收后发布，绑定节点、实现、输入、输出和缓存画像。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .contracts import ArtifactRef, _require_fields
 from .errors import RuntimeIntegrityError
 
 
-CHECKPOINT_MANIFEST_VERSION = "research-runtime-checkpoint-v3"
+CHECKPOINT_MANIFEST_VERSION = "research-runtime-checkpoint-v4"
 
 
 def _require_digest(value: str, field: str) -> None:

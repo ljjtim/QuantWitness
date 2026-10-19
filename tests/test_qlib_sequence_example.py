@@ -75,7 +75,9 @@ def test_public_prepare_freezes_explicit_gru_candidates(tmp_path, monkeypatch, m
     small, large = make(3), make(3)
     small["candidate_id"], large["candidate_id"] = "small", "large"
     large["model"]["kwargs"]["hidden_size"] = 8
-    prepare.prepare(tmp_path / "research", "model", sequence_step_len=3, model_candidates=[small, large])
+    prepare.prepare(tmp_path / "research", "model", sequence_step_len=3, model_candidates=[small, large],
+        research_series={"series_id": "sequence-model", "root": str(tmp_path / "series"),
+            "purpose": "序列候选最终评价", "legacy_ledger_roots": []})
     request = json.loads((tmp_path / "research/request.json").read_text(encoding="utf-8"))
     design = request["design"]
     candidates = json.loads(design["candidate_parameters_json"])

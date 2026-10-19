@@ -64,6 +64,8 @@ def prepared_research(tmp_path_factory):
                         root, mode=mode, horizon_sessions=horizon,
                         window_config={**WINDOWS, "expanding": expanding},
                         model_candidates=[module.candidate(0.1)],
+                        research_series=({"series_id": "horizon-confirmation", "root": str(parent / "series"),
+                            "purpose": "期限与窗口接线", "legacy_ledger_roots": []} if mode == "model" else None),
                     )
                     request = json.loads((root / "request.json").read_text(encoding="utf-8"))
                     graph = yaml.safe_load((root / "package/spec/research.yaml").read_text(encoding="utf-8"))["graph"]

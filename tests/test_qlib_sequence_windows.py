@@ -55,8 +55,9 @@ def test_calendar_members_preserve_purge_rows_and_holdout_warmup_without_labels(
     assert "target" not in windows.context
     for sid, expected_days in [("A2", calendar[:3]), ("A5", calendar[3:6]), ("A7", calendar[5:8])]:
         members = windows.members.loc[windows.members.sample_id == sid]
-        assert members.observation_session.tolist() == list(expected_days)
-        assert members.entity_id.tolist() == ["A"]*3
+        context = windows.context.set_index("context_index").loc[members.context_index]
+        assert context.observation_session.tolist() == list(expected_days)
+        assert context.entity_id.tolist() == ["A"]*3
     assert verify(windows, targets=ends) == dict(target_count=4, window_count=4, excluded_count=0, member_count=12)
 
 
@@ -123,16 +124,26 @@ def test_prediction_nan_labels_feature_order_and_endpoint_order():
 @pytest.mark.parametrize("change", ["entity", "session", "available", "lineage", "step", "omit", "duplicate", "value", "exclude"])
 def test_independent_verifier_rejects_altered_window_evidence(change):
     windows = plan()
-    if change == "entity": windows.members.loc[0, "entity_id"] = "B"
-    elif change == "session": windows.members.loc[0, "observation_session"] = windows.calendar_sessions[1]
-    elif change == "available": windows.members.loc[0, "feature_available_time"] += pd.Timedelta(minutes=1)
-    elif change == "lineage": windows.members.loc[0, "feature_lineage_hash"] = "other"
-    elif change == "step": windows.members.loc[0, "step"] = 9
-    elif change == "omit": windows = replace(windows, members=windows.members.iloc[1:])
-    elif change == "duplicate": windows = replace(windows, members=pd.concat([windows.members, windows.members.iloc[:1]]))
-    elif change == "value": windows.context.loc[0, "x__w1"] += 1
-    else: windows.exclusions.loc[0, "reason_code"] = "missing_feature"
-    with pytest.raises(SequenceWindowVerificationError): verify(windows)
+    if change == "entity":
+        windows.members.loc[0, "context_index"] = windows.context.loc[windows.context.entity_id.eq("B"), "context_index"].iloc[0]
+    elif change == "session":
+        windows.members.loc[0, "context_index"] = windows.context.loc[windows.context.observation_session.eq(windows.calendar_sessions[1]), "context_index"].iloc[0]
+    elif change == "available":
+        windows.context.loc[0, "feature_available_time"] += pd.Timedelta(minutes=1)
+    elif change == "lineage":
+        windows.context.loc[0, "feature_lineage_hash"] = "other"
+    elif change == "step":
+        windows.members.loc[0, "step"] = 9
+    elif change == "omit":
+        windows = replace(windows, members=windows.members.iloc[1:])
+    elif change == "duplicate":
+        windows = replace(windows, members=pd.concat([windows.members, windows.members.iloc[:1]]))
+    elif change == "value":
+        windows.context.loc[0, "x__w1"] += 1
+    else:
+        windows.exclusions.loc[0, "reason_code"] = "missing_feature"
+    with pytest.raises(SequenceWindowVerificationError):
+        verify(windows)
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -144,7 +155,8 @@ def test_independent_verifier_rejects_altered_window_evidence(change):
     dict(segments={"train":["A2"], "valid":["A5"]}, labels=pd.Series({"A2":1.0,"A5":2.0,"A7":3.0})),
 ])
 def test_dataset_rejects_label_leakage_and_invalid_endpoint_selection(kwargs):
-    with pytest.raises(ModelMainlineError): qlib_sequence_dataset(plan(), **kwargs)
+    with pytest.raises(ModelMainlineError):
+        qlib_sequence_dataset(plan(), **kwargs)
 
 
 def test_window_evidence_round_trip_plain_parquet(tmp_path):
@@ -204,3 +216,25 @@ def test_verifier_does_not_call_window_builder(monkeypatch):
     monkeypatch.setattr(sequence, "build_sequence_windows", reject)
     monkeypatch.setattr(sequence, "assemble_daily_feature_context", reject)
     assert verify(windows)["window_count"] == 14
+
+
+@pytest.mark.parametrize("mutation", ["unknown_index", "duplicate_context", "float_member_index"])
+def test_compact_indices_reject_incomplete_or_ambiguous_binding(mutation):
+    windows = plan()
+    assert set(windows.members) == {"sample_id", "step", "context_index"}
+    if mutation == "unknown_index": windows.members.loc[0, "context_index"] = 99999
+    elif mutation == "duplicate_context": windows.context.loc[1, "context_index"] = windows.context.loc[0, "context_index"]
+    else: windows = replace(windows, members=windows.members.astype({"context_index": "float64"}))
+    with pytest.raises(SequenceWindowVerificationError):
+        verify(windows)
+
+
+def test_historical_expanded_windows_keep_verification_and_qlib_sampling():
+    windows = plan()
+    members = windows.members.merge(windows.context.drop(columns=list(COLUMNS) + ["feature_count"]),
+                                    on="context_index", validate="many_to_one").drop(columns="context_index")
+    old = replace(windows, context=windows.context.drop(columns="context_index"), members=members)
+    assert verify(old) == verify(windows)
+    for value in (old, windows):
+        sampler = qlib_sequence_dataset(value, segments={"test": ["A7"]}).prepare("test", col_set="feature")
+        np.testing.assert_array_equal(sampler[0], [[50, 51], [60, 61], [70, 71]])

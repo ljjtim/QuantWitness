@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pyarrow as pa
 import pytest
 
-from research_pipeline.cli.report_output import report_table_ids, write_qlib_report
+from research_pipeline.application.report_output import report_table_ids, write_qlib_report
 from research_pipeline.evidence.qlib_report import validate_report_request
 from research_pipeline.evidence.portfolio_report import (
     TABLE_SCHEMAS, _figures, portfolio_display_data, read_portfolio_frames,

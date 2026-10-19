@@ -441,6 +441,7 @@ class PartitionedDatasetResolver:
                 "partitioned_dataset",
                 identity,
                 lambda: self._resolve_and_verify_uncached(expected, root),
+                descriptor={"root": root, "reference": expected},
             )
         return self._resolve_and_verify_uncached(expected, root)
 

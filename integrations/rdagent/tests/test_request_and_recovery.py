@@ -91,7 +91,10 @@ def test_inspect_does_not_create_session(tmp_path, monkeypatch, capsys):
     request_file.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr("sys.argv", ["quantwitness_rdagent", "inspect", "--request", str(request_file)])
     main()
-    assert json.loads(capsys.readouterr().out) == {"status": "incomplete"}
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "not_started"
+    assert result["next_action"] == "run"
+    assert result["request_consistent"] is None
     assert not (tmp_path / "session").exists()
 
 

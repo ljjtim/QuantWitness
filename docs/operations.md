@@ -38,9 +38,9 @@ python -m research_pipeline gc --root <工件根> --ttl-seconds 86400 --json
 python -m research_pipeline gc --root <工件根> --ttl-seconds 86400 --apply --json
 ```
 
-第一条只生成计划。`--apply` 才执行工件回收。
+第一条只生成计划，列出候选文件数、逻辑字节和保护原因。`--apply` 将候选移入 `quarantine/`，不删除隔离载荷，不代表磁盘空间已经释放。
 
-当前命令只扫描工件根下的 `staging/` 和 `cache/`。它不扫描、不移动 ResultStore、完成态 run-root 或历史项目轮次，因此也不会自动建立这些目录之间的引用关系。真实研究归档必须另行保留 ResultStore 中的 Result 本体和对应 VerificationResult；验收摘要不能替代它们。完成态 run-root 只有在 `report`、`export-result` 已证明不再依赖它，并经过独立清理规划和授权后才可处理。
+当前命令扫描工件根下的 `staging/`、`cache/` 及 external 暂存目录。external 暂存必须具备生产者停止、Runtime owner 停止和 attempt 终态证据；未知归属和活动对象保留。成功节点的已交接载荷按 [产物生命周期](artifact-lifecycle.md) 逐文件释放，失败恢复材料和正式输出保留。GC 不扫描、不移动 ResultStore、完成态 run-root 或历史项目轮次，也不会自动建立这些目录之间的引用关系。真实研究归档必须另行保留 ResultStore 中的 Result 本体和对应 VerificationResult；验收摘要不能替代它们。完成态 run-root 只有在 `report`、`export-result` 已证明不再依赖它，并经过独立清理规划和授权后才可处理。
 
 仍被故障排查、人工记录或其他工具直接引用的 run-root 继续保留。历史 legacy junction 只作为独立清理计划中的明确对象记录；当前 `gc` 不处理它，本流程也不为它提供兼容或迁移入口。
 

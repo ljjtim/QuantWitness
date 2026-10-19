@@ -193,16 +193,19 @@ def _resolve_entry(entry):
 class ArchivedInputInspector:
     """只用已验证 Arrow schema 提供归档物理 inventory。"""
 
-    def __init__(self, entry, *, source_profile, environment, object_name):
+    def __init__(self, entry, *, source_profile, environment, object_name, verified_schema=None):
         self.entry = entry
         self.source_profile = source_profile
         self.environment = environment
         self.object_name = object_name
+        self._verified_schema = verified_schema
 
     def observe_current_schema(self, object_name):
         if object_name != self.object_name:
             raise SnapshotIntegrityError("归档 Inspector 不能观察未绑定对象")
-        schema = _resolve_entry(self.entry)[3]
+        schema = self._verified_schema
+        if schema is None:
+            schema = _resolve_entry(self.entry)[3]
         return PhysicalInventory(
             "parquet", self.source_profile, self.environment, object_name,
             tuple(PhysicalColumn(field.name, str(field.type), field.nullable, index)
@@ -210,7 +213,7 @@ class ArchivedInputInspector:
         )
 
 
-def _evidence(entry, plan, files, reference):
+def _evidence(entry, plan, files, reference, *, dataset, execution_budget):
     import pyarrow.parquet as pq
     from .execution_budget import _CANONICAL_INSTRUMENT_UTF8_BYTES
 
@@ -238,26 +241,44 @@ def _evidence(entry, plan, files, reference):
                         if entry["kind"] == "minute" and field_id == plan.instrument_field:
                             width_bounds[field_id] = _CANONICAL_INSTRUMENT_UTF8_BYTES
         largest_bytes = max(largest_bytes, file_bytes)
+    ordered = False
     if entry["kind"] == "dataset":
-        dataset = _resolve_entry(entry)[4]
-        for field_id, dtype in plan.field_types:
-            if dtype != "string":
-                continue
-            maximum = 0
-            for batch in _snapshot_batches(dataset, files, plan, columns=(field_id,), batch_size=min(plan.query.budget.batch_size, 65536)):
-                for value in batch.column(0).to_pylist():
-                    if value is not None:
-                        maximum = max(maximum, len(value.encode("utf-8")))
-            width_bounds[field_id] = maximum
+        order_fields = _archive_order_fields(plan)
+        string_fields = tuple(field for field, dtype in plan.field_types
+                              if dtype == "string" and field in dataset.allowed_columns)
+        columns = tuple(dict.fromkeys((*order_fields, *string_fields)))
+        previous, ordered = None, True
+        for batch in _snapshot_batches(dataset, files, plan, columns=columns,
+                                       batch_size=min(plan.query.budget.batch_size, 65536)):
+            offset, proof_rows = 0, batch.num_rows
+            while offset < batch.num_rows:
+                part = batch.slice(offset, min(proof_rows, batch.num_rows - offset))
+                # 切片仍持有原 Arrow 批次；Python 投影仅在本次小批内存活。
+                while batch.nbytes + 7 * part.nbytes + part.num_rows * len(columns) * 128 > execution_budget.memory_bytes:
+                    if part.num_rows == 1:
+                        raise SnapshotIntegrityError("归档顺序与字段宽度检查超过节点内存预算")
+                    proof_rows = max(1, part.num_rows // 2)
+                    part = batch.slice(offset, proof_rows)
+                values = {field: part.column(field).to_pylist() for field in columns}
+                for field in string_fields:
+                    width_bounds[field] = max(width_bounds.get(field, 0),
+                        max((len(value.encode("utf-8")) for value in values[field] if value is not None), default=0))
+                for row in zip(*(values[field] for field in order_fields)):
+                    key = tuple((value is None, value) for value in row)
+                    if previous is not None and key <= previous:
+                        ordered = False
+                    previous = key
+                offset += part.num_rows
+                del values
     revision = reference.source_revision_hash if entry["kind"] == "dataset" else reference.reference_id
     partitioned = entry["kind"] == "minute"
     return ObjectExecutionEvidence(
         object_name=plan.object_name, object_kind="archived_parquet",
         dependency_chain=(plan.object_name,), source_rows_upper=rows,
         expanded_rows_upper=None, variable_width_upper=tuple(sorted(width_bounds.items())),
-        has_json_expansion=False, has_window=False, has_order_by=True,
+        has_json_expansion=False, has_window=False, has_order_by=not ordered,
         query_scope_hash=typed_canonical_hash(plan.query.to_dict()), database_revision=revision,
-        expansion_bound_method=None, method="arrow_archived_input_v1",
+        expansion_bound_method=None, method="arrow_archived_ordered_v2" if ordered else "arrow_archived_input_v1",
         partition_count=len(files) if partitioned else 0,
         partition_rows_upper=largest_rows if partitioned else None,
         partition_uncompressed_bytes_upper=largest_bytes if partitioned else None,
@@ -274,7 +295,7 @@ def admit_archived_queries(queries, *, catalog, execution_budgets, manifest):
     admitted, estimates, attestations, source_facts = {}, {}, [], {}
     for request_id, query in sorted(queries.items()):
         entry = manifest["requests"][request_id]
-        original, reference, files, schema, _ = _resolve_entry(entry)
+        original, reference, files, schema, dataset = _resolve_entry(entry)
         if _logical_query(query) != _logical_query(original.query):
             raise SnapshotIntegrityError("封存输入只支持逻辑查询语义等同的重用")
         binding = catalog.bindings.get(entry["binding_id"])
@@ -282,7 +303,7 @@ def admit_archived_queries(queries, *, catalog, execution_budgets, manifest):
             raise SnapshotIntegrityError("当前 Catalog 缺少已批准的归档 binding")
         if binding["source_profile"] == original.source_profile or binding["status"] != "approved":
             raise SnapshotIntegrityError("归档必须使用独立 parquet source_profile/binding")
-        inspector = ArchivedInputInspector(entry, source_profile=binding["source_profile"], environment=binding["environment"], object_name=binding["object_name"])
+        inspector = ArchivedInputInspector(entry, source_profile=binding["source_profile"], environment=binding["environment"], object_name=binding["object_name"], verified_schema=schema)
         resolved, attestation = CatalogPreflight(catalog).resolve_current_binding(
             inspector=inspector, dataset_id=query.dataset_id, dataset_version=query.dataset_version,
             source_profile=binding["source_profile"], environment=binding["environment"],
@@ -293,9 +314,9 @@ def admit_archived_queries(queries, *, catalog, execution_budgets, manifest):
         expected_mapping = {field_id: field_id for field_id in _snapshot_fields(original)} if entry["kind"] == "dataset" else dict(original.columns)
         if dict(plan.columns) != expected_mapping:
             raise SnapshotIntegrityError("归档物理字段映射与已封存列不一致")
-        evidence = _evidence(entry, plan, files, reference)
+        evidence = _evidence(entry, plan, files, reference, dataset=dataset, execution_budget=execution_budgets[request_id])
         estimate = build_execution_estimate(plan, evidence=evidence, execution_budget=execution_budgets[request_id])
-        if entry["kind"] == "dataset":
+        if entry["kind"] == "dataset" and evidence.has_order_by:
             required = 4 * evidence.source_rows_upper * estimate.projected_row_width_upper + 16 * evidence.source_rows_upper
             if required > estimate.provider_duckdb_memory_bytes:
                 raise SnapshotIntegrityError("归档 Arrow 排序超过节点内存预算")
@@ -311,9 +332,9 @@ def admit_archived_queries(queries, *, catalog, execution_budgets, manifest):
     }
 
 
-def rebind_archived_minute(entry, plan):
+def rebind_archived_minute(entry, plan, *, resolved=None):
     """复验分钟文件，保留原引用并绑定当前新准入，不复制分钟行。"""
-    original, reference, _, _, _ = _resolve_entry(entry)
+    original, reference, _, _, _ = resolved if resolved is not None else _resolve_entry(entry)
     if entry["kind"] != "minute":
         raise SnapshotIntegrityError("来源不是分钟分区引用")
     require_archived_plan_equivalent(original, plan)
@@ -324,9 +345,37 @@ def rebind_archived_minute(entry, plan):
     return replace(reference, dataset_id=f"minute/{plan.plan_hash}", lineage=lineage, partitions=partitions)
 
 
-def materialize_archived_inputs(*, manifest, admitted_plans, execution_estimates, execution_budget, artifact_root):
-    """在节点预算内按主键和版本顺序重排，保留原时态来源模式。"""
+
+def _archive_order_fields(plan):
+    return tuple(dict.fromkeys((*plan.primary_key,
+        *(plan.temporal_selection.source_order_fields if plan.temporal_selection.requires_consumer_binding else ()))))
+
+
+def _archive_publish_batches(dataset, files, plan, schema, estimate):
     import pyarrow as pa
+
+    source = _snapshot_batches(dataset, files, plan, columns=_snapshot_fields(plan),
+                               batch_size=min(estimate.provider_batch_rows, 65536))
+    if not estimate.has_order_by:
+        # 准入已逐键证明全局顺序；发布门禁仍逐批检查顺序和 PIT。
+        for batch in source:
+            if 4 * batch.nbytes + 16 * batch.num_rows > estimate.provider_duckdb_memory_bytes:
+                raise SnapshotIntegrityError("归档流式批次超过节点内存预算")
+            yield batch
+        return
+    batches, total_bytes, rows = [], 0, 0
+    for batch in source:
+        total_bytes += batch.nbytes
+        rows += batch.num_rows
+        if 4 * total_bytes + 16 * rows > estimate.provider_duckdb_memory_bytes:
+            raise SnapshotIntegrityError("归档 Arrow 排序超过节点内存预算")
+        batches.append(batch)
+    table = pa.Table.from_batches(batches, schema=schema)
+    table = table.sort_by([(field, "ascending") for field in _archive_order_fields(plan)])
+    yield from table.to_batches(max_chunksize=estimate.provider_batch_rows)
+
+def materialize_archived_inputs(*, manifest, admitted_plans, execution_estimates, execution_budget, artifact_root):
+    """按准入顺序证明流式发布，其他来源在预算内排序，保留全部版本。"""
 
     manifest = load_archived_input_manifest(manifest)
     if set(admitted_plans) - set(manifest["requests"]) or set(admitted_plans) - set(execution_estimates):
@@ -335,46 +384,52 @@ def materialize_archived_inputs(*, manifest, admitted_plans, execution_estimates
     references, verified = {}, {}
     for request_id, plan in sorted(admitted_plans.items()):
         entry = manifest["requests"][request_id]
-        original, reference, files, schema, dataset = _resolve_entry(entry)
-        require_archived_plan_equivalent(original, plan)
-        estimate = execution_estimates[request_id]
-        if estimate.query_scope_hash != typed_canonical_hash(plan.query.to_dict()) or estimate.object_name != plan.object_name or not estimate.accepts_runtime_budget(execution_budget):
-            raise SnapshotIntegrityError("归档物化预算证据与当前计划不一致")
-        if entry["kind"] == "minute":
-            references[request_id] = rebind_archived_minute(entry, plan).to_dict()
-            continue
-        file_hashes = {
-            str(Path(entry["root"]) / reference.relative_path / item["relative_path"]): item["sha256"]
-            for item in dataset.manifest["files"]
-        }
-        source = SourceRevision(
-            source_id=plan.binding_id, source_kind="archived_parquet",
-            files=tuple(SourceFileEvidence(file.relative_to(entry["root"]).as_posix(),
-                file.stat().st_size, file.stat().st_mtime_ns, file_hashes[str(file)]) for file in files),
-            schema_hash=reference.schema_hash, watermark=reference.manifest_hash,
-            evidence_strength="manifest_hash",
-        )
-        logical = build_logical_snapshot(plan, source_revisions=(source,), output_schema=schema,
-            provider_version="arrow-archived-input-v1", compiler_version="archived-query-equivalence-v1")
-        path = _existing_snapshot(root, logical.logical_snapshot_id, plan)
-        if path is None:
-            batches, total_bytes, rows = [], 0, 0
-            for batch in _snapshot_batches(dataset, files, original, columns=_snapshot_fields(plan), batch_size=min(estimate.provider_batch_rows, 65536)):
-                total_bytes += batch.nbytes
-                rows += batch.num_rows
-                if 4 * total_bytes + 16 * rows > estimate.provider_duckdb_memory_bytes:
-                    raise SnapshotIntegrityError("归档 Arrow 排序超过节点内存预算")
-                batches.append(batch)
-            table = pa.Table.from_batches(batches, schema=schema)
-            order_fields = tuple(dict.fromkeys((*plan.primary_key,
-                *(plan.temporal_selection.source_order_fields if plan.temporal_selection.requires_consumer_binding else ()))))
-            table = table.sort_by([(field, "ascending") for field in order_fields])
-            path = publish_parquet_snapshot(batches=table.to_batches(max_chunksize=estimate.provider_batch_rows),
-                schema=table.schema, plan=plan, logical_snapshot=logical, root=root,
-                before_commit=lambda entry=entry: _resolve_entry(entry),
-                temporal_source=plan.temporal_selection.requires_consumer_binding)
-        references[request_id] = build_dataset_artifact_ref(path, allowed_root=root).to_dict()
-        verified[request_id] = verify_parquet_snapshot(path)
+        request_status = "not_opened"
+        try:
+            resolved = _resolve_entry(entry)
+            original, reference, files, schema, dataset = resolved
+            request_status = "opened"
+            require_archived_plan_equivalent(original, plan)
+            estimate = execution_estimates[request_id]
+            if estimate.query_scope_hash != typed_canonical_hash(plan.query.to_dict()) or estimate.object_name != plan.object_name or not estimate.accepts_runtime_budget(execution_budget):
+                raise SnapshotIntegrityError("归档物化预算证据与当前计划不一致")
+            if entry["kind"] == "minute":
+                references[request_id] = rebind_archived_minute(entry, plan, resolved=resolved).to_dict()
+                continue
+            file_hashes = {
+                str(Path(entry["root"]) / reference.relative_path / item["relative_path"]): item["sha256"]
+                for item in dataset.manifest["files"]
+            }
+            source = SourceRevision(
+                source_id=plan.binding_id, source_kind="archived_parquet",
+                files=tuple(SourceFileEvidence(file.relative_to(entry["root"]).as_posix(),
+                    file.stat().st_size, file.stat().st_mtime_ns, file_hashes[str(file)]) for file in files),
+                schema_hash=reference.schema_hash, watermark=reference.manifest_hash,
+                evidence_strength="manifest_hash",
+            )
+            logical = build_logical_snapshot(plan, source_revisions=(source,), output_schema=schema,
+                provider_version="arrow-archived-input-v1", compiler_version="archived-query-equivalence-v1")
+            path = _existing_snapshot(root, logical.logical_snapshot_id, plan)
+            if path is None:
+                batches = _archive_publish_batches(dataset, files, original, schema, estimate)
+                path = publish_parquet_snapshot(batches=batches,
+                    schema=schema, plan=plan, logical_snapshot=logical, root=root,
+                    before_commit=lambda entry=entry: _resolve_entry(entry),
+                    temporal_source=plan.temporal_selection.requires_consumer_binding)
+            references[request_id] = build_dataset_artifact_ref(path, allowed_root=root).to_dict()
+            verified[request_id] = verify_parquet_snapshot(path)
+        except Exception as exc:
+            exc.failure_payload = {
+                "contract_version": "data-plane-request-failure-v1",
+                "request_status": request_status, "request_id": request_id,
+                "dataset_id": plan.query.dataset_id, "binding_id": plan.binding_id,
+                "object_name": plan.object_name, "provider": "archived_parquet",
+                "output_budget": plan.query.budget.to_dict(),
+                "execution_budget": execution_budget.to_dict(),
+                "completed_request_ids": sorted(references),
+                "underlying_exception_type": type(exc).__name__,
+            }
+            raise
     return build_research_data_bundle(admitted_plan_hashes={key: value.plan_hash for key, value in admitted_plans.items()}, references=references), verified
 
 

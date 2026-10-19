@@ -254,6 +254,8 @@ def verify_minute_corporate_actions(
                     expected.update(cancel_position_entitlements=True,
                                     trading_termination_date=action.trading_termination_date.isoformat(),
                                     settlement_available_time=action.settlement_available_time.isoformat())
+                    if action.recovery_assumption is not None:
+                        expected["recovery_assumption"] = action.recovery_assumption
                     share_claims = {claim: item for claim, item in share_claims.items() if item[0] != key}
             elif action.kind == "stock_dividend":
                 entitlement = count * action.ratio_numerator // action.ratio_denominator - count

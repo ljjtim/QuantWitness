@@ -464,11 +464,16 @@ def build_execution_estimate(
         if plan.temporal_selection.requires_consumer_binding
         else min(intermediate_rows, output_rows + 1)
     )
+    archive_ordered = (evidence.object_kind == "archived_parquet"
+                       and evidence.method == "arrow_archived_ordered_v2"
+                       and not evidence.has_order_by)
     sort_bytes = (
         intermediate_bytes
         if evidence.partition_bound_method is not None
         else sort_rows * row_width
     )
+    if archive_ordered:
+        sort_bytes = 0
     temporal = plan.temporal_selection
     needs_window = evidence.has_window or any(
         item is not None
@@ -477,6 +482,9 @@ def build_execution_estimate(
             temporal.effective_interval_selector,
         )
     )
+    # 归档重放保留全部版本，消费者随后按观察时间执行选择。
+    if archive_ordered:
+        needs_window = False
     window_bytes = intermediate_bytes if needs_window else 0
     dependency_children: dict[str, int] = {}
     for parent, _child in evidence.dependency_edges:
@@ -528,7 +536,7 @@ def build_execution_estimate(
         variable_width_upper=tuple(sorted(variable_widths.items())),
         has_json_expansion=evidence.has_json_expansion,
         has_window=needs_window,
-        has_order_by=True,
+        has_order_by=not archive_ordered,
         may_spill=required_temp > 0,
         expansion_bound_method=evidence.expansion_bound_method,
         dependency_edges=evidence.dependency_edges,

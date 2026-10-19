@@ -9,12 +9,13 @@ from research_pipeline.platform import MainlineError, typed_canonical_hash
 
 from .models import ResearchPackage, ResearchPackageError
 from .plan_contracts import OperatorGraphPlan
+from .store import PackageDocuments
 
 
 LINT_REPORT_VERSION = "research-package-lint-v1"
 
 
-def diagnose_research_package(root: str | Path) -> list[dict[str, str]]:
+def diagnose_research_package(root: str | Path, *, documents: PackageDocuments | None = None) -> list[dict[str, str]]:
     """复用严格读取的局部校验，收集不依赖完整研究包的声明问题。"""
     from . import store
     from .models import _freeze, _require_text
@@ -62,7 +63,7 @@ def diagnose_research_package(root: str | Path) -> list[dict[str, str]]:
     payloads: dict[str, dict[str, object]] = {}
     for file in store.PACKAGE_FILES:
         try:
-            payloads[file] = store._load_yaml(directory, file)
+            payloads[file] = store._load_yaml(directory, file, documents=documents)
         except ResearchPackageError as exc:
             issues.append({
                 "code": "package_yaml_invalid", "file": file, "field": "$",
@@ -122,9 +123,9 @@ def diagnose_research_package(root: str | Path) -> list[dict[str, str]]:
     return sorted(issues, key=lambda issue: (issue["file"], issue["field"], issue["code"], issue["message"]))
 
 
-def validate_lint_declarations(root: str | Path) -> None:
+def validate_lint_declarations(root: str | Path, *, documents: PackageDocuments | None = None) -> None:
     """聚合失败只用于修改声明，不授予加载、准入或运行资格。"""
-    issues = diagnose_research_package(root)
+    issues = diagnose_research_package(root, documents=documents)
     if issues:
         error = ResearchPackageError("研究包声明存在缺口：" + "；".join(issue["message"] for issue in issues))
         error.failure_payload = {

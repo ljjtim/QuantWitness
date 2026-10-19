@@ -30,6 +30,7 @@ from research_pipeline.data_plane.verification_lifecycle import (
 )
 
 from .artifacts import CheckpointExpectation
+from .artifact_lifecycle import AttemptArtifactLifecycle
 from .checkpoint import CheckpointStore
 from .contracts import ArtifactRef, DeterminismContext, NodeSpec, ResourceBudget
 from .diagnostics import read_finalize_status, safe_error_summary
@@ -86,6 +87,10 @@ from .resource_governor import (
     resource_data_bucket,
 )
 from .store import EventStore
+from .dag_parallel import (
+    DagUsageSampler, SpawnCall, drive_dag, require_spawn_environment,
+    spawn_base_process_slots, supervisor_memory_reserve, supervisor_process_slots,
+)
 
 
 OPERATOR_DAG_RUN_VERSION = "research-runtime-operator-dag-run-v3"
@@ -307,6 +312,7 @@ class RuntimeExecutionService:
         root_seed: int,
         fixed_clock: str,
         mode: ExecutionMode = ExecutionMode.DETERMINISTIC_SERIAL,
+        workers: int = 1,
         resume: bool = False,
         retry_node_id: str | None = None,
         process_slots_by_node: Mapping[str, int] | None = None,
@@ -317,6 +323,14 @@ class RuntimeExecutionService:
         node_identity_projection: str = NODE_IDENTITY_PROJECTION_CURRENT,
         owner: RuntimeLiveness | None = None,
     ) -> dict[str, object]:
+        if not isinstance(mode, ExecutionMode) or type(workers) is not int or workers < 1:
+            raise RuntimeAdmissionError("执行 mode/workers 无效")
+        if mode == ExecutionMode.DETERMINISTIC_SERIAL and workers != 1:
+            raise RuntimeAdmissionError("deterministic_serial 必须使用 workers=1")
+        if mode != ExecutionMode.DETERMINISTIC_SERIAL:
+            if self.resource_capacity is None:
+                raise RuntimeAdmissionError("并行执行必须显式提供总资源容量")
+            require_spawn_environment(environment)
         owns_lifetime = owner is None
         run_id = derive_run_id(
             dag, dag.dag_id,
@@ -329,24 +343,48 @@ class RuntimeExecutionService:
         else:
             owner.bind_run(run_root, run_id)
         try:
-            return self._execute(
-                dag=dag,
-                environment=environment,
-                run_root=run_root,
-                project_id=project_id,
-                root_seed=root_seed,
-                fixed_clock=fixed_clock,
-                mode=mode,
-                resume=resume,
-                retry_node_id=retry_node_id,
-                process_slots_by_node=process_slots_by_node,
-                parent_run_id=parent_run_id,
-                rerun_from_node=rerun_from_node,
-                recovery_plan_hash=recovery_plan_hash,
-                reuse_run_roots=reuse_run_roots,
-                node_identity_projection=node_identity_projection,
-                owner=owner,
-            )
+            with ExitStack() as session:
+                supervisor_memory_bytes = (
+                    supervisor_memory_reserve() if mode != ExecutionMode.DETERMINISTIC_SERIAL else 0
+                )
+                run_lease = None
+                if mode != ExecutionMode.DETERMINISTIC_SERIAL and self.resource_governor is not None:
+                    capacity = self.resource_capacity
+                    total_process_slots = self.resource_governor.config.capacity.process_slots
+                    run_vector = ResourceVector(capacity.memory_bytes, capacity.cpu_slots,
+                                                capacity.temp_bytes, total_process_slots)
+                    if not run_vector.fits_within(self.resource_governor.config.capacity):
+                        raise RuntimeAdmissionError("本次运行容量超过共享资源池")
+                    run_lease = self.resource_governor.acquire(
+                        owner_id=f"{project_id}/{run_id}/supervisor",
+                        vector=run_vector,
+                        timeout_seconds=float(self.resource_timeout_seconds),
+                    )
+                    session.callback(self.resource_governor.release, run_lease)
+                    session.enter_context(self.resource_governor.maintained_lease(run_lease))
+                events = session.enter_context(EventStore(run_root).writer_session())
+                return self._execute(
+                    dag=dag,
+                    environment=environment,
+                    run_root=run_root,
+                    project_id=project_id,
+                    root_seed=root_seed,
+                    fixed_clock=fixed_clock,
+                    mode=mode,
+                    workers=workers,
+                    resume=resume,
+                    retry_node_id=retry_node_id,
+                    process_slots_by_node=process_slots_by_node,
+                    parent_run_id=parent_run_id,
+                    rerun_from_node=rerun_from_node,
+                    recovery_plan_hash=recovery_plan_hash,
+                    reuse_run_roots=reuse_run_roots,
+                    node_identity_projection=node_identity_projection,
+                    owner=owner,
+                    events=events,
+                    supervisor_memory_bytes=supervisor_memory_bytes,
+                    run_lease=run_lease,
+                )
         finally:
             if owns_lifetime:
                 owner.stop()
@@ -361,6 +399,7 @@ class RuntimeExecutionService:
         root_seed: int,
         fixed_clock: str,
         mode: ExecutionMode = ExecutionMode.DETERMINISTIC_SERIAL,
+        workers: int = 1,
         resume: bool = False,
         retry_node_id: str | None = None,
         process_slots_by_node: Mapping[str, int] | None = None,
@@ -370,6 +409,9 @@ class RuntimeExecutionService:
         reuse_run_roots: tuple[str | Path, ...] = (),
         node_identity_projection: str = NODE_IDENTITY_PROJECTION_CURRENT,
         owner: RuntimeLiveness,
+        events: EventStore,
+        supervisor_memory_bytes: int = 0,
+        run_lease: ResourceLease | None = None,
     ) -> dict[str, object]:
         root = Path(run_root).resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -377,11 +419,26 @@ class RuntimeExecutionService:
         if record_path.exists() and not resume:
             raise RuntimeIntegrityError("operator DAG run 已存在；必须显式 resume")
         context = DeterminismContext(root_seed, datetime.fromisoformat(fixed_clock))
+        parallel = mode != ExecutionMode.DETERMINISTIC_SERIAL
+        spawn_environment = require_spawn_environment(environment) if parallel else None
         process_slots = dict(process_slots_by_node or {})
         if set(process_slots) - {node.node_id for node in dag.nodes} or any(
             type(value) is not int or value <= 0 for value in process_slots.values()
         ):
             raise RuntimeIntegrityError("节点 process slots 配置无效")
+        if parallel:
+            process_slots = {
+                node.node_id: max(process_slots.get(node.node_id, 1), spawn_base_process_slots())
+                if node.implementation_id in self._definitions else process_slots.get(node.node_id, 1)
+                for node in dag.nodes
+            }
+        process_capacity = (
+            self.resource_governor.config.capacity.process_slots - supervisor_process_slots()
+            if self.resource_governor is not None
+            else workers * max(process_slots.values(), default=1)
+        )
+        if parallel and any(value > process_capacity for value in process_slots.values()):
+            raise RuntimeAdmissionError("节点计算进程树加共享 Supervisor 超过进程总容量")
         effective_budgets = {
             node.node_id: _effective_resource_budget(
                 node.resource_budget,
@@ -389,6 +446,9 @@ class RuntimeExecutionService:
             )
             for node in dag.nodes
         }
+        if parallel and any(budget.memory_bytes + supervisor_memory_bytes > self.resource_capacity.memory_bytes
+                            for budget in effective_budgets.values()):
+            raise RuntimeAdmissionError("节点声明预算加 Supervisor 驻留内存超过运行总容量")
         reservation_budgets = {
             node.node_id: _reservation_budget(
                 node.resource_budget,
@@ -420,7 +480,6 @@ class RuntimeExecutionService:
             project_id=project_id,
             parent_run_id=parent_run_id,
         )
-        events = EventStore(root)
         checkpoints = CheckpointStore(root)
         verification_session = RunScopedArtifactVerification(run_id)
         external = ExternalArtifactStore(
@@ -445,6 +504,8 @@ class RuntimeExecutionService:
             "reused_nodes": [],
             "outputs": {},
         }
+        if parallel:
+            base_record["workers"] = workers
         if node_identity_projection == NODE_IDENTITY_PROJECTION_CURRENT:
             base_record["node_identity_projection"] = node_identity_projection
         elif reuse_run_roots:
@@ -482,6 +543,7 @@ class RuntimeExecutionService:
                     "resource_governance_hash": governance_hash,
                 }
             )
+        existing = None
         if record_path.exists():
             existing = json.loads(record_path.read_text(encoding="utf-8"))
             immutable = (
@@ -496,6 +558,8 @@ class RuntimeExecutionService:
                 "audit_environment",
                 "audit_manifest_digest",
             )
+            if parallel:
+                immutable += ("workers",)
             if parent_run_id is not None:
                 immutable += ("parent_run_id", "rerun_from_node", "recovery_plan_hash")
             if self.resource_capacity is not None:
@@ -527,18 +591,25 @@ class RuntimeExecutionService:
                 run_id,
                 "run",
                 "running",
-                command_id=f"run:retry:{retry_node_id}:{len(events.read_events())}",
+                command_id=f"run:retry:{retry_node_id}:{events.event_count}",
             )
         elif projection.run_status == "succeeded":
             if not resume:
                 raise RuntimeIntegrityError("succeeded run 不允许覆盖")
+            if (not isinstance(existing, Mapping)
+                    or existing.get("status") != "succeeded"
+                    or set(projection.node_statuses) != {node.node_id for node in dag.nodes}
+                    or any(status != "succeeded" for status in projection.node_statuses.values())):
+                raise RuntimeIntegrityError("成功 Runtime 的节点终态不完整")
+            # 下方只从成功 checkpoint 重建完成记录；缺失或漂移即拒绝，不启动节点。
         elif projection.run_status != "running":
             raise RuntimeIntegrityError("operator DAG run 状态不可恢复")
 
         outputs: dict[str, RuntimeNodeOutputs] = {}
         reused: list[str] = []
+        owner.start_dag_progress(len(dag.nodes))
         node_map = {node.node_id: node for node in dag.nodes}
-        for topological_level, node_id in enumerate(dag.topological_order()):
+        def execute_node(topological_level, node_id):
             node = node_map[node_id]
             values_by_port = self._inputs(dag, node, outputs)
             semantic_inputs = tuple(
@@ -554,7 +625,7 @@ class RuntimeExecutionService:
                     or any(
                         event.kind == "checkpoint_committed" and event.node_id == node_id
                         and event.payload.get("node_execution_id") == expectation.node_execution_id
-                        for event in events.read_events()
+                        for event in events.events_for_node(node_id)
                     )
                 )
                 and not (checkpoint_path / "COMMITTED").is_file()
@@ -576,7 +647,8 @@ class RuntimeExecutionService:
                 self._reconcile_success(
                     events, run_id, node_id, expectation.node_execution_id
                 )
-                continue
+                owner.complete_dag_nodes(len(outputs))
+                return
             reused_from = None
             if node.cacheable and node.pure:
                 reused_from = self._reuse_cross_run_checkpoint(
@@ -608,7 +680,8 @@ class RuntimeExecutionService:
                 self._reconcile_success(
                     events, run_id, node_id, expectation.node_execution_id
                 )
-                continue
+                owner.complete_dag_nodes(len(outputs))
+                return
             current = events.replay().node_statuses.get(node_id)
             recovered_interruption = False
             if current in {"waiting_for_resources", "running"}:
@@ -628,7 +701,7 @@ class RuntimeExecutionService:
                 event.node_id == node_id
                 and event.kind == "attempt_status_changed"
                 and event.payload.get("status") == "pending"
-                for event in events.read_events()
+                for event in events.events_for_node(node_id)
             )
             if (
                 current == "retryable_failed"
@@ -642,10 +715,11 @@ class RuntimeExecutionService:
                     command_id=f"{node_id}:exhausted:{attempts_used}",
                     node_id=node_id,
                 )
-                self._status(
-                    events, run_id, "run", "failed", command_id=f"run:failed:{node_id}"
-                )
-                self._write_record(record_path, {**base_record, "status": "failed"})
+                if not parallel:
+                    self._status(
+                        events, run_id, "run", "failed", command_id=f"run:failed:{node_id}"
+                    )
+                    self._write_record(record_path, {**base_record, "status": "failed"})
                 raise RuntimeWorkerError(f"operator 节点重试次数耗尽: {node_id}")
             if current is None:
                 self._status(
@@ -657,7 +731,7 @@ class RuntimeExecutionService:
                     node_id=node_id,
                 )
                 current = "pending"
-            transition_suffix = len(events.read_events())
+            transition_suffix = events.event_count
             if current in {"pending", "retryable_failed"}:
                 self._status(
                     events,
@@ -718,6 +792,7 @@ class RuntimeExecutionService:
             sampler = None
             sampled = False
             checkpoint_committed = False
+            lifecycle = AttemptArtifactLifecycle(root, node_id, attempt_id, external)
             liveness: RuntimeLiveness | None = None
             estimate_components = {
                 "scan_bytes": None,
@@ -746,6 +821,7 @@ class RuntimeExecutionService:
                         owner_id=f"{project_id}/{run_id}/{node_id}/{attempt_id}",
                         vector=reservation_vector,
                         timeout_seconds=float(self.resource_timeout_seconds),
+                        parent_lease_id=run_lease.lease_id if run_lease is not None else None,
                     )
                 acquired_at = datetime.now().astimezone().isoformat()
                 wait_milliseconds = max(
@@ -796,13 +872,17 @@ class RuntimeExecutionService:
                         )
 
                 with ExitStack() as stack:
+                    stack.enter_context(lifecycle.external_staging_scope())
                     if lease is not None:
                         stack.enter_context(
                             self.resource_governor.maintained_lease(lease)
                         )
-                    if self.resource_governor is not None:
+                    if self.resource_governor is not None or parallel:
                         sampler_context = stack.enter_context(ExitStack())
-                        sampler = sampler_context.enter_context(ResourceUsageSampler(work_dir))
+                        sampler = sampler_context.enter_context((DagUsageSampler if parallel and node.implementation_id in self._definitions else ResourceUsageSampler)(
+                            work_dir,
+                            additional_scratch_roots=(checkpoints.staging_root / attempt_id,),
+                        ))
                         sampled = True
                     node_context = RuntimeNodeContext(
                         node=node,
@@ -816,6 +896,9 @@ class RuntimeExecutionService:
                         resource_lease=lease,
                         attempt_deadline_monotonic=attempt_deadline,
                         process_slots=process_slots.get(node_id, 1),
+                        parallel_workers=(min(workers, node.resource_budget.cpu_slots,
+                                              max(1, process_slots.get(node_id, 1) - 1))
+                                          if parallel else 1),
                     )
                     definition = self._definitions.get(node.implementation_id)
                     if definition is not None:
@@ -829,16 +912,21 @@ class RuntimeExecutionService:
                             raise RuntimeIntegrityError(
                                 f"正式 Runtime adapter 源码摘要漂移: {adapter_ref.adapter_id}"
                             )
-                        module = importlib.import_module(adapter_ref.module_name)
-                        adapter = getattr(module, adapter_ref.symbol_name, None)
-                        if not callable(adapter):
-                            raise RuntimeIntegrityError(
-                                f"正式 Runtime adapter 不可调用: {adapter_ref.adapter_id}"
+                        if parallel:
+                            raw_outputs = yield SpawnCall(
+                                adapter_ref.module_name, adapter_ref.symbol_name,
+                                node_context, spawn_environment, run_id, attempt_id,
+                                external, verification_session, sampler,
                             )
-                        with activate_artifact_verification(verification_session):
-                            raw_outputs = adapter(
-                                OperatorRuntimeContext(node_context, environment)
-                            )
+                        else:
+                            module = importlib.import_module(adapter_ref.module_name)
+                            adapter = getattr(module, adapter_ref.symbol_name, None)
+                            if not callable(adapter):
+                                raise RuntimeIntegrityError("正式 Runtime adapter 不可调用")
+                            with activate_artifact_verification(verification_session):
+                                raw_outputs = adapter(
+                                    OperatorRuntimeContext(node_context, environment)
+                                )
                     else:
                         with activate_artifact_verification(verification_session):
                             raw_outputs = self._execute_project_node(
@@ -847,10 +935,15 @@ class RuntimeExecutionService:
                                 attempt_id=attempt_id,
                                 node_execution_id=expectation.node_execution_id,
                                 environment=environment,
+                                progress=owner,
+                                lifecycle=lifecycle,
                             )
                     node_context.remaining_resource_budget()
                     node_outputs = self._coerce_outputs(node, raw_outputs)
                     self._validate_outputs(node, node_outputs)
+                    if (definition is not None and definition.runtime_adapter_ref.symbol_name
+                            == "execute_data_columnar_materialize_v1"):
+                        lifecycle.register_request_data(node_outputs)
                     output_bytes = (
                         _runtime_outputs_size(node_outputs, external)
                         if sampler is not None else 0
@@ -869,6 +962,22 @@ class RuntimeExecutionService:
                         node_id=node_id,
                         attempt_id=attempt_id,
                     )
+                    def require_resources_before_publish() -> None:
+                        if sampler is not None:
+                            sampler_context.close()
+                            _require_sampled_resources(
+                                sampler, budget=effective_budgets[node_id],
+                                reservation=reservation_vector,
+                            )
+                        if parallel:
+                            reserved = sum(reservation_budgets[key].memory_bytes
+                                           for key in resource_ledger.active_keys)
+                            if supervisor_memory_reserve() + reserved > self.resource_capacity.memory_bytes:
+                                raise RuntimeWorkerError(
+                                    "checkpoint 发布前运行内存超过总容量", error_code="resource_exceeded")
+                        node_context.remaining_resource_budget()
+                        lifecycle.resources_accepted = True
+
                     checkpoints.commit_bytes(
                         expectation=expectation,
                         attempt_id=attempt_id,
@@ -879,19 +988,8 @@ class RuntimeExecutionService:
                         root_seed=root_seed,
                         fixed_clock=fixed_clock,
                         phase_hook=phase_hook,
+                        before_publish=require_resources_before_publish,
                     )
-                    try:
-                        if sampler is not None:
-                            sampler_context.close()
-                            _require_sampled_resources(
-                                sampler, budget=effective_budgets[node_id],
-                                reservation=reservation_vector,
-                            )
-                        node_context.remaining_resource_budget()
-                    except BaseException:
-                        # 本 attempt 的完整复验尚未通过资源门禁，不能留下可恢复的提交。
-                        shutil.rmtree(checkpoint_path)
-                        raise
                     checkpoint_committed = True
                     events.append(
                         run_id,
@@ -1004,16 +1102,12 @@ class RuntimeExecutionService:
                     command_id=f"{attempt_id}:node-failed",
                     node_id=node_id,
                 )
-                self._status(
-                    events,
-                    run_id,
-                    "run",
-                    run_failure_status,
-                    command_id=f"run:{run_failure_status}:{attempt_id}",
-                )
-                self._write_record(
-                    record_path, {**base_record, "status": run_failure_status}
-                )
+                if not parallel:
+                    self._status(
+                        events, run_id, "run", run_failure_status,
+                        command_id=f"run:{run_failure_status}:{attempt_id}",
+                    )
+                    self._write_record(record_path, {**base_record, "status": run_failure_status})
                 failure_payload = getattr(exc, "failure_payload", None)
                 raise RuntimeWorkerError(
                     f"operator 节点执行失败: {node_id}",
@@ -1046,7 +1140,37 @@ class RuntimeExecutionService:
                 command_id=f"{node_id}:succeeded",
                 node_id=node_id,
             )
+            lifecycle.release(checkpoint_committed=checkpoint_committed)
             outputs[node_id] = node_outputs
+            owner.complete_dag_nodes(len(outputs))
+        if parallel:
+            def exclusive(node_id):
+                node = node_map[node_id]
+                return (not node.pure or "holdout" in node.implementation_id
+                        or node.implementation_id == "research.model.selection.v2"
+                        or node.implementation_id not in self._definitions)
+
+            try:
+                drive_dag(
+                    dag=dag, task=execute_node, outputs=outputs, mode=mode,
+                    workers=min(workers, self.resource_capacity.max_workers),
+                    ledger=resource_ledger, budgets=reservation_budgets,
+                    process_slots=process_slots, process_capacity=process_capacity,
+                    exclusive=exclusive, memory_capacity=self.resource_capacity.memory_bytes,
+                    supervisor_memory_bytes=supervisor_memory_bytes,
+                )
+            except BaseException:
+                state = events.replay()
+                status = "failed" if "exhausted" in state.node_statuses.values() else "paused"
+                if state.run_status == "running":
+                    self._status(events, run_id, "run", status,
+                                 command_id=f"run:{status}:parallel:{events.event_count}")
+                    self._write_record(record_path, {**base_record, "status": status})
+                raise
+        else:
+            for topological_level, node_id in enumerate(dag.topological_order()):
+                for _ in execute_node(topological_level, node_id):
+                    raise RuntimeIntegrityError("串行节点不能生成 spawn 请求")
         result = {
             **base_record,
             "status": "succeeded",
@@ -1389,6 +1513,8 @@ class RuntimeExecutionService:
         attempt_id: str,
         node_execution_id: str,
         environment: object,
+        progress: RuntimeLiveness | None = None,
+        lifecycle: AttemptArtifactLifecycle | None = None,
     ) -> RuntimeNodeOutputs:
         registry = self.project_registry
         if registry is None:
@@ -1402,7 +1528,7 @@ class RuntimeExecutionService:
 
             return execute_project_causal_node(
                 self, node_context=node_context, run_id=run_id,
-                attempt_id=attempt_id, environment=environment,
+                attempt_id=attempt_id, environment=environment, progress=progress,
             )
         project_parameters = self.project_parameters_by_node.get(node.node_id, {})
         declared_request_ids = _declared_request_ids(project_parameters)
@@ -1425,6 +1551,7 @@ class RuntimeExecutionService:
                 environment=environment,
                 project_inputs=project_inputs,
                 dataset=partitioned,
+                lifecycle=lifecycle,
             )
         result = execute_project_worker_attempt(
             registry=registry,
@@ -1452,6 +1579,12 @@ class RuntimeExecutionService:
                     output,
                 )
             )
+        if lifecycle is not None and result.state is None:
+            for output in result.outputs:
+                lifecycle.register_worker(
+                    output, values[output.port].external_commit,
+                    worker_exited=result.process_cleanup_status == "complete",
+                )
         return RuntimeNodeOutputs(values)
 
     def _execute_partitioned_project_node(
@@ -1464,6 +1597,7 @@ class RuntimeExecutionService:
         environment: object,
         project_inputs: tuple[ProjectRuntimeInput, ...],
         dataset,
+        lifecycle: AttemptArtifactLifecycle | None = None,
     ) -> RuntimeNodeOutputs:
         """由 Supervisor 逐月运行项目算子，并只复用有效 checkpoint。"""
 
@@ -1590,6 +1724,18 @@ class RuntimeExecutionService:
                 ),
             )
             store.commit(checkpoint)
+            if lifecycle is not None:
+                for output in result.outputs:
+                    lifecycle.register_worker(
+                        output, committed_outputs[output.port],
+                        worker_exited=result.process_cleanup_status == "complete",
+                    )
+                if result.state is not None:
+                    lifecycle.register(
+                        category="worker_output", source=result.state.path,
+                        commit=state_commit, files={"": "runtime_state/content.bin"},
+                        worker_exited=result.process_cleanup_status == "complete",
+                    )
             outputs_by_partition[partition.partition_key] = committed_outputs
             state = (
                 None
@@ -2292,7 +2438,7 @@ class RuntimeExecutionService:
         if projection.node_statuses.get(node_id) == "succeeded":
             return
         current = projection.node_statuses.get(node_id)
-        all_events = events.read_events()
+        all_events = events.events_for_node(node_id)
         active_attempt = next(
             (
                 event.attempt_id
@@ -2382,7 +2528,7 @@ class RuntimeExecutionService:
                 node_id=node_id,
             )
         elif current == "retryable_failed":
-            suffix = len(events.read_events())
+            suffix = events.event_count
             cls._status(
                 events,
                 run_id,
@@ -2468,7 +2614,7 @@ class RuntimeExecutionService:
         attempt_id = next(
             (
                 event.attempt_id
-                for event in reversed(events.read_events())
+                for event in reversed(events.events_for_node(node_id))
                 if event.node_id == node_id and event.attempt_id is not None
             ),
             None,

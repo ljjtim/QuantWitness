@@ -11,11 +11,11 @@ HERE = Path(__file__).resolve().parent
 BASE = HERE.parent / "qlib_portfolio"
 SOURCE = HERE.parents[1] / "project_extensions/qlib_portfolio_risk"
 sys.path.insert(0, str(BASE))
-import prepare as model_prepare
-import portfolio_plan
+import prepare as model_prepare  # noqa: E402
+import portfolio_plan  # noqa: E402
 
 
-def prepare(root, *, method="inv", estimator="empirical", lookback=20):
+def prepare(root, *, method="inv", estimator="empirical", lookback=20, research_series=None):
     from research_pipeline.extensions import (load_project_operator_declaration, compile_project_operator_bundle,
         compile_project_verifier_bundle, verify_project_verifier_bundle)
     from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
@@ -25,7 +25,7 @@ def prepare(root, *, method="inv", estimator="empirical", lookback=20):
         raise ValueError("风险组合方法无效")
     if estimator not in {"empirical", "shrink"}:
         raise ValueError("风险估计方法无效")
-    bundle = model_prepare.prepare(root, mode="portfolio")
+    bundle = model_prepare.prepare(root, mode="portfolio", research_series=research_series)
     package = Path(bundle["package"])
     path = package / "spec/research.yaml"
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))

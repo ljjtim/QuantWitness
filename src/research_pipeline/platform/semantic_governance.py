@@ -188,17 +188,6 @@ class BuiltinSemanticRevision:
 MAINLINE_BUILTIN_SEMANTIC_REVISIONS = (
     BuiltinSemanticRevision(
         semantic_kind="verifier",
-        previous_identity="model:label.split:verifier.model-label-split.v1",
-        replacement_identity="model:label.split:verifier.model-label-split.v2",
-        reason="序列研究按原始特征和标签重建窗口资格并复核模型训练子集与GRU配置",
-        regression_test_ids=(
-            "test_real_gru_window_and_model_facts_pass_without_production_sampling",
-            "test_sequence_facts_reject_changed_evidence",
-            "test_window_file_fact_must_match_result_snapshot",
-        ),
-    ),
-    BuiltinSemanticRevision(
-        semantic_kind="verifier",
         previous_identity="result-semantic:financial_oracle:result-bundle-financial-oracle-v5",
         replacement_identity="result-semantic:financial_oracle:result-bundle-financial-oracle-v6",
         reason="P3 生命周期支持分区独立复核，六表保持原成交摘要语义",
@@ -206,17 +195,6 @@ MAINLINE_BUILTIN_SEMANTIC_REVISIONS = (
             "test_formal_result_oracle_uses_sealed_lifecycle_after_run_root_removed",
             "test_independent_oracle_rejects_lifecycle_corruption",
             "test_new_result_cannot_drop_or_corrupt_lifecycle_support",
-        ),
-    ),
-    BuiltinSemanticRevision(
-        semantic_kind="verifier",
-        previous_identity="model:search.holdout:verifier.model-search-holdout.v1",
-        replacement_identity="model:search.holdout:verifier.model-search-holdout.v2",
-        reason="序列研究按原始特征和标签重建窗口资格并复核模型训练子集与GRU配置",
-        regression_test_ids=(
-            "test_real_gru_window_and_model_facts_pass_without_production_sampling",
-            "test_sequence_facts_reject_changed_evidence",
-            "test_window_file_fact_must_match_result_snapshot",
         ),
     ),
     BuiltinSemanticRevision(
@@ -248,6 +226,13 @@ MAINLINE_BUILTIN_SEMANTIC_REVISIONS = (
     ),
     BuiltinSemanticRevision(
         semantic_kind="verifier",
+        previous_identity="result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v2",
+        replacement_identity="result-semantic:adjustment_snapshot:verifier.adjustment-snapshot.v3",
+        reason="复权金额、参考价舍位、可见行动与逐决策锚点由证据层独立重建",
+        regression_test_ids=("test_independent_oracle_rejects_production_formula_fault",),
+    ),
+    BuiltinSemanticRevision(
+        semantic_kind="verifier",
         previous_identity="minute:label.split:verifier.minute-label-split.v2",
         replacement_identity="minute:label.split:verifier.minute-label-split.v3",
         reason="分钟标签经济起点可已知，独立要求决策和起价均早于未来终价",
@@ -266,6 +251,35 @@ MAINLINE_BUILTIN_SEMANTIC_REVISIONS = (
         replacement_identity="minute:financial.tradability:verifier.minute-financial.v3",
         reason="分钟金融事实从正式六表与 TCA 身份重建，并绑定 Result 独立金融复核",
         regression_test_ids=("test_p6_minute_public_package_chain",),
+    ),
+    BuiltinSemanticRevision(
+        semantic_kind="verifier",
+        previous_identity="model:label.split:verifier.model-label-split.v1",
+        replacement_identity="model:label.split:verifier.model-label-split.v2",
+        reason="序列研究按原始特征和标签重建窗口资格并复核模型训练子集与GRU配置",
+        regression_test_ids=(
+            "test_real_gru_window_and_model_facts_pass_without_production_sampling",
+            "test_sequence_facts_reject_changed_evidence",
+            "test_window_file_fact_must_match_result_snapshot",
+        ),
+    ),
+    BuiltinSemanticRevision(
+        semantic_kind="verifier",
+        previous_identity="model:search.holdout:verifier.model-search-holdout.v1",
+        replacement_identity="model:search.holdout:verifier.model-search-holdout.v2",
+        reason="序列研究按原始特征和标签重建窗口资格并复核模型训练子集与GRU配置",
+        regression_test_ids=(
+            "test_real_gru_window_and_model_facts_pass_without_production_sampling",
+            "test_sequence_facts_reject_changed_evidence",
+            "test_window_file_fact_must_match_result_snapshot",
+        ),
+    ),
+    BuiltinSemanticRevision(
+        semantic_kind="verifier",
+        previous_identity="model:search.holdout:verifier.model-search-holdout.v2",
+        replacement_identity="model:search.holdout:verifier.model-search-holdout.v3",
+        reason="同一研究系列真实暴露、打开时重检及完整历史账本由Result独立核对",
+        regression_test_ids=("test_series_rejects_overlapping_variant_after_open",),
     ),
     BuiltinSemanticRevision(
         semantic_kind="verifier",

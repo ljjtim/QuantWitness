@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import json
 import math
 from pathlib import Path
 
@@ -12,7 +11,7 @@ from qlib.model.base import Model
 
 from .inputs import QlibModelError
 
-from .generated_definition import compile_source, validate_definition, validate_kwargs
+from .generated_definition import compile_source, validate_kwargs
 
 
 def _network(source):

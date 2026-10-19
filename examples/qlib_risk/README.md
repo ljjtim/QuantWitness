@@ -6,20 +6,20 @@
 
 ```powershell
 python -m pip install -e ".[ml]" "scipy==1.15.3" "cvxpy==1.7.5" "clarabel==0.11.1"
-python examples/qlib_risk/run.py --method inv --output I:/quantwitness/risk-inv
-python examples/qlib_risk/run.py --method enhanced --estimator shrink --output I:/quantwitness/risk-enhanced
-python examples/qlib_risk/run.py --method topk_dropout --output I:/quantwitness/risk-topk
+python examples/qlib_risk/run.py --method inv --output I:/quantwitness/risk-inv `
+  --research-series-id synthetic-risk --research-series-root I:/quantwitness/holdout-series `
+  --research-series-purpose "合成ETF风险组合最终确认"
 ```
 
 `--method`支持inv、gmv、rp、mvo、enhanced和topk_dropout。`--estimator`支持empirical和shrink；`--lookback`默认20个完整收益会话。收缩模型固定alpha=0.1，目标为常方差矩阵。所有风险输入仅使用决策时已可见的价格变化。
 
-风险方法、估计器和窗口共同进入冻结研究设计；模型拟合与最终holdout绑定同一份完整设计。每个风险配置分别封存ResearchPackage、Result与VerificationResult。
+风险方法、估计器和窗口共同进入冻结研究设计；模型拟合与最终holdout绑定同一份完整设计。每个风险配置分别封存ResearchPackage、Result与VerificationResult。同一研究问题始终复用同一个持久研究系列；改变风险方法、输出目录或其他设计参数不会清零已经打开的最终holdout。最终确认前应完成开发期比较，同系列重叠日期只能打开一次。旧账本可通过重复的`--research-series-legacy-root`显式登记。
 
 研究在第一个开发test预测日09:31生成目标，下一会话09:30执行，现金引擎处理整手、现金预算、停牌、涨跌停和费用。后续估计无需把目标权重当作实际持仓；适配接口接受显式的实际持仓及持有会话数。最终holdout只用于原模型研究评价，不流入组合目标。
 
 目标证据保存于Result的risk_inputs、risk_optimization_results、risk_optimization_attempts与risk_constraint_residuals表。独立Verifier从Result原价、模型预测和风险证据复算目标；现有金融oracle复核正式现金、持仓、估值、费用和TCA。完成以Result finalized及VerificationResult的status=pass为准。
 
-可用`--stage prepare|lint|admit|run|resume|verify|report`分阶段执行；恢复使用原输出目录与原冻结声明。
+可用`--stage prepare|lint|admit|run|resume|verify|report`分阶段执行；恢复使用原输出目录与原冻结声明，不重新传入系列参数。系列目录应独立于运行输出长期保留，详见[研究系列合同](../../docs/holdout-series.md)。
 
 ## 已知限制
 

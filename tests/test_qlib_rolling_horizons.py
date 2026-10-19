@@ -129,11 +129,13 @@ def test_sequence_warmup_keeps_history_outside_fit_endpoints(split_case):
     first_id = f"SYN_0:{days[2].date()}:h{parameters['horizon_sessions']}"
     warmup = members.loc[members.sample_id.eq(first_id)].sort_values("step")
     assert warmup.step.tolist() == [0, 1, 2]
+    warmup = warmup.merge(context, on="context_index", validate="many_to_one").sort_values("step")
     assert warmup.observation_session.tolist() == [day.date() for day in days[:3]]
     assert (warmup.feature_available_time <= samples.loc[samples.sample_id.eq(first_id), "decision_time"].iloc[0]).all()
     if not parameters["expanding"]:
         later_id = f"SYN_0:{days[8].date()}:h{parameters['horizon_sessions']}"
         later = members.loc[members.sample_id.eq(later_id)].sort_values("step")
+        later = later.merge(context, on="context_index", validate="many_to_one").sort_values("step")
         assert later.observation_session.tolist() == [day.date() for day in days[6:9]]
         assert later_id in metadata["split_manifest"]["folds"][1]["train_ids"]
         assert f"SYN_0:{days[6].date()}:h{parameters['horizon_sessions']}" not in metadata["split_manifest"]["folds"][1]["train_ids"]

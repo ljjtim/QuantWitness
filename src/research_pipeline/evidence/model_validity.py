@@ -1,8 +1,10 @@
 """从 Result 绑定事实独立复核日频模型的时间切分、选模和 holdout。
 
 model_diagnostics 字段：mode、design、tables、table_bindings、model_configs、
-holdout_ledger。model_configs 按 models 表 config_path 索引；holdout_ledger
-包含 plan、prepared、opened、terminal 原始记录。所有时间均使用带时区 ISO 文本。
+holdout_ledger。新表示使用 table_storage=result_tables_v2，正式表与封存文件是唯一来源。
+model_configs 按 models 表 config_path 索引；holdout_ledger
+包含 plan、prepared、opened、terminal 原始记录；系列合同另封存 series。
+所有时间均使用带时区 ISO 文本。
 """
 
 from __future__ import annotations
@@ -14,8 +16,11 @@ from datetime import date, datetime
 from statistics import fmean
 
 from research_pipeline.platform import typed_canonical_hash
+from research_pipeline.platform.canonical import typed_canonical_hash_streamed
+from .columnar_rows import ColumnarRows
 
 from .errors import EvidenceContractError
+from .holdout_series import verify_holdout_series_evidence
 from .model_sequence_validity import verify_sequence_research_facts, sequence_expected_parameters
 
 MODEL_DIAGNOSTICS_MODE = "walk_forward_prediction_v1"
@@ -63,12 +68,168 @@ def _json_value(value):
     return value
 
 
+MODEL_RESULT_TABLE_STORAGE = "result_tables_v2"
+LEGACY_MODEL_RESULT_TABLE_STORAGE = "result_tables_v1"
+_MODEL_REFERENCE_BASE_TABLES = frozenset({
+    "features", "labels", "samples", "split_audit", "holdout_index", "fit_audit",
+    "validation_predictions", "raw_sources", "study_design", "metrics", "models",
+})
+_MODEL_REFERENCE_HOLDOUT_TABLES = frozenset({
+    "selection", "test_predictions", "fold_selections", "holdout_predictions", "holdout_receipt",
+})
+_MODEL_SAMPLE_COLUMNS = (
+    "horizon_sessions", "sample_id", "entity_id", "observation_session", "observation_time",
+    "feature_available_time", "decision_time", "label_start_time", "label_end_time",
+    "label_available_time", "target", "feature_lineage_hash", "label_lineage_hash",
+)
+_MODEL_REQUIRED_COLUMNS = {
+    "features": ("entity_id", "observation_session", "observation_time", "available_time", "window_sessions", "feature_id", "value", "status", "lineage_hash"),
+    "labels": ("entity_id", "observation_session", "horizon_sessions", "lineage_hash", "forward_return", "decision_time", "label_start_time", "label_end_time", "available_time"),
+    "raw_sources": ("kind", "record_json"),
+    "raw_prices": ("session", "entity_id", "close"),
+    "sequence_context": ("context_index", "entity_id", "observation_session", "observation_time", "feature_available_time", "feature_count", "feature_lineage_hash"),
+    "sequence_targets": ("sample_id", "entity_id", "observation_session", "decision_time"),
+    "sequence_members": ("sample_id", "step", "context_index"),
+    "sequence_exclusions": ("sample_id", "reason_code"),
+    "samples": _MODEL_SAMPLE_COLUMNS,
+    "split_audit": ("fold_id", "sample_id", "role", "exclusion_reason", "label_start", "label_end"),
+    "holdout_index": ("sample_id", "label_available_time"),
+    "fit_audit": ("fold_id", "candidate_id", "train_ids_json", "validation_ids_json", "evidence_scope", "fit_scope_ref"),
+    "validation_predictions": ("fold_id", "candidate_id", "sample_id", "stage", "entity_id", "horizon_sessions", "actual", "prediction", "raw_label", "evaluation_label", "model_ref", "processor_ref", "score_semantics", "decision_time", "feature_available_time", "label_start_time", "label_end_time", "label_available_time", "observation_session"),
+    "selection": ("selected_candidate_id", "validation_metric", "test_metric", "objective", "direction", "selection_scope", "selection_time", "selected_parameters_json", "selection_hash"),
+    "fold_selections": ("fold_id", "selected_candidate_id", "validation_metric", "selection_time", "validation_fold_count"),
+    "holdout_predictions": ("sample_id", "candidate_id", "fold_id", "stage", "entity_id", "observation_session", "horizon_sessions", "observation_time", "decision_time", "feature_available_time", "label_start_time", "label_end_time", "label_available_time", "actual", "prediction", "raw_label", "evaluation_label", "processor_ref", "model_ref", "score_semantics"),
+    "holdout_receipt": ("status", "objective", "metric", "holdout_identity_hash", "plan_hash", "prepared_hash", "opened_hash", "terminal_hash", "result_hash"),
+    "models": ("config_path", "model_path", "model_class", "feature_columns_json", "target_kind", "fit_scope_ref", "fit_time", "candidate_id", "fold_id", "status"),
+    "study_design": ("design_json",),
+    "metrics": ("metric_ref", "value", "unit", "sample_start", "sample_end", "sample_size", "status"),
+}
+_MODEL_REQUIRED_COLUMNS["test_predictions"] = _MODEL_REQUIRED_COLUMNS["validation_predictions"]
+
+
+def _bind_model_reference_facts(snapshot, facts):
+    """正式表只读绑定，公共检查不展开特征矩阵和来源大表。"""
+    from research_pipeline.results import QLIB_MODEL_INVENTORY_SCHEMA_ID
+
+    model = facts["model_diagnostics"]
+    _require(not {"tables", "design", "model_configs", "holdout_ledger", "model_window_facts"} & model.keys(), "引用式模型事实不得包含表或配置副本")
+    legacy = model["table_storage"] == LEGACY_MODEL_RESULT_TABLE_STORAGE
+    bindings = model.get("table_bindings")
+    _require(isinstance(bindings, Mapping), "引用式模型事实表绑定不完整")
+    _require(all(isinstance(value, str) for value in bindings.values())
+             and len(set(bindings.values())) == len(bindings), "模型表引用重复或无效")
+    _require("study_design" in bindings, "模型缺少冻结研究设计")
+    design_rows = snapshot.read_table(bindings["study_design"]).to_pylist()
+    _require(len(design_rows) == 1, "模型冻结研究设计必须唯一")
+    design = json.loads(design_rows[0]["design_json"])
+    _require(isinstance(design, Mapping), "模型冻结研究设计无效")
+    sequence = design.get("sequence")
+    expected = _MODEL_REFERENCE_BASE_TABLES | (_MODEL_REFERENCE_HOLDOUT_TABLES
+        if model["mode"] == MODEL_DIAGNOSTICS_MODE else frozenset())
+    if legacy:
+        _require(facts.get("financial_tradability", {}).get("applicability") == "not_applicable"
+                 and model["mode"] == MODEL_DIAGNOSTICS_MODE and sequence is None,
+                 "历史引用式模型事实仅支持表格最终预测")
+    else:
+        sources = set(bindings) & {"raw_sources", "raw_prices"}
+        _require(len(sources) == 1, "模型来源表必须唯一绑定")
+        expected = (expected - {"raw_sources"}) | sources
+        if sequence is not None:
+            _require(sequence.get("schema") == "research.model-sequence-context.v2", "新模型事实必须使用序列v2")
+            expected |= {"sequence_" + name for name in ("context", "targets", "members", "exclusions")}
+    _require(set(bindings) == expected, "引用式模型事实表绑定不完整")
+    tables = {}
+    for name, schema in bindings.items():
+        manifest = snapshot.table_manifest(schema)
+        _require(manifest.table_id == name and manifest.path_prefix == name, f"模型表角色与正式引用不一致：{name}")
+        required = _MODEL_REQUIRED_COLUMNS[name]
+        if name == "models":
+            _require(schema == QLIB_MODEL_INVENTORY_SCHEMA_ID, "模型清单 schema 不符")
+        elif name == "features" and schema.endswith(".features_packed.v1"):
+            _require(sequence is None, "序列模型必须封存原始Feature列")
+            required = ("format", "segment", "source_file", "row_offset", "row_count", "raw_bytes", "original_schema", "payload")
+        else:
+            version = "v2" if name in {"sequence_context", "sequence_members"} else "v1"
+            _require(schema.endswith("." + name + "." + version), f"模型表角色schema不受支持：{name}")
+        table_schema = snapshot.table_schema(schema)
+        _require(table_schema.names and set(required) <= set(table_schema.names), f"模型正式表缺少必需列：{name}")
+        if name.startswith("sequence_") and name in {"sequence_context", "sequence_members"}:
+            import pyarrow as pa
+            _require(table_schema.field("context_index").type == pa.int64(), "上下文索引必须使用int64")
+            if name == "sequence_members":
+                _require(set(table_schema.names) == set(required) and table_schema.field("step").type == pa.int64(),
+                         "紧凑成员表列或步序类型无效")
+        if sequence is None and name in {"features", "labels", "raw_sources", "raw_prices"}:
+            continue
+        if name in {"raw_sources", "raw_prices"}:
+            continue
+        # 序列验证需要末端特征值；表格模型只读取时间与标签索引。
+        columns = _MODEL_SAMPLE_COLUMNS if name == "samples" and sequence is None else None
+        if columns is not None:
+            import pyarrow as pa
+            table_schema = pa.schema([table_schema.field(column) for column in columns], metadata=table_schema.metadata)
+        tables[name] = ColumnarRows(
+            snapshot.iter_table_batches(schema, columns=columns, batch_size=8192), schema=table_schema,
+        )
+    support = {(item.artifact_key, item.source_path): item for item in snapshot.bundle.support_files}
+
+    def read_support(artifact, source):
+        item = support.get((artifact, source))
+        _require(item is not None, f"模型 Result 缺少封存文件：{source}")
+        raw = snapshot.support_bytes.get(item.relative_path)
+        _require(raw is not None, f"模型 Result 文件未经本次快照验证：{source}")
+        return json.loads(raw)
+
+    artifact = snapshot.table_manifest(bindings["models"]).artifact_key
+    configs, model_windows = {}, {}
+    for row in tables["models"]:
+        path = row["config_path"]
+        _require(isinstance(path, str) and path not in configs, "模型配置引用重复或无效")
+        config = read_support(artifact, path)
+        model_class = config["candidate"]["model"]["class"]
+        _require(model_class in {"LinearModel", "LGBModel", "XGBModel", "DEnsembleModel", "GRU", "LSTM", "TransformerModel", "GeneratedModel"}, "引用式模型事实不支持该模型类别")
+        _require(not legacy or model_class in {"LinearModel", "LGBModel", "XGBModel", "DEnsembleModel"},
+                 "历史引用式模型事实不支持该模型类别")
+        if model_class == "GeneratedModel":
+            _require(isinstance(config.get("generated"), Mapping), "生成模型缺少封存定义")
+            from .generated_model_validity import verify_generated_support
+            verify_generated_support(snapshot, artifact, config)
+        if model_class in {"GRU", "LSTM", "TransformerModel"}:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            _require((artifact, config["weights_path"]) in support, "序列模型 Result缺少显式权重文件")
+            files = config.get("sequence", {}).get("files", {})
+            _require(set(files) == {"context", "targets", "members"}, "序列模型窗口文件集合无效")
+            model_windows[path] = {}
+            for name, source in files.items():
+                item = support.get((artifact, source))
+                _require(item is not None, "序列模型 Result缺少窗口文件")
+                raw = snapshot.support_bytes.get(item.relative_path)
+                _require(raw is not None, "序列模型窗口文件未经本次快照验证")
+                table = pq.read_table(pa.BufferReader(raw))
+                model_windows[path][name] = ColumnarRows(table.to_batches(), schema=table.schema)
+        configs[path] = config
+    ledger = {}
+    if model["mode"] == MODEL_DIAGNOSTICS_MODE:
+        artifact = snapshot.table_manifest(bindings["holdout_receipt"]).artifact_key
+        ledger = {name: read_support(artifact, "holdout-ledger/" + name + ".json")
+                  for name in ("plan", "prepared", "opened", "terminal")}
+        if "research_series" in ledger["plan"]["freeze_payload"]:
+            ledger["series"] = read_support(artifact, "holdout-ledger/series.json")
+    return {**facts, "model_diagnostics": {**model, "tables": tables, "design": design,
+                                           "model_configs": configs, "holdout_ledger": ledger,
+                                           "model_window_facts": model_windows}}
+
+
 def verify_model_result_binding(snapshot, facts):
     """事实必须逐行绑定已验证 Result；不得用项目声明替换正式表和封存配置。"""
     model = facts.get("model_diagnostics")
     if model is None:
-        return
+        return facts
     _require(isinstance(model, Mapping) and model.get("mode") in {MODEL_DIAGNOSTICS_MODE, MODEL_DEVELOPMENT_MODE}, "模型有效性模式无效")
+    if "table_storage" in model:
+        _require(model["table_storage"] in {MODEL_RESULT_TABLE_STORAGE, LEGACY_MODEL_RESULT_TABLE_STORAGE}, "模型事实表存储模式不受支持")
+        return _bind_model_reference_facts(snapshot, facts)
     tables, bindings = model["tables"], model["table_bindings"]
     _require(set(tables) == set(bindings), "模型事实表未完整绑定 Result")
     for name, schema in bindings.items():
@@ -109,8 +270,12 @@ def verify_model_result_binding(snapshot, facts):
     for name in (("plan", "prepared", "opened", "terminal") if holdout_table is not None else ()):
         actual = read_support(holdout_table.artifact_key, f"holdout-ledger/{name}.json")
         _require(actual == model["holdout_ledger"][name], "holdout 事实与封存账本不一致")
+    if holdout_table is not None and "research_series" in model["holdout_ledger"]["plan"]["freeze_payload"]:
+        actual = read_support(holdout_table.artifact_key, "holdout-ledger/series.json")
+        _require(actual == model["holdout_ledger"].get("series"), "系列事实与封存文件不一致")
     if "study_design" in tables:
         _require(len(tables["study_design"]) == 1 and json.loads(tables["study_design"][0]["design_json"]) == model["design"], "模型设计与 Result 不一致")
+    return facts
 
 
 def _split(model):
@@ -124,9 +289,12 @@ def _split(model):
     for row in samples.values():
         _require(_time(row["feature_available_time"]) <= _time(row["decision_time"]) <= _time(row["label_start_time"]) <= _time(row["label_end_time"]) < boundary, "模型特征前视或标签区间无效")
         _require(_time(row["label_end_time"]) <= _time(row["label_available_time"]) <= boundary, "模型开发标签尚未成熟")
+    sample_sessions = {sid: _day(_time(row["observation_time"])) for sid, row in samples.items()}
+    sample_times = {sid: {name: _time(row[name]) for name in ("decision_time", "label_end_time", "label_available_time")}
+                    for sid, row in samples.items()}
     calendar = [_day(day) for day in design["split_calendar_sessions"]]
     _require(calendar == sorted(set(calendar)), "模型切分日历无序或重复")
-    calendar = [day for day in calendar if day <= max(_day(_time(row["observation_time"])) for row in samples.values())]
+    calendar = [day for day in calendar if day <= max(sample_sessions.values())]
     train, valid, test, step = (design[name] for name in ("train_sessions", "validation_sessions", "test_sessions", "step_sessions"))
     embargo = design["embargo_sessions"]
     _require(all(type(v) is int and v > 0 for v in (train, valid, test, step)) and type(embargo) is int and embargo >= 0, "模型切分窗口无效")
@@ -137,12 +305,14 @@ def _split(model):
         boundary_valid = offset + train
         boundary_test = boundary_valid + valid + embargo
         windows = {"train": calendar[train_start:boundary_valid], "validation": calendar[boundary_valid:boundary_valid + valid], "embargoed": calendar[boundary_valid + valid:boundary_test], "test": calendar[boundary_test:boundary_test + test]}
-        groups = {role: {sid for sid, row in samples.items() if _day(_time(row["observation_time"])) in days} for role, days in windows.items()}
+        membership = {role: set(days) for role, days in windows.items()}
+        groups = {role: {sid for sid, session in sample_sessions.items() if session in days}
+                  for role, days in membership.items()}
         _require(all(groups[role] for role in ("train", "validation", "test")), "模型切分窗口为空")
-        cutoffs = {"train": min(_time(samples[sid]["decision_time"]) for sid in groups["validation"]), "validation": min(_time(samples[sid]["decision_time"]) for sid in groups["test"])}
+        cutoffs = {"train": min(sample_times[sid]["decision_time"] for sid in groups["validation"]), "validation": min(sample_times[sid]["decision_time"] for sid in groups["test"])}
         groups["purged"] = set()
         for role, cutoff in cutoffs.items():
-            removed = {sid for sid in groups[role] if _time(samples[sid]["label_end_time"]) >= cutoff or _time(samples[sid]["label_available_time"]) > cutoff}
+            removed = {sid for sid in groups[role] if sample_times[sid]["label_end_time"] >= cutoff or sample_times[sid]["label_available_time"] > cutoff}
             groups[role] -= removed
             groups["purged"] |= removed
         _require(groups["train"] and groups["validation"], "模型 purge 后样本为空")
@@ -223,11 +393,26 @@ def _selection(model, samples, folds, candidates):
 MODEL_VERIFIER_ALGORITHM_VERSIONS = {
     "data.pit": "verifier.data-pit.v1",
     "label.split": "verifier.model-label-split.v2",
-    "search.holdout": "verifier.model-search-holdout.v2",
+    "search.holdout": "verifier.model-search-holdout.v3",
     "statistics": "verifier.model-statistics.v1",
     "financial.tradability": "verifier.model-financial-scope.v2",
 }
 
+
+LEGACY_MODEL_REFERENCE_VERIFIER_ALGORITHM_VERSIONS = {
+    **MODEL_VERIFIER_ALGORITHM_VERSIONS,
+    "label.split": "verifier.model-reference-label-split.v1",
+    "search.holdout": "verifier.model-reference-search-holdout.v1",
+    "statistics": "verifier.model-reference-statistics.v1",
+}
+
+
+MODEL_REFERENCE_VERIFIER_ALGORITHM_VERSIONS = {
+    **MODEL_VERIFIER_ALGORITHM_VERSIONS,
+    "label.split": "verifier.model-reference-label-split.v2",
+    "search.holdout": "verifier.model-reference-search-holdout.v2",
+    "statistics": "verifier.model-reference-statistics.v2",
+}
 
 def _fit_configs(model, samples, folds, selection=None):
     tables, design = model["tables"], model["design"]
@@ -323,10 +508,15 @@ def _holdout(model, selection):
     receipt = tables["holdout_receipt"][0]
     _require(receipt["status"] == "committed" and receipt["objective"] == "neg_mean_squared_error" and _equal(receipt["metric"], -fmean(losses)), "holdout 收据指标不一致")
     ledger = model["holdout_ledger"]
-    _require(set(ledger) == {"plan", "prepared", "opened", "terminal"}, "holdout 账本阶段不完整")
+    series_parent = verify_holdout_series_evidence(ledger)
+    expected_stages = {"plan", "prepared", "opened", "terminal"} | ({"series"} if series_parent is not None else set())
+    _require(set(ledger) == expected_stages, "holdout 账本阶段不完整")
     plan, prepared, opened, terminal = (ledger[name] for name in ("plan", "prepared", "opened", "terminal"))
     freeze = plan["freeze_payload"]
-    research_id = typed_canonical_hash(design)
+    research_id = series_parent if series_parent is not None else typed_canonical_hash(design)
+    if series_parent is not None:
+        _require(design.get("research_series") == freeze["research_series"], "模型设计与冻结研究系列声明不一致")
+        _require(freeze["aliases"]["run"] == typed_canonical_hash(design), "holdout 未绑定当前完整模型设计")
     candidate_hash = typed_canonical_hash(json.loads(selection["selected_parameters_json"]))
     _require(freeze["parent_research_purpose"] == research_id and freeze["mode"] == "single_candidate_confirmation" and freeze["candidates"] == [candidate_hash], "holdout 未冻结当前研究唯一候选")
     _require(selection["selected_candidate_id"] == "candidate_" + candidate_hash[:16], "holdout 候选参数身份不符")
@@ -352,8 +542,8 @@ def _holdout(model, selection):
     _require(_time(opened["opened_at"]) >= _time(plan["unlock_at"]) and _time(opened["opened_at"]) >= _time(prepared["prepared_at"]), "holdout 提前打开")
     _require(opened["opening_id"] == "holdout:" + identity[:16], "holdout 打开身份不符")
     _require(terminal["opened_hash"] == opened["opened_hash"] and terminal["status"] == "committed" and terminal["reason"] is None and terminal["result_hash"] == receipt["result_hash"], "holdout 终态结果不符")
-    payload = _json_value(predictions)
-    _require(typed_canonical_hash({"predictions": payload, "objective": receipt["objective"], "metric": receipt["metric"]}) == receipt["result_hash"], "holdout 预测未绑定持久收据")
+    payload = (_json_value(row) for row in predictions)
+    _require(typed_canonical_hash_streamed({"predictions": payload, "objective": receipt["objective"], "metric": receipt["metric"]}) == receipt["result_hash"], "holdout 预测未绑定持久收据")
     _require(all(_time(row["label_available_time"]) <= _time(opened["opened_at"]) for row in predictions), "holdout 读取尚未成熟标签")
     return fmean(losses), len(losses)
 

@@ -59,6 +59,16 @@ class PathRolePolicy:
         expected_kind: str,
     ) -> Path:
         root = self.resolve_root(allowed_root, role=root_role)
+        return self._resolve_contained_path(
+            root=root, candidate=candidate, root_role=root_role,
+            path_role=path_role, expected_kind=expected_kind,
+        )
+
+    def _resolve_contained_path(
+        self, *, root: Path, candidate: str | Path, root_role: str,
+        path_role: str, expected_kind: str,
+    ) -> Path:
+        """复用本次操作已核实的根，候选路径仍逐项核对。"""
         raw_candidate = Path(candidate)
         lexical = raw_candidate if raw_candidate.is_absolute() else root / raw_candidate
         lexical = self._absolute(lexical, path_role)
@@ -83,12 +93,13 @@ class PathRolePolicy:
     ) -> tuple[Path, ...]:
         if not relative_paths or len(relative_paths) != len(set(relative_paths)):
             raise SnapshotIntegrityError(f"路径角色 {file_role} 的 manifest 文件必须非空且唯一")
+        root = self.resolve_root(allowed_root, role=root_role)
         files = []
         for relative in relative_paths:
             normalized = self._safe_relative_path(relative, file_role)
             files.append(
-                self.resolve_contained_path(
-                    allowed_root=allowed_root,
+                self._resolve_contained_path(
+                    root=root,
                     candidate=Path(*normalized.parts),
                     root_role=root_role,
                     path_role=file_role,
@@ -107,14 +118,14 @@ class PathRolePolicy:
     ) -> Mapping[str, Path]:
         resolved_root = self.resolve_root(root, role=root_role)
         found: dict[str, Path] = {}
-        for directory, dirnames, filenames in self.walk(resolved_root):
+        for directory, dirnames, filenames in self._walk_resolved(resolved_root):
             directory_path = Path(directory)
             for name in sorted(filenames):
                 lexical = directory_path / name
                 if lexical.suffix.lower() != suffix.lower():
                     continue
-                resolved = self.resolve_contained_path(
-                    allowed_root=resolved_root,
+                resolved = self._resolve_contained_path(
+                    root=resolved_root,
                     candidate=lexical,
                     root_role=root_role,
                     path_role=file_role,
@@ -165,19 +176,26 @@ class PathRolePolicy:
     def walk(self, root: str | Path):
         """遍历根内真实目录，保留链接路径名；循环目录不能无限展开。"""
         resolved_root = self.resolve_root(root, role="directory_root")
+        yield from self._walk_resolved(resolved_root)
+
+    def _walk_resolved(self, resolved_root: Path):
+        # 目录进入遍历前已完成真实路径检查，祖先事实只在本次遍历内保留。
+        directories = {resolved_root: (resolved_root, frozenset())}
         for directory, dirnames, filenames in os.walk(resolved_root, followlinks=True):
             current = Path(directory)
-            ancestors = {current.resolve()}
-            ancestors.update(parent.resolve() for parent in current.parents
-                             if parent == resolved_root or resolved_root in parent.parents)
+            target, parents = directories.pop(current)
+            ancestors = parents | {target}
             for name in dirnames:
-                target = self.resolve_contained_path(
-                    allowed_root=resolved_root, candidate=current / name,
+                child = current / name
+                target = self._resolve_contained_path(
+                    root=resolved_root, candidate=child,
                     root_role="directory_root", path_role="directory", expected_kind="directory",
                 )
                 if target in ancestors:
                     raise SnapshotIntegrityError("目录链接形成循环")
+                directories[child] = (target, ancestors)
             yield directory, dirnames, filenames
+
 
 
 __all__ = ["PathRolePolicy"]

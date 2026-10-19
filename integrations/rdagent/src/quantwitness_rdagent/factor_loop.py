@@ -1,67 +1,30 @@
-"""上游LoopBase调度开放表达式的提案、正式评价与研究反思。"""
-import asyncio
-import json
-from pathlib import Path
-
-from rdagent.core.conf import RD_AGENT_SETTINGS
+"""上游LoopBase调度因子的提案、正式评价与研究反思。"""
 from rdagent.utils.workflow.loop import LoopBase, LoopMeta
 
-from .factor_research import FactorResearch
+from .factor_research import FactorResearch, validate_factor_research
+from .session_inspection import check_frozen_request
+from .research_loop import (
+    configure_serial_steps, run_research_session,
+    propose_research, evaluate_research, reflect_research, record_research,
+)
 
 
 class FactorResearchLoop(LoopBase, metaclass=LoopMeta):
     def __init__(self, session):
-        RD_AGENT_SETTINGS.step_semaphore = 1
-        RD_AGENT_SETTINGS.multi_proc_n = 1
-        RD_AGENT_SETTINGS.subproc_step = False
+        configure_serial_steps()
         super().__init__()
         self.session = session
 
-    async def propose(self, previous):
-        index = previous[self.LOOP_IDX_KEY]
-        while index > len(self.session.history()):
-            await asyncio.sleep(0.01)
-        if (self.session.root / "outcome.json").exists():
-            raise self.LoopTerminationError("已到研究停止条件")
-        return self.session.propose(index)
-
-    def evaluate(self, previous):
-        return self.session.evaluate(previous[self.LOOP_IDX_KEY], previous["propose"])
-
-    def reflect(self, previous):
-        return self.session.reflect(previous[self.LOOP_IDX_KEY], previous["evaluate"])
-
-    def record(self, previous):
-        return self.session.record(previous[self.LOOP_IDX_KEY], previous["reflect"])
+    # 显式保留原阶段名与顺序，供上游LoopMeta及历史快照恢复使用。
+    propose = propose_research
+    evaluate = evaluate_research
+    reflect = reflect_research
+    record = record_research
 
 
 def run_factor_research(payload, *, resume=False, model_env_file=None, step_n=None):
-    from rdagent.log.conf import LOG_SETTINGS
-    from rdagent.log import rdagent_logger
+    payload = validate_factor_research(payload)
+    check_frozen_request(payload)
     session = FactorResearch(payload, model_env_file=model_env_file)
-    outcome = session.root / "outcome.json"
-    def completed():
-        if "knowledge" in session.payload:
-            from .research_knowledge import export_session
-            export_session(session.root, session.payload["knowledge"]["output"])
-        return json.loads(outcome.read_text(encoding="utf-8"))
-    if outcome.exists():
-        return completed()
-    RD_AGENT_SETTINGS.workspace_path = session.root / "rd-workspace"
-    RD_AGENT_SETTINGS.artifact_signing_key_path = session.root / "rd-signing.key"
-    LOG_SETTINGS.trace_path = str(session.root / "rd-logs")
-    rdagent_logger.set_storages_path(session.root / "rd-logs")
-    snapshots = session.root / "rd-logs" / "__session__"
-    if resume and snapshots.exists() and any(snapshots.glob("*/*_*")):
-        loop = FactorResearchLoop.load(snapshots, checkout=False)
-        if loop.session.payload != session.payload:
-            raise ValueError("研究快照与冻结请求不同")
-        loop.session = session
-    else:
-        loop = FactorResearchLoop(session)
-    loop.step_n = None
-    asyncio.run(loop.run(step_n=step_n, loop_n=session.payload["budget"]["rounds"]))
-    if outcome.exists():
-        return completed()
-    return {"status": "incomplete", "completed_rounds": len(session.history()),
-            "next_action": "factor-resume", "session_root": str(session.root)}
+    return run_research_session(FactorResearchLoop, session, resume=resume,
+                                command="factor", step_n=step_n)

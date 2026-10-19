@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
+import tempfile
 
 import pytest
 
@@ -31,8 +33,16 @@ def _recipe(*, scope="final", step=3, fit=None, holdout=None):
     for name, operator, candidates in declarations:
         if candidates is None:
             candidates = [gru_candidate(), _table_candidate()]
+        parameters = {"thread_count": 1, "candidate_jsons": [json.dumps(item) for item in candidates]}
+        if name == "holdout":
+            parameters["research_series_json"] = json.dumps({
+                "series_id": "sequence-admission",
+                "root": str(Path(tempfile.gettempdir()).resolve() / "sequence-admission-series"),
+                "purpose": "序列与表格候选的最终评价准入",
+                "legacy_ledger_roots": [],
+            })
         nodes.append(OperatorNodeRecipe(name, operator, "2.0.0", (InputBinding("splits", "split", "splits"),),
-            {"thread_count": 1, "candidate_jsons": [json.dumps(item) for item in candidates]}, ()))
+            parameters, ()))
     return OperatorGraphRecipe.build(graph_id="sequence-admission", nodes=tuple(nodes))
 
 

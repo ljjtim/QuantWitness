@@ -20,7 +20,7 @@ def require(condition, message):
 
 
 def frame(rows):
-    result = pd.DataFrame(rows)
+    result = rows.to_pandas() if hasattr(rows, "to_pandas") else pd.DataFrame(rows)
     for name in ("observation_time", "feature_available_time", "decision_time", "available_time",
                  "label_start_time", "label_end_time"):
         if name in result:
@@ -49,7 +49,7 @@ def verify_sequence_research_facts(model):
         require(not any("sequence_" + name in tables for name in WINDOW_NAMES)
                 and not model.get("model_window_facts"), "表格研究不得混入未声明序列事实")
         return
-    require(bool(sequence) and spec.get("schema") == "research.model-sequence-context.v1"
+    require(bool(sequence) and spec.get("schema") in {"research.model-sequence-context.v1", "research.model-sequence-context.v2"}
             and spec.get("missing_policy") == "complete_window"
             and spec.get("candidate_sample_policy") == "shared_complete_endpoints", "研究序列合同无效")
     step = spec.get("step_len")
@@ -73,7 +73,11 @@ def verify_sequence_research_facts(model):
     same_frame(targets, wanted, ["sample_id"], "研究末端未完整绑定原始Label")
     context = frame(tables["sequence_context"])
     members = frame(tables["sequence_members"])
-    excluded = pd.DataFrame(tables["sequence_exclusions"], columns=["sample_id", "reason_code"])
+    compact = spec["schema"] == "research.model-sequence-context.v2"
+    require(compact == ("context_index" in context)
+            and compact == (set(members.columns) == {"sample_id", "step", "context_index"}),
+            "研究序列版本与上下文、成员结构不一致")
+    excluded = frame(tables["sequence_exclusions"]).reindex(columns=["sample_id", "reason_code"])
     features = frame(tables["features"])
     features = features.loc[features.observation_session <= targets.observation_session.max()]
     try:
@@ -135,8 +139,11 @@ def verify_bundle_windows(model, path):
     context = frame(model["tables"]["sequence_context"])
     selected_members = members.loc[members.sample_id.isin(ids)]
     require(len(selected_members) == len(ids) * spec["step_len"], "模型拟合末端缺少完整窗口")
-    selected_context = context.merge(selected_members[["entity_id", "observation_session"]].drop_duplicates(),
-                                      on=["entity_id", "observation_session"], validate="one_to_one")
+    if spec["schema"] == "research.model-sequence-context.v2":
+        selected_context = context.loc[context.context_index.isin(selected_members.context_index)]
+    else:
+        selected_context = context.merge(selected_members[["entity_id", "observation_session"]].drop_duplicates(),
+                                          on=["entity_id", "observation_session"], validate="one_to_one")
     same_frame(frame(facts["targets"]), targets.loc[targets.sample_id.isin(ids)], ["sample_id"], "模型窗口末端不是拟合样本精确子集")
     same_frame(frame(facts["members"]), selected_members, ["sample_id", "step"], "模型历史成员不是拟合窗口精确子集")
     same_frame(frame(facts["context"]), selected_context, ["entity_id", "observation_session"], "模型历史特征与研究上下文不一致")
@@ -145,11 +152,14 @@ def verify_bundle_windows(model, path):
 def sequence_expected_parameters(config, candidate, design):
     model_class = candidate["model"]["class"]
     require(model_class in SEQUENCE_MODEL_CLASSES, "序列模型类型不符")
-    require(config.get("schema") == "research.qlib-sequence-model-bundle.v1", "序列模型文件schema不符")
+    require(config.get("schema") in {"research.qlib-sequence-model-bundle.v1", "research.qlib-sequence-model-bundle.v2"}, "序列模型文件schema不符")
     versions = config.get("versions", {})
     require(versions.get("pyqlib") == "0.9.7" and versions.get("torch", "").split("+", 1)[0] == "2.5.1", "序列模型封存依赖版本不符")
     spec, sequence = design["sequence"], config["sequence"]
-    require(sequence.get("schema") == "research.qlib-sequence-input.v1"
+    require((config["schema"] == "research.qlib-sequence-model-bundle.v2")
+            == (spec["schema"] == "research.model-sequence-context.v2"), "序列模型与研究证据版本不一致")
+    require(sequence.get("schema") == ("research.qlib-sequence-input.v2"
+            if spec["schema"] == "research.model-sequence-context.v2" else "research.qlib-sequence-input.v1")
             and sequence.get("missing_policy") == "complete_window" and sequence.get("batch_axis") == "vector"
             and all(sequence.get(key) == spec[key] for key in ("step_len", "feature_columns", "calendar_sessions"))
             and config["feature_columns"] == spec["feature_columns"], "序列模型窗口声明不符")

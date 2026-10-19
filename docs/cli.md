@@ -80,23 +80,23 @@ typed commit；缺少 commit、端口/Artifact 不符、未声明文件或字节
 ## 运行与恢复
 
 ```powershell
-python -m research_pipeline run --plan <计划目录> --data-db <只读DuckDB> --artifact-root <工件目录> --handoff-out <handoff.json> --run-root <run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
+python -m research_pipeline run --plan <计划目录> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
 
 # 可重复提供；只机会式复用 pure/cacheable 节点，未命中时正常执行
-python -m research_pipeline run --plan <新计划目录> --reuse-run-root <已完成run目录> --data-db <只读DuckDB> --artifact-root <工件目录> --handoff-out <handoff.json> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
+python -m research_pipeline run --plan <新计划目录> --reuse-run-root <已完成run目录> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
 
 # 指定节点及其必要上游必须复用；可非 pure/cacheable，完整复验失败时不得回退执行
-python -m research_pipeline run --plan <新计划目录> --reuse-run-root <已完成run目录> --require-reused-node <节点ID> --data-db <只读DuckDB> --artifact-root <工件目录> --handoff-out <handoff.json> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
+python -m research_pipeline run --plan <新计划目录> --reuse-run-root <已完成run目录> --require-reused-node <节点ID> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
 
 # 修正不改变 DAG 的计划后，从一个显式失败 run 的成功 checkpoint 继续
-python -m research_pipeline run --plan <新计划目录> --reuse-failed-run-root <失败run目录> --data-db <只读DuckDB> --artifact-root <工件目录> --handoff-out <handoff.json> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
+python -m research_pipeline run --plan <新计划目录> --reuse-failed-run-root <失败run目录> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
 python -m research_pipeline inspect --run-root <run目录> --json
 python -m research_pipeline resume --run-root <run目录> --json
 python -m research_pipeline retry-node --run-root <run目录> --node <node-id> --json
 python -m research_pipeline rerun-from --run-root <父run目录> --output-run-root <子run目录> --node <node-id> --json
 ```
 
-不提供资源参数时，单次 CLI 使用 16 GiB 总内存、当前进程可用的全部逻辑核心和 64 GiB scratch 上限。内部 worker 默认 1 个；显式 `--workers` 不得超过 CPU 或 `max_workers` 容量，项目 Worker 在节点总资源预算内自行管理任务并行。`--resource-memory-bytes`、`--resource-cpu-slots` 和 `--resource-scratch-bytes` 可以覆盖本次进程内容量。
+不提供资源参数时，单次 CLI 使用 16 GiB 总内存、当前进程可用的全部逻辑核心和 64 GiB scratch 上限。正式主 DAG 默认 `--mode deterministic_serial --workers 1`。并行需显式选择 `--mode bounded_parallel` 或 `--mode partitioned_batch`，并通过 `--workers N` 声明主 DAG 在途节点上限及单个模型节点的候选并发上限；未提供 workers 时仍为 1。workers 不增加节点或运行总资源预算，实际并发受 CPU、内存、临时空间与进程槽共同限制。项目 Worker 在节点总资源预算内管理内部工作。`--resource-memory-bytes`、`--resource-cpu-slots` 和 `--resource-scratch-bytes` 可以覆盖本次进程内容量。
 
 只有同时运行多个独立 CLI 时才需要仓库外 `--resource-state-dir`，并额外提供 process 总额度和 timeout。它只等待或拒绝，不改变样本、分区、seed 或金融语义。
 
@@ -164,13 +164,13 @@ python -m research_pipeline gc --root <工件根> --ttl-seconds 86400 --json
 
 ## Workspace 运行与复用
 
-完整合成研究流程见 [Workspace 入门](workspace-quickstart.md)。`workspace run` 自动管理工件、handoff、run 和 ResultStore 路径，与普通 `run` 共用复用选项及校验：
+完整合成研究流程见 [Workspace 入门](workspace-quickstart.md)。`workspace run` 自动管理工件、run 和 ResultStore 路径，与普通 `run` 共用复用选项及校验：
 
 - `--reuse-run-root <完成态run目录>` 可重复传入，按显式顺序尝试复用。
 - `--require-reused-node <节点ID>` 可重复传入；必须同时提供完成态来源，任一指定节点不可复用时在计算前拒绝。
 - `--reuse-failed-run-root <失败run目录>` 复用终态失败 run 中通过完整复验的成功 checkpoint，不能与完成态复用组合使用。
 
-Workspace 不自动执行 lint、admit、verify 或 report；clock 和 root-seed 必须与分配 execution 时一致。
+`workspace run` 只执行已准入计划；clock 和 root-seed 必须与分配 execution 时一致。完整流程使用 `workspace execute`。
 
 ## 状态摘要与完整流程
 
@@ -184,4 +184,4 @@ python -m research_pipeline workspace execute --workspace <工作区> --catalog-
 python -m research_pipeline package lint --package <研究包> --summary
 ```
 
-`workspace execute` 沿用现有 lint、admit、run、verify、report；时点和种子从包读取，显式值必须一致。它每次分配新 execution，失败返回 `failed_stage`、`stages` 和已生成的结果位置。验证 fail 仍生成失败报告，但完整流程退出非零。恢复使用 inspect/resume/retry-node 后独立 verify/report，不以新的 execute 替代恢复。来源与资源参数见各命令 --help。
+`workspace execute` 与 RD-Agent 正式包执行共用应用层的 lint、admit、run、恢复、verify、report 编排；时点和种子从包读取，显式值必须一致。未提供 `--execution-id` 时分配新 execution；提供原编号时接续原 plan、invocation 和 Result。失败返回 `failed_stage`、`stages` 与已生成的结果位置。验证 fail 仍生成失败报告，完整流程退出非零。运行不再要求 handoff 输出，`--artifact-root` 继续承担工件和 holdout 持久锚点职责；旧 invocation 保持原身份读取。来源与资源参数见各命令 --help。

@@ -17,6 +17,22 @@ FINAL_COMMANDS = (
 )
 
 
+def _formal_execution_mode(value: str) -> str:
+    if value not in {"deterministic_serial", "bounded_parallel", "partitioned_batch"}:
+        raise argparse.ArgumentTypeError("未知正式执行模式")
+    return value
+
+
+def _formal_worker_count(value: str) -> int:
+    try:
+        workers = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("workers 必须是正整数") from exc
+    if workers < 1:
+        raise argparse.ArgumentTypeError("workers 必须是正整数")
+    return workers
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="quantwitness", description=DESCRIPTION)
     parser.add_argument(
@@ -198,11 +214,14 @@ def _add_run(commands: argparse._SubParsersAction) -> None:
         help="为 Catalog source_profile 显式绑定额外只读 DuckDB；可重复传入",
     )
     run.add_argument("--artifact-root", required=True)
-    run.add_argument("--handoff-out", required=True, help="数据平面 handoff 输出")
+    run.add_argument("--handoff-out", help=argparse.SUPPRESS)
     run.add_argument("--run-root", required=True)
     _add_run_reuse_arguments(run)
     run.add_argument("--result-store", required=True, help="自包含 ResultStore")
-    run.add_argument("--mode", choices=("deterministic_serial", "bounded_parallel", "partitioned_batch"), default="deterministic_serial")
+    run.add_argument(
+        "--mode", type=_formal_execution_mode, choices=("deterministic_serial", "bounded_parallel", "partitioned_batch"),
+        default="deterministic_serial", help="串行、动态有界并行或确定性批次并行；共用节点声明与运行总预算",
+    )
     _add_runtime_resource_arguments(run)
     run.add_argument("--root-seed", type=int, default=0)
     run.add_argument("--clock", required=True, help="显式带时区的固定 ISO 时钟")
@@ -258,8 +277,8 @@ def _add_run_reuse_arguments(command: argparse.ArgumentParser) -> None:
 def _add_runtime_resource_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument(
         "--workers",
-        type=int,
-        help="内部 worker 数；默认 1，显式指定时不能超过 CPU 或 max_workers 容量",
+        type=_formal_worker_count,
+        help="主 DAG 在途节点上限及单个模型节点的候选并发上限；默认 1，不增加总资源预算",
     )
     command.add_argument(
         "--resource-state-dir",
@@ -491,6 +510,7 @@ def _add_workspace(commands: argparse._SubParsersAction) -> None:
     init.add_argument("--workspace-id")
     init.add_argument("--allow-existing", action="store_true")
     init.add_argument("--from-package", help="复制已填写的四份研究声明；目标必须不存在")
+    init.add_argument("--parameter", action="append", default=[], help="替换模板已有节点参数：NODE.PARAM=JSON；须提供 --from-package")
     _add_output_arguments(init)
     validate = subcommands.add_parser("validate", help="只读检查工作区合同与 Git 危险文件")
     validate.add_argument("--workspace", required=True)
@@ -517,7 +537,10 @@ def _add_workspace(commands: argparse._SubParsersAction) -> None:
     run.add_argument("--input-snapshot-manifest", help="显式封存输入清单")
     run.add_argument("--clock", required=True)
     run.add_argument("--root-seed", type=int, required=True)
-    run.add_argument("--mode", choices=("deterministic_serial", "bounded_parallel", "partitioned_batch"), default="deterministic_serial")
+    run.add_argument(
+        "--mode", type=_formal_execution_mode, choices=("deterministic_serial", "bounded_parallel", "partitioned_batch"),
+        default="deterministic_serial", help="串行、动态有界并行或确定性批次并行；共用节点声明与运行总预算",
+    )
     _add_runtime_resource_arguments(run)
     run.add_argument("--source-db", action="append", default=[])
     run.add_argument("--minute-data-root")
@@ -533,6 +556,7 @@ def _add_workspace(commands: argparse._SubParsersAction) -> None:
     _add_output_arguments(retry)
     execute = subcommands.add_parser("execute", help="依次检查、准入、运行、验证并报告工作区研究")
     execute.add_argument("--workspace", required=True)
+    execute.add_argument("--execution-id", help="接续明确的既有 execution，不分配新运行")
     execute.add_argument("--catalog-lock", required=True)
     execute.add_argument("--data-db", help="显式只读 DuckDB")
     execute.add_argument("--input-snapshot-manifest", help="显式封存输入清单；与数据库来源互斥")
@@ -544,10 +568,14 @@ def _add_workspace(commands: argparse._SubParsersAction) -> None:
     execute.add_argument("--root-seed", type=int, help="省略时使用研究包；显式值必须一致")
     execute.add_argument("--label")
     execute.add_argument("--minute-data-root")
-    execute.add_argument("--mode", choices=("deterministic_serial", "bounded_parallel", "partitioned_batch"), default="deterministic_serial")
+    execute.add_argument(
+        "--mode", type=_formal_execution_mode, choices=("deterministic_serial", "bounded_parallel", "partitioned_batch"),
+        default="deterministic_serial", help="串行、动态有界并行或确定性批次并行；共用节点声明与运行总预算",
+    )
     _add_runtime_resource_arguments(execute)
     _add_run_reuse_arguments(execute)
     _add_verification_resource_arguments(execute)
+    execute.set_defaults(verification_process_slots=None)
     _add_output_arguments(execute)
     dashboard = subcommands.add_parser(
         "dashboard",

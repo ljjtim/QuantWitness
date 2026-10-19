@@ -1,11 +1,9 @@
 """风险目标、实际现金执行与独立金融oracle。"""
 from copy import deepcopy
-from datetime import datetime, time
 import importlib.util
 import json
 import math
 from pathlib import Path
-import sys
 
 import pandas as pd
 import pyarrow as pa
@@ -13,11 +11,12 @@ import pyarrow.parquet as pq
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1] / "project_extensions/qlib_portfolio_risk"
-sys.path.insert(0, str(ROOT))
-spec = importlib.util.spec_from_file_location("risk_extension", ROOT/"extension.py")
-extension = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(extension)
-import oracle as risk_oracle
+with pytest.MonkeyPatch.context() as imports:
+    imports.syspath_prepend(str(ROOT))
+    spec = importlib.util.spec_from_file_location("risk_extension", ROOT/"extension.py")
+    extension = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(extension)
+    import oracle as risk_oracle
 
 
 def case(method="inv"):

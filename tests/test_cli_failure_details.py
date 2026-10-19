@@ -79,7 +79,7 @@ def test_non_runtime_failure_does_not_project_stale_runtime_diagnostic(
 
 def test_verify_cli_forwards_default_and_explicit_process_slots(monkeypatch, capfd, tmp_path):
     from research_pipeline.cli import main
-    from research_pipeline.cli.commands import evidence_lifecycle
+    from research_pipeline.application import evidence_lifecycle
 
     observed = []
 
@@ -103,7 +103,7 @@ def test_verify_cli_forwards_default_and_explicit_process_slots(monkeypatch, cap
 def workspace_failure_cli(tmp_path, monkeypatch):
     import duckdb
 
-    from research_pipeline.cli.commands import research_run
+    from research_pipeline.application import research_run
     from research_pipeline.workspace import allocate_execution, initialize_workspace
 
     def reject_database(*args, **kwargs):

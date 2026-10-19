@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from copy import deepcopy
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -13,7 +16,7 @@ from research_pipeline.platform.canonical import canonical_json
 
 from .errors import RuntimeIntegrityError, RuntimeStateError
 from .events import RuntimeEvent
-from .state import RuntimeProjection, apply_event
+from .state import RuntimeProjection, _ProjectionAccumulator
 
 
 def process_identity_alive(pid: int, process_started_at: float) -> bool:
@@ -69,6 +72,27 @@ class _StoreLock:
             return
 
 
+class _EventSession:
+    def __init__(self, events: tuple[RuntimeEvent, ...]) -> None:
+        self.state = _ProjectionAccumulator()
+        self.events: list[RuntimeEvent] = []
+        self.by_command: dict[str, RuntimeEvent] = {}
+        self.by_node: dict[str, list[RuntimeEvent]] = {}
+        for event in events:
+            self.accept(event, self.state.validate(event))
+
+    def accept(self, event: RuntimeEvent, target: str) -> None:
+        self.state.accept(event, target)
+        self.events.append(event)
+        self.by_command.setdefault(event.command_id, event)
+        if event.node_id is not None:
+            self.by_node.setdefault(event.node_id, []).append(event)
+
+
+def _copy_event(event: RuntimeEvent) -> RuntimeEvent:
+    return replace(event, payload=deepcopy(event.payload))
+
+
 class EventStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
@@ -76,8 +100,30 @@ class EventStore:
         self.events_path = self.root / "events.jsonl"
         self.projection_path = self.root / "projection.json"
         self.lock_path = self.root / ".writer.lock"
+        self._writer_active = False
+        self._append_active = False
+        self._session: _EventSession | None = None
 
-    def read_events(self) -> tuple[RuntimeEvent, ...]:
+    @contextmanager
+    def writer_session(self):
+        """独占写者期间只重建一次；退出后不保留日志信任。"""
+        if self._writer_active:
+            raise RuntimeStateError("事件写者会话不能嵌套")
+        with _StoreLock(self.lock_path):
+            self._writer_active = True
+            try:
+                self._current_session()
+                yield self
+            finally:
+                self._session = None
+                self._writer_active = False
+
+    def _current_session(self) -> _EventSession:
+        if self._session is None:
+            self._session = _EventSession(self._read_events())
+        return self._session
+
+    def _read_events(self) -> tuple[RuntimeEvent, ...]:
         if not self.events_path.exists():
             return ()
         events: list[RuntimeEvent] = []
@@ -93,35 +139,65 @@ class EventStore:
             raise RuntimeIntegrityError("事件日志损坏或截断") from exc
         return tuple(events)
 
+    def read_events(self) -> tuple[RuntimeEvent, ...]:
+        if self._writer_active:
+            return tuple(_copy_event(event) for event in self._current_session().events)
+        return self._read_events()
+
+    @property
+    def event_count(self) -> int:
+        if self._writer_active:
+            return self._current_session().state.last_seq
+        return self.replay().last_seq
+
+    def events_for_node(self, node_id: str) -> tuple[RuntimeEvent, ...]:
+        if self._writer_active:
+            return tuple(_copy_event(event) for event in self._current_session().by_node.get(node_id, ()))
+        return tuple(event for event in self._read_events() if event.node_id == node_id)
+
     def replay(self) -> RuntimeProjection:
-        projection = RuntimeProjection()
-        for event in self.read_events():
-            projection = apply_event(projection, event)
-        return projection
+        session = self._current_session() if self._writer_active else _EventSession(self._read_events())
+        return session.state.snapshot()
 
     def append(self, run_id: str, kind: str, payload: dict[str, object], *, command_id: str, node_id: str | None = None, attempt_id: str | None = None, before_append: Callable[[RuntimeEvent], None] | None = None) -> RuntimeEvent:
-        with _StoreLock(self.lock_path):
-            events = self.read_events()
-            for event in events:
-                if event.command_id == command_id:
-                    if (event.kind, event.payload, event.node_id, event.attempt_id) != (kind, payload, node_id, attempt_id):
-                        raise RuntimeStateError("command_id 已用于不同事件")
-                    return event
-            projection = RuntimeProjection()
-            for existing in events:
-                projection = apply_event(projection, existing)
-            event = RuntimeEvent.build(projection.last_seq + 1, run_id, kind, payload, previous_hash=projection.chain_head, command_id=command_id, node_id=node_id, attempt_id=attempt_id)
-            updated = apply_event(projection, event)
+        if self._append_active:
+            raise RuntimeStateError("事件追加不能重入当前写者")
+        if not self._writer_active:
+            with self.writer_session():
+                return self.append(run_id, kind, payload, command_id=command_id,
+                                   node_id=node_id, attempt_id=attempt_id, before_append=before_append)
+        self._append_active = True
+        try:
+            session = self._current_session()
+            existing = session.by_command.get(command_id)
+            if existing is not None:
+                if (existing.run_id, existing.kind, existing.payload, existing.node_id, existing.attempt_id) != (run_id, kind, payload, node_id, attempt_id):
+                    raise RuntimeStateError("command_id 已用于不同事件")
+                return _copy_event(existing)
+            event = RuntimeEvent.build(
+                session.state.last_seq + 1, run_id, kind, deepcopy(payload),
+                previous_hash=session.state.chain_head, command_id=command_id,
+                node_id=node_id, attempt_id=attempt_id,
+            )
+            target = session.state.validate(event)
             if before_append is not None:
-                before_append(event)
-            with self.events_path.open("a", encoding="utf-8", newline="") as handle:
-                handle.write(canonical_json(event.to_dict()) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary = self.projection_path.with_suffix(".tmp")
-            temporary.write_text(canonical_json(updated.to_dict()), encoding="utf-8")
-            os.replace(temporary, self.projection_path)
-            return event
+                before_append(_copy_event(event))
+            try:
+                with self.events_path.open("a", encoding="utf-8", newline="") as handle:
+                    handle.write(canonical_json(event.to_dict()) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                session.accept(event, target)
+                temporary = self.projection_path.with_suffix(".tmp")
+                temporary.write_text(canonical_json(session.state.snapshot().to_dict()), encoding="utf-8")
+                os.replace(temporary, self.projection_path)
+            except BaseException:
+                # 日志写入是否完成以再次重放为准，不沿用不确定的内存状态。
+                self._session = None
+                raise
+            return _copy_event(event)
+        finally:
+            self._append_active = False
 
 
 __all__ = ["EventStore"]

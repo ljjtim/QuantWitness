@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from factor_contracts import FactorPublicationBinding
 
 from .admission import AdmittedQueryPlan
+from .snapshot_layout import PhysicalSnapshotPolicy
 from .errors import QueryIRInvalidError
 from .query_ir import (
     QUERY_IR_V2_VERSION,
@@ -114,6 +115,10 @@ def admitted_plan_from_dict(payload: dict[str, Any]) -> AdmittedQueryPlan:
         temporal_selection=TemporalSelectionPlan.from_dict(payload["temporal_selection"]),
         input_claim_ceiling=str(payload["input_claim_ceiling"]),
         session_close_binding=session_close,
+        snapshot_layout=(
+            PhysicalSnapshotPolicy.from_dict(payload["snapshot_layout"])
+            if "snapshot_layout" in payload else None
+        ),
         plan_version=str(payload["plan_version"]),
         daily_availability_policy_ref=daily_policy_ref,
         daily_availability_rule=daily_rule,

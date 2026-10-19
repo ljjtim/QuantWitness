@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from research_pipeline.research.validation import persistent_holdout_ledger_root
+from research_pipeline.research.validation.holdout_series import series_from_parameters
 from ..walk_forward_model_execution import execute_model_fit_artifact, execute_model_fold_metrics_artifact, execute_model_locked_holdout_artifact, execute_model_predict_artifact, execute_model_selection_artifact, execute_model_split_artifact
 from ..operator_runtime import OperatorRuntimeContext, RuntimeNodeValue
 from .common import _environment, _factor_external_result, _input_external_root, _parameters
@@ -33,6 +33,12 @@ def execute_research_model_fit_v2(
         parameters=_parameters(context),
         root_seed=_environment(context).root_seed,
         max_memory_bytes=context.effective_resource_budget.memory_bytes,
+        parallel_workers=context.node_context.parallel_workers,
+        process_slots=context.node_context.process_slots,
+        cpu_slots=context.effective_resource_budget.cpu_slots,
+        max_temp_bytes=context.effective_resource_budget.temp_bytes,
+        deadline_monotonic=context.node_context.attempt_deadline_monotonic,
+        execution_report_path=context.work_dir / "model-fit-execution.json",
     )
     return value
 
@@ -86,7 +92,7 @@ def execute_research_model_locked_holdout_v2(
     parameters = _parameters(context)
     if parameters.get("fixed_clock") != env.fixed_clock:
         raise ValueError("locked holdout fixed_clock 必须与正式 Runtime 时钟一致")
-    identity = str(parameters["research_identity_hash"])
+    series = series_from_parameters(parameters)
     result, value = _factor_external_result(
         context,
         execute_model_locked_holdout_artifact,
@@ -95,11 +101,7 @@ def execute_research_model_locked_holdout_v2(
         feature_root=_input_external_root(context, "features"),
         label_root=_input_external_root(context, "labels"),
         parameters=parameters,
-        ledger_root=persistent_holdout_ledger_root(
-            env.holdout_ledger_anchor,
-            scope="model",
-            research_identity_hash=identity,
-        ),
+        ledger_root=series.ledger_root,
         root_seed=env.root_seed,
         max_memory_bytes=context.effective_resource_budget.memory_bytes,
     )

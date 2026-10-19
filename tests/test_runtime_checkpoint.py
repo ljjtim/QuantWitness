@@ -35,7 +35,7 @@ def _expectation(
     )
 
 
-def _commit(store: CheckpointStore, *, attempt_id: str, content: bytes = b"result"):
+def _commit(store: CheckpointStore, *, attempt_id: str, content: bytes = b"result", **options):
     return store.commit_bytes(
         expectation=_expectation(),
         attempt_id=attempt_id,
@@ -46,6 +46,7 @@ def _commit(store: CheckpointStore, *, attempt_id: str, content: bytes = b"resul
         execution_identity_digest="f" * 64,
         root_seed=7,
         fixed_clock="2026-07-13T00:00:00+00:00",
+        **options,
     )
 
 
@@ -100,6 +101,8 @@ def test_checkpoint_rejects_current_identity_mismatch_and_legacy_schema(tmp_path
         CheckpointManifest.from_dict({"contract_version": "research-runtime-checkpoint-v1"})
     with pytest.raises(RuntimeIntegrityError, match="旧 checkpoint"):
         CheckpointManifest.from_dict({"contract_version": "research-runtime-checkpoint-v2"})
+    with pytest.raises(RuntimeIntegrityError, match="旧 checkpoint"):
+        CheckpointManifest.from_dict({"contract_version": "research-runtime-checkpoint-v3"})
 
 
 def test_partial_staging_is_never_reused_and_can_be_recomputed(tmp_path) -> None:
@@ -155,3 +158,48 @@ def test_checkpoint_rejects_input_implementation_and_environment_drift(
     _commit(store, attempt_id="attempt-1")
     with pytest.raises(RuntimeIntegrityError, match="当前预期"):
         store.verify(_expectation(**changed_expectation))
+
+
+def test_resource_rejection_leaves_no_recoverable_checkpoint(tmp_path):
+    store = CheckpointStore(tmp_path / "run")
+    calls = []
+
+    def reject():
+        stage = store.staging_root / "attempt-1"
+        assert (stage / "content.bin").read_bytes() == b"result"
+        assert not (stage / "COMMITTED").exists()
+        assert not (store.checkpoints_root / _expectation().node_execution_id).exists()
+        calls.append("resource_gate")
+        raise RuntimeIntegrityError("资源验收拒绝")
+
+    with pytest.raises(RuntimeIntegrityError, match="资源验收拒绝"):
+        _commit(store, attempt_id="attempt-1", before_publish=reject)
+    assert calls == ["resource_gate"]
+    with pytest.raises(RuntimeIntegrityError, match="marker"):
+        store.verify(_expectation())
+    _commit(store, attempt_id="attempt-2")
+    store.verify(_expectation())
+
+
+def test_staging_content_is_verified_before_resource_gate(tmp_path):
+    store = CheckpointStore(tmp_path / "run")
+    calls = []
+
+    def corrupt(phase):
+        if phase == "checkpoint_prepared":
+            (store.staging_root / "attempt-1" / "content.bin").write_bytes(b"changed")
+
+    with pytest.raises(RuntimeIntegrityError, match="内容"):
+        _commit(store, attempt_id="attempt-1", phase_hook=corrupt,
+                before_publish=lambda: calls.append("resource_gate"))
+    assert calls == []
+    assert not list(store.checkpoints_root.iterdir())
+
+
+def test_resource_gate_precedes_marker_and_atomic_publication(tmp_path):
+    store = CheckpointStore(tmp_path / "run")
+    phases = []
+    _commit(store, attempt_id="attempt-1", phase_hook=phases.append,
+            before_publish=lambda: phases.append("resources_accepted"))
+    assert phases == ["checkpoint_prepared", "resources_accepted", "marker_fsynced", "renamed"]
+    store.verify(_expectation())

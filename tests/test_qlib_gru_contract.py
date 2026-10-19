@@ -21,7 +21,8 @@ def gru_candidate(**changes):
     for path, value in changes.items():
         target = item
         parts = path.split(".")
-        for part in parts[:-1]: target = target[part]
+        for part in parts[:-1]:
+            target = target[part]
         target[parts[-1]] = value
     return item
 

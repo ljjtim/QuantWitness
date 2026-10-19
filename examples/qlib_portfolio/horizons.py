@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from prepare import prepare, candidate, gru_candidate, SEED
+from prepare import prepare, candidate, gru_candidate, SEED, normalize_research_series
 import synthetic
 
 GROUP_FILE = "horizon-group.json"
@@ -48,6 +48,8 @@ def _require_member_declaration(member, plan):
         **{key: source[key] for key in ("calendar_id", "calendar_source", "snapshot_scope", "entities")}}
     if any(design.get(key) != value for key, value in expected.items()):
         raise ValueError("成员研究声明与冻结组计划不一致: h" + str(member["horizon_sessions"]))
+    if design.get("research_series") != plan.get("research_series"):
+        raise ValueError("成员研究系列与冻结组计划不一致")
     if design.get("sequence", {}).get("step_len") != plan["sequence_step_len"]:
         raise ValueError("成员序列窗口与冻结组计划不一致")
     candidates = [json.loads(value) for value in request["model_parameters"]["candidate_jsons"]]
@@ -56,7 +58,7 @@ def _require_member_declaration(member, plan):
 
 
 def prepare_horizons(root, horizons, mode="model", input_config=None, sequence_step_len=None,
-        model_candidates=None, window_config=None):
+        model_candidates=None, window_config=None, research_series=None):
     """先冻结所有成员，组索引只保存声明及正式工件引用。"""
     root = Path(root).resolve()
     horizons = list(horizons)
@@ -66,6 +68,9 @@ def prepare_horizons(root, horizons, mode="model", input_config=None, sequence_s
         raise ValueError("多期限组的期限不能重复")
     if mode not in {"development", "model"}:
         raise ValueError("多期限组支持development和model模式")
+    if mode != "development":
+        raise ValueError("多期限final共享重叠holdout，不能分别确认；请用development比较，再以单期限model确认")
+    research_series = normalize_research_series(research_series)
     if root.exists() and any(root.iterdir()):
         raise ValueError("多期限组必须使用未用目录")
     windows = deepcopy(WINDOW_DEFAULTS)
@@ -95,13 +100,14 @@ def prepare_horizons(root, horizons, mode="model", input_config=None, sequence_s
     plan = {"horizons": horizons, "mode": mode, "input_source": source,
         "input_config": str(frozen_input) if frozen_input is not None else None,
         "calendar_sessions": days, "holdout_start": days[-23] + "T00:00:00+08:00",
-        "sequence_step_len": sequence_step_len, "model_candidates": candidates, "window_config": windows}
+        "sequence_step_len": sequence_step_len, "model_candidates": candidates, "window_config": windows,
+        "research_series": research_series}
     members = []
     for horizon in horizons:
         child = root / ("h" + str(horizon))
         bundle = prepare(child, mode=mode, input_config=plan["input_config"],
             sequence_step_len=sequence_step_len, model_candidates=deepcopy(candidates),
-            horizon_sessions=horizon, window_config=deepcopy(windows))
+            horizon_sessions=horizon, window_config=deepcopy(windows), research_series=research_series)
         member = {"horizon_sessions": horizon, "root": str(child), "package": bundle["package"],
             "bundle_paths": str(child / "bundle-paths.json"), "result_directory": None,
             "verification_result": None, "report": None}

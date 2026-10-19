@@ -24,7 +24,7 @@
   → 下一轮候选，或按预算停止
 ```
 
-公式复现只根据实现正确性修复，不能为提高收益偷偷修改原定义。探索研究可以提出新候选，但最终 test/holdout 不进入开发反馈。
+公式复现只根据实现正确性修复，不能为提高收益偷偷修改原定义。探索研究可以提出新候选，但最终 test/holdout 不进入开发反馈。 独立验证仅因公式实现不符而不通过时，保留正式否定结论与诊断供候选修复；其他验证失败及进程中断仍按原 execution 处理。
 
 ## 运行前要准备什么
 
@@ -287,3 +287,14 @@ python -m quantwitness_rdagent spec-render --draft I:/research/paper-spec/draft.
 ## 因子与模型联合研究
 
 `joint-run/joint-resume/joint-inspect`统一方向选择、调用预算和研究反思。模型消费已验证因子中开发指标最好的表达式，并在正式设计及Result中保存特征绑定；两分支共用冻结输入、开发范围和指标。外部真实归档与已确认材料沿用各自请求接口。三轮合成准备例及恢复方法见[联合研究指南](docs/joint-research.md)。
+
+
+## 只读查看与恢复诊断
+
+`inspect`、`campaign-inspect`、`factor-inspect`、`model-inspect`、`joint-inspect` 只读取冻结请求、已有轮次和执行收据，不创建会话、不读取模型凭据，也不加载 RD-Agent、Qlib 或 Torch。查看不重新执行研究准入；恢复仍由原命令复验冻结材料和正式执行合同。
+
+返回状态包括：`not_started`（尚无冻结会话）、`incomplete`（会话已建立）、`interrupted`（存在未记录完的轮次或待接续执行）、`running`（现有执行锁的原进程仍存活）、`request_mismatch`（当前请求与冻结声明不同）。已有 `outcome.json` 保留原完成状态。`interrupted` 表示已有阶段需要接续，不能单凭该状态认定后台进程已退出；存在活跃执行锁时按 `next_action=wait` 等待。
+
+请求不一致时展示 `changed_fields`，`next_action=use_frozen_request_or_new_session` 提示使用原请求恢复或另建会话，不展示旧 outcome 为本次结果。失败诊断仅用于恢复定位，不能作为循环金融反馈。已完成的评价沿用原收据，预算、开发范围和 test/holdout 边界不变。
+
+未取得确定结果的模型调用预约显示在 `unresolved_model_calls`；`next_action=review_model_calls` 要求核对原调用收据，不自动重复调用或释放已预约预算。

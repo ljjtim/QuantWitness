@@ -55,8 +55,9 @@ def build_search_manifest(
         raise ValidationError("搜索清单必须在读取 test/holdout 前冻结")
     if frozen_at.tzinfo is None or frozen_at.utcoffset() is None:
         raise ValidationError("frozen_at 必须包含时区")
-    if isinstance(max_trials, bool) or max_trials < 1 or isinstance(max_parallel, bool) or max_parallel != 1:
-        raise ValidationError("搜索预算要求 max_trials>=1 且 max_parallel=1")
+    if (type(max_trials) is not int or max_trials < 1
+            or type(max_parallel) is not int or not 1 <= max_parallel <= max_trials):
+        raise ValidationError("搜索预算要求整数 max_trials>=1 且 1<=max_parallel<=max_trials")
     if not isinstance(candidates, (list, tuple)) or not candidates:
         raise ValidationError("候选参数空间不能为空")
     normalized: list[SearchCandidate] = []

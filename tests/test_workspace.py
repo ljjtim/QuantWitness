@@ -125,7 +125,7 @@ def test_workspace_run_maps_paths_without_opening_database(tmp_path) -> None:
     execution_root = root / ".research" / "executions" / allocation["execution_id"]
     assert captured["run_root"] == str(execution_root / "run")
     assert captured["result_store"] == str(execution_root / "results")
-    assert captured["handoff_out"] == str(execution_root / "handoff.json")
+    assert "handoff_out" not in captured
     assert "draft_out" not in captured
     assert not (execution_root / "handoff.json").exists()
     assert result["result_id"] == "c" * 64
@@ -510,7 +510,7 @@ def test_workspace_cli_validate_fails_for_tracked_generated_file(tmp_path, capsy
 def test_workspace_cli_forwards_reuse_options_to_run_service(
     tmp_path, capsys, monkeypatch, options, expected,
 ) -> None:
-    from research_pipeline.cli.commands import research_run
+    from research_pipeline.application import research_run
 
     root = tmp_path / "workspace"
     initialize_workspace(root)
@@ -553,7 +553,7 @@ def test_workspace_cli_forwards_reuse_options_to_run_service(
 def test_workspace_cli_reuses_run_rejection_before_engine_start(
     tmp_path, capsys, monkeypatch, options, message,
 ) -> None:
-    from research_pipeline.cli.commands import research_run
+    from research_pipeline.application import research_run
 
     root = tmp_path / "workspace"
     initialize_workspace(root)
@@ -583,7 +583,7 @@ def test_workspace_cli_recovery_preserves_result_and_completion(
 ) -> None:
     from pathlib import Path
 
-    from research_pipeline.cli.commands import research_run
+    from research_pipeline.application import research_run
 
     root = tmp_path / "workspace"
     initialize_workspace(root)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -19,29 +18,219 @@ from .gates import QualityGateSession, gate_policy_hash, validate_publish_manife
 from .path_policy import PathRolePolicy
 from .query_ir import InstantRangeV2, canonical_minute_instant
 from .snapshot_identity import LogicalSnapshot
+from .snapshot_layout import PhysicalSnapshotPolicy
 from .verification_lifecycle import current_artifact_verification
 
 
 PHYSICAL_SNAPSHOT_VERSION = "physical-snapshot-v1"
 _PATH_POLICY = PathRolePolicy()
+_MAX_PENDING_BATCHES = 64
 
 
-@dataclass(frozen=True)
-class PhysicalSnapshotPolicy:
-    policy_id: str = "daily-year-month-v1"
-    compression: str = "zstd"
-    row_group_size: int = 65_536
-    partitioning: str = "event-year-month"
-    writer_version: str = "pyarrow-parquet-v1"
+class _SnapshotLayoutWriter:
+    """缓冲仅持有已复制的有界 Arrow 数据，同时只打开一个文件。"""
 
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "policy_id": self.policy_id,
-            "compression": self.compression,
-            "row_group_size": self.row_group_size,
-            "partitioning": self.partitioning,
-            "writer_version": self.writer_version,
-        }
+    def __init__(self, staging: Path, schema: Any, policy: PhysicalSnapshotPolicy,
+                 event_time_field: str, temporal_source: bool) -> None:
+        self.staging = staging
+        self.schema = schema
+        self.policy = policy
+        self.event_time_field = event_time_field
+        self.temporal_source = temporal_source
+        self.small = True
+        self.pending: list[Any] = []
+        self.buffer_rows = 0
+        self.buffer_bytes = 0
+        self.peak_buffer_rows = 0
+        self.peak_buffer_bytes = 0
+        self.peak_buffer_batches = 0
+        self.writer: Any = None
+        self.partition: str | None = None
+        self.counts: dict[str, int] = {}
+        self.file_rows = 0
+        self.file_bytes = 0
+
+    def _piece_rows(self, batch: Any, rows: int, byte_limit: int) -> int:
+        if batch.slice(0, rows).nbytes <= byte_limit:
+            return rows
+        low, high = 0, rows
+        while low < high:
+            middle = (low + high + 1) // 2
+            if batch.slice(0, middle).nbytes <= byte_limit:
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    def _append(self, batch: Any, count: int) -> None:
+        import pyarrow as pa
+
+        piece = batch.slice(0, count)
+        # slice 会保留输入整块缓冲；复制后才可把当前输入与待写工作集分开计量。
+        piece = pa.RecordBatch.from_arrays(
+            [pa.concat_arrays([column]) for column in piece.columns], schema=self.schema
+        )
+        self.pending.append(piece)
+        self.peak_buffer_batches = max(self.peak_buffer_batches, len(self.pending))
+        if len(self.pending) >= _MAX_PENDING_BATCHES:
+            # 极小输入批次也限制元数据对象数；合并仍在同一行数/字节包络内。
+            self.pending = pa.Table.from_batches(self.pending, schema=self.schema).combine_chunks().to_batches()
+        self.buffer_rows += count
+        self.buffer_bytes += int(piece.nbytes)
+        self.peak_buffer_rows = max(self.peak_buffer_rows, self.buffer_rows)
+        self.peak_buffer_bytes = max(self.peak_buffer_bytes, self.buffer_bytes)
+
+    def _take_buffer(self) -> Any:
+        import pyarrow as pa
+
+        table = pa.Table.from_batches(self.pending, schema=self.schema).combine_chunks()
+        self.pending.clear()
+        self.buffer_rows = 0
+        self.buffer_bytes = 0
+        return table
+
+    def _open(self, partition: str) -> None:
+        import pyarrow.parquet as pq
+
+        if self.writer is not None and self.partition == partition:
+            return
+        self.close_file()
+        directory = self.staging / partition
+        directory.mkdir(parents=True, exist_ok=True)
+        index = self.counts.get(partition, 0)
+        self.counts[partition] = index + 1
+        self.writer = pq.ParquetWriter(
+            directory / f"part-{index:012d}.parquet", self.schema,
+            compression=self.policy.compression,
+        )
+        self.partition = partition
+        self.file_rows = 0
+        self.file_bytes = 0
+
+    def _flush(self) -> None:
+        if not self.pending:
+            return
+        table = self._take_buffer()
+        if self.small and not self.temporal_source:
+            import pyarrow as pa
+
+            # 与原月份目录扫描一致：仅按月份聚合，月内维持来源顺序。
+            groups: dict[tuple[int, int], list[int]] = {}
+            for index, value in enumerate(table.column(self.event_time_field).to_pylist()):
+                groups.setdefault((value.year, value.month), []).append(index)
+            if len(groups) > 1:
+                indices = [index for key in sorted(groups) for index in groups[key]]
+                table = table.take(pa.array(indices, type=pa.int64()))
+        self.writer.write_table(table, row_group_size=self.policy.row_group_size)
+        self.file_rows += table.num_rows
+        self.file_bytes += int(table.nbytes)
+
+    def close_file(self) -> None:
+        if self.writer is not None:
+            try:
+                self._flush()
+            finally:
+                self.writer.close()
+                self.writer = None
+
+    def _feed_partition(self, batch: Any, partition: str) -> None:
+        self._open(partition)
+        while batch.num_rows:
+            row_room = min(
+                self.policy.row_group_size - self.buffer_rows,
+                self.policy.target_file_rows - self.file_rows - self.buffer_rows,
+            )
+            byte_room = min(
+                self.policy.max_buffer_bytes - self.buffer_bytes,
+                self.policy.target_file_bytes - self.file_bytes - self.buffer_bytes,
+            )
+            count = self._piece_rows(batch, min(batch.num_rows, row_room), byte_room)
+            if count == 0:
+                if self.pending:
+                    self._flush()
+                    continue
+                if self.file_rows:
+                    self.close_file()
+                    self._open(partition)
+                    continue
+                raise SnapshotIntegrityError("单行 Arrow 数据超过布局缓冲字节上限")
+            self._append(batch, count)
+            batch = batch.slice(count)
+            if (self.file_rows + self.buffer_rows >= self.policy.target_file_rows
+                    or self.file_bytes + self.buffer_bytes >= self.policy.target_file_bytes):
+                self.close_file()
+                if batch.num_rows:
+                    self._open(partition)
+            elif (self.buffer_rows >= self.policy.row_group_size
+                  or self.buffer_bytes >= self.policy.max_buffer_bytes):
+                self._flush()
+
+    def _write_month_block(self, table: Any) -> None:
+        import pyarrow as pa
+
+        groups: dict[tuple[int, int], list[int]] = {}
+        for index, value in enumerate(table.column(self.event_time_field).to_pylist()):
+            groups.setdefault((value.year, value.month), []).append(index)
+        for key in sorted(groups):
+            # 块内按月份聚合，月内下标保持来源顺序；不随证券切换开新文件。
+            month = table if len(groups) == 1 else table.take(
+                pa.array(groups[key], type=pa.int64())
+            )
+            for batch in month.to_batches():
+                self._feed_partition(batch, f"year={key[0]:04d}/month={key[1]:02d}")
+            # 月份副本不跨块积压，使块、月份副本和 writer 输入最多三份共存。
+            self._flush()
+
+    def _drain_month_block(self) -> None:
+        if self.pending:
+            self._write_month_block(self._take_buffer())
+
+    def _feed_large(self, batch: Any) -> None:
+        if self.temporal_source:
+            self._feed_partition(batch, "primary-key-stream")
+            return
+        while batch.num_rows:
+            count = self._piece_rows(
+                batch, min(batch.num_rows, self.policy.row_group_size - self.buffer_rows),
+                self.policy.max_buffer_bytes - self.buffer_bytes,
+            )
+            if count == 0:
+                if self.pending:
+                    self._drain_month_block()
+                    continue
+                raise SnapshotIntegrityError("单行 Arrow 数据超过布局缓冲字节上限")
+            self._append(batch, count)
+            batch = batch.slice(count)
+            if (self.buffer_rows >= self.policy.row_group_size
+                    or self.buffer_bytes >= self.policy.max_buffer_bytes):
+                self._drain_month_block()
+
+    def feed(self, batch: Any) -> None:
+        while self.small and batch.num_rows:
+            count = self._piece_rows(
+                batch, min(batch.num_rows, self.policy.small_table_max_rows - self.buffer_rows),
+                self.policy.max_buffer_bytes - self.buffer_bytes,
+            )
+            if count:
+                self._append(batch, count)
+                batch = batch.slice(count)
+            if batch.num_rows:
+                self.small = False
+                if self.temporal_source:
+                    table = self._take_buffer()
+                    for piece in table.to_batches():
+                        self._feed_large(piece)
+                else:
+                    self._drain_month_block()
+        if batch.num_rows:
+            self._feed_large(batch)
+
+    def finish(self) -> None:
+        if self.small and self.pending:
+            self._open("primary-key-stream" if self.temporal_source else "small")
+        elif not self.temporal_source:
+            self._drain_month_block()
+        self.close_file()
 
 
 def _sha256(path: Path) -> str:
@@ -67,32 +256,29 @@ def publish_parquet_snapshot(
     before_commit: Callable[[], None] | None = None,
     temporal_source: bool = False,
 ) -> Path:
-    import pyarrow as pa
     import pyarrow.parquet as pq
 
-    policy = policy or PhysicalSnapshotPolicy()
-    if temporal_source:
-        policy = PhysicalSnapshotPolicy(
-            policy_id="temporal-primary-key-stream-v1",
-            compression=policy.compression,
-            row_group_size=policy.row_group_size,
-            partitioning="primary-key-stream",
-            writer_version=policy.writer_version,
-        )
+    frozen_policy = plan.snapshot_layout
+    if frozen_policy is None:
+        raise SnapshotIntegrityError("旧计划未冻结布局策略，重新准入后才能物化快照")
+    policy = policy or frozen_policy
+    if policy != frozen_policy:
+        raise SnapshotIntegrityError("物理布局与准入计划冻结策略不一致")
+    if logical_snapshot.admitted_plan_hash != plan.plan_hash:
+        raise SnapshotIntegrityError("逻辑快照与准入计划身份不一致")
+    if temporal_source != plan.temporal_selection.requires_consumer_binding:
+        raise SnapshotIntegrityError("逐决策时态来源模式与 admitted plan 不一致")
     _PATH_POLICY.validate({"snapshot_output_root": root})
     root_path = Path(root).resolve(strict=False)
     root_path.mkdir(parents=True, exist_ok=True)
     root_path = _PATH_POLICY.resolve_root(root_path, role="snapshot_output_root")
     staging = root_path / f".staging-{uuid.uuid4().hex}"
     staging.mkdir()
-    partition_file_counts: dict[tuple[int, int], int] = {}
-    temporal_part_index = 0
     rows = 0
     minimum: str | None = None
     maximum: str | None = None
-    if temporal_source != plan.temporal_selection.requires_consumer_binding:
-        raise SnapshotIntegrityError("逐决策时态来源模式与 admitted plan 不一致")
     gate = QualityGateSession(plan, temporal_source=temporal_source)
+    layout = _SnapshotLayoutWriter(staging, schema, policy, plan.event_time_field, temporal_source)
     try:
         for batch in batches:
             gate.validate_batch(batch)
@@ -117,43 +303,8 @@ def publish_parquet_snapshot(
                 maximum_value = batch_maximum.isoformat()
             minimum = min(filter(None, (minimum, minimum_value)))
             maximum = max(filter(None, (maximum, maximum_value)))
-            if temporal_source:
-                # 时态消费者依赖已验证的主键顺序做单遍选择；按事件月重排会
-                # 打散跨月实体顺序。连续编号仍允许 Parquet 统计量裁剪文件。
-                directory = staging / "primary-key-stream"
-                directory.mkdir(parents=True, exist_ok=True)
-                file_path = directory / f"part-{temporal_part_index:012d}.parquet"
-                temporal_part_index += 1
-                with pq.ParquetWriter(
-                    file_path,
-                    schema,
-                    compression=policy.compression,
-                ) as writer:
-                    writer.write_batch(
-                        batch,
-                        row_group_size=policy.row_group_size,
-                    )
-                continue
-            groups: dict[tuple[int, int], list[int]] = {}
-            for index, value in enumerate(dates):
-                groups.setdefault((value.year, value.month), []).append(index)
-            for key, indices in sorted(groups.items()):
-                year, month = key
-                directory = staging / f"year={year:04d}" / f"month={month:02d}"
-                directory.mkdir(parents=True, exist_ok=True)
-                part_index = partition_file_counts.get(key, 0)
-                file_path = directory / f"part-{part_index:05d}.parquet"
-                partition_file_counts[key] = part_index + 1
-                # 单次只保留一个 writer；不让跨年/月 writer 数随总分区数增长。
-                with pq.ParquetWriter(
-                    file_path,
-                    schema,
-                    compression=policy.compression,
-                ) as writer:
-                    writer.write_batch(
-                        batch.take(pa.array(indices)),
-                        row_group_size=policy.row_group_size,
-                    )
+            layout.feed(batch)
+        layout.finish()
         if rows == 0:
             if plan.result_cardinality != "zero_or_more":
                 raise SnapshotIntegrityError("当前 dataset 合同不允许发布空 Parquet 快照")
@@ -240,6 +391,9 @@ def publish_parquet_snapshot(
             session.remember("parquet_snapshot", str(target), manifest)
         return target
     except BaseException:
+        if layout.writer is not None:
+            layout.writer.close()
+            layout.writer = None
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -256,6 +410,7 @@ def verify_parquet_snapshot(path: str | Path) -> dict[str, Any]:
         "parquet_snapshot",
         str(snapshot),
         lambda: _verify_parquet_snapshot_uncached(snapshot),
+        descriptor={"path": snapshot},
     )
 
 
@@ -300,12 +455,10 @@ def _verify_parquet_snapshot_uncached(path: str | Path) -> dict[str, Any]:
         root_role="parquet_snapshot_root",
         file_role="parquet_partition",
     )
-    _PATH_POLICY.resolve_manifest_files(
-        allowed_root=snapshot,
-        relative_paths=tuple(declared),
-        root_role="parquet_snapshot_root",
-        file_role="parquet_partition",
-    )
+    if not declared:
+        raise SnapshotIntegrityError("Parquet manifest 文件声明不能为空")
+    for relative in declared:
+        _PATH_POLICY._safe_relative_path(relative, "parquet_partition")
     if set(declared) != set(actual):
         raise SnapshotIntegrityError("Parquet 文件集合与 manifest 不一致")
     for relative, item in declared.items():

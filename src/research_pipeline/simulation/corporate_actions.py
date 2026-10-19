@@ -538,6 +538,8 @@ def _compile_v2_corporate_action(
         values["cancel_position_entitlements"] = True
         values["trading_termination_date"] = action.trading_termination_date.isoformat()
         values["settlement_available_time"] = action.settlement_available_time.isoformat()
+        if action.recovery_assumption is not None:
+            values["recovery_assumption"] = action.recovery_assumption
         cash_amount = _cash_entitlement_units(action, held_quantity)
     elif action.kind == "stock_dividend":
         entitlement_quantity = (

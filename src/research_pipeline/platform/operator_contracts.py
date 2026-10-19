@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 import re
 from types import MappingProxyType
-from typing import Mapping
 
 from .canonical import typed_canonical_hash
 from .errors import MainlineError

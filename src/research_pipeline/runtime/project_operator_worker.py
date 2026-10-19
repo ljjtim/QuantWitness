@@ -213,11 +213,23 @@ def _load_project_entry_module(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--attempt-root", required=True)
-    parser.add_argument("--task", required=True)
-    parser.add_argument("--result", required=True)
+    parser.add_argument("--attempt-root")
+    parser.add_argument("--task")
+    parser.add_argument("--result")
+    parser.add_argument("--session-root")
     args = parser.parse_args(argv)
     windows_job_bound = _bind_windows_descendants_to_worker_lifetime()
+    if args.session_root:
+        if sys.platform == "win32" and not windows_job_bound:
+            raise ValueError("project_worker_job_binding_failed")
+        from .causal_worker_session import run_session
+        return run_session(args.session_root, _execute_task)
+    if not all((args.attempt_root, args.task, args.result)):
+        parser.error("单批执行必须提供attempt-root、task和result")
+    return _execute_task(args, windows_job_bound=windows_job_bound)
+
+
+def _execute_task(args, *, session=None, windows_job_bound=True):
     attempt_root = Path(args.attempt_root).resolve(strict=True)
     task_path = Path(args.task).resolve(strict=True)
     result_path = Path(args.result).resolve()
@@ -232,21 +244,27 @@ def main(argv: list[str] | None = None) -> int:
         identity, manifest, context, inputs, output_contracts = _validate_task(
             task,
             attempt_root=attempt_root,
+            session=session,
         )
-        _validate_installed_dependencies(manifest.dependency_lock)
+        if session is None or not session.get("dependencies_verified"):
+            _validate_installed_dependencies(manifest.dependency_lock)
+            if session is not None:
+                session["dependencies_verified"] = True
         output_root = ProjectOutputRoot(attempt_root / "outputs")
         output_root.mkdir()
         if "causal_context" in task:
             from .project_causal_worker import run_causal_entry
         sys.dont_write_bytecode = True
-        source_root = attempt_root / str(task["bundle_relative_path"]) / "sources"
-        sys.path.insert(0, str(source_root))
-        synthetic_root = f"_research_project_{identity['identity_hash'][:16]}"
-        module = _load_project_entry_module(
-            source_root=source_root,
-            entry_module=manifest.entry_module,
-            synthetic_root=synthetic_root,
-        )
+        source_root = (session["root"] if session is not None else attempt_root) / str(task["bundle_relative_path"]) / "sources"
+        module = session.get("module") if session is not None else None
+        if module is None:
+            sys.path.insert(0, str(source_root))
+            synthetic_root = f"_research_project_{identity['identity_hash'][:16]}"
+            module = _load_project_entry_module(
+                source_root=source_root, entry_module=manifest.entry_module, synthetic_root=synthetic_root,
+            )
+            if session is not None:
+                session["module"] = module
         entry = getattr(module, manifest.entry_function, None)
         if not callable(entry):
             raise ValueError("project_entry_missing")
@@ -259,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
             if "causal_plan" in context.parameters:
                 raise ValueError("project_causal_context_missing")
             raw_commits = entry(context, inputs, output_root)
+        if session is not None:
+            import psutil
+            if any(child.is_running() for child in psutil.Process().children(recursive=True)):
+                raise ValueError("project_worker_session_descendants_remaining")
         for item in inputs:
             if "causal_context" not in task and isinstance(
                 item,
@@ -299,7 +321,9 @@ def main(argv: list[str] | None = None) -> int:
         if request_traces:
             payload["request_traces"] = request_traces
         if causal_facts is not None:
-            payload["causal_facts"] = causal_facts
+            from .causal_facts_codec import write_causal_facts
+
+            payload["causal_facts"] = write_causal_facts(causal_facts, attempt_root)
         result_handle.write(canonical_json(payload))
         result_handle.flush()
         os.fsync(result_handle.fileno())
@@ -351,6 +375,7 @@ def _validate_task(
     task: object,
     *,
     attempt_root: Path,
+    session=None,
 ) -> tuple[
     Mapping[str, object],
     object,
@@ -382,7 +407,21 @@ def _validate_task(
         raise ValueError("project_runtime_identity_hash_invalid")
     if task["bundle_relative_path"] != identity["bundle_hash"]:
         raise ValueError("project_bundle_location_invalid")
-    manifest = verify_project_operator_bundle(attempt_root / str(task["bundle_relative_path"]))
+    if session is not None:
+        import copy
+        from .causal_worker_session import session_binding
+        binding = session_binding(task)
+        if "binding" in session and binding != session["binding"]:
+            raise ValueError("project_worker_session_binding_changed")
+        if "binding" not in session:
+            session["binding"] = copy.deepcopy(binding)
+    manifest = session.get("manifest") if session is not None else None
+    first_task = manifest is None
+    if first_task:
+        bundle_root = session["root"] if session is not None else attempt_root
+        manifest = verify_project_operator_bundle(bundle_root / str(task["bundle_relative_path"]))
+        if session is not None:
+            session["manifest"] = manifest
     checks = {
         "project_id": manifest.project_id,
         "bundle_hash": manifest.bundle_hash,
@@ -394,10 +433,11 @@ def _validate_task(
     }
     if any(identity[key] != value for key, value in checks.items()):
         raise ValueError("project_bundle_runtime_identity_mismatch")
-    if identity["adapter_hash"] != project_worker_adapter_hash():
-        raise ValueError("project_worker_adapter_drift")
-    if identity["runtime_environment_hash"] != environment_fingerprint():
-        raise ValueError("project_worker_environment_drift")
+    if first_task:
+        if identity["adapter_hash"] != project_worker_adapter_hash():
+            raise ValueError("project_worker_adapter_drift")
+        if identity["runtime_environment_hash"] != environment_fingerprint():
+            raise ValueError("project_worker_environment_drift")
     if not isinstance(task["context"], Mapping):
         raise ValueError("project_context_invalid")
     context = ProjectOperatorContext.from_dict(task["context"])

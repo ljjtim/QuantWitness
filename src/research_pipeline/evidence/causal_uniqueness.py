@@ -51,6 +51,7 @@ def verify_causal_key_uniqueness(
                 },
             ) as connection,
         ):
+            connection.execute("SET enable_progress_bar = false")
             # DuckDB 初始化 temp_directory 后再设置配额，否则目录初始化会重置上限。
             connection.execute(f"SET max_temp_directory_size = '{budget.temp_bytes}B'")
             if parquet_paths:

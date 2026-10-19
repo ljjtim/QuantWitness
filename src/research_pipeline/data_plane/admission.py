@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from types import MappingProxyType
 from typing import Any
@@ -24,6 +24,8 @@ from research_pipeline.domain.session_close import (
     load_futures_session_close_bundle,
     require_current_futures_session_close_binding,
 )
+
+from .snapshot_layout import PhysicalSnapshotPolicy
 
 from .errors import (
     QueryAttestationStaleError,
@@ -92,6 +94,7 @@ class AdmittedQueryPlan:
     result_cardinality: str = "one_or_more"
     factor_publication: FactorPublicationBinding | None = None
     plan_version: str = ADMITTED_PLAN_VERSION
+    snapshot_layout: PhysicalSnapshotPolicy | None = field(default_factory=PhysicalSnapshotPolicy)
 
     def __post_init__(self) -> None:
         if self.plan_version != ADMITTED_PLAN_VERSION:
@@ -181,6 +184,8 @@ class AdmittedQueryPlan:
             "temporal_selection": self.temporal_selection.to_dict(),
             "input_claim_ceiling": self.input_claim_ceiling,
         }
+        if self.snapshot_layout is not None:
+            payload["snapshot_layout"] = self.snapshot_layout.to_dict()
         if self.result_cardinality != "one_or_more":
             payload["result_cardinality"] = self.result_cardinality
         if self.factor_publication is not None:

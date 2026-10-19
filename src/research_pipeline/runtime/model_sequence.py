@@ -10,7 +10,7 @@ from research_pipeline.research.modeling.inputs import ModelMainlineError
 from research_pipeline.research.modeling.sequence import SequenceWindows, build_sequence_windows
 
 
-SEQUENCE_ARTIFACT_SCHEMA = "research.model-sequence-context.v1"
+SEQUENCE_ARTIFACT_SCHEMA = "research.model-sequence-context.v2"
 WINDOW_TABLES = ("context", "targets", "members", "exclusions")
 
 
@@ -23,7 +23,7 @@ def sequence_step(parameters):
 
 def build_runtime_windows(features, targets, *, calendar, columns, step_len, budget):
     # 成员行、宽表与构建期间的索引副本都计入同一节点预算。
-    budget.require_additional(6 * pandas_frame_bytes(features) + len(targets) * step_len * 1024,
+    budget.require_additional(3 * pandas_frame_bytes(features) + len(targets) * step_len * 160,
                               label="序列窗口构建工作集")
     windows = build_sequence_windows(features, targets, calendar_sessions=calendar,
                                      feature_columns=columns, step_len=step_len)
@@ -49,7 +49,7 @@ def load_runtime_windows(root, metadata, budget, loader):
     spec = metadata.get("sequence")
     if spec is None:
         return None
-    if (spec.get("schema") != SEQUENCE_ARTIFACT_SCHEMA or spec.get("missing_policy") != "complete_window"
+    if (spec.get("schema") not in {SEQUENCE_ARTIFACT_SCHEMA, "research.model-sequence-context.v1"} or spec.get("missing_policy") != "complete_window"
             or spec.get("candidate_sample_policy") != "shared_complete_endpoints"
             or spec.get("feature_columns") != metadata.get("feature_columns")):
         raise ModelMainlineError("模型序列工件合同不受支持或特征顺序不一致")
@@ -57,6 +57,10 @@ def load_runtime_windows(root, metadata, budget, loader):
     if step is None:
         raise ModelMainlineError("模型序列工件缺少窗口长度")
     frames = {name: loader(root, "sequence_" + name, frame_budget=budget)[0] for name in WINDOW_TABLES}
+    compact = spec["schema"] == SEQUENCE_ARTIFACT_SCHEMA
+    if (compact != (set(frames["members"].columns) == {"sample_id", "step", "context_index"})
+            or compact != ("context_index" in frames["context"])):
+        raise ModelMainlineError("序列成员结构与冻结版本不一致")
     return SequenceWindows(**frames, feature_columns=tuple(spec["feature_columns"]),
         calendar_sessions=tuple(pd.Timestamp(day).date() for day in spec["calendar_sessions"]), step_len=step)
 

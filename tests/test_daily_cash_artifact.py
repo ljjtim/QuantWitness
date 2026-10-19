@@ -33,7 +33,8 @@ def _case(root):
         market.append({'date': date(2024,1,day), 'code': code, 'open': 10., 'close': 10.,
             'high_limit':11., 'low_limit':9., 'paused':False})
     for prefix, rows in [('targets',targets),('benchmarks',benchmarks),('market',market)]:
-        folder=root/prefix;folder.mkdir(parents=True)
+        folder=root/prefix
+        folder.mkdir(parents=True)
         pq.write_table(pa.Table.from_pylist(rows),folder/'data.parquet')
     return {'market_rule_profile_id':'cn_etf.daily.curated.v1','instrument_codes':[code],
         'bond_etf_codes':[],'equity_etf_codes':[code],'commission_ppm':300,'min_commission_units':5,
@@ -47,7 +48,8 @@ def _run(root, params):
 
 
 def test_cash_artifact_costs_and_independent_oracle(tmp_path,monkeypatch):
-    import duckdb, sqlite3
+    import duckdb
+    import sqlite3
     def reject(*args,**kwargs):
         pytest.fail('日频接线测试不访问数据库')
     monkeypatch.setattr(duckdb,'connect',reject)
@@ -82,7 +84,8 @@ def test_future_benchmark_is_rejected(tmp_path):
 def test_target_reference_mismatch_is_rejected(tmp_path):
     params=_case(tmp_path)
     path=tmp_path/'targets/data.parquet'
-    rows=pq.read_table(path).to_pylist();rows[0]['target_hash']='f'*64
+    rows=pq.read_table(path).to_pylist()
+    rows[0]['target_hash']='f'*64
     pq.write_table(pa.Table.from_pylist(rows),path)
     with pytest.raises(ValueError,match='身份'):
         _run(tmp_path,params)

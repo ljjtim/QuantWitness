@@ -7,26 +7,12 @@ ResearchPackage 与扩展维护。当前没有满足异构复用和人工批准�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Mapping
 
 from research_pipeline.platform import typed_canonical_hash
 
 
 BUILTIN_WORKFLOW_PROFILE_IDENTITIES: frozenset[str] = frozenset()
-
-
-class RecipeScaffoldError(ValueError):
-    """公共 Recipe 不存在或不能用于 scaffold。"""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        missing_requirements: tuple[str, ...] = (),
-    ) -> None:
-        super().__init__(message)
-        self.missing_requirements = missing_requirements
 
 
 @dataclass(frozen=True)
@@ -49,23 +35,6 @@ def build_reference_transform_recipes() -> tuple[ReferenceTransformRecipe, ...]:
     return ()
 
 
-def scaffold_research_package(
-    recipe: ReferenceTransformRecipe,
-    *,
-    answers: Mapping[str, object],
-    output: str | Path,
-    admission: object,
-    dataset_versions: Mapping[str, int],
-) -> dict[str, object]:
-    """拒绝未注册的完整研究拓扑进入公共 scaffold。"""
-
-    del recipe, answers, output, admission, dataset_versions
-    raise RecipeScaffoldError(
-        "当前没有已批准的公共 recipe；请使用 package init 或项目自有模板",
-        missing_requirements=("approved_public_recipe",),
-    )
-
-
 def recipe_identity(recipe: ReferenceTransformRecipe) -> str:
     """计算正式公共 Recipe 的发现身份。"""
 
@@ -82,9 +51,7 @@ def recipe_identity(recipe: ReferenceTransformRecipe) -> str:
 
 __all__ = [
     "BUILTIN_WORKFLOW_PROFILE_IDENTITIES",
-    "RecipeScaffoldError",
     "ReferenceTransformRecipe",
     "build_reference_transform_recipes",
     "recipe_identity",
-    "scaffold_research_package",
 ]

@@ -8,6 +8,7 @@ from datetime import date, datetime
 import json
 import os
 from pathlib import Path
+import re
 import threading
 from typing import Any
 
@@ -496,10 +497,40 @@ class PersistentHoldoutLedger:
                 raise ValidationError("holdout 已按不同终态 retired") from None
 
 
+def normalize_series_declaration(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != {"series_id", "root", "purpose", "legacy_ledger_roots"}:
+        raise ValidationError("最终评价必须声明完整 research_series：series_id/root/purpose/legacy_ledger_roots")
+    series_id = value["series_id"]
+    if not isinstance(series_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", series_id) is None:
+        raise ValidationError("research_series.series_id 必须是字母数字开头的简短目录标识")
+    purpose = value["purpose"]
+    if not isinstance(purpose, str) or not purpose.strip():
+        raise ValidationError("research_series.purpose 必须明确研究问题")
+    roots = value["legacy_ledger_roots"]
+    if not isinstance(roots, list):
+        raise ValidationError("research_series.legacy_ledger_roots 必须是目录列表")
+    def absolute(raw: object) -> str:
+        if not isinstance(raw, str) or not raw.strip() or not Path(raw).is_absolute():
+            raise ValidationError("研究系列与旧账本必须使用绝对目录")
+        return str(Path(raw).resolve())
+    return {"series_id": series_id, "root": absolute(value["root"]),
+            "purpose": purpose, "legacy_ledger_roots": sorted(set(absolute(root) for root in roots))}
+
+
+def series_purpose_identity(declaration: Mapping[str, object]) -> str:
+    return typed_canonical_hash({"series_id": declaration["series_id"], "purpose": declaration["purpose"]})
+
+
 def _validate_freeze_payload(payload: Mapping[str, object]) -> dict[str, object]:
-    if not isinstance(payload, Mapping) or set(payload) != _FREEZE_PAYLOAD_FIELDS:
+    if not isinstance(payload, Mapping) or set(payload) not in (_FREEZE_PAYLOAD_FIELDS, _FREEZE_PAYLOAD_FIELDS | {"research_series"}):
         raise ValidationError("holdout freeze payload 字段不闭合")
     normalized = _json_mapping(payload, "holdout freeze payload")
+    if "research_series" in normalized:
+        declaration = normalize_series_declaration(normalized["research_series"])
+        if declaration != normalized["research_series"]:
+            raise ValidationError("研究系列声明必须使用规范绝对路径")
+        if normalized["parent_research_purpose"] != series_purpose_identity(declaration):
+            raise ValidationError("holdout 父研究目的与系列身份不一致")
     for field in (
         "parent_research_purpose",
         "data_snapshot",

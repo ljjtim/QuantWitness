@@ -73,7 +73,7 @@ def test_transformer_round_trip_single_sample_and_no_prediction_labels(tmp_path,
     assert single.shape == (1,) and single[0] == prediction[0]
 
     config = json.loads((tmp_path / row["config_path"]).read_text(encoding="utf-8"))
-    assert config["schema"] == "research.qlib-sequence-model-bundle.v1"
+    assert config["schema"] == "research.qlib-sequence-model-bundle.v2"
     assert config["candidate"]["model"]["class"] == "TransformerModel"
     assert config["versions"]["torch"].split("+")[0] == "2.5.1"
     assert config["effective_model_kwargs"]["GPU"] == -1

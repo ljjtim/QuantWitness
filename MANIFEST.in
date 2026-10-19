@@ -42,6 +42,8 @@ include docs/bar_tca.md
 include docs/catalog.md
 include docs/cli.md
 include docs/data_plane.md
+include docs/snapshot-layout.md
+include docs/artifact-lifecycle.md
 include docs/evidence.md
 include docs/framework-contracts.md
 include docs/getting-started.md
@@ -55,6 +57,14 @@ include docs/release.md
 include docs/external-acceptance.md
 include docs/research_package.md
 include docs/runtime.md
+include docs/workspace-continuation.md
+include docs/research-execution-improvements.md
+include docs/holdout-series.md
+include docs/runtime-progress.md
+include docs/verifier-input-projection.md
+include docs/implementation-identity-scope.md
+include docs/minute-resource-budget.md
+include docs/resource-history.md
 include docs/walk_forward_model.md
 include docs/project_resource_budgets.md
 include project_extensions/README.md
@@ -62,6 +72,8 @@ include examples/README.md
 include docs/qlib-model-results.md
 include docs/qlib-report.md
 include release/daily-cash-local-admission.md
+include release/model-resource-review.md
+include release/causal-performance-review.md
 include project_extensions/dai_zhu_er_jiu_metrics.md
 include examples/qlib_portfolio/README.md
 include integrations/rdagent/README.md

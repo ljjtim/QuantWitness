@@ -32,3 +32,12 @@ python -m quantwitness_rdagent model-resume --request /mnt/i/research/model-demo
 ## 范围限制
 
 本入口生成受支持的前馈结构，不加载模型返回的任意 Python 插件。序列网络生成不在该入口范围。联合因子与模型方向使用[联合研究入口](joint-research.md)。固定响应验证接口、执行和恢复；模型服务上的自主提案质量需要单独的 live 验收。合成研究结果只证明流程与算法行为。
+
+
+## 查看中断与请求差异
+
+`model-inspect --request REQUEST.json` 只读查看已有会话，不创建文件、不调用模型或重跑正式评价。`not_started` 表示尚未建立会话，`incomplete` 表示已冻结但尚无终态，`interrupted` 列出未记录完的轮次及已有执行引用、诊断；原执行锁仍存活时返回 `running` 和 `next_action=wait`。已保存 outcome 保留原状态。
+
+`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `model-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入已验证开发指标反馈，test/holdout 不参与研究循环。
+
+未取得确定结果的模型调用预约显示在 `unresolved_model_calls`；`next_action=review_model_calls` 要求核对原调用收据，不自动重复调用或释放已预约预算。

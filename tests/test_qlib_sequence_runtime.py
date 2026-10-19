@@ -13,7 +13,7 @@ from research_pipeline.research.modeling.inputs import ModelMainlineError
 from research_pipeline.research.dataframe_budget import PandasFrameBudget, PandasFrameBudgetError
 from research_pipeline.runtime.model_sequence import build_runtime_windows
 import research_pipeline.runtime.walk_forward_model_execution as runtime
-from test_qlib_model_integration import synthetic_samples, candidate, _parameters, _read
+from test_qlib_model_integration import synthetic_samples, candidate, _parameters, _read, research_series
 from test_qlib_gru_contract import gru_candidate
 
 BUDGET = 256 * 1024**2
@@ -94,8 +94,10 @@ def test_sequence_window_budget_refuses_before_build(monkeypatch):
 @pytest.mark.parametrize("step", [None, 4])
 def test_sequence_candidate_requires_matching_split_before_fit(tmp_path, monkeypatch, step):
     _, _, p = source(tmp_path)
-    if step is None: del p["sequence_step_len"]
-    else: p["sequence_step_len"] = step
+    if step is None:
+        del p["sequence_step_len"]
+    else:
+        p["sequence_step_len"] = step
     split(tmp_path, p)
     monkeypatch.setattr(runtime, "fit_bundle", lambda *a, **k: pytest.fail("声明不匹配不得训练"))
     with pytest.raises(ModelMainlineError, match="sequence_step_len"):
@@ -141,23 +143,24 @@ def test_gru_runtime_six_stages_and_holdout_consumption(tmp_path, monkeypatch, f
     selected = json.loads(_read(selection_root, "selection").iloc[0].selected_parameters_json)
     assert selected["model"]["class"] == final_model
     params.update(package_hash="4"*64, implementation_hash="5"*64, holdout_actor="test",
-        holdout_reason="序列验收", holdout_unlock_at="2024-06-01T00:00:00Z", fixed_clock="2024-06-02T00:00:00Z")
+        research_series_json=canonical_json(research_series(tmp_path)), holdout_reason="序列验收", holdout_unlock_at="2024-06-01T00:00:00Z", fixed_clock="2024-06-02T00:00:00Z")
     original = runtime._load_table
     def track(root, name, **kwargs):
         if name in {"features", "labels"}:
-            assert list((tmp_path/"ledger").glob("*/opened.json"))
+            assert list((tmp_path/"test-model"/"ledgers").glob("*/opened.json"))
         return original(root, name, **kwargs)
     monkeypatch.setattr(runtime, "_load_table", track)
     kwargs = dict(split_root=tmp_path/"split", selection_root=selection_root,
         feature_root=tmp_path/"features", label_root=tmp_path/"labels", parameters=params,
-        output_root=tmp_path/"holdout", ledger_root=tmp_path/"ledger", root_seed=7, max_memory_bytes=BUDGET)
+        output_root=tmp_path/"holdout", ledger_root=tmp_path/"test-model"/"ledgers", root_seed=7, max_memory_bytes=BUDGET)
     result = runtime.execute_model_locked_holdout_artifact(**kwargs)
     assert result["status"] == "model_locked_holdout_succeeded"
     assert set(_read(tmp_path/"holdout", "holdout_predictions").sample_id) == set(_read(tmp_path/"split", "holdout_index").sample_id)
     if final_model == "LinearModel":
         assert len(_read(tmp_path/"holdout", "holdout_predictions")) < 30
     from research_pipeline.research.validation import ValidationError
-    with pytest.raises(ValidationError): runtime.execute_model_locked_holdout_artifact(**kwargs)
+    with pytest.raises(ValidationError, match="已经 prepared/opened|已暴露区间重叠"):
+        runtime.execute_model_locked_holdout_artifact(**kwargs)
 
 
 @pytest.mark.parametrize("scope", ["development", "final"])

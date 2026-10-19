@@ -15,6 +15,7 @@ import psutil
 from research_pipeline.platform import canonical_json
 
 from .errors import RuntimeIntegrityError
+from .progress import ProgressCounter
 from .store import _StoreLock, process_identity_alive
 
 
@@ -72,6 +73,9 @@ class RuntimeLiveness:
             "reserved_resources": dict(reserved_resources or {}),
             "progress": None,
         }
+        self._dag_progress: ProgressCounter | None = None
+        self._work_progress: ProgressCounter | None = None
+        self._progress_stage = phase
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -116,6 +120,7 @@ class RuntimeLiveness:
             if self._payload["phase"] != phase:
                 self._payload["phase"] = phase
                 self._payload["phase_started_at"] = _utc_now()
+            self._progress_stage = phase
             if reserved_resources is not None:
                 self._payload["reserved_resources"] = dict(reserved_resources)
             self._write_locked()
@@ -125,12 +130,39 @@ class RuntimeLiveness:
         requested_resources: Mapping[str, int],
     ) -> None:
         with self._lock:
+            self._work_progress = None
+            self._progress_stage = "node_execution"
             self._payload.update(
                 node_id=node_id, attempt_id=attempt_id,
                 requested_resources=dict(requested_resources), reserved_resources={},
                 phase="waiting_for_resources", phase_started_at=_utc_now(),
             )
             self._write_locked()
+
+    def start_dag_progress(self, total: int) -> None:
+        with self._lock:
+            self._dag_progress = ProgressCounter("nodes", total)
+            self._write_locked()
+
+    def complete_dag_nodes(self, completed: int) -> None:
+        with self._lock:
+            if self._dag_progress is not None:
+                self._dag_progress.advance(completed)
+                self._write_locked()
+
+    def start_work_progress(self, total: int) -> None:
+        with self._lock:
+            self._work_progress = ProgressCounter("causal_batches", total)
+            self._progress_stage = "causal_batches"
+            self._write_locked()
+
+    def complete_work_batch(self, completed: int) -> None:
+        with self._lock:
+            if self._work_progress is not None:
+                self._work_progress.advance(completed)
+                if completed == self._work_progress.total:
+                    self._progress_stage = "causal_assembly"
+                self._write_locked()
 
     def stop(self) -> None:
         if not self._active:
@@ -152,6 +184,15 @@ class RuntimeLiveness:
 
     def _write_locked(self) -> None:
         self._payload["heartbeat_at"] = _utc_now()
+        if self._dag_progress is not None or self._work_progress is not None:
+            dag = self._dag_progress.snapshot() if self._dag_progress else None
+            work = self._work_progress.snapshot(estimate=True) if self._work_progress else None
+            last = [counter["last_progress_at"] for counter in (dag, work)
+                    if counter is not None and counter["last_progress_at"] is not None]
+            self._payload["progress"] = {
+                "stage": self._progress_stage, "dag": dag, "work": work,
+                "last_progress_at": max(last) if last else None,
+            }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(
             f".{self.path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
@@ -184,7 +225,7 @@ def read_runtime_liveness(run_root: str | Path) -> dict[str, object] | None:
         or not isinstance(payload["process_started_at"], (int, float))
         or not isinstance(payload["requested_resources"], Mapping)
         or not isinstance(payload["reserved_resources"], Mapping)
-        or payload["progress"] is not None
+        or (payload["progress"] is not None and not isinstance(payload["progress"], Mapping))
     ):
         raise RuntimeIntegrityError("Runtime 存活投影内容无效")
     return payload

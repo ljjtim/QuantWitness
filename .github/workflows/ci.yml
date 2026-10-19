@@ -113,6 +113,8 @@ jobs:
           fi
           "$RUNNER_TEMP/installed-env/bin/python" -I tools/verify_rdagent_install.py --project . --output "$RUNNER_TEMP/installed-acceptance"
       - name: 回归公开请求与多轮研究边界
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tests
         run: |
           "$RUNNER_TEMP/installed-env/bin/python" -m pip install 'pytest>=8,<10'
           "$RUNNER_TEMP/installed-env/bin/python" -m pytest -o pythonpath= -q --basetemp "$RUNNER_TEMP/rdagent-tests" integrations/rdagent/tests/test_volume_concentration_example.py integrations/rdagent/tests/test_request_builder.py integrations/rdagent/tests/test_formula_spec.py integrations/rdagent/tests/test_source_materials.py integrations/rdagent/tests/test_campaign.py integrations/rdagent/tests/test_campaign_data.py integrations/rdagent/tests/test_package_campaign.py integrations/rdagent/tests/test_package_campaign_execution.py
@@ -157,7 +159,13 @@ jobs:
           import os, pathlib, subprocess, sys
           root = pathlib.Path(os.environ["RUNNER_TEMP"])
           python = root / "ml-installed-env" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
-          subprocess.run([str(python), "examples/qlib_portfolio/run.py", "--mode", "portfolio", "--output", str(root / "qlib-portfolio")], check=True)
+          subprocess.run([
+              str(python), "examples/qlib_portfolio/run.py", "--mode", "portfolio",
+              "--output", str(root / "qlib-portfolio"),
+              "--research-series-id", "synthetic-ci-portfolio",
+              "--research-series-root", str(root / "qlib-research-series"),
+              "--research-series-purpose", "合成组合示例的发行安装验收",
+          ], check=True)
   release-request:
     name: Record version change after CI
     needs: [public-boundary, rdagent-distribution, ml-distribution]

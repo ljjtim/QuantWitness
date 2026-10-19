@@ -173,6 +173,7 @@ class ResultAssembler:
             external=external,
             commits=commits,
         )
+        self._validate_model_table_references(validity_facts, tuple(tables))
         data_pit = validity_facts.get("data_pit")
         if not isinstance(data_pit, Mapping):
             raise ResultContractError("validity facts 缺少 data_pit")
@@ -362,6 +363,34 @@ class ResultAssembler:
         return tuple(revisions)
 
     @staticmethod
+    def _validate_model_table_references(facts, tables):
+        """引用事实只绑定 ResultSpec 正式表，拒绝副本和错角色引用。"""
+        model = facts.get("model_diagnostics")
+        if not isinstance(model, Mapping) or "table_storage" not in model:
+            return
+        if model["table_storage"] not in {"result_tables_v1", "result_tables_v2"}:
+            raise ResultContractError("模型事实表存储模式不受支持")
+        if model.get("mode") not in {"walk_forward_prediction_v1", "walk_forward_development_v1"}:
+            raise ResultContractError("引用式模型事实模式无效")
+        if {"tables", "design", "model_configs", "holdout_ledger", "model_window_facts"} & model.keys():
+            raise ResultContractError("引用式模型事实不得包含表或配置副本")
+        bindings = model.get("table_bindings")
+        # 平台自动追加的因果时点证据由独立时点门禁消费，不属于模型表角色。
+        financial_types = {"research.daily-simulation.v1", "research.portfolio-targets.v1", "data.daily-market.v1"}
+        manifests = {item.table_id: item for item in tables
+                     if not item.schema_id.startswith("research.causal-time.")
+                     and not (model["table_storage"] == "result_tables_v2"
+                              and facts.get("financial_tradability", {}).get("applicability") == "applicable"
+                              and getattr(item, "artifact_type", None) in financial_types)}
+        if not isinstance(bindings, Mapping) or set(bindings) != set(manifests):
+            raise ResultContractError("引用式模型事实与正式表集合不一致")
+        if any(not isinstance(schema, str) or schema != manifests[name].schema_id
+               or manifests[name].path_prefix != name for name, schema in bindings.items()):
+            raise ResultContractError("引用式模型事实与正式表角色不一致")
+        if len(set(bindings.values())) != len(bindings):
+            raise ResultContractError("引用式模型事实表引用重复")
+
+    @staticmethod
     def _validity_support_file(
         *,
         record: Mapping[str, object],
@@ -451,7 +480,13 @@ class ResultAssembler:
             if len(holdout_keys) != 1:
                 raise ResultContractError("模型有效性要求唯一正式 holdout 工件")
             commit = commits[next(iter(holdout_keys))]
-            for name in ("plan", "prepared", "opened", "terminal"):
+            if "holdout-ledger/plan.json" not in commit.files:
+                raise ResultContractError("模型 Result 缺少完整 holdout 账本")
+            plan = json.loads(external.read_bytes(commit, "holdout-ledger/plan.json"))
+            ledger_names = ["plan", "prepared", "opened", "terminal"]
+            if "research_series" in plan.get("freeze_payload", {}):
+                ledger_names.append("series")
+            for name in ledger_names:
                 source_path = f"holdout-ledger/{name}.json"
                 if source_path not in commit.files:
                     raise ResultContractError("模型 Result 缺少完整 holdout 账本")
@@ -640,7 +675,7 @@ class ResultAssembler:
                     if not isinstance(processor_files, dict) or set(processor_files) != {"infer", "learn"}:
                         raise ResultContractError("Qlib 模型配置缺少 Processor 文件清单")
                     paths = [config_path, row["model_path"]]
-                    if config.get("schema") == "research.qlib-sequence-model-bundle.v1":
+                    if config.get("schema") in {"research.qlib-sequence-model-bundle.v1", "research.qlib-sequence-model-bundle.v2"}:
                         sequence = config.get("sequence")
                         sequence_files = sequence.get("files") if isinstance(sequence, dict) else None
                         if not isinstance(sequence_files, dict) or set(sequence_files) != {"context", "targets", "members"}:

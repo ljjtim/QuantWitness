@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from research_pipeline.cli import main
-from research_pipeline.cli.commands import workspace_flow
+from research_pipeline.application import workspace_flow
 from research_pipeline.workspace import WorkspaceError, initialize_workspace
 
 
@@ -49,6 +49,7 @@ def test_workspace_copy_rejects_existing_target_and_invalid_source(tmp_path):
 def _install_services(monkeypatch, *, fail=None, verdict="pass", finalized=True):
     calls = []
     arguments = {}
+    monkeypatch.setattr(workspace_flow, "_show_verification_resources", lambda outcome, args: None)
 
     def capture(stage, args):
         calls.append(stage)
@@ -56,7 +57,7 @@ def _install_services(monkeypatch, *, fail=None, verdict="pass", finalized=True)
         if stage == fail:
             raise ValueError("测试阶段失败：" + stage)
 
-    def package(args):
+    def package(args, *, documents=None):
         stage = args.package_command
         capture(stage, args)
         if stage == "lint":

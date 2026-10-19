@@ -36,6 +36,7 @@ class ProjectTableInput:
         self.source_identity = source_identity
         self._paths: dict[str, Path] = {}
         self._parquet_paths: tuple[str, ...] = ()
+        self._homogeneous_schema = None
         self._complete = False
         self._started = False
         self._active_streams = 0
@@ -60,7 +61,7 @@ class ProjectTableInput:
             path for path in self._paths if path.endswith(".parquet")
         )
         if homogeneous_parquet and self._parquet_paths:
-            self._schema_for(
+            self._homogeneous_schema = self._schema_for(
                 tuple(self._paths[path] for path in self._parquet_paths)
             )
 
@@ -147,7 +148,9 @@ class ProjectTableInput:
         if not self._parquet_paths:
             raise ValueError("project_table_input_no_parquet")
         paths = tuple(self._paths[path] for path in self._parquet_paths)
-        schema = self._schema_for(paths)
+        schema = self._homogeneous_schema
+        if schema is None:
+            schema = self._schema_for(paths)
         assert schema is not None
         self._validate_projection(
             schema,

@@ -135,6 +135,8 @@ _ADAPTER_FAMILY_DEPENDENCIES = {
         "research_pipeline.research.dataframe_budget",
     ),
     "research_pipeline.runtime.adapters.model": (
+        "research_pipeline.runtime.model_fit_parallel",
+        "research_pipeline.research.validation.search_manifest",
         "research_pipeline.runtime.walk_forward_model_execution",
         "research_pipeline.runtime.model_sequence",
         "research_pipeline.research.modeling.sequence",
@@ -213,6 +215,12 @@ _ADAPTER_FAMILY_DEPENDENCIES = {
         "research_pipeline.data_plane.errors",
         "research_pipeline.platform.metric_contracts",
     ),
+}
+
+
+# 仅实际调用该独立重算的入口绑定此依赖，不扩散到同文件的统计入口。
+_ADAPTER_IMPLEMENTATION_DEPENDENCIES = {
+    "research.validity.minute.v1": ("research_pipeline.evidence.minute_validity",),
 }
 
 
@@ -351,6 +359,7 @@ def _runtime_adapter_ref(
                 (
                     *_COMMON_ADAPTER_DEPENDENCIES,
                     *_ADAPTER_FAMILY_DEPENDENCIES[module_name],
+                    *_ADAPTER_IMPLEMENTATION_DEPENDENCIES.get(implementation_id, ()),
                     *implementation_modules,
                 )
             )

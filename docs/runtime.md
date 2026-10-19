@@ -8,6 +8,19 @@
 
 Runtime 只执行已经准入的 typed operator DAG。调用方不能传入 callable、动态模块或另一套 action dispatcher。
 
+正式主 DAG 默认 `--mode deterministic_serial --workers 1`。`run`、`workspace run/execute` 可显式声明 `bounded_parallel` 或 `partitioned_batch`；workers 默认仍为 1，限制主 DAG 在途节点数，也作为单个模型节点的候选并发上限，不提高资源总量。恢复使用原 invocation 的 mode/workers、计划和 checkpoint，不改写执行配置。已有 Result 仍按正式验证和报告入口消费。
+
+- `bounded_parallel`：依赖满足的内建节点按稳定顺序进入有界执行，空出的额度用于后续 ready 节点。
+- `partitioned_batch`：当前批次完成并提交后再派下一批，输出仍按节点身份交接。
+- 项目节点保持独占，复用现有项目 Worker 和分区恢复；专用 `execute_minute_partitions` 的分钟分区并行保持原合同。
+- 选择、最终训练、holdout 以及其他非纯节点保持独占，不能借并行绕过系列锁和单次消费。
+
+内建节点使用独立 spawn 进程计算；Supervisor 是唯一事件写者和 checkpoint 发布者。工件完整验证及 external 提交通过绑定 run/attempt 的临时通道回到 Supervisor，同一运行继续复用首次验证结果，验证会话不跨进程序列化。
+
+实际并发受总 CPU、内存、scratch 和进程槽共同限制，节点声明预算不能相加超卖。并行模式启用共享资源治理时，先为整次运行取得总容量租约，再向节点分配子租约；同一资源池内其他运行按原排队规则等待可用容量。该方式保留明确总包络，暂不跨运行细分空闲节点额度。进程总容量计共享 Supervisor 加活动节点专属进程树，POSIX 另计一个共享 resource_tracker；显式资源治理的 process-slots 至少容纳 Supervisor 与最大的单节点专属树。没有共享治理时，上限由 workers 和计划内进程树声明派生。每个内建节点只采样自己的子进程树及暂存，避免把其他节点计入本节点。首个失败后停止补交，收齐在途任务并保留已成功 checkpoint，恢复仍复验原身份。
+
+模型 fit 在节点额度内对 candidate×fold 使用 spawn 池，训练输入、处理器、模型和随机状态由各进程隔离。CPU、进程槽、父进程驻留和每个子进程的输入副本共同限制实际并发；资源不足时降低调度并发或明确拒绝，不修改候选、数据或 seed。拟合结果和 trial ledger 按原 candidate/fold 顺序汇总；资源计数和 worker PID 属于运行诊断，不进入模型研究指标。
+
 项目Worker在导入扩展入口前通过安装元数据核对dependency_lock，缺包或实际版本不符即拒绝。静态bundle构建不要求安装依赖，也不自动安装；依赖校验不拦截运行时动态导入。
 
 项目扩展在可信本地代码前提下使用独立 worker。框架保留正式输入输出路径、内容完整性、超时和进程树清理，不用全局文件/导入 monkeypatch 或 audit hook 伪装安全沙箱。正常临时文件和替换操作可用；staging 外任意副作用由可信代码负责。受控 junction 和 hardlink 不因链接形态拒绝，正式路径仍按解析后的真实位置校验。
@@ -15,6 +28,14 @@ Runtime 只执行已经准入的 typed operator DAG。调用方不能传入 call
 ExternalArtifact提交时，staging内部的链接项会先复制为普通内容，再原子移动，避免绝对junction因目录改名失效；hardlink保持原有内容校验，不重复复制。越出工件根或形成目录循环仍拒绝。随机发布事务令牌只用于 staging 与原子提交，不参与内容身份；相同正式文件、schema、行数、名称和类型在不同目录、进程或调度方式下生成相同 ArtifactRef。耗时、RSS、scratch 和进程数属于运行资源观测，不写入正式数据工件，也不改变下游节点、checkpoint 或 Result 身份。
 
 项目算子bundle和ExternalArtifact的同盘目录发布在Windows遇到暂时拒绝访问或共享冲突时，最多重试5次，总等待0.31秒。每次仍使用原子重命名；目标已经存在、源目录消失或其他错误立即失败，持续占用则保留原异常。该处理不改变工件内容身份、恢复校验或已封存结果。
+
+## checkpoint 发布与资源验收
+
+节点输出先写入 staging，并完成 manifest、内容大小、内容摘要和当前节点身份复验，再执行剩余时间检查；启用资源治理时，最终采样同时统计本次工作目录与 checkpoint 暂存目录，不计入其他 attempt。验收通过后才写入 `COMMITTED` 并原子发布正式目录。验收前中断或被拒绝时，暂存内容不能恢复为成功；发布后尚未记录成功事件的中断，仍可按正式身份复验后接续。
+
+当前 checkpoint 合同为 `research-runtime-checkpoint-v4`。v1、v2、v3 均不能用于当前恢复、跨运行复用或 rerun 导入，不自动迁移。旧版本无法证明发布前已完成资源验收；需要使用匹配的历史环境审阅，新的研究重新准入。已封存 Result 与 VerificationResult 继续只读消费；已消费的 holdout 资格不会因换版本恢复。
+
+分钟并行任务按 worker 数分配节点临时空间，实际验收还受对应租约额度约束。在途任务不超过 worker 数；发现失败后停止补交、取消未开始任务，等待运行项退出并保留成功 checkpoint，见[分钟分区预算与调度](minute-resource-budget.md)。已发布 Result 的 Workspace 接续从正式结果补齐完成索引，见[执行接续](workspace-continuation.md)。
 
 ## 不可变身份
 
@@ -50,6 +71,14 @@ ExternalArtifact提交时，staging内部的链接项会先复制为普通内容
 - result finalize projection：只供 `inspect` 区分 `pending/succeeded/failed`；成功时绑定已发布 Result，失败时保留脱敏错误和真实发布状态。它不是 Result，也不进入 verify。
 
 完整事件链属于具体执行的审计记录，保留在 run-root。ResultAssembler 在发布 Result 前重放事件并核对 run、node 终态和链头；不可变 Result 只保存稳定终态摘要和正式输出身份，不复制受排队、租约取得和 attempt 时序影响的链头。相同 plan、clock、seed、实现、输入和正式输出在串行或受控并行调度下生成相同 Result 身份。
+
+## 事件增量会话
+
+一次 Runtime 执行持有事件库的排他写者锁。进入会话时完整读取日志，验证事件内容、hash chain、run 身份及状态转换，然后建立仅驻留内存的投影、command_id 和节点事件索引。后续追加只处理新事件，幂等命令直接返回原事件；相同 command_id 的不同 run、载荷或关联对象仍拒绝。
+
+每条新事件继续写入日志、flush 和 fsync，然后更新可丢弃的 `projection.json`。日志始终是恢复依据。写入失败后丢弃内存状态，下一次操作从日志重建；截断日志明确拒绝。写者会话退出时释放锁和索引，新命令、新进程、恢复及只读 inspect 都重新验证日志，不继承旧会话的信任。
+
+公开事件和状态快照与内部缓存隔离。Runtime 用节点索引查询当前节点的尝试及提交事件，避免为一个节点反复扫描全部历史。投影仍随每条新事件完整写出，因此历史很长时仍有投影序列化成本，不承诺整次追加为恒定时间。
 
 ## 数据引用与节点交接
 
@@ -191,7 +220,7 @@ admit 把已验证 bundle 和实现摘要写入计划闭包。run、resume、ret
 根级 `manifest.json` 和 `COMMITTED` 由 ExternalArtifact 核心保留，项目输出不能以任何大小写形式占用。
 正式 Feature/Label 通过 `causal_plan` 冻结源列、逻辑月份、键和窗口，核心每批最多调度
 8,192 键并记录实际交付，合并 inherited state lineage 后由 ExternalArtifact 核心附加时间。
-正式路径最低 256 MiB，不能按预算改变 carry 的键批边界。扩展没有源路径，不自报时间事实；
+正式路径最低 256 MiB，保持每批8,192键的既有调用边界；independent只声明无继承状态，不代表横截面运算可以任意拆并。扩展没有源路径，不自报时间事实；
 越界读取、继承状态超窗、缺键、伪造时间或输出超出核心合并预算都会失败。
 完整声明及当前支持范围见 `../project_extensions/README.md`。
 
@@ -199,11 +228,11 @@ admit 把已验证 bundle 和实现摘要写入计划闭包。run、resume、ret
 
 普通单次运行默认总容量为 16 GiB 内存、当前进程可用的全部逻辑 CPU 和 64 GiB scratch 上限；scratch 只是临时文件硬上限，不会提前占用磁盘。OperatorDefinition 的 `resource_profile` 必须显式声明 memory、CPU、scratch、进程槽和节点 wall-time。声明是节点执行包络，也是共享准入的 reservation；Runtime 不再把整次 CLI 容量替换成每个节点的申请。总容量只负责拒绝无法承载的声明和协调多个运行。
 
-数据节点的 memory 是一次 provider 调用可使用的进程树支持包络，不是 QueryIR 输出上限，也不是把字符串和引用长度相加得到的“Runtime 总硬上界”。admit 将其编译为 DuckDB、batch/writer 与进程余量；当前支持下限为 256 MiB，低于下限在对象统计和扫描前失败。provider 用本次有效预算设置 DuckDB memory/temp、Arrow batch 与 CPU；只有显式 resource governor 存在时，Runtime 才创建 ResourceUsageSampler，观测当前 Runtime 进程、attempt 开始后新建的后代进程以及 scratch 峰值并交给治理记录。采样开始前已经存在的控制台宿主等 Runtime 后代不属于当前节点，不能污染节点 RSS 和进程数。默认 run 不启动无人消费的采样线程。代表查询探针只做测试回归，不写新的 proof，也不进入真实成功运行的资源校准总体。
+数据节点的 memory 是一次 provider 调用可使用的进程树支持包络，不是 QueryIR 输出上限，也不是把字符串和引用长度相加得到的“Runtime 总硬上界”。admit 将其编译为 DuckDB、batch/writer 与进程余量；当前支持下限为 256 MiB，低于下限在对象统计和扫描前失败。provider 用本次有效预算设置 DuckDB memory/temp、Arrow batch 与 CPU；串行路径仅在显式 resource governor 存在时创建 ResourceUsageSampler，观测当前 Runtime 进程、attempt 开始后新建的后代进程以及 scratch 峰值并交给治理记录。并行路径始终采样各节点的专属进程树与暂存，超限即停止该节点。采样开始前已经存在的控制台宿主等 Runtime 后代不属于当前节点，不能污染节点 RSS 和进程数。默认串行 run 不启动无人消费的采样线程。代表查询探针只做测试回归，不写新的 proof，也不进入真实成功运行的资源校准总体。
 
 完整矩阵消费者先用 Parquet footer 下界做数据页前拒绝，再由运行时预算核对实际 Arrow/pandas 保留量。
 
-`process_slots` 覆盖 Supervisor、Worker 及其受支持的子进程树。内建算子默认声明 1 个槽；项目算子必须在薄声明中显式填写。启用共享治理时，`--resource-process-slots` 必须至少容纳 DAG 中最大的单节点声明。CPU 和进程槽分别准入，不再用进程数推高 CPU 申请。
+串行路径的 `process_slots` 覆盖 Supervisor、Worker 及其受支持的子进程树；并行路径将共享 Supervisor 与节点专属树分开计入总量。内建算子默认声明 1 个槽，spawn 计算至少预留当前解释器所需启动槽；项目算子必须在薄声明中显式填写。启用共享治理时，`--resource-process-slots` 必须至少容纳 DAG 中最大的单节点声明；并行模式还须加共享 Supervisor 及 POSIX tracker 的槽。CPU 和进程槽分别准入，不再用进程数推高 CPU 申请。
 
 节点在排队时记录为 `waiting_for_resources`，取得租约并真正开始执行后才进入 `running`。事件同时记录申请向量、排队时间、取得租约时间和等待毫秒数，`inspect` 可以区分等待中断与执行中断。
 
@@ -215,12 +244,14 @@ admit 把已验证 bundle 和实现摘要写入计划闭包。run、resume、ret
 同进程内重入和跨进程接管均须等待当前调用释放；进程存活由 PID 与进程创建时间共同判定。
 没有算子提供的真实总量时 `progress` 固定为 `null`，框架不按耗时猜百分比。
 
-`wall_seconds` 覆盖整个节点 attempt，不包含排队时间。Runtime 在取得资源后建立统一截止时间，逐分区 Worker 和 causal 键批只获得剩余秒数，不能为每次调用重新获得完整时限；项目 Worker 超时会被终止并清理进程树。当前内建同步 adapter 在返回边界核对截止时间，不能把它宣称为可抢占终止。
+`wall_seconds` 覆盖整个节点 attempt，不包含排队时间。Runtime 在取得资源后建立统一截止时间，逐分区 Worker 和 causal 键批只获得剩余秒数，不能为每次调用重新获得完整时限；项目 Worker 超时会被终止并清理进程树。串行内建同步 adapter 在返回边界核对截止时间；并行内建节点在截止时间到达时终止专属进程树。
 
-默认路径不创建跨命令状态或租约。只有调用方显式提供共享 resource state dir 时，多个独立 CLI 才按各自节点声明申请跨进程 FIFO 额度；各维度之和未超过总容量时可以同时执行，超过任一维度时后到请求等待。等待超过显式 timeout 后拒绝，不改变金融语义。启用共享治理时，最终资源采样覆盖 checkpoint 提交标记、目录发布与内容复验，再核对 Supervisor 与本 attempt 子进程的
+默认路径不创建跨命令状态或租约。只有调用方显式提供共享 resource state dir 时，多个独立 CLI 才申请跨进程 FIFO 额度。串行运行按节点声明申请，并行运行先申请整次 run 的总容量，再分配节点子租约；各维度之和未超过总容量时可以同时执行，超过任一维度时后到请求等待。等待超过显式 timeout 后拒绝，不改变金融语义。启用共享治理时，最终资源采样覆盖 checkpoint 提交标记、目录发布与内容复验，再核对 Supervisor 与本 attempt 子进程的
 合计 RSS、scratch、进程数和耗时。通过后才记录 checkpoint 成功事件；超出预算或租约时记录失败，
 撤销本 attempt 刚发布的 checkpoint，避免恢复复用未通过资源门禁的输出；
-资源测量不可用时记录 `measurement_unavailable` 并阻断提交。需要清理失控 Worker 时仍保留进程树终止，无法递归观察时报告 `direct_process_only` 残留风险。资源观测保留实际测量值，不会静默改写后续 reservation。资源观测 v4 不读取含 v3 观测的旧共享状态，升级后必须使用新的仓库外 state dir；旧四字段项目声明也必须补齐 `process_slots` 后重新 build、lint、admit 并新建 run。
+资源测量不可用时记录 `measurement_unavailable` 并阻断提交。需要清理失控 Worker 时仍保留进程树终止，无法递归观察时报告 `direct_process_only` 残留风险。资源观测保留实际测量值，不会静默改写后续 reservation。共享状态使用 `research-resource-governor-v3`，资源观测保持 v4。升级后必须使用新的仓库外 state dir，旧状态不自动迁移；旧四字段项目声明也必须补齐 `process_slots` 后重新 build、lint、admit 并新建 run。
+
+活动租约与已结束租约、观测历史分开保存，心跳只读写活动状态。冷日志先持久化，再由热状态原子提交有效前缀；中断后仍以原提交位置恢复。项目 Supervisor 接管采样时，一次进程树和去重目录遍历同时供硬门禁与资源峰值使用，退出后恢复后台采样。测量失败及超限继续阻止成功。状态文件、版本和恢复说明见[资源历史](resource-history.md)。
 
 ## Result 边界
 
@@ -247,3 +278,29 @@ Package MetricContract 实际选择的项目指标；其余定义保留在 Verif
 ### 分区工件跨运行复制
 
 恢复导入外部工件时保留已封存文件的修改时间与内容。分钟分区身份包含`mtime_ns`，导入后仍按原分区身份复验，不重写分区引用或放宽漂移检查。原工件保持只读，ArtifactRef不因复制改变。
+
+### 因果事实列式传输
+
+Worker的核心时间事实使用`causal-facts-v1`描述：逐行标量写入attempt内Parquet，相同`source_partition_ids`列表只存一份，各行保存列表编号。JSON只承载路径、行数、键列、lineage和共享来源清单。Supervisor读取后恢复同一有序事实，再执行既有核心合并、来源和时间检查。特征值、时间字符串精度、标签成熟边界及最终证据含义保持。
+
+非分钟Parquet按观测列的行组最小／最大月份跳过确定不相交的数据；缺少统计、存在空时间或非日期时间列时保留原读取。原始来源身份仍完整核验，实际交付仍受冻结月份、窗口和可见时间约束。
+
+新编解码模块属于Worker adapter身份。新研究重新准入，历史Result只读，不能跨实现身份恢复旧checkpoint。性能测量同时报告真实数值等价、分段耗时、传输大小及完整运行验收，不以压缩率替代完整链路成功。
+
+## 紧凑因果键声明
+
+`causal_plan.work_items`支持两种互斥键表示：原有`key_rows`，或`key_axes`与`key_order`。`key_axes`按`key_columns`顺序给出每列的非空唯一值轴；`key_order`给出从外层到内层的循环列索引。每列值仍只能是有限JSON标量，产品键与其他工作项的键不得重复。时间窗口、来源分区和工作项排序规则保持不变。
+
+例如`key_columns=[entity_id,observation_session,window_sessions,feature_id]`时，`key_axes=[股票列表,[信号日期],[1],因子列表]`及`key_order=[3,0,1,2]`表示按因子、再按股票遍历。运行时仅展开当前至多8,192个键，扩展看到的每批`key_rows`和原表示相同。冻结计划保留轴表示，新旧表示具有不同计划身份；不能拿新身份接续旧checkpoint，历史Result保持只读。
+
+### 因果 Worker 会话与组装恢复
+
+因果项目节点可显式声明 `worker_lifecycle="stateless_session"`，在一个节点 attempt 内串行复用 Worker。仅适用于非分钟输入且不依赖隐式模块状态的算子；分钟输入显式请求此模式时在启动前拒绝。每批仍建立独立上下文和时间事实，保持 8,192 键边界，跨批状态必须由原合同显式传递。会话固定节点、实现、输入和来源身份，固定输入核验在初始化时执行；批次失败、超时或节点结束关闭整个进程树。未声明的算子继续每批独立进程，未知值拒绝。
+
+全部节点成功但 Result 组装失败且尚未发布时，公开 `resume --run-root` 可仅重试组装。恢复先核对原计划、当前实现、DAG、时钟、seed、审计身份和全部成功 checkpoint；任何不符都拒绝，不回退节点执行。每次组装尝试追加事件，保留原终态；已发布 Result 不重开。
+
+## 成功节点的载荷释放
+
+本次 attempt 的请求数据副本及普通／分区 Worker 输出，在全部端口和状态完成正式交接、资源验收通过、checkpoint 发布、Worker 退出、attempt 与 node 成功之后，才按登记逐文件释放。源文件必须有已复验的正式 external 替代位置；失败、部分完成、保护标记和未登记对象继续保留。释放报告记录实际删除的文件数与逻辑字节，回收失败不改变已成功研究状态。
+
+恢复使用正式 checkpoint 和 external，不为补清理重新执行节点；Result 与独立验证仍保持自包含。因果 Worker、活动会话及历史未登记目录保持原保留策略。目录类别、保护规则和只读 GC 预览见 [产物生命周期](artifact-lifecycle.md)。

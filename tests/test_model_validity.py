@@ -1,7 +1,6 @@
 """模型有效性使用内存事实验证，覆盖时间泄漏、选模和一次性 holdout。"""
 
-from copy import deepcopy
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 
@@ -10,8 +9,7 @@ import pytest
 
 from research_pipeline.evidence.errors import EvidenceContractError
 from research_pipeline.evidence.model_validity import (
-    _holdout, _selection, _split, _statistics, recompute_model_validity_issues,
-    verify_model_result_binding,
+    _holdout, _selection, _split, _statistics, verify_model_result_binding,
 )
 from research_pipeline.platform import typed_canonical_hash as digest
 

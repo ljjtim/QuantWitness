@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import nullcontext
+
 from collections.abc import Sequence
 from pathlib import Path
 import shutil
@@ -15,6 +17,7 @@ from research_pipeline.data_plane import ArtifactResolver, DatasetArtifactRef, P
 from research_pipeline.data_plane.minute_scan import build_minute_partitioned_dataset
 from research_pipeline.platform import canonical_json, typed_canonical_hash
 from research_pipeline.platform.project_causal_contract import parse_causal_plan
+from .causal_worker_session import CausalWorkerSession
 from .contracts import ArtifactRef
 from .errors import RuntimeIntegrityError
 from .operator_runtime import RuntimeNodeOutputs, RuntimeNodeValue, OperatorRuntimeContext
@@ -23,10 +26,16 @@ from .project_operator_runtime import ProjectRuntimeInput, execute_project_worke
 from .project_output import ProjectOutputRoot
 
 
-def execute_project_causal_node(service, *, node_context, run_id, attempt_id, environment):
+def execute_project_causal_node(service, *, node_context, run_id, attempt_id, environment, progress=None):
     parameters = service.project_parameters_by_node[node_context.node.node_id]
+    if "worker_lifecycle" in parameters and parameters["worker_lifecycle"] != "stateless_session":
+        raise RuntimeIntegrityError("未知的worker_lifecycle")
     plan = parse_causal_plan(parameters["causal_plan"])
     token = service.project_registry.project_token_by_implementation(node_context.node.implementation_id)
+    if parameters.get("worker_lifecycle") == "stateless_session" and any(
+        port.artifact_type == "data.minute-bars.v1" for port in token.manifest.operator_spec.input_ports
+    ):
+        raise RuntimeIntegrityError("stateless_session仅支持非分钟输入")
     formal_type = "research.feature-set.v1" if plan.kind == "feature" else "research.label.v1"
     if {port.port: port.artifact_type for port in token.manifest.operator_spec.output_ports}.get(plan.output_port) != formal_type:
         raise RuntimeIntegrityError("项目 causal_plan 输出端口或类型未绑定")
@@ -35,62 +44,73 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
     committed_by_port = {}
     inherited = ()
     state = None
-    # carry 扩展可按调用次数更新状态，不能随内存预算改变其键批边界。
+    # 项目可依赖当前键集合，保持所有扩展的既有调用边界。
     max_keys = 8192
     if node_context.effective_resource_budget.memory_bytes < 256 * 1024**2:
         raise RuntimeIntegrityError("正式 causal worker memory 低于 256 MiB 支持下限")
-    for index, item in enumerate(plan.iter_work_items(max_keys=max_keys)):
-        state_input = state if plan.state_scope == "carry" else None
-        lineage = inherited if state_input is not None else ()
-        CausalReadTrace(plan, item, lineage, source_partition_identities=identities)
-        work_plan = replace(plan, work_items=(item,))
-        work_root = node_context.work_dir / f"causal-{index:06d}"
-        work_root.mkdir()
-        result = execute_project_worker_attempt(
-            registry=service.project_registry, implementation_id=node_context.node.implementation_id,
-            node_id=node_context.node.node_id, run_id=run_id, attempt_id=attempt_id,
-            attempt_root=work_root, inputs=inputs,
-            parameters={**parameters, "causal_plan": work_plan.to_dict()},
-            fixed_clock=node_context.fixed_clock, root_seed=node_context.root_seed,
-            budget=node_context.remaining_resource_budget(), state_in=state_input,
-            process_slots=node_context.process_slots,
-            causal_context={"plan": work_plan.to_dict(), "inherited_lineage": list(lineage),
-                            "partition_identities": identities, "source_timezones": timezones},
-        )
-        facts = result.causal_facts
-        if facts is None or tuple(facts["key_columns"]) != plan.key_columns:
-            raise RuntimeIntegrityError("项目输出缺少核心键批事实")
-        # 核心在提交前再次验证状态来源与本次允许窗口，再用已有 attach 合同一一合并。
-        checked = CausalReadTrace(plan, item, facts["lineage"], source_partition_identities=identities) if plan.state_scope == "carry" else None
-        core_facts = pd.DataFrame(facts["records"])
-        for output in result.outputs:
-            parquet = pq.ParquetFile(output.path)
-            metadata = parquet.metadata
-            output_facts = core_facts.copy()
-            if output.port == plan.output_port:
-                for key in plan.key_columns:
-                    if pa.types.is_date(parquet.schema_arrow.field(key).type):
-                        output_facts[key] = pd.to_datetime(output_facts[key], errors="raise").dt.date
-            if metadata.num_rows != len(item.key_rows):
-                raise RuntimeIntegrityError("项目 causal 输出行数与冻结键批不一致")
-            uncompressed = sum(metadata.row_group(i).total_byte_size for i in range(metadata.num_row_groups))
-            if uncompressed * 4 > node_context.effective_resource_budget.memory_bytes // 2:
-                raise RuntimeIntegrityError("项目 causal 输出超过核心合并内存预算")
-            staging = external.prepare()
-            target = staging / output.port / "data.parquet"
-            target.parent.mkdir()
-            shutil.copyfile(output.path, target)
-            committed = external.commit(
-                staging, artifact_name=output.port, artifact_type=output.artifact_type,
-                producer_scope="project",
-                core_time_facts=output_facts if output.port == plan.output_port else None,
-                causal_time_key_columns=plan.key_columns if output.port == plan.output_port else (),
+    session_scope = (
+        CausalWorkerSession(node_context.work_dir / "worker-session")
+        if parameters.get("worker_lifecycle") == "stateless_session" else nullcontext(None)
+    )
+    if progress is not None:
+        progress.start_work_progress(_work_batch_count(plan, max_keys))
+    with session_scope as worker_session:
+        for index, item in enumerate(plan.iter_work_items(max_keys=max_keys)):
+            state_input = state if plan.state_scope == "carry" else None
+            lineage = inherited if state_input is not None else ()
+            CausalReadTrace(plan, item, lineage, source_partition_identities=identities)
+            work_plan = replace(plan, work_items=(item,))
+            worker_plan = work_plan.to_dict()
+            work_root = node_context.work_dir / f"causal-{index:06d}"
+            work_root.mkdir()
+            result = execute_project_worker_attempt(
+                registry=service.project_registry, implementation_id=node_context.node.implementation_id,
+                node_id=node_context.node.node_id, run_id=run_id, attempt_id=attempt_id,
+                attempt_root=work_root, inputs=inputs,
+                parameters={**parameters, "causal_plan": worker_plan},
+                fixed_clock=node_context.fixed_clock, root_seed=node_context.root_seed,
+                budget=node_context.remaining_resource_budget(), state_in=state_input,
+                process_slots=node_context.process_slots,
+                worker_session=worker_session,
+                causal_context={"plan": worker_plan, "inherited_lineage": list(lineage),
+                                "partition_identities": identities, "source_timezones": timezones},
             )
-            committed_by_port.setdefault(output.port, []).append(committed)
-        state = result.state
-        inherited = tuple(facts["lineage"]) if state is not None else ()
-        if checked is not None:
-            checked.core_time_facts()
+            facts = result.causal_facts
+            if facts is None or tuple(facts["key_columns"]) != plan.key_columns:
+                raise RuntimeIntegrityError("项目输出缺少核心键批事实")
+            # 核心在提交前再次验证状态来源与本次允许窗口，再用已有 attach 合同一一合并。
+            checked = CausalReadTrace(plan, item, facts["lineage"], source_partition_identities=identities) if plan.state_scope == "carry" else None
+            core_facts = pd.DataFrame(facts["records"])
+            for output in result.outputs:
+                parquet = pq.ParquetFile(output.path)
+                metadata = parquet.metadata
+                output_facts = core_facts.copy()
+                if output.port == plan.output_port:
+                    for key in plan.key_columns:
+                        if pa.types.is_date(parquet.schema_arrow.field(key).type):
+                            output_facts[key] = pd.to_datetime(output_facts[key], errors="raise").dt.date
+                if metadata.num_rows != len(item.key_rows):
+                    raise RuntimeIntegrityError("项目 causal 输出行数与冻结键批不一致")
+                uncompressed = sum(metadata.row_group(i).total_byte_size for i in range(metadata.num_row_groups))
+                if uncompressed * 4 > node_context.effective_resource_budget.memory_bytes // 2:
+                    raise RuntimeIntegrityError("项目 causal 输出超过核心合并内存预算")
+                staging = external.prepare()
+                target = staging / output.port / "data.parquet"
+                target.parent.mkdir()
+                shutil.copyfile(output.path, target)
+                committed = external.commit(
+                    staging, artifact_name=output.port, artifact_type=output.artifact_type,
+                    producer_scope="project",
+                    core_time_facts=output_facts if output.port == plan.output_port else None,
+                    causal_time_key_columns=plan.key_columns if output.port == plan.output_port else (),
+                )
+                committed_by_port.setdefault(output.port, []).append(committed)
+            state = result.state
+            inherited = tuple(facts["lineage"]) if state is not None else ()
+            if checked is not None:
+                checked.core_time_facts()
+            if progress is not None:
+                progress.complete_work_batch(index + 1)
     values = {}
     for port, commits in committed_by_port.items():
         staging = external.prepare()
@@ -129,6 +149,22 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
         final = external.commit(staging, artifact_name=port, artifact_type=commits[0].artifact_type)
         values[port] = RuntimeNodeValue.external(final)
     return RuntimeNodeOutputs(values)
+
+
+
+def _work_batch_count(plan, max_keys):
+    """按原迭代器的同窗合批规则计算总量，不复制完整键集合。"""
+    total = 0
+    pending = 0
+    previous = None
+    for item in plan.work_items:
+        window = (item.decision_time, item.window_start, item.window_end, item.source_partitions)
+        if previous is not None and window != previous:
+            total += (pending + max_keys - 1) // max_keys
+            pending = 0
+        pending += len(item.key_rows)
+        previous = window
+    return total + (pending + max_keys - 1) // max_keys
 
 
 def _write_daily_causal_artifact(staging, commits, external, plan, environment):

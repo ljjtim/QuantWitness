@@ -13,8 +13,6 @@ import pandas as pd
 from research_pipeline.platform.canonical import typed_canonical_hash
 from .inputs import ModelMainlineError, assemble_daily_feature_context, _require_columns
 from research_pipeline.research.validation import (
-    HoldoutAccessPlan,
-    PersistentHoldoutLedger,
     ValidationError,
 )
 
@@ -190,6 +188,7 @@ def evaluate_locked_holdout(
     unlock_at: datetime,
     fixed_clock: datetime,
     ledger_root: str | Path,
+    research_series: Mapping[str, object],
     root_seed: int,
     thread_count: int = 1,
     development_sequence_context=None,
@@ -236,8 +235,13 @@ def evaluate_locked_holdout(
     if holdout_end_date < holdout_start_date:
         raise ModelMainlineError("holdout end 不能早于 start")
     _metric(np.array([0.0]), np.array([0.0]), objective, target_kind)
+    from research_pipeline.research.validation.holdout_series import HoldoutSeries
+    series = HoldoutSeries(research_series)
+    if Path(ledger_root).resolve() != series.ledger_root.resolve():
+        raise ModelMainlineError("最终评价 ledger_root 必须对应冻结研究系列")
     freeze_payload = {
-        "parent_research_purpose": research_identity_hash,
+        "research_series": series.declaration,
+        "parent_research_purpose": series.purpose_identity,
         "data_snapshot": data_snapshot_hash,
         "holdout_split": {
             "split_id": typed_canonical_hash(list(holdout_ids)),
@@ -270,15 +274,12 @@ def evaluate_locked_holdout(
             "family": candidate_id,
         },
     }
-    plan = HoldoutAccessPlan.build(
+    plan, frozen_ledgers, ledger, prior = series.freeze_plan(
         freeze_payload=freeze_payload,
         actor=actor,
         reason=reason,
         unlock_at=unlock_at,
     )
-    ledger_path = Path(ledger_root).resolve() / plan.holdout_identity_hash
-    ledger = PersistentHoldoutLedger(ledger_path, plan)
-    prior = ledger.verify()
     if prior.get("status") != "frozen":
         raise ValidationError(
             "同一研究目的和 holdout 已经 prepared/opened，不能重复读取"
@@ -309,8 +310,9 @@ def evaluate_locked_holdout(
                        fit_scope_ref="holdout-final-development",
                        sequence_context=development_sequence_context)
     model.update(candidate_id=f"candidate_{candidate_id[:16]}", fold_id="locked_holdout", status="fitted")
-    prepared = ledger.prepare(prepared_at=fixed_clock, preflight=holdout_preflight)
-    opened = ledger.open(
+    prepared = series.prepare(ledger, prepared_at=fixed_clock, preflight=holdout_preflight)
+    opened = series.open(
+        ledger, frozen_ledgers=frozen_ledgers,
         opening_id=f"holdout:{plan.holdout_identity_hash[:16]}",
         token_hash=plan.token_hash,
         actor=actor,
@@ -355,13 +357,13 @@ def evaluate_locked_holdout(
         result_hash = typed_canonical_hash(
             {"predictions": [{**row, "observation_session": row["observation_session"].isoformat()} for row in rows], "objective": objective, "metric": metric}
         )
-        terminal = ledger.finish(
+        terminal = series.finish(ledger,
             opened_hash=str(opened["opened_hash"]),
             status="committed",
             result_hash=result_hash,
         )
     except Exception as exc:
-        terminal = ledger.finish(
+        terminal = series.finish(ledger,
             opened_hash=str(opened["opened_hash"]),
             status="consumed_failed",
             result_hash=typed_canonical_hash({"error": type(exc).__name__}),

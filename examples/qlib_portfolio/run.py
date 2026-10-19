@@ -8,11 +8,14 @@ import tempfile
 import subprocess
 
 from research_pipeline.cli import build_parser
-from research_pipeline.cli.commands import research_package, research_run, evidence_lifecycle, runtime_lifecycle
-from prepare import prepare, CLOCK, SEED
+from research_pipeline.application import research_package, research_run, evidence_lifecycle, runtime_lifecycle
+from prepare import (prepare, CLOCK, SEED, add_research_series_arguments,
+    research_series_from_arguments)
 
 
-def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reused_nodes=(), input_config=None, sequence_step_len=None, horizon_sessions=1, window_config=None, model_candidates=None, feature_suite=None, resource_state_dir=None):
+def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reused_nodes=(), input_config=None, sequence_step_len=None, horizon_sessions=1, window_config=None, model_candidates=None, feature_suite=None, resource_state_dir=None, research_series=None):
+    if stage != "prepare" and research_series is not None:
+        raise ValueError("继续研究不能重新声明research_series；读取原冻结request")
     root=Path(root).resolve()
     root.mkdir(parents=True,exist_ok=True)
     scratch=root/"tmp"
@@ -20,7 +23,8 @@ def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reuse
     tempfile.tempdir=str(scratch)
     if stage=="prepare":
         return prepare(root,mode,input_config,sequence_step_len=sequence_step_len,
-            horizon_sessions=horizon_sessions,window_config=window_config,model_candidates=model_candidates,feature_suite=feature_suite)
+            horizon_sessions=horizon_sessions,window_config=window_config,model_candidates=model_candidates,
+            feature_suite=feature_suite,research_series=research_series)
     bundle=json.loads((root/"bundle-paths.json").read_text(encoding="utf-8"))
     extensions=[arg for path in bundle["extensions"] for arg in ("--extension-bundle",path)]
     common=["--package",bundle["package"],"--catalog-lock",bundle["catalog_lock"],"--verifier-bundle",bundle["verifier"],*extensions]
@@ -30,9 +34,9 @@ def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reuse
         args=["package","admit",*common,"--input-snapshot-manifest",bundle["input_snapshot_manifest"],"--output",str(root/"plan"),"--json"];handler=research_package._execute
     elif stage=="run":
         args=["run","--plan",str(root/"plan"),"--input-snapshot-manifest",bundle["input_snapshot_manifest"],
-            "--artifact-root",str(root/"artifacts"),"--handoff-out",str(root/"handoff.json"),"--run-root",str(root/"run"),
+            "--artifact-root",str(root/"artifacts"),"--run-root",str(root/"run"),
             "--result-store",str(root/"results"),"--clock",bundle["fixed_clock"],"--root-seed",str(SEED),"--workers","1",
-            "--resource-memory-bytes",str(12*1024**3),"--resource-cpu-slots","4","--resource-process-slots","8",
+            "--resource-memory-bytes",str(16*1024**3),"--resource-cpu-slots","4","--resource-process-slots","10",
             "--resource-scratch-bytes",str(64*1024**3),"--resource-timeout-seconds","300","--resource-state-dir",str(Path(resource_state_dir).resolve() if resource_state_dir else root/"resources"),"--json"]
         if reuse_failed_run_root:
             args.extend(["--reuse-failed-run-root", str(reuse_failed_run_root)])
@@ -83,12 +87,16 @@ def argument_parser():
     parser.add_argument("--window-mode", choices=("expanding", "rolling"))
     for name in ("train", "validation", "test", "step", "embargo"):
         parser.add_argument("--" + name + "-sessions", type=int)
+    add_research_series_arguments(parser)
     return parser
 
 
 def main(argv=None):
     parser = argument_parser()
     args = parser.parse_args(argv)
+    research_series = research_series_from_arguments(args, parser)
+    if research_series is not None and args.stage not in {"prepare", "all"}:
+        parser.error("继续研究不能重新声明研究系列；读取原冻结request")
     root = Path(args.output).resolve()
     window_config = {name + "_sessions": getattr(args, name + "_sessions")
         for name in ("train", "validation", "test", "step", "embargo")
@@ -120,9 +128,11 @@ def main(argv=None):
         for stage in stages:
             result = (prepare_horizons(root, args.horizons, mode=args.mode or "model",
                 input_config=args.input_config, sequence_step_len=args.sequence_step_len,
-                window_config=window_config) if stage == "prepare" else execute_horizons(root, stage))
+                window_config=window_config, research_series=research_series) if stage == "prepare" else execute_horizons(root, stage))
             print(json.dumps(result, ensure_ascii=True, default=str), flush=True)
         return
+    if args.stage in {"prepare", "all"} and (args.mode or "model") != "development" and research_series is None:
+        parser.error("最终评价必须提供--research-series-id、--research-series-root和--research-series-purpose")
     if args.stage == "all" and args.factor_suite is not None:
         # 原生Alpha定义准备的依赖占用不计入后续节点预算。
         prepare_args = [sys.executable, "-B", str(Path(__file__).resolve()),
@@ -134,6 +144,12 @@ def main(argv=None):
             value = getattr(args, name)
             if value is not None:
                 prepare_args.extend(["--" + name.replace("_", "-"), str(value)])
+        if research_series is not None:
+            for name in ("id", "root", "purpose"):
+                key = "series_id" if name == "id" else name
+                prepare_args.extend(["--research-series-" + name, research_series[key]])
+            for legacy_root in research_series["legacy_ledger_roots"]:
+                prepare_args.extend(["--research-series-legacy-root", legacy_root])
         subprocess.run(prepare_args, check=True)
         stages = stages[1:]
     for stage in stages:
@@ -146,7 +162,8 @@ def main(argv=None):
         result = execute(root, stage, args.mode or "model", args.reuse_failed_run_root,
             args.require_reused_node, args.input_config, args.sequence_step_len,
             horizon_sessions=1 if args.horizon_sessions is None else args.horizon_sessions,
-            window_config=window_config, feature_suite=args.factor_suite, resource_state_dir=args.resource_state_dir)
+            window_config=window_config, feature_suite=args.factor_suite, resource_state_dir=args.resource_state_dir,
+            research_series=research_series if stage == "prepare" else None)
         print(json.dumps(result, ensure_ascii=True, default=str), flush=True)
 
 

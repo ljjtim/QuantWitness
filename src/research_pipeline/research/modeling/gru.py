@@ -15,7 +15,7 @@ from .inputs import QlibModelError, qlib_matrix
 from .sequence import SequenceWindows, qlib_sequence_dataset
 
 
-SEQUENCE_BUNDLE_SCHEMA = "research.qlib-sequence-model-bundle.v1"
+SEQUENCE_BUNDLE_SCHEMA = "research.qlib-sequence-model-bundle.v2"
 SEQUENCE_MODEL_MODULES = {
     "GRU": ("qlib.contrib.model.pytorch_gru_ts", "GRU", "GRU_model"),
     "LSTM": ("qlib.contrib.model.pytorch_lstm_ts", "LSTM", "LSTM_model"),
@@ -98,6 +98,14 @@ def bind_windows(windows, frame, feature_columns, step_len):
     if context.duplicated(["observation_session", "entity_id"]).any():
         raise QlibModelError("序列模型 上下文证券会话重复")
     source = context.set_index(["observation_session", "entity_id"])
+    compact = "context_index" in windows.members
+    if compact:
+        if (set(windows.members.columns) != {"sample_id", "step", "context_index"}
+                or "context_index" not in context or context.context_index.duplicated().any()
+                or not pd.api.types.is_integer_dtype(context.context_index)
+                or not pd.api.types.is_integer_dtype(windows.members.context_index)):
+            raise QlibModelError("序列模型上下文索引必须为唯一整数")
+        indexed_context = context.set_index("context_index")
     members = windows.members.loc[windows.members.sample_id.isin(ids)].copy()
     if members.duplicated(["sample_id", "step"]).any() or len(members) != len(ids) * step_len:
         raise QlibModelError("序列模型 窗口成员数量或步序无效")
@@ -120,6 +128,11 @@ def bind_windows(windows, frame, feature_columns, step_len):
             raise QlibModelError("序列模型 窗口步序不连续")
         for member, member_day in zip(group.to_dict("records"), days[end - step_len + 1:end + 1]):
             key = (member_day, entity)
+            if compact:
+                if member["context_index"] not in indexed_context.index:
+                    raise QlibModelError("序列模型成员引用不存在的上下文")
+                referenced = indexed_context.loc[member["context_index"]]
+                member = referenced.to_dict()
             if key not in source.index or (member["entity_id"], pd.Timestamp(member["observation_session"]).date()) != (entity, member_day):
                 raise QlibModelError("序列模型 窗口会话或证券不一致")
             row = source.loc[key]
@@ -182,7 +195,7 @@ def save_window_facts(root, bundle_path, windows):
         path.parent.mkdir(parents=True, exist_ok=True)
         getattr(windows, name).to_parquet(path, index=False)
         paths[name] = relative
-    return {"schema": "research.qlib-sequence-input.v1", "files": paths,
+    return {"schema": "research.qlib-sequence-input.v2", "files": paths,
             "step_len": windows.step_len, "feature_columns": list(windows.feature_columns),
             "calendar_sessions": [str(day) for day in windows.calendar_sessions],
             "missing_policy": "complete_window", "batch_axis": "vector"}
@@ -205,7 +218,8 @@ def verify_loaded_model(root, config, model):
         names = ("d_model", "dropout", "n_epochs", "lr", "reg", "metric", "batch_size", "early_stop", "loss", "optimizer", "n_jobs", "seed")
     for name in names:
         expected = kwargs.get(name, defaults.get(name))
-        if name == "optimizer": expected = expected.lower()
+        if name == "optimizer":
+            expected = expected.lower()
         if getattr(model, name) != expected:
             raise QlibModelError(f"恢复的序列模型 {name} 与封存参数不一致")
     weights = torch.load(Path(root) / config["weights_path"], map_location="cpu", weights_only=True)

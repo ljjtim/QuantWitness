@@ -84,7 +84,7 @@ admit 自动从 package requests 和 Catalog Lock 解析 binding，观察当前 
 ## 6. 运行和恢复
 
 ```powershell
-python -m research_pipeline run --plan work/plan --data-db <只读DuckDB> --artifact-root work/artifacts --handoff-out work/handoff.json --run-root work/run --result-store work/results --clock 2026-01-01T00:00:00+08:00 --root-seed 0 --json
+python -m research_pipeline run --plan work/plan --data-db <只读DuckDB> --artifact-root work/artifacts --run-root work/run --result-store work/results --clock 2026-01-01T00:00:00+08:00 --root-seed 0 --json
 python -m research_pipeline inspect --run-root work/run --json
 ```
 

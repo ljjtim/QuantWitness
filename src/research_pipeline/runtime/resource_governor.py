@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from research_pipeline.platform.file_lock import ProcessFileLock
+
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,12 +19,16 @@ import uuid
 import psutil
 
 from research_pipeline.platform import canonical_json, typed_canonical_hash
+from research_pipeline.platform.process_resources import (
+    _measure_scratch_scopes, _nonoverlapping_roots, _project_process_usage,
+    _register_attempt_sampler, _unregister_attempt_sampler,
+)
 
 from .contracts import ResourceBudget
 from .errors import RuntimeAdmissionError, RuntimeIntegrityError
 
 
-RESOURCE_GOVERNOR_VERSION = "research-resource-governor-v2"
+RESOURCE_GOVERNOR_VERSION = "research-resource-governor-v3"
 RESOURCE_OBSERVATION_VERSION = "research-resource-observation-v4"
 RESOURCE_CALIBRATION_VERSION = "research-resource-calibration-v2"
 
@@ -229,10 +235,15 @@ class ResourceObservation:
 class ResourceUsageSampler:
     """独立采样 attempt 进程树和 scratch，不信任算子自报峰值。"""
 
-    def __init__(self, scratch_root: str | Path, *, interval_seconds: float = 0.05) -> None:
+    def __init__(
+        self, scratch_root: str | Path, *,
+        additional_scratch_roots: tuple[str | Path, ...] = (),
+        interval_seconds: float = 0.05,
+    ) -> None:
         if interval_seconds <= 0:
             raise ValueError("资源采样间隔必须为正数")
         self.scratch_root = Path(scratch_root).resolve()
+        self.scratch_roots = (self.scratch_root, *(Path(root).resolve() for root in additional_scratch_roots))
         self.interval_seconds = interval_seconds
         self.peak_rss_bytes = 0
         self.peak_scratch_bytes = 0
@@ -243,26 +254,52 @@ class ResourceUsageSampler:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._baseline_descendants: frozenset[tuple[int, float]] | None = None
+        self._sampling_lock = threading.RLock()
 
     def __enter__(self) -> "ResourceUsageSampler":
         self._started = time.monotonic()
         self._sample()
         self._thread = threading.Thread(target=self._run, name="resource-usage-sampler", daemon=True)
         self._thread.start()
+        _register_attempt_sampler(self)
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=max(1.0, self.interval_seconds * 4))
-        self._sample()
-        self.wall_milliseconds = max(1, round((time.monotonic() - self._started) * 1000))
+        try:
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=max(1.0, self.interval_seconds * 4))
+            self._sample()
+            self.wall_milliseconds = max(1, round((time.monotonic() - self._started) * 1000))
+        finally:
+            _unregister_attempt_sampler(self)
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
             self._sample()
 
+    def sample_project_usage(self, worker_pid: int | None, observed_descendants: dict[int, float],
+                             scratch_roots: tuple[Path, ...]) -> tuple[int, int, int]:
+        """复用监督器本轮真实测量，治理峰值和 Worker 硬门禁共享同一读数。"""
+        with self._sampling_lock:
+            try:
+                rss, count = _project_process_usage(worker_pid, observed_descendants)
+                sizes = _measure_scratch_scopes((*self.scratch_roots, *scratch_roots))
+                governor_size = sum(sizes[path] for path in _nonoverlapping_roots(self.scratch_roots))
+                worker_size = sum(sizes[path] for path in _nonoverlapping_roots(scratch_roots))
+            except (psutil.Error, OSError, RuntimeError):
+                self.measurement_status = "measurement_unavailable"
+                raise
+            self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+            self.max_processes = max(self.max_processes, count)
+            self.peak_scratch_bytes = max(self.peak_scratch_bytes, governor_size)
+            return rss, count, worker_size
+
     def _sample(self) -> None:
+        with self._sampling_lock:
+            self._sample_unlocked()
+
+    def _sample_unlocked(self) -> None:
         try:
             root = psutil.Process(os.getpid())
             descendants = root.children(recursive=True)
@@ -292,50 +329,13 @@ class ResourceUsageSampler:
             self.max_processes = max(self.max_processes, len(processes))
         except (psutil.Error, OSError, RuntimeError):
             self.measurement_status = "measurement_unavailable"
-        self.peak_scratch_bytes = max(self.peak_scratch_bytes, _directory_size(self.scratch_root))
+        try:
+            sizes = _measure_scratch_scopes(self.scratch_roots)
+            current_scratch_bytes = sum(sizes[path] for path in _nonoverlapping_roots(self.scratch_roots))
+            self.peak_scratch_bytes = max(self.peak_scratch_bytes, current_scratch_bytes)
+        except (OSError, RuntimeError):
+            self.measurement_status = "measurement_unavailable"
 
-
-class _ProcessFileLock:
-    def __init__(self, path: Path, timeout_seconds: float) -> None:
-        self.path = path
-        self.timeout_seconds = timeout_seconds
-        self.handle = None
-
-    def __enter__(self) -> "_ProcessFileLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("a+b")
-        if self.path.stat().st_size == 0:
-            self.handle.write(b"0")
-            self.handle.flush()
-        deadline = time.monotonic() + self.timeout_seconds
-        while True:
-            try:
-                self.handle.seek(0)
-                if os.name == "nt":
-                    import msvcrt
-                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return self
-            except OSError:
-                if time.monotonic() >= deadline:
-                    self.handle.close()
-                    self.handle = None
-                    raise RuntimeAdmissionError("资源治理状态锁超时")
-                time.sleep(0.01)
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        if self.handle is None:
-            return
-        self.handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
-        self.handle.close()
 
 
 def read_resource_governor_state(
@@ -343,72 +343,14 @@ def read_resource_governor_state(
 ) -> dict[str, object] | None:
     """只读共享资源池状态，不加写锁、不清理租约、也不写回文件。"""
 
-    state_path = config.state_dir / "resource-governor.json"
-    if not state_path.is_file():
+    reader = ResourceGovernor.__new__(ResourceGovernor)
+    reader.config = config
+    reader._state_path = config.state_dir / "resource-governor.json"
+    if not reader._state_path.is_file():
         return None
-    try:
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeIntegrityError("资源治理状态损坏；请保留目录并人工检查") from exc
-    expected = {
-        "contract_version", "governor_config_hash", "governor_config_payload",
-        "capacity", "next_sequence", "requests", "leases", "observations",
-    }
-    if not isinstance(payload, dict) or set(payload) != expected:
-        raise RuntimeIntegrityError("资源治理状态 schema 无效；准入已关闭")
-    config_payload = payload.get("governor_config_payload")
-    if (
-        payload.get("contract_version") != RESOURCE_GOVERNOR_VERSION
-        or not isinstance(config_payload, Mapping)
-        or config_payload != config.identity_payload
-        or payload.get("governor_config_hash") != config.identity_hash
-        or typed_canonical_hash(config_payload) != config.identity_hash
-    ):
-        raise RuntimeIntegrityError("资源治理配置身份与现有状态不一致；准入已关闭")
-    capacity = payload.get("capacity")
-    if not isinstance(capacity, Mapping) or ResourceVector.from_dict(capacity) != config.capacity:
-        raise RuntimeIntegrityError("资源治理容量与现有状态不一致")
-    requests = payload.get("requests")
-    leases = payload.get("leases")
-    observations = payload.get("observations")
-    if (
-        type(payload.get("next_sequence")) is not int
-        or payload["next_sequence"] < 1
-        or not isinstance(requests, dict)
-        or not isinstance(leases, dict)
-        or not isinstance(observations, list)
-    ):
-        raise RuntimeIntegrityError("资源治理集合状态损坏")
-    ResourceGovernor._validate_observations(observations)
-    for collection_name, collection in (("申请", requests), ("租约", leases)):
-        for identity, item in collection.items():
-            if not isinstance(identity, str) or not isinstance(item, Mapping):
-                raise RuntimeIntegrityError(f"资源治理{collection_name}状态损坏")
-            vector = item.get("vector")
-            if not isinstance(vector, Mapping):
-                raise RuntimeIntegrityError(f"资源治理{collection_name}向量损坏")
-            ResourceVector.from_dict(vector)
-            if (
-                type(item.get("sequence")) is not int
-                or type(item.get("pid")) is not int
-                or not isinstance(item.get("process_started_at"), (int, float))
-            ):
-                raise RuntimeIntegrityError(f"资源治理{collection_name}身份损坏")
-    return {
-        "contract_version": payload["contract_version"],
-        "governor_config_hash": payload["governor_config_hash"],
-        "governor_config_payload": dict(config_payload),
-        "capacity": dict(capacity),
-        "next_sequence": payload["next_sequence"],
-        "requests": [
-            dict(item)
-            for item in sorted(requests.values(), key=lambda value: value["sequence"])
-        ],
-        "leases": [
-            dict(item)
-            for item in sorted(leases.values(), key=lambda value: value["sequence"])
-        ],
-    }
+    state = reader._read_state()
+    reader._validate_or_initialize(state)
+    return reader._snapshot_state(state)
 
 
 class ResourceGovernor:
@@ -504,6 +446,10 @@ class ResourceGovernor:
         with self._locked_state() as state:
             record = state["leases"].get(lease.lease_id)
             if record is None:
+                record = next((item for item in self._read_history(state, "leases")
+                               if item["lease_id"] == lease.lease_id), None)
+                if record is not None and not _same_lease_identity(record, lease):
+                    raise RuntimeIntegrityError("资源租约释放身份不一致")
                 return False
             if not _same_lease_identity(record, lease):
                 raise RuntimeIntegrityError("资源租约释放身份不一致")
@@ -519,28 +465,34 @@ class ResourceGovernor:
     def snapshot(self) -> dict[str, object]:
         with self._locked_state() as state:
             self._reap_stale_in_state(state)
-            return {
-                "contract_version": state["contract_version"],
-                "governor_config_hash": state["governor_config_hash"],
-                "governor_config_payload": dict(state["governor_config_payload"]),
-                "capacity": dict(state["capacity"]),
-                "next_sequence": state["next_sequence"],
-                "requests": [dict(item) for item in sorted(
-                    state["requests"].values(), key=lambda value: value["sequence"]
-                )],
-                "leases": [dict(item) for item in sorted(
-                    state["leases"].values(), key=lambda value: value["sequence"]
-                )],
-            }
+            return self._snapshot_state(state)
+
+    def _snapshot_state(self, state: Mapping[str, object]) -> dict[str, object]:
+        leases = {item["lease_id"]: item for item in self._read_history(state, "leases")}
+        if set(leases).intersection(state["leases"]):
+            raise RuntimeIntegrityError("资源租约同时存在于活动状态和已提交历史")
+        leases.update(state["leases"])
+        return {
+            "contract_version": state["contract_version"],
+            "governor_config_hash": state["governor_config_hash"],
+            "governor_config_payload": dict(state["governor_config_payload"]),
+            "capacity": dict(state["capacity"]),
+            "next_sequence": state["next_sequence"],
+            "requests": [dict(item) for item in sorted(
+                state["requests"].values(), key=lambda value: value["sequence"]
+            )],
+            "leases": [dict(item) for item in sorted(
+                leases.values(), key=lambda value: value["sequence"]
+            )],
+        }
 
     def record_observation(self, observation: ResourceObservation) -> str:
         payload = {**observation.to_dict(), "observation_id": observation.observation_id}
         with self._locked_state() as state:
-            self._validate_observations(state["observations"])
-            observations = state["observations"]
+            observations = self._read_history(state, "observations")
             existing = next((item for item in observations if item["observation_id"] == observation.observation_id), None)
             if existing is None:
-                observations.append(payload)
+                self._append_history(state, "observations", [payload])
             elif existing != payload:
                 raise RuntimeIntegrityError("资源观测身份冲突")
         return observation.observation_id
@@ -567,8 +519,8 @@ class ResourceGovernor:
             "data_bucket": data_bucket,
         }
         with self._locked_state() as state:
-            self._validate_observations(state["observations"])
-            matched = [item for item in state["observations"] if (
+            observations = self._read_history(state, "observations")
+            matched = [item for item in observations if (
                 item["operator_id"] == operator_id
                 and item["operator_version"] == operator_version
                 and item["profile_id"] == profile_id
@@ -645,7 +597,7 @@ class ResourceGovernor:
 
     @contextmanager
     def _locked_state(self) -> Iterator[dict[str, object]]:
-        with _ProcessFileLock(self._lock_path, timeout_seconds=10.0):
+        with ProcessFileLock(self._lock_path, timeout_seconds=10.0, timeout_error=RuntimeAdmissionError("资源治理状态锁超时")):
             state = self._read_state()
             self._validate_or_initialize(state)
             yield state
@@ -663,10 +615,81 @@ class ResourceGovernor:
             raise RuntimeIntegrityError("资源治理状态不是对象")
         return payload
 
-    def _write_state(self, state: Mapping[str, object]) -> None:
+    def _write_state(self, state: dict[str, object]) -> None:
+        ended = [item for item in state["leases"].values() if item["status"] != "active"]
+        if ended:
+            self._append_history(state, "leases", ended)
+            state["leases"] = {key: item for key, item in state["leases"].items()
+                               if item["status"] == "active"}
         temporary = self._state_path.with_name(f".{self._state_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-        temporary.write_text(canonical_json(dict(state)), encoding="utf-8")
-        temporary.replace(self._state_path)
+        try:
+            with temporary.open("w", encoding="utf-8", newline="") as handle:
+                handle.write(canonical_json(dict(state)))
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(self._state_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _history_path(self, kind: str) -> Path:
+        return self.config.state_dir / ("lease-history.jsonl" if kind == "leases" else "observations.jsonl")
+
+    def _append_history(self, state: dict[str, object], kind: str, records: list[dict[str, object]]) -> None:
+        cursor = state["history"][kind]
+        path = self._history_path(kind)
+        committed = cursor["bytes"]
+        if committed and not path.is_file():
+            raise RuntimeIntegrityError("资源治理已提交冷历史缺失")
+        mode = "r+b" if path.exists() else "w+b"
+        with path.open(mode) as handle:
+            if os.fstat(handle.fileno()).st_size < committed:
+                raise RuntimeIntegrityError("资源治理已提交冷历史被截断")
+            # 仅移除未被热状态提交的尾部，原有效前缀保持原样。
+            handle.truncate(committed)
+            handle.seek(committed)
+            for index, record in enumerate(records, start=cursor["records"] + 1):
+                payload = {"governor_config_hash": self.identity_hash,
+                           "sequence": index, "record": record}
+                handle.write((canonical_json(payload) + "\n").encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+            state["history"][kind] = {"bytes": handle.tell(), "records": cursor["records"] + len(records)}
+
+    def _read_history(self, state: Mapping[str, object], kind: str) -> list[dict[str, object]]:
+        cursor = state["history"][kind]
+        remaining = cursor["bytes"]
+        records: list[dict[str, object]] = []
+        if remaining:
+            try:
+                with self._history_path(kind).open("rb") as handle:
+                    while remaining:
+                        line = handle.readline(remaining)
+                        if not line or not line.endswith(b"\n"):
+                            raise RuntimeIntegrityError("资源治理已提交冷历史被截断或记录不完整")
+                        remaining -= len(line)
+                        item = json.loads(line)
+                        if (not isinstance(item, dict)
+                                or set(item) != {"governor_config_hash", "sequence", "record"}
+                                or item["governor_config_hash"] != self.identity_hash
+                                or type(item["sequence"]) is not int
+                                or item["sequence"] != len(records) + 1
+                                or not isinstance(item["record"], dict)):
+                            raise RuntimeIntegrityError("资源治理冷历史身份或顺序损坏")
+                        records.append(item["record"])
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise RuntimeIntegrityError("资源治理已提交冷历史损坏") from exc
+        if len(records) != cursor["records"]:
+            raise RuntimeIntegrityError("资源治理冷历史记录数与提交位置不一致")
+        if kind == "observations":
+            self._validate_observations(records)
+            identities = [item["observation_id"] for item in records]
+        else:
+            for item in records:
+                self._validate_lease_record(item, active=False)
+            identities = [item["lease_id"] for item in records]
+        if len(set(identities)) != len(identities):
+            raise RuntimeIntegrityError("资源治理冷历史身份重复")
+        return records
 
     def _validate_or_initialize(self, state: dict[str, object]) -> None:
         if not state:
@@ -678,12 +701,14 @@ class ResourceGovernor:
                 "next_sequence": 1,
                 "requests": {},
                 "leases": {},
-                "observations": [],
+                "history": {kind: {"bytes": 0, "records": 0} for kind in ("leases", "observations")},
             })
             return
+        if state.get("contract_version") != RESOURCE_GOVERNOR_VERSION:
+            raise RuntimeIntegrityError("资源治理状态版本不受支持；请使用新的仓库外 state dir，旧目录保持原样")
         if set(state) != {
             "contract_version", "governor_config_hash", "governor_config_payload",
-            "capacity", "next_sequence", "requests", "leases", "observations",
+            "capacity", "next_sequence", "requests", "leases", "history",
         }:
             raise RuntimeIntegrityError("资源治理状态 schema 无效；准入已关闭")
         if state["contract_version"] != RESOURCE_GOVERNOR_VERSION:
@@ -701,10 +726,61 @@ class ResourceGovernor:
             raise RuntimeIntegrityError("资源治理容量与现有状态不一致")
         if type(state["next_sequence"]) is not int or state["next_sequence"] < 1:
             raise RuntimeIntegrityError("资源治理申请序号损坏")
-        if not isinstance(state["requests"], dict) or not isinstance(state["leases"], dict) or not isinstance(state["observations"], list):
+        if not isinstance(state["requests"], dict) or not isinstance(state["leases"], dict):
             raise RuntimeIntegrityError("资源治理集合状态损坏")
-        self._validate_observations(state["observations"])
+        history = state["history"]
+        if not isinstance(history, dict) or set(history) != {"leases", "observations"}:
+            raise RuntimeIntegrityError("资源治理冷历史提交位置损坏")
+        for cursor in history.values():
+            if (not isinstance(cursor, dict) or set(cursor) != {"bytes", "records"}
+                    or any(type(value) is not int or value < 0 for value in cursor.values())
+                    or bool(cursor["bytes"]) != bool(cursor["records"])):
+                raise RuntimeIntegrityError("资源治理冷历史提交位置损坏")
+        for identity, record in state["requests"].items():
+            self._validate_request_record(record)
+            if identity != record["request_id"]:
+                raise RuntimeIntegrityError("资源申请身份损坏")
+        for identity, record in state["leases"].items():
+            self._validate_lease_record(record, active=True)
+            if identity != record["lease_id"]:
+                raise RuntimeIntegrityError("活动租约身份损坏")
         self._assert_conservation(state)
+
+    @staticmethod
+    def _validate_request_record(record: object) -> None:
+        if not isinstance(record, Mapping):
+            raise RuntimeIntegrityError("资源申请记录损坏")
+        if (any(not isinstance(record.get(key), str) or not record[key]
+                for key in ("request_id", "owner_id", "created_at"))
+                or type(record.get("sequence")) is not int or record["sequence"] < 1
+                or type(record.get("pid")) is not int or record["pid"] < 1
+                or type(record.get("process_started_at")) not in (int, float)
+                or not math.isfinite(record["process_started_at"])
+                or record["process_started_at"] <= 0
+                or (record.get("parent_lease_id") is not None
+                    and not isinstance(record["parent_lease_id"], str))
+                or not isinstance(record.get("vector"), Mapping)):
+            raise RuntimeIntegrityError("资源申请进程身份或序号损坏")
+        ResourceVector.from_dict(record["vector"])
+
+    def _validate_lease_record(self, record: object, *, active: bool) -> None:
+        self._validate_request_record(record)
+        expected = {"request_id", "sequence", "owner_id", "vector", "parent_lease_id", "pid",
+                    "process_started_at", "created_at", "lease_id", "status", "acquired_at",
+                    "heartbeat_epoch", "released_at", "release_reason"}
+        if set(record) != expected:
+            raise RuntimeIntegrityError("资源租约 schema 损坏")
+        identity = {"governor": self.identity_hash, **{key: record[key] for key in
+                    ("request_id", "sequence", "owner_id", "pid", "process_started_at")}}
+        if (record["lease_id"] != typed_canonical_hash(identity)
+                or record["status"] not in ({"active"} if active else {"released", "reaped"})
+                or type(record["heartbeat_epoch"]) not in (int, float)
+                or not math.isfinite(record["heartbeat_epoch"])
+                or not isinstance(record["acquired_at"], str)
+                or (active and (record["released_at"] is not None or record["release_reason"] is not None))
+                or (not active and (not isinstance(record["released_at"], str)
+                                    or not isinstance(record["release_reason"], str)))):
+            raise RuntimeIntegrityError("资源租约身份或状态损坏")
 
     @staticmethod
     def _validate_observations(observations: object) -> None:
@@ -904,24 +980,6 @@ def _find_repository_root(start: Path) -> Path | None:
             return candidate
     return None
 
-
-def _directory_size(root: Path) -> int:
-    total = 0
-    if not root.exists():
-        return total
-
-    def directory_error(error: OSError) -> None:
-        # 正式提交会原子移动 staging；下一次采样会从新目录计入文件。
-        if not isinstance(error, FileNotFoundError):
-            raise error
-
-    for directory, _, files in os.walk(root, onerror=directory_error):
-        for name in files:
-            try:
-                total += (Path(directory) / name).stat().st_size
-            except OSError:
-                continue
-    return total
 
 
 __all__ = [

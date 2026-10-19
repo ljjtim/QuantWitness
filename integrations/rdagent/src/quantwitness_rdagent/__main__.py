@@ -56,6 +56,11 @@ def main():
     for field in ("template", "draft", "materials", "decisions", "confirmation", "output"):
         builder.add_argument("--" + field, required=True)
     args = parser.parse_args()
+    if args.command in {"inspect", "factor-inspect", "model-inspect", "joint-inspect", "campaign-inspect"}:
+        from .session_inspection import inspect_session
+        payload = json.loads(Path(args.request).read_text(encoding="utf-8"))
+        print(json.dumps(inspect_session(payload, command=args.command), ensure_ascii=False))
+        return
     if args.command == "knowledge-export":
         from .research_knowledge import export_session
         result = export_session(args.session, args.output)
@@ -64,10 +69,6 @@ def main():
     if args.command.startswith("joint-"):
         from .joint_research import validate_joint_research
         payload = validate_joint_research(json.loads(Path(args.request).read_text(encoding="utf-8")))
-        if args.command == "joint-inspect":
-            outcome = Path(payload["session_root"]) / "outcome.json"
-            print(outcome.read_text(encoding="utf-8") if outcome.exists() else json.dumps({"status": "incomplete"}))
-            return
         os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
         from .joint_loop import run_joint_research
         print(json.dumps(run_joint_research(payload, resume=args.command == "joint-resume", model_env_file=args.model_env_file), ensure_ascii=False))
@@ -75,10 +76,6 @@ def main():
     if args.command.startswith("model-"):
         from .model_research import validate_model_research
         payload = validate_model_research(json.loads(Path(args.request).read_text(encoding="utf-8")))
-        if args.command == "model-inspect":
-            outcome = Path(payload["session_root"]) / "outcome.json"
-            print(outcome.read_text(encoding="utf-8") if outcome.exists() else json.dumps({"status": "incomplete"}))
-            return
         os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
         from .model_loop import run_model_research
         print(json.dumps(run_model_research(payload, resume=args.command == "model-resume", model_env_file=args.model_env_file), ensure_ascii=False))
@@ -86,10 +83,6 @@ def main():
     if args.command.startswith("factor-"):
         from .factor_research import validate_factor_research
         payload = validate_factor_research(json.loads(Path(args.request).read_text(encoding="utf-8")))
-        if args.command == "factor-inspect":
-            outcome = Path(payload["session_root"]) / "outcome.json"
-            print(outcome.read_text(encoding="utf-8") if outcome.exists() else json.dumps({"status": "incomplete"}))
-            return
         os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
         from .factor_loop import run_factor_research
         result = run_factor_research(payload, resume=args.command == "factor-resume", model_env_file=args.model_env_file)
@@ -103,10 +96,6 @@ def main():
             payload = validate_package_campaign(payload)
         else:
             payload = validate_campaign(payload)
-        if args.command == "campaign-inspect":
-            output = Path(payload["session_root"]) / "outcome.json"
-            print(output.read_text(encoding="utf-8") if output.exists() else json.dumps({"status": "incomplete"}))
-            return
         os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
         from .campaign_loop import run_campaign
         result = run_campaign(payload, resume=args.command == "campaign-resume", model_env_file=args.model_env_file)
@@ -139,10 +128,6 @@ def main():
             print(json.dumps({"status": "written", "output": args.output}))
         return
     request = FrozenRequest.load(args.request)
-    if args.command == "inspect":
-        outcome = request.session_root / "outcome.json"
-        print(outcome.read_text(encoding="utf-8") if outcome.exists() else json.dumps({"status": "incomplete"}))
-        return
     live = "code_generation" in request.payload
     if live != bool(args.model_env_file):
         parser.error("live模式必须显式提供--model-env-file，固定响应模式不接受此参数")

@@ -38,7 +38,10 @@ def assemble_daily_feature_context(features: pd.DataFrame) -> tuple[pd.DataFrame
         "lineage_hash",
     }
     _require_columns(features, feature_required, "features")
-    valid_features = features.loc[features["status"].astype(str) == "ok"].copy()
+    valid_features = features.loc[
+        features["status"].astype(str) == "ok",
+        [column for column in features.columns if column in feature_required],
+    ].copy()
     if valid_features.empty:
         raise ModelMainlineError("模型样本缺少可用 Feature")
     for column in ("observation_time", "available_time"):

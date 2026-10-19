@@ -39,6 +39,9 @@ def _execute(args) -> dict[str, object]:
             "dry_run": not args.apply,
             "plan_hash": plan.plan_hash,
             "candidates": [asdict(item) for item in plan.candidates],
+            "candidate_bytes": sum(item.size_bytes for item in plan.candidates),
+            "candidate_files": sum(item.file_count for item in plan.candidates),
+            "protected": [asdict(item) for item in plan.protected],
             "quarantined": list(quarantined),
         }
     report = run_research_doctor(

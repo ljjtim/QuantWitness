@@ -106,7 +106,7 @@ def test_active_calculation_child_blocks_duplicate_then_allows_recovery(tmp_path
 def replacement(tmp_path, monkeypatch):
     import research_pipeline.workspace as workspace
     import research_pipeline.packages as packages
-    import research_pipeline.cli.research_plan_store as plan_store
+    import research_pipeline.application.research_plan_store as plan_store
     import research_pipeline.data_plane.archived_inputs as archived
     import research_pipeline.extensions as extensions
     import research_pipeline.results as results
@@ -153,15 +153,8 @@ def replacement(tmp_path, monkeypatch):
         manifests[Path(target).parent.parent.name], {"r": SimpleNamespace(catalog_hash="catalog")}, None, None, None))
     monkeypatch.setattr(archived, "load_archived_input_manifest", lambda p: {"requests": {"r": {"root": "archive"}}})
     monkeypatch.setattr(extensions, "verify_project_verifier_bundle", lambda p: SimpleNamespace(bundle_hash="verifier"))
-    def command(argv):
-        if argv[:2] == ["package", "lint"]:
-            return {"checks": {"fields": {"catalog_hash": "catalog"}}}
-        if argv[0] in {"verify", "report"}:
-            path = Path(argv[argv.index("--output") + 1])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}", encoding="utf-8")
-        return {}
-    monkeypatch.setattr(worker, "_command", command)
+    from research_pipeline.application import research_package
+    monkeypatch.setattr(research_package, "_execute", lambda args, **kwargs: {"checks": {"fields": {"catalog_hash": "catalog"}}})
     class Store:
         def __init__(self, *a, **kw):
             pass
@@ -193,6 +186,12 @@ def test_adopted_execution_stably_reuses_formal_result(replacement, monkeypatch)
     import research_pipeline.workspace as workspace
     monkeypatch.setattr(workspace, "run_workspace_execution", forbidden)
     monkeypatch.setattr(workspace, "resume_workspace_execution", forbidden)
+    from research_pipeline.application import workspace_flow
+    def execute(args, *, allocation_handler):
+        allocation_handler(args.workspace, clock=package.spec_payload["fixed_clock"], root_seed=17, label=args.label)
+        return {"execution_status": "succeeded", "verification_status": "pass", "result_directory": str(new / "results/result"),
+            "verification_result": str(new / "verification/result.json"), "result_store": str(new / "results"), "claim_level": verification.claim_level}
+    monkeypatch.setattr(workspace_flow, "execute_workspace", execute)
     first = package_execution._execute_package(**kwargs)
     repeated = package_execution._execute_package(**kwargs)
     assert first == repeated and first["result_ref"] == str(new / "results/result")
@@ -210,7 +209,8 @@ def test_replacement_identity_drift_is_rejected(replacement, monkeypatch, drift)
     elif drift == "input":
         manifests["new"]["input_snapshot_manifest"] = {"requests": {"r": {"root": "other"}}}
     elif drift == "catalog":
-        monkeypatch.setattr(worker, "_command", lambda argv: {"checks": {"fields": {"catalog_hash": "other"}}})
+        from research_pipeline.application import research_package
+        monkeypatch.setattr(research_package, "_execute", lambda args, **kwargs: {"checks": {"fields": {"catalog_hash": "other"}}})
     elif drift == "bundle":
         manifests["new"]["project_admission"] = {"bundle_hashes": ["other"]}
     elif drift == "clock":

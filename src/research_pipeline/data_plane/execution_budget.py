@@ -289,16 +289,26 @@ def build_provider_execution_plan(
     )
     process_reserve = _provider_process_reserve_bytes(execution_budget.memory_bytes)
     available_for_batches = execution_budget.memory_bytes - process_reserve
-    required_copies = _BATCH_LIVE_COPIES + _DUCKDB_MIN_BATCH_COPIES
+    # 布局缓冲与读取 batch 解耦；同时预留复制、合并与交接时的固定工作集。
+    layout_reserve = (
+        0 if plan.snapshot_layout is None else 3 * plan.snapshot_layout.max_buffer_bytes
+    )
+    required_copies = (
+        _BATCH_LIVE_COPIES + _DUCKDB_MIN_BATCH_COPIES
+        if plan.snapshot_layout is None else 1 + _DUCKDB_MIN_BATCH_COPIES
+    )
+    available_for_batches -= layout_reserve
     if available_for_batches < row_width * required_copies:
         raise ProviderExecutionError(
-            "data-plane 节点内存不足以同时容纳一行的 DuckDB 执行批次、"
-            "输出 batch、take 副本和 writer 缓冲"
+            "data-plane 节点内存不足以同时容纳布局缓冲、DuckDB 和输出 batch"
         )
     max_rows_by_memory = available_for_batches // (row_width * required_copies)
     batch_rows = min(plan.query.budget.batch_size, max_rows_by_memory)
     max_batch_bytes = batch_rows * row_width
-    batch_and_writer = max_batch_bytes * _BATCH_LIVE_COPIES
+    batch_and_writer = (
+        max_batch_bytes * _BATCH_LIVE_COPIES
+        if plan.snapshot_layout is None else max_batch_bytes + layout_reserve
+    )
     duckdb_memory = execution_budget.memory_bytes - process_reserve - batch_and_writer
     if duckdb_memory <= 0:
         raise ProviderExecutionError(

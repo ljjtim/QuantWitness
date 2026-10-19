@@ -46,7 +46,7 @@ def test_lstm_round_trip_does_not_read_prediction_labels(tmp_path, monkeypatch):
     assert prediction.shape == (len(test),) and np.isfinite(prediction).all()
     config = json.loads((tmp_path / row["config_path"]).read_text(encoding="utf-8"))
     assert config["candidate"]["model"]["class"] == "LSTM"
-    assert config["schema"] == "research.qlib-sequence-model-bundle.v1"
+    assert config["schema"] == "research.qlib-sequence-model-bundle.v2"
     assert config["training_curve"]
     assert {record["metric"] for record in config["training_curve"]} == {"negative_mse"}
 

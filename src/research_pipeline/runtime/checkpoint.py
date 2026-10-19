@@ -46,6 +46,7 @@ class CheckpointStore:
         fixed_clock: str,
         partition_key: str | None = None,
         phase_hook: Callable[[str], None] | None = None,
+        before_publish: Callable[[], None] | None = None,
     ) -> CheckpointManifest:
         node_execution_id = expectation.node_execution_id
         if any(token in node_execution_id for token in ("/", "\\")) or node_execution_id in {".", ".."}:
@@ -91,6 +92,8 @@ class CheckpointStore:
             comparable_existing["attempt_id"] = comparable_new["attempt_id"]
             if existing.content_hash != content_hash or comparable_existing != comparable_new:
                 raise RuntimeIntegrityError("同 checkpoint key 出现冲突内容")
+            if before_publish is not None:
+                before_publish()
             return existing
         stage = self.staging_root / attempt_id
         if stage.exists():
@@ -107,6 +110,10 @@ class CheckpointStore:
             os.fsync(handle.fileno())
         if phase_hook:
             phase_hook("checkpoint_prepared")
+        prepared = self._verify_content(stage, node_execution_id)
+        prepared.require_expectation(expectation)
+        if before_publish is not None:
+            before_publish()
         marker = stage / "COMMITTED"
         with marker.open("w", encoding="ascii") as handle:
             handle.write(manifest.manifest_hash)
@@ -117,7 +124,7 @@ class CheckpointStore:
         os.replace(stage, target)
         if phase_hook:
             phase_hook("renamed")
-        return self.verify(expectation)
+        return prepared
 
     def verify(
         self,
@@ -142,6 +149,14 @@ class CheckpointStore:
         marker = target / "COMMITTED"
         if not marker.is_file():
             raise RuntimeIntegrityError("checkpoint 缺 committed marker")
+        manifest = self._verify_content(target, node_execution_id)
+        if marker.read_text(encoding="ascii") != manifest.manifest_hash:
+            raise RuntimeIntegrityError("checkpoint marker 与 manifest 不一致")
+        return manifest
+
+    @staticmethod
+    def _verify_content(target: Path, node_execution_id: str) -> CheckpointManifest:
+        """复验暂存或已提交目录的内容，不将暂存对象当作可恢复提交。"""
         try:
             payload = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
             manifest = CheckpointManifest.from_dict(payload)
@@ -159,8 +174,6 @@ class CheckpointStore:
         content = content_path.read_bytes()
         if len(content) != manifest.content_size or _sha256(content) != manifest.content_hash:
             raise RuntimeIntegrityError("checkpoint 内容 hash 或大小不一致")
-        if marker.read_text(encoding="ascii") != manifest.manifest_hash:
-            raise RuntimeIntegrityError("checkpoint marker 与 manifest 不一致")
         return manifest
 
     def list_uncommitted_staging(self) -> tuple[Path, ...]:

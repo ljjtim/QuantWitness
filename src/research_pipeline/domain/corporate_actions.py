@@ -44,6 +44,7 @@ class CorporateAction:
     source_ref: str | None = None
     settlement_available_time: datetime | None = None
     trading_termination_date: date | None = None
+    recovery_assumption: str | None = None
 
     def __post_init__(self) -> None:
         if not self.action_id.strip() or self.revision < 1 or self.kind not in CORPORATE_ACTION_KINDS:
@@ -63,6 +64,13 @@ class CorporateAction:
             raise DomainContractError("数量类公司行为必须声明正比例")
         if self.kind == "code_change" and not self.new_code:
             raise DomainContractError("代码变更必须声明 new_code")
+
+        if self.recovery_assumption is not None:
+            if (self.recovery_assumption != "zero_recovery" or self.contract_version != 2
+                    or self.kind != "delisting_cash"):
+                raise DomainContractError("零回收假设仅适用于 v2 退市核销")
+            if self.cash_per_share_units or self.cash_per_share_microunits:
+                raise DomainContractError("零回收假设不能同时声明现金清算金额")
 
         extensions = (
             self.shares_arrival_date, self.shares_sellable_date, self.source_ref,
@@ -90,7 +98,7 @@ class CorporateAction:
                 require_aware_datetime(self.settlement_available_time, "settlement_available_time")
                 if self.trading_termination_date > self.effective_date:
                     raise DomainContractError("退市清算不能早于终止交易日")
-                if not (self.cash_per_share_units or self.cash_per_share_microunits):
+                if not (self.cash_per_share_units or self.cash_per_share_microunits) and self.recovery_assumption is None:
                     raise DomainContractError("退市现金清算必须有来源明确的正清算价格")
             elif self.settlement_available_time is not None or self.trading_termination_date is not None:
                 raise DomainContractError("非退市现金清算不能声明退市清算事实")
@@ -101,6 +109,9 @@ class CorporateAction:
 
     def to_dict(self) -> dict[str, object]:
         payload = dict(self.__dict__)
+        # 未声明假设的既有行动保持原封存身份。
+        if self.recovery_assumption is None:
+            payload.pop("recovery_assumption")
         extension_fields = {
             "contract_version", "shares_arrival_date", "shares_sellable_date", "source_ref",
             "settlement_available_time", "trading_termination_date",
@@ -129,6 +140,8 @@ class CorporateAction:
             "settlement_available_time", "trading_termination_date",
         }
         expected = set(cls.__dataclass_fields__)
+        if "recovery_assumption" not in payload:
+            expected.remove("recovery_assumption")
         if "contract_version" not in payload:
             expected -= extension_fields
         elif payload["contract_version"] != 2:

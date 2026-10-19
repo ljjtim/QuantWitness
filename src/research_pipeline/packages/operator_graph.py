@@ -372,7 +372,12 @@ def _inject_platform_catalog_admission(
     raw_nodes = graph["nodes"]
     if not isinstance(raw_nodes, (list, tuple)) or not raw_nodes:
         raise ResearchPackageError("spec.graph.nodes 必须是非空序列")
-    nodes = [_thaw_mapping(item, "spec.graph.nodes") for item in raw_nodes]
+    # 平台只改节点外层的 inputs；参数由 Recipe 构造器统一校验和冻结。
+    nodes = []
+    for item in raw_nodes:
+        if not isinstance(item, Mapping):
+            raise ResearchPackageError("spec.graph.nodes 必须是映射")
+        nodes.append(dict(item))
     declared = [item for item in nodes if item.get("operator_id") == "data.catalog.admission"]
     if declared:
         raise ResearchPackageError("ResearchPackage 不得声明平台 Catalog admission 节点")
@@ -406,7 +411,7 @@ def _inject_platform_catalog_admission(
     for data_node in data_nodes:
         operator_id = str(data_node["operator_id"])
         inputs = data_node.get("inputs")
-        if not isinstance(inputs, list):
+        if not isinstance(inputs, (list, tuple)):
             raise ResearchPackageError(f"{operator_id} inputs 必须是序列")
         if inputs:
             raise ResearchPackageError(f"{operator_id} 的 admission 输入由平台注入")
@@ -655,6 +660,12 @@ def _validate_operator_graph_special_contracts(
     node_by_id = {item.node_id: item for item in recipe.nodes}
     for node in recipe.nodes:
         parameters = node.parameters
+        if node.operator_id == "research.model.locked-holdout":
+            from research_pipeline.research.validation.holdout_series import series_from_parameters
+            try:
+                series_from_parameters(parameters)
+            except ValueError as exc:
+                raise ResearchPackageError(str(exc)) from exc
         if node.operator_id in {"finance.simulation.intraday", "finance.simulation.daily-cash"}:
             _validate_explicit_order_parameters(parameters)
         if node.operator_id == "finance.simulation.daily-cash":

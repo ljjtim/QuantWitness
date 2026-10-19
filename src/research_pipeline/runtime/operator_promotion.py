@@ -53,7 +53,7 @@ BUILTIN_ARTIFACT_TYPE_IDENTITIES = frozenset({
 
 # 公共定义集合经审查固定；有意修改实现需同步复核本常量。
 BUILTIN_OPERATOR_DEFINITION_SET_HASH = (
-    "228be0b82eab75a56b1b6005cccb82f456274cda01b0a197fc15654a7a1196d5"
+    "ef8b60cdf66d0c38e18ac71e45098707fe2f6009fb3a3ebdef59ad6518ce4d0e"
 )
 
 
@@ -224,7 +224,7 @@ DAILY_CASH_LOCAL_APPROVAL = MappingProxyType({
         "finance.simulation.daily-cash.v1",
         "research_pipeline.runtime.qlib_portfolio_execution",
     ),
-    "definition_hash": "75a1adce5000da19ae2e779b25dd46a6f78ca6448c4d8be080e74d8cd0ae4227",
+    "definition_hash": "1bf79376276192d456979dd5d8c26e1fe7b96eb69dba2ab752867b44b51b018c",
     "approved_at": "2026-10-03",
     "approval_ref": "release/daily-cash-local-admission.md",
     "maximum_state": "local_only",
@@ -232,7 +232,7 @@ DAILY_CASH_LOCAL_APPROVAL = MappingProxyType({
 })
 
 
-SHARED_FUTURES_LOCAL_DEFINITION_HASHES = MappingProxyType({'daily': '34adb479505d698f1812c362aa1bd03daa6069b841b139a0a365ca1b2db1c775', 'intraday': 'f4314f11f1c56690bb49ffe37873854c6617840edb8f2dc9cbe37be9a96bd8e0'})
+SHARED_FUTURES_LOCAL_DEFINITION_HASHES = MappingProxyType({'daily': '5baa3ed25343f700d55847c32522ead13baac162ecbccec4992af28a53c32281', 'intraday': 'd61ac1e53073cc92e726a834c29f423e46fac54038b51f92f5a8f57431e206c1'})
 
 SHARED_FUTURES_LOCAL_APPROVALS = tuple(MappingProxyType({
     "operator_identity": (

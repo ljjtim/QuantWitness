@@ -1,8 +1,8 @@
 """Qlib 表格模型、冻结处理器及六节点无数据库合成验收。"""
 from __future__ import annotations
 import json
-from pathlib import Path
 import shutil
+from pathlib import Path
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
@@ -10,10 +10,15 @@ import pytest
 
 from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle, normalize_candidates, QlibModelError
 from research_pipeline.platform import canonical_json
-from research_pipeline.research.validation import build_walk_forward
+from research_pipeline.research.validation import build_walk_forward, ValidationError
 import research_pipeline.runtime.walk_forward_model_execution as runtime
 
 BUDGET = 128 * 1024**2
+
+
+def research_series(root):
+    return {"series_id": "test-model", "root": str(Path(root).resolve()),
+        "purpose": "合成模型最终评价验收", "legacy_ledger_roots": []}
 
 
 def synthetic_samples():
@@ -87,7 +92,8 @@ def test_three_models_frozen_bundle_round_trip_and_future_labels(tmp_path, name,
 
 def test_processors_fit_only_train_and_rank_preserves_raw_labels(tmp_path):
     samples,_=synthetic_samples()
-    train=samples.iloc[:390].copy(); valid=samples.iloc[400:490].copy()
+    train=samples.iloc[:390].copy()
+    valid=samples.iloc[400:490].copy()
     original=train.target.copy()
     row=fit_bundle(train,valid,candidate=candidate(rank=True),feature_columns=("x1","x2"),
         output_root=tmp_path,bundle_path="bundles/0/0",root_seed=7,fit_scope_ref="train-only")
@@ -105,7 +111,8 @@ def test_processors_fit_only_train_and_rank_preserves_raw_labels(tmp_path):
     assert np.isfinite(labels).all()
     with pytest.raises(QlibModelError,match="口径必须一致"):
         normalize_candidates([candidate(rank=True),candidate(alpha=10.0)])
-    changed=valid.copy(); changed[["x1","x2"]]=1e9
+    changed=valid.copy()
+    changed[["x1","x2"]]=1e9
     other=fit_bundle(train,changed,candidate=candidate(rank=True),feature_columns=("x1","x2"),
         output_root=tmp_path,bundle_path="bundles/1/0",root_seed=7,fit_scope_ref="train-only")
     changed_config=json.loads((tmp_path/other["config_path"]).read_text())
@@ -114,12 +121,15 @@ def test_processors_fit_only_train_and_rank_preserves_raw_labels(tmp_path):
 
 
 def test_rejects_future_training_labels_and_unsupported_configuration(tmp_path):
-    samples,_=synthetic_samples(); train=samples.iloc[:390].copy();valid=samples.iloc[400:490].copy()
+    samples,_=synthetic_samples()
+    train=samples.iloc[:390].copy()
+    valid=samples.iloc[400:490].copy()
     train.loc[0,"label_available_time"]=pd.Timestamp("2025-01-01",tz="UTC")
     with pytest.raises(QlibModelError,match="尚不可见"):
         fit_bundle(train,valid,candidate=candidate(),feature_columns=("x1","x2"),output_root=tmp_path,
             bundle_path="bundles/0/0",root_seed=1,fit_scope_ref="x")
-    spec=candidate();spec["model"]["kwargs"]["include_valid"]=True
+    spec=candidate()
+    spec["model"]["kwargs"]["include_valid"]=True
     with pytest.raises(QlibModelError,match="include_valid"):
         normalize_candidates([spec])
 
@@ -170,11 +180,11 @@ def test_split_fit_predict_metrics_selection_and_locked_holdout(tmp_path, model_
         output_root=tmp_path/"holdout",research_identity_hash="1"*64,data_snapshot_hash="2"*64,selection_hash="3"*64,
         package_hash="4"*64,implementation_hash="5"*64,actor="synthetic-test",reason="组件验收",
         unlock_at=datetime(2024,6,1,tzinfo=timezone.utc),fixed_clock=datetime(2024,6,2,tzinfo=timezone.utc),
-        ledger_root=tmp_path/"ledger",root_seed=7)
+        ledger_root=tmp_path/"test-model"/"ledgers",research_series=research_series(tmp_path),root_seed=7)
     result=evaluate_locked_holdout(**kwargs)
     assert len(opened)==1 and len(result["predictions"])==100
     assert all(row["raw_label"]==row["actual"] for row in result["predictions"])
-    with pytest.raises(Exception,match="prepared/opened"):
+    with pytest.raises(ValidationError,match="已经 prepared/opened|已暴露区间重叠"):
         evaluate_locked_holdout(**kwargs)
     assert len(opened)==1
 
@@ -203,7 +213,8 @@ def _run_daily_chain(root, samples, *, monkeypatch=None, failure=False):
 
 def test_future_labels_do_not_change_previous_selected_prediction(tmp_path):
     samples,_=synthetic_samples()
-    baseline=tmp_path/"baseline";changed=tmp_path/"changed"
+    baseline=tmp_path/"baseline"
+    changed=tmp_path/"changed"
     split=_run_daily_chain(baseline,samples)
     future=samples.copy()
     future.loc[future.index>=480,"target"]=future.loc[future.index>=480,"target"]*1000
@@ -211,17 +222,20 @@ def test_future_labels_do_not_change_previous_selected_prediction(tmp_path):
     fold=split.folds[0].fold_id
     for table,cols in (("fold_selections",["selected_candidate_id","selection_time","validation_metric"]),
                        ("test_predictions",["sample_id","candidate_id","prediction","model_ref"])):
-        before=_read(baseline/"selection",table);after=_read(changed/"selection",table)
+        before=_read(baseline/"selection",table)
+        after=_read(changed/"selection",table)
         pd.testing.assert_frame_equal(before.loc[before.fold_id==fold,cols].reset_index(drop=True),
             after.loc[after.fold_id==fold,cols].reset_index(drop=True))
 
 
 def test_future_candidate_failure_is_excluded_only_after_its_fit_time(tmp_path,monkeypatch):
     samples,_=synthetic_samples()
-    baseline=tmp_path/"baseline";changed=tmp_path/"changed"
+    baseline=tmp_path/"baseline"
+    changed=tmp_path/"changed"
     split=_run_daily_chain(baseline,samples)
     _run_daily_chain(changed,samples,monkeypatch=monkeypatch,failure=True)
-    before=_read(baseline/"selection","fold_selections");after=_read(changed/"selection","fold_selections")
+    before=_read(baseline/"selection","fold_selections")
+    after=_read(changed/"selection","fold_selections")
     fold=split.folds[0].fold_id
     assert before.loc[before.fold_id==fold,"selected_candidate_id"].iloc[0]==after.loc[after.fold_id==fold,"selected_candidate_id"].iloc[0]
     models=_read(changed/"fit","models")
@@ -243,7 +257,6 @@ def test_unknown_fit_error_propagates_without_success_metadata(tmp_path,monkeypa
 
 def test_real_prediction_result_generates_qlib_html(tmp_path):
     """正式预测表经 Result 封存后驱动报告，不使用手工替代预测表。"""
-    import pyarrow.parquet as pq
     from research_pipeline.results import ResultAssembler, ResultSpec, ResultTableSpec
     from research_pipeline.runtime.external_artifact import ExternalArtifactStore
     from research_pipeline.evidence.verification_result import verify_result
@@ -259,7 +272,8 @@ def test_real_prediction_result_generates_qlib_html(tmp_path):
     staging=external.prepare()
     shutil.copytree(producer/"predict",staging,dirs_exist_ok=True)
     commit=external.commit(staging,artifact_name="predictions",artifact_type="research.model-validation-predictions.v2")
-    path=run_root/"operator-dag-run.json";record=json.loads(path.read_text())
+    path=run_root/"operator-dag-run.json"
+    record=json.loads(path.read_text())
     record["outputs"]["statistics"]["predictions"]=commit.artifact_ref.to_dict()
     path.write_text(canonical_json(record),encoding="utf-8")
     spec=ResultSpec.build((*_spec().tables,ResultTableSpec("model_predictions","diagnostic","statistics","predictions",
@@ -271,7 +285,8 @@ def test_real_prediction_result_generates_qlib_html(tmp_path):
     context=verify_result(directory,result_store=result_root)
     predictions=_read(producer/"predict","validation_predictions")
     first=predictions.iloc[0]
-    request=_request();request.update(result_id=bundle.result_id,table_id="model_predictions")
+    request=_request()
+    request.update(result_id=bundle.result_id,table_id="model_predictions")
     request["selection"].update(candidate_id=first.candidate_id,fold_id=first.fold_id)
     request["window"]={"start":"2024-01-01","end":"2024-06-01"}
     html=render_qlib_report(context,request,verification_summary="合成模型接口验证；不代表真实策略结论")

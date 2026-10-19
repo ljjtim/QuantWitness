@@ -22,7 +22,7 @@ split 只组织准入样本和角色。fit 在每个 candidate/fold 内依次拟
 
 开发切分支持 expanding 和 rolling。前者保持训练起点，随时间增加历史；后者按 `step_sessions` 前移固定名义训练窗。切分日历按开发样本的 `observation_time` 日期裁切，窗口成员也按真实观察时间分组；`observation_session` 保留模型证券日期索引。前一会话收盘因子可以在下一决策会话使用，两种日期不要求相同。独立复核按相同观察时间重建成员，purge 继续使用实际决策时点、标签结束与成熟时间。每个候选在每个 fold 单独拟合处理器与模型。实际训练成员还要经过标签结束时间、成熟时间、embargo 和完整序列资格筛选；名义窗口不保证固定样本数。序列 warmup 可读取窗前已可见的 Feature，不把窗外标签加入拟合。
 
-公开 Qlib 示例用 `--window-mode rolling --train-sessions 20` 声明滚动开发，用 `--horizon-sessions 5` 声明单个五会话目标，也可用 `--horizons 1 5` 一次冻结多份研究。每个期限独立生成 ResearchPackage、Result、VerificationResult 和最终留出账本，共享输入来源、候选、窗口配置及留出边界。组清单只记录各成员结果位置，不合并不同期限的 MSE，不用最终留出表现选择期限。
+公开 Qlib 示例用 `--window-mode rolling --train-sessions 20` 声明滚动开发，用 `--horizon-sessions 5` 声明单个五会话目标，也可用 `--horizons 1 5` 一次冻结多份研究。开发模式下每个期限独立生成 ResearchPackage、Result 和 VerificationResult，共享输入来源、候选与窗口配置。组清单只记录各成员结果位置，不合并不同期限的 MSE。多期限比较使用开发指标，最终确认选择单一期限；同一研究系列的重叠留出日期不得按期限重复打开。
 
 标签为 `close[t+h] / close[t] - 1`，在 t+h 会话收盘结束，下一会话开盘成熟。不同期限按真实成熟时间分别 purge；冻结设计、开发样本及最终预测的期限必须一致。开发模式只封存留出边界前的输入，不开放最终留出。
 
@@ -124,3 +124,33 @@ Result组件已支持序列权重与窗口文件封存，独立模型验证已�
 上游使用完整历史窗口内的自注意力，预测末端只读取决策时点已可见的窗口成员；窗口内的位置互相注意不引入决策时点之后的数据。模型的特征投影、位置编码、注意力头、编码器层、前馈层和优化器状态在加载时核对。内存预算包含参数副本、固定位置编码和随窗口长度平方增长的注意力工作区。Transformer训练、早停与预测沿用Qlib，单样本输出保持一维；学习曲线继续记录negative_mse。
 
 Transformer已完成Windows正式ResearchPackage及两次模型成功节点后的中断恢复：最终200条holdout预测，10节点复用，holdout单次消费，独立验证pass。Linux当前源码及1.2.0 wheel安装态同7项真实模型专项分别通过。Linux正式包全流程仍待最终跨平台交付验收。
+
+
+## 输入工作集与资源
+
+split 与 locked holdout 默认声明 16 GiB。Feature 和 opened 后的 Label 完整记录逐批核验，来源和时间字段都参与原摘要；模型必需时间列投影后继续执行可见性门禁，未参与训练的来源字段篡改仍拒绝。development 标签继续按留出边界隔离，locked holdout 必须先登记 opened 才加载目标；已消费留出不能重新训练。列投影不改变样本、缺失值、处理器、模型、指标或 PIT 规则。加载工作集和小批测量见[资源预算](project_resource_budgets.md#日频模型长表加载)。
+
+## 正式表引用式模型事实
+
+新写的模型事实使用 `model_diagnostics.table_storage=result_tables_v2`。JSON 只保存模式、正式表角色绑定、PIT 声明和必要统计量；正式表、研究设计、模型配置、序列窗口文件及 holdout 账本从已验证 Result 读取，不在 facts 中保存完整副本。开发研究和最终研究使用同一表示，表格、序列和生成模型沿用各自独立验证；金融组合的正式账本及金融 oracle 仍单独核对。
+
+引用必须匹配已验证 Result 的表角色、schema 和必需列。模型时间、预测和审计事实保持列式存储，按访问位置核对；表格模型不展开因子矩阵及来源大表。序列验证直接读取 Feature、Label 和上下文列，逐窗核对原始特征值、可见时间、末端资格和 raw 标签。模型训练范围、选模、一次性 holdout、MSE 与数值容差保持原合同，项目 Verifier 继续独立检查原始来源和研究定义。
+
+序列研究工件使用 `research.model-sequence-context.v2`。context 为每条证券会话分配唯一的 `context_index:int64`；members 仅保存 `sample_id`、`step:int64` 和 `context_index:int64`。证券、会话、观察/可见时间、特征及 lineage 保存在共享 context。模型训练子集保留原 context_index，不重新编号。Result 中 context、members 的表 schema 使用 v2，targets、exclusions 保持 v1。独立 verifier 从原始 Feature、Label 与冻结日历推导每个窗口，不调用生产构建算法。
+
+封存模型使用 `research.qlib-sequence-model-bundle.v2` 和 `research.qlib-sequence-input.v2`。旧内嵌 facts、`result_tables_v1` 及 v1 序列 Result 仍可读取；v1 封存模型可在原依赖合同下显式恢复预测。新包只写 v2，不迁移旧 Result。源码、证据 schema 与项目 bundle 身份变化后，旧 plan/checkpoint 不跨身份恢复或复用。研究系列、四阶段账本和已消费 holdout 状态保持原规则，不重新分配访问资格。
+
+## 最终评价的研究系列
+
+`research.model.locked-holdout` 使用必填 `research_series_json` 冻结系列 ID、持久 Root、研究问题和旧账本根。具体设计身份继续用于本次变体，父研究目的由稳定系列确定。改窗口、候选、seed 或数据版本后，既往最终暴露仍参加闭区间重叠检查。
+
+四阶段账本及 `series.json` 随 Result 封存。系列级文件锁覆盖打开前重读与 `opened` 写入，目标值在记录成功后读取；失败消费和已成功节点复用继续遵守原合同。配置、旧账本登记和恢复操作见[研究系列与最终留出集](holdout-series.md)。
+
+
+## 候选与 fold 并行
+
+正式 `run` 或 Workspace 执行使用 `--mode bounded_parallel --workers 2 --resource-memory-bytes 34359738368` 可请求候选与 fold 的并行拟合；32 GiB 总包络为已声明 16 GiB 的 split 节点和 Supervisor 驻留留下空间，实际容量按研究声明配置。`partitioned_batch` 使用分批调度，默认串行保持不变。内建 fit 声明两个 CPU 槽和十个节点进程槽，覆盖 Windows 虚拟环境的外层计算进程、两个候选进程及文件 Recorder 的辅助进程；候选的内部线程数继续由原模型合同限制。workers 不额外分配内存，跨进程治理还需为共享 Supervisor 留一个槽。冻结搜索清单的 max_parallel 等于声明候选数，串行与并行使用同一候选宇宙上限；单个候选的多个 fold 可独立并行，不新增候选试验。实际任务并发继续受运行资源约束。
+
+每个 spawn 子进程从封存 split 读取同一训练／validation 范围，使用原候选参数和根种子，写入独立 bundle 路径。Supervisor 按固定候选／fold 顺序汇总拟合记录、范围证书和 trial ledger。预测、选择、最终重训与 holdout 的原口径保持；并行拟合不打开 test/holdout。
+
+父进程驻留、子进程输入副本和运行时开销共同限制实际并发；实际内存、temp 和 deadline 超限会停止并返回失败。失败状态不会作为金融指标，未完成 fit 不发布成功 checkpoint。执行模式和 workers 随原 invocation 保存，恢复须复验同一配置与实现身份。

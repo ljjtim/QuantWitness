@@ -57,22 +57,15 @@ def collect_facts(context, inputs):
     sequence_ports = {"sequence_" + name: "splits" for name in ("context", "targets", "members", "exclusions")}
     if set(bindings) not in (set(table_ports), set(table_ports) | set(sequence_ports)):
         raise ValueError('模型有效性绑定表集合与正式端口不一致')
-    tables = {name: _table(values[port], name, allow_empty=development and name == "holdout_index") for name, port in table_ports.items()}
-    if len(tables['study_design']) != 1:
+    design_rows = _table(values['summary'], 'study_design')
+    if len(design_rows) != 1:
         raise ValueError('冻结研究设计必须唯一')
-    design = json.loads(tables['study_design'][0]['design_json'])
+    design = json.loads(design_rows[0]['design_json'])
     if design.get('sequence') is not None:
-        if not set(sequence_ports) <= set(bindings):
-            raise ValueError('序列研究缺少窗口表绑定')
-        tables.update({name: _table(values[port], name, allow_empty=name == "sequence_exclusions") for name, port in sequence_ports.items()})
+        if not set(sequence_ports) <= set(bindings) or design['sequence'].get('schema') != 'research.model-sequence-context.v2':
+            raise ValueError('序列研究必须绑定v2窗口表')
     elif set(sequence_ports) & set(bindings):
         raise ValueError('未声明序列研究却绑定窗口表')
-    configs = {row['config_path']: values['summary'].read_json(row['config_path']) for row in tables['models']}
-    model_windows = {path: {name: pq.read_table(pa.BufferReader(values['summary'].read_bytes(source))).to_pylist()
-        for name, source in config['sequence']['files'].items()}
-        for path, config in configs.items() if config['candidate']['model']['class'] in {'GRU', 'LSTM', 'TransformerModel'}}
-    ledger = {name: values['holdout'].read_json('holdout-ledger/' + name + '.json')
-              for name in ('plan', 'prepared', 'opened', 'terminal')} if not development else {}
     observations, ceilings = [], {}
     for request_id in sorted(context.parameters['data_request_ids']):
         admission = values['data'].admission(request_id)
@@ -86,22 +79,30 @@ def collect_facts(context, inputs):
     levels = ('research_observation', 'portfolio_simulation_candidate', 'tradable_simulation')
     if not ceilings or any(value not in levels for value in ceilings.values()):
         raise ValueError('模型输入结论上限缺失或非法')
-    predictions = tables['validation_predictions'] if development else tables['holdout_predictions']
-    mse = fmean((row['prediction'] - row['actual']) ** 2 for row in predictions)
-    if len(tables['metrics']) != 1 or tables['metrics'][0]['metric_ref'] != context.parameters['metric_ref']:
+    prediction_name = 'validation_predictions' if development else 'holdout_predictions'
+    prediction_port = 'predictions' if development else 'holdout'
+    count, start, end = 0, None, None
+    def squared_errors():
+        nonlocal count, start, end
+        for name in values[prediction_port].file_paths:
+            if name.startswith(prediction_name + '/') and name.endswith('.parquet'):
+                parquet = pq.ParquetFile(pa.BufferReader(values[prediction_port].read_bytes(name)))
+                for batch in parquet.iter_batches(batch_size=8192, columns=['prediction', 'actual', 'observation_session']):
+                    for row in batch.to_pylist():
+                        day = str(row['observation_session'])[:10]
+                        start = day if start is None else min(start, day)
+                        end = day if end is None else max(end, day)
+                        count += 1
+                        yield (row['prediction'] - row['actual']) ** 2
+    mse = fmean(squared_errors())
+    metric_rows = _table(values['summary'], 'metrics')
+    if len(metric_rows) != 1 or metric_rows[0]['metric_ref'] != context.parameters['metric_ref']:
         raise ValueError('模型诊断指标必须唯一并绑定冻结定义')
-    tables['metrics'] = [{
-        **tables['metrics'][0], 'unit': 'squared_decimal_price_change',
-        'sample_start': min(str(row['observation_session'])[:10] for row in predictions),
-        'sample_end': max(str(row['observation_session'])[:10] for row in predictions),
-        'sample_size': len(predictions), 'status': 'computed',
-    }]
     facts = {
         'contract_version': 'research-validity-facts-v1',
         'model_diagnostics': {
-            'mode': 'walk_forward_development_v1' if development else 'walk_forward_prediction_v1', 'design': design,
-            'tables': tables, 'table_bindings': dict(bindings),
-            'model_configs': configs, 'holdout_ledger': ledger, 'model_window_facts': model_windows,
+            'mode': 'walk_forward_development_v1' if development else 'walk_forward_prediction_v1',
+            'table_storage': 'result_tables_v2', 'table_bindings': dict(bindings),
         },
         'data_pit': {
             'observations': observations, 'consumed_request_ids': sorted(ceilings),
@@ -110,8 +111,9 @@ def collect_facts(context, inputs):
         },
         'label_split': {'mode': 'walk_forward_development_v1' if development else 'walk_forward_prediction_v1'},
         'search_holdout': {'mode': 'walk_forward_development_v1' if development else 'walk_forward_prediction_v1'},
-        'statistics': {'method': 'validation_mse' if development else 'prediction_mse', 'sample_count': len(predictions),
-                       'mse': mse, 'metric_ref': context.parameters['metric_ref']},
+        'statistics': {'method': 'validation_mse' if development else 'prediction_mse', 'sample_count': count,
+                       'mse': mse, 'metric_ref': context.parameters['metric_ref'],
+                       'sample_start': start, 'sample_end': end},
         'financial_tradability': {'applicability': 'not_applicable',
                                  'reason': 'prediction_diagnostics_has_no_trading_simulation'},
     }
@@ -143,7 +145,12 @@ def run(context, inputs, output_root):
         port='validity', artifact_type='research.validity-facts.v1',
         relative_path='validity', files=('result.json',), publish_at_artifact_root=True,
     )
-    metric_table = pa.Table.from_pylist(facts['model_diagnostics']['tables']['metrics'])
+    values = {value.port: value for value in inputs}
+    statistics = facts['statistics']
+    metric = _table(values['summary'], 'metrics')[0]
+    metric_table = pa.Table.from_pylist([{**metric, 'unit': 'squared_decimal_price_change',
+        'sample_start': statistics['sample_start'], 'sample_end': statistics['sample_end'],
+        'sample_size': statistics['sample_count'], 'status': 'computed'}])
     metrics = output_root.write_batches(
         port='metrics', artifact_type='project.qlib_demo.prediction-metrics.v1',
         relative_path='metrics/part-00000.parquet', schema=metric_table.schema,

@@ -26,9 +26,9 @@ def load_report_request(path: str | Path) -> dict:
 def validate_report_request(value: object) -> dict:
     if not isinstance(value, Mapping):
         raise ValueError("Qlib 报告请求必须为对象")
-    from .portfolio_report import PORTFOLIO_REPORT_VERSION, validate_portfolio_request
+    from .portfolio_report import PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION, validate_portfolio_request
 
-    if value.get("contract_version") == PORTFOLIO_REPORT_VERSION:
+    if value.get("contract_version") in {PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION}:
         return validate_portfolio_request(value)
     request = dict(value)
     fields = {"contract_version", "result_id", "table_id", "selection", "window", "columns", "method", "budget"}
@@ -231,9 +231,9 @@ def _model_figures(frame, method):
 def render_qlib_report(context, request: Mapping, *, verification_summary: str) -> str:
     """验证结论与 Qlib 图形并列展示，图形成功不改变验证状态。"""
     request = validate_report_request(request)
-    from .portfolio_report import PORTFOLIO_REPORT_VERSION, render_portfolio_report
+    from .portfolio_report import PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION, render_portfolio_report
 
-    if request["contract_version"] == PORTFOLIO_REPORT_VERSION:
+    if request["contract_version"] in {PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION}:
         return render_portfolio_report(context, request, verification_summary=verification_summary)
     frame = read_prediction_frame(context, request)
     figures, diagnostics, notes = _model_figures(frame, request["method"])

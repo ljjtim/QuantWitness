@@ -1,17 +1,16 @@
 """风险和组合手算、真实求解状态及PIT专项。"""
 from copy import deepcopy
-import importlib.util
 from pathlib import Path
-import sys
 
 import numpy as np
 import pandas as pd
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1] / "project_extensions/qlib_portfolio_risk"
-sys.path.insert(0, str(ROOT))
-import optimizer as risk_optimizer
-import oracle as risk_oracle
+with pytest.MonkeyPatch.context() as imports:
+    imports.syspath_prepend(str(ROOT))
+    import optimizer as risk_optimizer
+    import oracle as risk_oracle
 
 
 def covariance():

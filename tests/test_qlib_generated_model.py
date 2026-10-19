@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle, normalize_candidates
-from research_pipeline.research.modeling.generated import validate_definition
 from research_pipeline.evidence.generated_model_validity import verify_source_and_weights
 from test_qlib_model_integration import synthetic_samples, candidate
 
@@ -26,7 +25,8 @@ def generated_candidate():
 
 @pytest.fixture(autouse=True)
 def no_database(monkeypatch):
-    import sqlite3, duckdb
+    import sqlite3
+    import duckdb
     def reject(*args, **kwargs):
         raise AssertionError('生成模型验收禁止数据库连接')
     monkeypatch.setattr(sqlite3, 'connect', reject)
@@ -80,12 +80,18 @@ def test_generated_restore_rejects_modified_source(generated_bundle, tmp_path):
 @pytest.mark.parametrize('change', ['future_edge', 'output_width', 'unused_node', 'extra_fit', 'rank_label'])
 def test_generated_contract_rejects_unsupported_model(change):
     item = generated_candidate()
-    if change == 'future_edge': item['model']['kwargs']['definition']['nodes'][0]['inputs'] = [1]
-    elif change == 'output_width': item['model']['kwargs']['definition']['nodes'][-1]['width'] = 3
-    elif change == 'unused_node': item['model']['kwargs']['definition']['nodes'][-1]['inputs'] = [-1]
-    elif change == 'extra_fit': item['fit'] = {'test': True}
-    else: item['processors']['learn'].append({'class': 'CSRankNorm', 'kwargs': {}})
-    with pytest.raises(ValueError): normalize_candidates([item])
+    if change == 'future_edge':
+        item['model']['kwargs']['definition']['nodes'][0]['inputs'] = [1]
+    elif change == 'output_width':
+        item['model']['kwargs']['definition']['nodes'][-1]['width'] = 3
+    elif change == 'unused_node':
+        item['model']['kwargs']['definition']['nodes'][-1]['inputs'] = [-1]
+    elif change == 'extra_fit':
+        item['fit'] = {'test': True}
+    else:
+        item['processors']['learn'].append({'class': 'CSRankNorm', 'kwargs': {}})
+    with pytest.raises(ValueError):
+        normalize_candidates([item])
 
 
 def test_generated_declaration_does_not_load_optional_training_dependencies(tmp_path):

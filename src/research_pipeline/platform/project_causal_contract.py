@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, replace
-from math import isfinite
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from itertools import product
+from math import isfinite, prod
+from operator import index as integer_index
+from sys import maxsize
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -62,13 +65,102 @@ class CausalSource:
         return result
 
 
+def _key_scalar(value: object) -> bool:
+    return type(value) in (str, int, float, bool) and not (
+        type(value) is float and not isfinite(value)
+    )
+
+
+@dataclass(frozen=True)
+class CausalKeyProduct(Sequence):
+    """按冻结循环顺序生成笛卡尔积键，只常驻各列的唯一值轴。"""
+
+    axes: tuple[tuple[object, ...], ...]
+    order: tuple[int, ...]
+    _members: tuple[frozenset, ...] = field(init=False, repr=False, compare=False)
+    _length: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.axes, (tuple, list)) or not self.axes:
+            raise CausalTimeContractError("causal key_axes 必须是非空值轴序列")
+        axes = []
+        members = []
+        for axis in self.axes:
+            if not isinstance(axis, (tuple, list)) or not axis:
+                raise CausalTimeContractError("causal key_axes 每个值轴必须非空")
+            if any(not _key_scalar(value) for value in axis):
+                raise CausalTimeContractError("causal key_axes 只能包含非空 JSON 标量")
+            values = frozenset(axis)
+            if len(values) != len(axis):
+                raise CausalTimeContractError("causal key_axes 值轴必须唯一")
+            axes.append(tuple(axis))
+            members.append(values)
+        if (not isinstance(self.order, (tuple, list))
+                or any(type(column) is not int for column in self.order)
+                or len(self.order) != len(axes)
+                or set(self.order) != set(range(len(axes)))):
+            raise CausalTimeContractError("causal key_order 必须是所有列索引的排列")
+        length = prod(len(axis) for axis in axes)
+        if length > maxsize:
+            raise CausalTimeContractError("causal key_axes 键数超出 Sequence 支持范围")
+        object.__setattr__(self, "axes", tuple(axes))
+        object.__setattr__(self, "order", tuple(self.order))
+        object.__setattr__(self, "_members", tuple(members))
+        object.__setattr__(self, "_length", length)
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return tuple(self[position] for position in range(*index.indices(len(self))))
+        position = integer_index(index)
+        if position < 0:
+            position += len(self)
+        if not 0 <= position < len(self):
+            raise IndexError("causal key index out of range")
+        key = [None] * len(self.axes)
+        for column in reversed(self.order):
+            position, offset = divmod(position, len(self.axes[column]))
+            key[column] = self.axes[column][offset]
+        return tuple(key)
+
+    def __iter__(self) -> Iterator[tuple[object, ...]]:
+        for values in product(*(self.axes[column] for column in self.order)):
+            key = [None] * len(self.axes)
+            for column, value in zip(self.order, values):
+                key[column] = value
+            yield tuple(key)
+
+    def __contains__(self, key) -> bool:
+        return (isinstance(key, (tuple, list)) and len(key) == len(self.axes)
+                and all(_key_scalar(value) and value in values
+                        for value, values in zip(key, self._members)))
+
+    def overlaps(self, other: CausalKeyProduct) -> bool:
+        """两笛卡尔积相交当且仅当每列值轴均相交。"""
+        return len(self.axes) == len(other.axes) and all(
+            not left.isdisjoint(right) for left, right in zip(self._members, other._members)
+        )
+
+    def to_dict(self) -> dict:
+        return {"key_axes": [list(axis) for axis in self.axes], "key_order": list(self.order)}
+
+
 @dataclass(frozen=True)
 class CausalWorkItem:
-    key_rows: tuple[tuple[object, ...], ...]
+    key_rows: Sequence[tuple[object, ...]]
     decision_time: pd.Timestamp
     window_start: pd.Timestamp
     window_end: pd.Timestamp
     source_partitions: Mapping[str, tuple[str, ...]]
+
+    def to_dict(self) -> dict:
+        keys = (self.key_rows.to_dict() if isinstance(self.key_rows, CausalKeyProduct)
+                else {"key_rows": [list(row) for row in self.key_rows]})
+        return {**keys, "decision_time": self.decision_time.isoformat(),
+                "window_start": self.window_start.isoformat(), "window_end": self.window_end.isoformat(),
+                "source_partitions": {port: list(ids) for port, ids in self.source_partitions.items()}}
 
 
 @dataclass(frozen=True)
@@ -85,10 +177,7 @@ class CausalPlan:
             "kind": self.kind, "output_port": self.output_port,
             "key_columns": list(self.key_columns), "state_scope": self.state_scope,
             "sources": [source.to_dict() for source in self.sources],
-            "work_items": [dict(key_rows=[list(row) for row in item.key_rows],
-                decision_time=item.decision_time.isoformat(), window_start=item.window_start.isoformat(),
-                window_end=item.window_end.isoformat(), source_partitions={port: list(ids)
-                    for port, ids in item.source_partitions.items()}) for item in self.work_items],
+            "work_items": [item.to_dict() for item in self.work_items],
         }
 
     def iter_work_items(self, max_keys: int = 8192) -> Iterator[CausalWorkItem]:
@@ -108,8 +197,11 @@ class CausalPlan:
                     yield replace(current, key_rows=tuple(pending))
                     pending = []
             current = item
-            for key in item.key_rows:
-                pending.append(key)
+            offset = 0
+            while offset < len(item.key_rows):
+                end = min(len(item.key_rows), offset + max_keys - len(pending))
+                pending.extend(item.key_rows[offset:end])
+                offset = end
                 if len(pending) == max_keys:
                     yield replace(item, key_rows=tuple(pending))
                     pending = []
@@ -158,9 +250,11 @@ def parse_causal_plan(raw: object) -> CausalPlan:
         raise CausalTimeContractError("causal work_items 必须非空")
     work_items = []
     seen_keys: set[tuple[object, ...]] = set()
+    products: list[CausalKeyProduct] = []
     for value in data["work_items"]:
+        key_fields = {"key_axes", "key_order"} if isinstance(value, Mapping) and "key_axes" in value else {"key_rows"}
         item = _fields(value, {
-            "key_rows", "decision_time", "window_start", "window_end", "source_partitions",
+            *key_fields, "decision_time", "window_start", "window_end", "source_partitions",
         }, "causal work item")
         if not isinstance(item["source_partitions"], Mapping) or set(item["source_partitions"]) != ports:
             raise CausalTimeContractError("causal work item 必须绑定全部 source port 分区")
@@ -175,22 +269,29 @@ def parse_causal_plan(raw: object) -> CausalPlan:
             raise CausalTimeContractError("Feature 历史窗口不能晚于决策")
         if data["kind"] == "label" and (start < decision or end <= decision):
             raise CausalTimeContractError("Label 窗口必须位于决策之后")
-        if not isinstance(item["key_rows"], (list, tuple)) or not item["key_rows"]:
-            raise CausalTimeContractError("causal key_rows 必须非空")
-        rows = []
-        for row in item["key_rows"]:
-            if not isinstance(row, (list, tuple)) or len(row) != len(keys):
+        if "key_axes" in item:
+            rows = CausalKeyProduct(item["key_axes"], item["key_order"])
+            if len(rows.axes) != len(keys):
                 raise CausalTimeContractError("causal 行键宽度不匹配")
-            if any(type(cell) not in (str, int, float, bool) or (
-                isinstance(cell, float) and not isfinite(cell)
-            ) for cell in row):
-                raise CausalTimeContractError("causal 行键只能包含非空 JSON 标量")
-            key = tuple(row)
-            if key in seen_keys:
+            if any(rows.overlaps(previous) for previous in products) or any(key in rows for key in seen_keys):
                 raise CausalTimeContractError("causal 输出行键必须全局唯一")
-            seen_keys.add(key)
-            rows.append(key)
-        work_items.append(CausalWorkItem(tuple(rows), decision, start, end, partitions))
+            products.append(rows)
+        else:
+            if not isinstance(item["key_rows"], (list, tuple)) or not item["key_rows"]:
+                raise CausalTimeContractError("causal key_rows 必须非空")
+            plain_rows = []
+            for row in item["key_rows"]:
+                if not isinstance(row, (list, tuple)) or len(row) != len(keys):
+                    raise CausalTimeContractError("causal 行键宽度不匹配")
+                if any(not _key_scalar(cell) for cell in row):
+                    raise CausalTimeContractError("causal 行键只能包含非空 JSON 标量")
+                key = tuple(row)
+                if key in seen_keys or any(key in previous for previous in products):
+                    raise CausalTimeContractError("causal 输出行键必须全局唯一")
+                seen_keys.add(key)
+                plain_rows.append(key)
+            rows = tuple(plain_rows)
+        work_items.append(CausalWorkItem(rows, decision, start, end, partitions))
     work_items.sort(key=lambda item: (
         item.decision_time, item.window_start, item.window_end,
         tuple(sorted(item.source_partitions.items())),

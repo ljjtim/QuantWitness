@@ -12,6 +12,8 @@ import tempfile
 import time
 
 import psutil
+import pyarrow as pa
+import pyarrow.parquet as pq
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -196,16 +198,23 @@ def execute_project_verifier(
         root = Path(raw)
         guard = _VerifierResources(root, budget, process_slots, started)
         guard.check()
+        if manifest.authorized_columns:
+            for schema_id in manifest.authorized_schema_ids:
+                snapshot._require_verified_schema(schema_id)
         required_bytes = sum(
-            (snapshot.directory / relative_path).stat().st_size
+            _verifier_input_size(
+                snapshot.directory / relative_path,
+                manifest.authorized_columns.get(schema_id), guard,
+            )
             for schema_id in manifest.authorized_schema_ids
             for relative_path in snapshot.table_manifest(schema_id).files
         ) + sum(len(snapshot.support_bytes[path]) for path in support_by_path)
+        estimate_status = "estimated" if manifest.authorized_columns else "measured"
         if required_bytes > budget.temp_bytes:
-            raise ProjectVerifierResourceError("project_verifier_temp_exceeded", exceeded={"temp_bytes": {"actual": required_bytes, "limit": budget.temp_bytes}}, measurement_status="measured")
+            raise ProjectVerifierResourceError("project_verifier_temp_exceeded", exceeded={"temp_bytes": {"actual": required_bytes, "limit": budget.temp_bytes}}, measurement_status=estimate_status)
         free_bytes = shutil.disk_usage(root).free
         if required_bytes > free_bytes:
-            raise ProjectVerifierResourceError("project_verifier_disk_space_exceeded", exceeded={"disk_space_bytes": {"actual": required_bytes, "limit": free_bytes}}, measurement_status="measured")
+            raise ProjectVerifierResourceError("project_verifier_disk_space_exceeded", exceeded={"disk_space_bytes": {"actual": required_bytes, "limit": free_bytes}}, measurement_status=estimate_status)
         input_root = root / "input"
         input_root.mkdir()
         table_entries = []
@@ -217,13 +226,24 @@ def execute_project_verifier(
             for index, relative_path in enumerate(sorted(table.files)):
                 source = snapshot.directory / relative_path
                 target = table_root / f"part-{index:05d}.parquet"
-                _copy_verifier_input(source, target, guard)
+                columns = manifest.authorized_columns.get(schema_id)
+                if columns is None:
+                    _copy_verifier_input(source, target, guard)
+                else:
+                    _project_verifier_input(source, target, columns, guard)
                 files.append(target.relative_to(input_root).as_posix())
-            table_entries.append({
+            entry = {
                 "schema_id": schema_id,
                 "artifact_type": table.artifact_type,
                 "files": files,
-            })
+            }
+            if manifest.authorized_columns:
+                entry["source_table_manifest"] = table.to_dict()
+                entry["columns"] = (
+                    list(manifest.authorized_columns[schema_id])
+                    if schema_id in manifest.authorized_columns else None
+                )
+            table_entries.append(entry)
         support_entries = []
         for index, (source_path, item) in enumerate(sorted(support_by_path.items())):
             target = input_root / "support" / f"item-{index:05d}.bin"
@@ -246,7 +266,10 @@ def execute_project_verifier(
                 "content_hash": item.content_hash,
             })
         input_manifest = {
-            "contract_version": "project-verifier-input-v1",
+            "contract_version": (
+                "project-verifier-input-v2" if manifest.authorized_columns
+                else "project-verifier-input-v1"
+            ),
             "result_id": snapshot.bundle.result_id,
             "tables": table_entries,
             "support_files": support_entries,
@@ -351,10 +374,114 @@ class _VerifierResources:
                 raise ProjectVerifierResourceError(code, exceeded=exceeded, measurement_status="measured")
 
 
+def estimate_project_verifier_input_size(
+    source: str | Path,
+    *,
+    columns: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    """只读估算单个输入文件；投影重编码量不作为确定复制下界。"""
+    return {
+        "bytes": _verifier_input_size(Path(source), columns),
+        "measurement_status": "measured" if columns is None else "estimated",
+    }
+
+
+def _verifier_input_size(
+    source: Path,
+    columns: tuple[str, ...] | None,
+    guard: _VerifierResources | None = None,
+) -> int:
+    """完整文件按实长计费；投影以所选列块和页脚估算，写入另做实测。"""
+    if guard is not None:
+        guard.check(check_disk=False)
+    if columns is None:
+        return source.stat().st_size
+    with pq.ParquetFile(source) as parquet:
+        if guard is not None:
+            guard.check(check_disk=False)
+        schema = parquet.schema_arrow
+        missing = [name for name in columns if schema.get_field_index(name) < 0]
+        if missing:
+            raise ResultContractError(f"项目 Verifier 声明列缺失: {missing}")
+        metadata = parquet.metadata
+        total = 4096 + len(columns) * 1024
+        for index in range(metadata.num_row_groups):
+            group = metadata.row_group(index)
+            for column_index in range(group.num_columns):
+                column = group.column(column_index)
+                if any(
+                    column.path_in_schema == name
+                    or column.path_in_schema.startswith(f"{name}.")
+                    for name in columns
+                ):
+                    total += column.total_compressed_size + 256
+        return total
+
+
+class _VerifierInputWriter:
+    """准备阶段没有 Worker 并发写入，用已占空间与流位置约束每次写入。"""
+
+    def __init__(self, handle, guard):
+        self.handle = handle
+        self.guard = guard
+        self.existing_bytes = _measure_attempt_tree_bytes(guard.root)
+
+    @property
+    def closed(self):
+        return self.handle.closed
+
+    def writable(self):
+        return True
+
+    def tell(self):
+        return self.handle.tell()
+
+    def write(self, data):
+        actual = self.existing_bytes + self.tell() + len(data)
+        limit = self.guard.budget.temp_bytes
+        if actual > limit:
+            raise ProjectVerifierResourceError(
+                "project_verifier_temp_exceeded",
+                exceeded={"temp_bytes": {"actual": actual, "limit": limit}},
+                measurement_status="measured",
+            )
+        return self.handle.write(data)
+
+    def flush(self):
+        self.handle.flush()
+
+
+def _project_verifier_input(source, target, columns, guard):
+    """只读来源并按固定批次生成独立投影文件，不复用生产计算结果。"""
+    try:
+        with pq.ParquetFile(source) as parquet, target.open("wb", buffering=0) as handle:
+            schema = pa.schema([parquet.schema_arrow.field(name) for name in columns])
+            sink = _VerifierInputWriter(handle, guard)
+            with pq.ParquetWriter(sink, schema, compression="snappy", use_dictionary=False) as writer:
+                batches = parquet.iter_batches(
+                    batch_size=8192, columns=list(columns), use_threads=False,
+                )
+                while True:
+                    guard.check()
+                    batch = next(batches, None)
+                    if batch is None:
+                        break
+                    guard.check()
+                    batch = batch.select(list(columns)).replace_schema_metadata(None)
+                    if not batch.schema.equals(schema):
+                        raise ResultContractError("项目 Verifier 投影列 schema 不一致")
+                    writer.write_batch(batch)
+                    del batch
+        guard.check()
+    except OSError as exc:
+        raise ProjectVerifierResourceError("project_verifier_copy_failed") from exc
+
+
 def _copy_verifier_input(source, target, guard):
     """复制块之间检查预算，准备失败不会进入 Worker 或发布阶段。"""
     try:
-        with source.open("rb") as reader, target.open("wb") as writer:
+        with source.open("rb") as reader, target.open("wb", buffering=0) as handle:
+            writer = _VerifierInputWriter(handle, guard)
             while True:
                 guard.check(check_disk=False)
                 block = reader.read(1024 * 1024)
@@ -435,4 +562,5 @@ __all__ = [
     "PROJECT_VERIFIER_OUTPUT_VERSION",
     "ProjectVerifierOutcome",
     "execute_project_verifier",
+    "estimate_project_verifier_input_size",
 ]

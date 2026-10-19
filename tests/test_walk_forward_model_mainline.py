@@ -24,7 +24,7 @@ from research_pipeline.runtime.walk_forward_model_execution import (
     execute_model_split_artifact,
 )
 import research_pipeline.runtime.adapters.model as operator_adapters
-from test_qlib_model_integration import candidate as qlib_candidate
+from test_qlib_model_integration import candidate as qlib_candidate, research_series
 
 
 def test_walk_forward_adapters_match_implementation_signatures(
@@ -43,6 +43,7 @@ def test_walk_forward_adapters_match_implementation_signatures(
     parameters = {
         "fixed_clock": fixed_clock,
         "research_identity_hash": "a" * 64,
+        "research_series_json": canonical_json(research_series(tmp_path)),
     }
 
     def fake_external_result(context, implementation, **kwargs):
@@ -67,8 +68,10 @@ def test_walk_forward_adapters_match_implementation_signatures(
     )
     for adapter in adapters:
         context = SimpleNamespace(
+            work_dir=tmp_path,
+            node_context=SimpleNamespace(parallel_workers=2, process_slots=10, attempt_deadline_monotonic=None),
             effective_resource_budget=SimpleNamespace(
-                memory_bytes=64 * 1024**2
+                memory_bytes=64 * 1024**2, cpu_slots=2, temp_bytes=64 * 1024**2
             ),
             node=SimpleNamespace(
                 resource_budget=SimpleNamespace(memory_bytes=64 * 1024**2)
@@ -81,12 +84,22 @@ def test_walk_forward_adapters_match_implementation_signatures(
             for name, parameter in inspect.signature(implementation).parameters.items()
             if name != "output_root" and parameter.default is inspect.Parameter.empty
         }
+        if adapter is operator_adapters.execute_research_model_fit_v2:
+            required |= {"parallel_workers", "cpu_slots", "max_temp_bytes",
+                         "deadline_monotonic", "execution_report_path", "process_slots"}
+            assert captured["kwargs"]["parallel_workers"] == 2
+            assert captured["kwargs"]["process_slots"] == 10
+            assert captured["kwargs"]["execution_report_path"] == tmp_path / "model-fit-execution.json"
         assert set(captured["kwargs"]) == required, (
             adapter.__name__,
             implementation.__name__,
             set(captured["kwargs"]),
             required,
         )
+
+        if adapter is operator_adapters.execute_research_model_locked_holdout_v2:
+            assert captured["kwargs"]["ledger_root"] == tmp_path / "test-model" / "ledgers"
+            assert captured["kwargs"]["parameters"]["research_series_json"] == canonical_json(research_series(tmp_path))
 
 
 def test_model_split_adapter_verifies_label_before_starting_split(
@@ -187,7 +200,36 @@ def _write_input_artifact(
 
 
 
-def test_locked_holdout_is_reserved_once_and_cannot_be_reused(tmp_path) -> None:
+def _assert_consumed_series_rejects_variants(arguments, tmp_path, monkeypatch):
+    import research_pipeline.research.modeling.qlib as qlib_models
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("已消费系列必须在训练、预检和读取留出值之前拒绝")
+
+    monkeypatch.setattr(qlib_models, "fit_bundle", forbidden)
+    series_root = tmp_path / "test-model"
+    frozen_files = {path.relative_to(series_root): path.read_bytes()
+                    for path in series_root.rglob("*.json")}
+    assert len(list((series_root / "ledgers").glob("*/opened.json"))) == 1
+    assert len(list((series_root / "ledgers").glob("*/series.json"))) == 1
+    with pytest.raises(ValidationError, match="已经 prepared/opened"):
+        evaluate_locked_holdout(**arguments)
+    variants = (({}, "已经 prepared/opened"),
+                ({"research_identity_hash": "7" * 64}, "同一 holdout 身份已冻结，不能更换原计划声明"),
+                ({"data_snapshot_hash": "8" * 64}, "已暴露区间重叠"),
+                ({"research_identity_hash": "7" * 64, "data_snapshot_hash": "8" * 64}, "已暴露区间重叠"))
+    for index, (variant, expected_error) in enumerate(variants):
+        output = tmp_path / f"blocked-final-{index}"
+        retry = {**arguments, **variant, "output_root": output,
+                 "holdout_preflight": forbidden, "holdout_loader": forbidden}
+        with pytest.raises(ValidationError, match=expected_error):
+            evaluate_locked_holdout(**retry)
+        assert not output.exists()
+    assert {path.relative_to(series_root): path.read_bytes()
+            for path in series_root.rglob("*.json")} == frozen_files
+
+
+def test_locked_holdout_is_reserved_once_and_cannot_be_reused(tmp_path, monkeypatch) -> None:
     frame, sessions = _samples(64)
     development = tuple(frame.iloc[:54]["sample_id"])
     holdout = tuple(frame.iloc[54:]["sample_id"])
@@ -214,18 +256,18 @@ def test_locked_holdout_is_reserved_once_and_cannot_be_reused(tmp_path) -> None:
         reason="locked_holdout_primary",
         unlock_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
         fixed_clock=datetime(2024, 6, 1, tzinfo=timezone.utc),
-        ledger_root=tmp_path / "holdout-ledger",
+        ledger_root=tmp_path / "test-model" / "ledgers",
+        research_series=research_series(tmp_path),
         root_seed=7,
     )
     result = evaluate_locked_holdout(**arguments)
     assert result["status"] == "committed"
     assert len(result["predictions"]) == len(holdout)
-    with pytest.raises(ValidationError, match="已经 prepared|不能重复读取"):
-        evaluate_locked_holdout(**arguments)
+    _assert_consumed_series_rejects_variants(arguments, tmp_path, monkeypatch)
 
 
 def test_locked_holdout_opens_before_loading_target_and_failed_identity_stays_closed(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
     frame, sessions = _samples(64)
     calls = 0
@@ -233,6 +275,7 @@ def test_locked_holdout_opens_before_loading_target_and_failed_identity_stays_cl
     def failing_loader() -> pd.DataFrame:
         nonlocal calls
         calls += 1
+        assert list((tmp_path / "test-model" / "ledgers").glob("*/opened.json"))
         raise ModelMainlineError("故意模拟 holdout 读取失败")
 
     arguments = dict(
@@ -258,17 +301,17 @@ def test_locked_holdout_opens_before_loading_target_and_failed_identity_stays_cl
         reason="locked_holdout_primary",
         unlock_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
         fixed_clock=datetime(2024, 6, 1, tzinfo=timezone.utc),
-        ledger_root=tmp_path / "lazy-holdout-ledger",
+        ledger_root=tmp_path / "test-model" / "ledgers",
+        research_series=research_series(tmp_path),
         root_seed=7,
     )
     with pytest.raises(ModelMainlineError, match="故意模拟"):
         evaluate_locked_holdout(**arguments)
     assert calls == 1
-    terminal_path = next((tmp_path / "lazy-holdout-ledger").glob("*/terminal.json"))
+    terminal_path = next((tmp_path / "test-model" / "ledgers").glob("*/terminal.json"))
     terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
     assert terminal["status"] == "consumed_failed"
-    with pytest.raises(ValidationError, match="不能重复读取"):
-        evaluate_locked_holdout(**arguments)
+    _assert_consumed_series_rejects_variants(arguments, tmp_path, monkeypatch)
     assert calls == 1
 
 
@@ -357,7 +400,14 @@ def test_model_split_rejects_mixed_label_row_group_before_target_scan(
     _write_input_artifact(
         feature_root,
         "features",
-        pd.DataFrame({"entity_id": ["INDEX"], "feature_value": [1.0]}),
+        pd.DataFrame({
+            "entity_id": ["INDEX"],
+            "observation_session": pd.to_datetime(["2024-01-02T00:00:00Z"]),
+            "observation_time": pd.to_datetime(["2024-01-02T08:00:00Z"]),
+            "available_time": pd.to_datetime(["2024-01-02T08:00:00Z"]),
+            "window_sessions": [1], "feature_id": ["close"], "value": [1.0],
+            "status": ["ok"], "lineage_hash": ["a" * 64],
+        }),
         "semantics",
     )
     _write_input_artifact(

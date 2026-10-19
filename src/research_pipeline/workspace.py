@@ -96,9 +96,12 @@ def initialize_workspace(
     workspace_id: str | None = None,
     allow_existing: bool = False,
     from_package: str | Path | None = None,
+    parameters: dict[str, Any] | None = None,
 ) -> WorkspaceConfig:
     """在仓库外初始化工作区，不触碰数据库或数据文件。"""
 
+    if parameters and from_package is None:
+        raise WorkspaceError("参数变体必须提供完整的 from_package 模板")
     target = Path(root).expanduser().absolute()
     source_package = None
     if from_package is not None:
@@ -111,6 +114,19 @@ def initialize_workspace(
             raise WorkspaceError("工作区目标不能位于来源研究包内")
         validate_research_package_layout(source_package)
         load_research_package(source_package)
+        if parameters:
+            from .packages.variants import _compatible_value_type
+
+            variant = yaml.safe_load((source_package / "spec/research.yaml").read_text(encoding="utf-8"))
+            nodes = {node["node_id"]: node for node in variant["graph"]["nodes"]}
+            for key, value in parameters.items():
+                node_id, separator, field = key.partition(".")
+                declared = nodes.get(node_id, {}).get("parameters", {})
+                if not separator or field not in declared:
+                    raise WorkspaceError(f"参数变体只能替换已有节点参数: {key}")
+                if not _compatible_value_type(declared[field], value):
+                    raise WorkspaceError(f"参数变体须保留原参数类型: {key}")
+                declared[field] = value
     if target.exists():
         if not target.is_dir():
             raise WorkspaceError("工作区根路径必须是目录")
@@ -143,6 +159,9 @@ def initialize_workspace(
                 destination = package_root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source_package / relative, destination)
+        if parameters:
+            (package_root / "spec/research.yaml").write_text(_yaml_text(variant), encoding="utf-8")
+            load_research_package(package_root)
         _write_text_exclusive(
             target / WORKSPACE_FILE,
             _yaml_text({
@@ -365,12 +384,11 @@ def run_workspace_execution(
         raise WorkspaceError("run 的 clock/root_seed 必须与 execution 声明完全一致")
     paths = {
         "artifact_root": execution_root / "artifacts",
-        "handoff_out": execution_root / "handoff.json",
         "run_root": execution_root / "run",
         "result_store": execution_root / "results",
     }
     if handler is None:
-        from .cli.commands.research_run import _execute as handler
+        from .application.research_run import _execute as handler
     from argparse import Namespace
 
     payload = {
@@ -417,12 +435,37 @@ def resume_workspace_execution(
     except Exception as exc:
         raise WorkspaceError("execution 尚无可验证的正式 Runtime invocation") from exc
     if handler is None:
-        from .cli.commands.research_run import resume_operator_graph as handler
+        from .application.research_run import resume_operator_graph as handler
     result = handler(run_root=run_root, retry_node_id=retry_node_id)
     if not isinstance(result, dict):
         raise WorkspaceError("恢复服务必须返回对象")
     _record_completion(config, index, item, execution_root, result)
     return {**result, "execution_id": execution_id, "execution_root": str(execution_root)}
+
+
+def record_workspace_result_completion(
+    root: str | Path,
+    *,
+    execution_id: str,
+    result_directory: str | Path,
+    result_id: str,
+) -> None:
+    """从正式 Result 控制文件恢复完成身份及导航索引，不执行研究。"""
+    from .results import ResultStore
+
+    config = load_workspace(root)
+    index = _read_index(config.generated_root / "index.json", config.workspace_id)
+    item, execution_root = _resolve_execution(config, index, execution_id)
+    bundle = ResultStore(execution_root / "results", create=False).inspect_directory(result_directory)
+    if bundle.result_id != result_id:
+        raise WorkspaceError("接续 Result 身份与原执行不一致")
+    _record_completion(config, index, item, execution_root, {
+        "status": "result_finalized",
+        "run_id": bundle.run_id,
+        "runtime_run_id": bundle.run_id,
+        "package_plan_hash": bundle.plan_hash,
+        "result_id": bundle.result_id,
+    })
 
 
 def export_dashboard_manifest(root: str | Path) -> dict[str, Any]:
@@ -555,11 +598,12 @@ def _record_completion(
         existing = _read_completion(completion_path, item["execution_id"])
         completion.update(existing)
     for key in COMPLETION_IDENTITY_KEYS:
+        values = [facts[key] for facts in (completion, item, result) if key in facts]
+        if values and any(value != values[0] for value in values[1:]):
+            raise WorkspaceError(f"completion 不可变身份发生漂移: {key}")
         if key in result:
-            if key in completion and completion[key] != result[key]:
-                raise WorkspaceError(f"completion 不可变身份发生漂移: {key}")
-            item[key] = result[key]
             completion[key] = result[key]
+    item.update({key: completion[key] for key in COMPLETION_IDENTITY_KEYS if key in completion})
     completion["status"] = str(
         result.get("status", result.get("evidence_state", "completed"))
     )
@@ -783,3 +827,19 @@ __all__ = [
     "resume_workspace_execution",
     "export_dashboard_manifest", "validate_workspace",
 ]
+
+
+def workspace_execution_context(root: str | Path, execution_id: str) -> dict[str, Any]:
+    """从正式 execution 声明解析固定目录，不搜索其他运行。"""
+    config = load_workspace(root)
+    index = _read_index(config.generated_root / "index.json", config.workspace_id)
+    _, execution_root = _resolve_execution(config, index, execution_id)
+    return {
+        **_read_execution_declaration(execution_root, config.workspace_id),
+        "execution_root": str(execution_root),
+    }
+
+
+def record_workspace_continuation(execution_root: Path, facts: dict[str, Any]) -> None:
+    """保存主链返回的显式位置；接续时仍须复验正式产物。"""
+    _atomic_replace_text(execution_root / "continuation.json", _json_text(facts))

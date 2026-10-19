@@ -455,7 +455,7 @@ def predict_bundle(root, model_row, frame, *, sequence_context=None):
     if is_sequence:
         from .gru import SEQUENCE_BUNDLE_SCHEMA, bind_windows, processed_dataset, cpu_execution, verify_loaded_model, require_sequence_environment
         require_sequence_environment()
-        if config.get("schema") != SEQUENCE_BUNDLE_SCHEMA:
+        if config.get("schema") not in {SEQUENCE_BUNDLE_SCHEMA, "research.qlib-sequence-model-bundle.v1"}:
             raise QlibModelError("序列模型必须使用序列模型文件合同")
         candidate = normalize_candidates([config["candidate"]])[0]
         windows = bind_windows(sequence_context, frame, features, candidate["dataset"]["step_len"])

@@ -192,7 +192,7 @@
         "research_pipeline/src/research_pipeline/runtime/external_artifact.py::ExternalArtifactCommit",
         "research_pipeline/src/research_pipeline/results/assembler.py::ResultAssembler",
         "research_pipeline/src/research_pipeline/evidence/verification_result.py::verify_result",
-        "research_pipeline/src/research_pipeline/cli/research_plan_store.py::load_operator_graph_research_plan"
+        "research_pipeline/src/research_pipeline/application/research_plan_store.py::load_operator_graph_research_plan"
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_artifact_verification_lifecycle.py::test_same_run_validates_each_artifact_content_once",
@@ -258,7 +258,8 @@
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_and_intervals",
-        "research_pipeline/tests/test_minute_cli_contract.py::test_all_modes_parse_seed_workers_and_bind_them_to_identity",
+        "research_pipeline/tests/test_minute_cli_contract.py::test_formal_minute_run_records_serial_seed_workers",
+        "research_pipeline/tests/test_minute_cli_contract.py::test_formal_minute_run_preserves_parallel_mode",
         "research_pipeline/tests/test_minute_event_simulation.py::test_futures_same_session_round_trip_keeps_terminal_position_snapshot",
         "research_pipeline/tests/test_result_financial_oracle.py::test_futures_minute_context_recomputes_settlement_and_margin",
         "research_pipeline/release/minute-reference-acceptance/real-data-smoke.md"
@@ -385,7 +386,7 @@
         "research_pipeline/tests/test_data_plane_execution_budget.py::test_fresh_process_real_duckdb_queries_stay_within_approved_process_tree_envelope",
         "research_pipeline/tests/test_data_plane_execution_admission.py::test_unsupported_query_shape_is_rejected_before_provider_scan",
         "research_pipeline/tests/test_partitioned_consumer_memory.py::test_full_matrix_consumer_rejects_before_materialization",
-        "research_pipeline/tests/test_runtime_operator_dag.py::test_worker_count_uses_only_shared_runtime_capacity",
+        "research_pipeline/tests/test_runtime_operator_dag.py::test_formal_worker_count_is_serial_within_runtime_capacity",
         "research_pipeline/tests/test_resource_governor.py::test_cross_process_fifo_and_no_oversell",
         "research_pipeline/tests/test_resource_governor.py::test_parent_child_conservation_and_idempotent_release",
         "research_pipeline/tests/test_resource_governor.py::test_calibration_19_20_and_49_50_boundaries_use_real_success_only",

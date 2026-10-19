@@ -9,9 +9,9 @@ import pyarrow as pa
 import pytest
 
 from research_pipeline.evidence.qlib_report import (
-    _model_figures, read_prediction_frame, render_qlib_report, validate_report_request,
+    _model_figures, read_prediction_frame, validate_report_request,
 )
-from research_pipeline.cli.report_output import prepare_qlib_request, write_qlib_report
+from research_pipeline.application.report_output import prepare_qlib_request, write_qlib_report
 
 
 def _request():
@@ -141,7 +141,7 @@ def test_html_request_parameters_and_parser():
 
 def test_report_command_verifies_requested_table_and_preserves_failure(tmp_path, monkeypatch):
     import json
-    from research_pipeline.cli.commands import evidence_lifecycle
+    from research_pipeline.application import evidence_lifecycle
     from research_pipeline.cli.parser import build_parser
 
     request_path = tmp_path / "request.json"

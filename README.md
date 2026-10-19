@@ -6,11 +6,21 @@
 
 目标不只是画出一条好看的收益曲线，而是让你能回答：**用了什么数据？当时能不能知道？试过哪些方案？这个结果能否被另一套检查复核？**
 
-[入门教程](docs/workspace-quickstart.md) · [基本数据接入](docs/catalog.md) · [AI 复现研报](integrations/rdagent/docs/formula-reproduction.md) · [文档导航](docs/index.md) · [框架约定](docs/framework-contracts.md) · [架构图集](docs/architecture/README.md)
+[快照布局](docs/snapshot-layout.md) · [中间产物保留与回收](docs/artifact-lifecycle.md) · [执行接续与模板](docs/workspace-continuation.md) · [运行效率与进度](docs/research-execution-improvements.md) · [入门教程](docs/workspace-quickstart.md) · [基本数据接入](docs/catalog.md) · [AI 复现研报](integrations/rdagent/docs/formula-reproduction.md) · [文档导航](docs/index.md) · [框架约定](docs/framework-contracts.md) · [架构图集](docs/architecture/README.md)
+
+当前 checkpoint 使用 v4：内容复验与资源验收通过后才发布，旧 v1/v2/v3 不用于恢复或复用。分钟并行任务的实际临时空间限制与分摊额度一致，在途任务不超过 worker 数，失败后停止补交并保留成功分区供恢复；已发布 Result 的工作区接续会补齐完成索引。边界见[运行与恢复](docs/runtime.md#checkpoint-发布与资源验收)。
+
+分钟复权验证从 Result 封存事实独立重建金额换算、参考价舍位、行动版本、因子区间及逐决策 pre 锚点，验证算法身份为 `verifier.adjustment-snapshot.v3`。详见[独立金融复核](src/research_pipeline/evidence/financial_oracle/README.md)。
+
+Workspace 与 RD-Agent 复用同一套包检查、执行、恢复和独立验证服务。`run` 无需提供 `--handoff-out`；`--artifact-root` 继续保留工件和留出集账本的持久位置。接续沿用原 execution 与冻结计划，详情见[执行接续](docs/workspace-continuation.md)。RD-Agent inspect 只读显示请求差异和中断记录，不启动研究或加载上游循环依赖。
+
+模型最终评价显式声明持久研究系列，同系列变体共享已打开的留出区间；打开前重检重叠，失败消费继续保留，Result 封存完整系列证据供独立复核。入口与恢复见[研究系列与最终留出集](docs/holdout-series.md)。
 
 [![QuantWitness：总体概览：从研究想法到可验证结果，RD-Agent 位于研究提案与迭代层](docs/architecture/overview.svg)](https://ljjtim.github.io/QuantWitness/overview.html)
 
 *点击图片打开交互架构图，可查看模块职责、上下游和源码位置。在线图册使用 GitHub Pages；离线使用请下载仓库并打开 `docs/architecture/index.html`。*
+
+正式主链默认 `deterministic_serial`、`workers=1`。显式 `bounded_parallel` 或 `partitioned_batch` 可在总资源预算内执行独立节点和模型 candidate×fold；选择、最终训练和 holdout 保持原顺序。事件状态在独占写者会话内增量维护，逐条日志仍同步落盘，恢复重新验证原配置、完整日志和成功 checkpoint。详见[运行与恢复](docs/runtime.md)。
 
 ## 你交给它什么，它交还你什么
 
@@ -171,3 +181,20 @@ python -m research_pipeline --help
 ## 开源与贡献
 
 QuantWitness 自有代码采用 **Apache-2.0**。Qlib 与 RD-Agent 等上游组件保留各自许可证，详见[第三方说明](THIRD_PARTY_NOTICES.md)。欢迎从可手算的新研究示例、独立验证器、数据接入或文档改进开始：[贡献指南](CONTRIBUTING.md)。
+
+## 退市零回收假设
+
+v2 `delisting_cash` 可显式声明 `recovery_assumption: zero_recovery`，将退市剩余持仓核销且现金回收为零。该字段属于研究假设，必须封存来源说明、公告可见时间、终止交易日和生效日；它不代表实际清算结果。未声明假设时仍要求正清算金额，普通行情价格仍必须为正。核销记录进入金融事件及独立复核，不能生成卖出成交，也不能在公告可见或终止交易前生效。
+
+
+日频 Qlib 模型的 split 与 locked holdout 默认声明 16 GiB；完整来源逐批核验后只保留模型必需列，完整证据仍随研究封存。预算变化要求重新准入，旧 Result 和已消费 holdout 保持原样。工作集测量与边界见[资源预算](docs/project_resource_budgets.md#日频模型长表加载)。
+
+因果Feature／Label的Worker事实以列式文件和共享来源清单传递；键批调用边界固定。输入按已核验Parquet的月份统计裁剪，仍保留逐条可见时间与来源检查。执行与恢复边界见[Runtime](docs/runtime.md#因果事实列式传输)。
+
+紧凑因果键允许使用`key_axes/key_order`冻结笛卡尔积，运行时仍按原8,192键批次提供完整行键。跨批键顺序、唯一性和时间来源规则不变，具体结构见[运行合同](docs/runtime.md#紧凑因果键声明)。
+
+全部节点成功但 Result 组装失败且未发布时，可用原 `resume --run-root` 仅重试组装。原计划、当前实现及全部成功 checkpoint 须复验通过，组装尝试追加留痕，不重新训练或消费 holdout；已发布 Result 不重开。
+
+有序归档输入按批流式重放，无序输入保留有界排序和预算拒绝；PIT 与发布门禁继续逐批检查。共享资源池使用 v3 活动状态及冷历史日志，升级需新的仓库外 state dir，Worker 与治理采样共用实际读数。操作见[数据读取](docs/data_plane.md)和[资源历史](docs/resource-history.md)。
+
+模型 facts 使用正式表引用 `result_tables_v2`，序列证据以共享 context 和紧凑成员索引保存窗口；独立验证仍从原始特征、标签与日历重建。旧 Result 保持只读，封存模型可按原依赖合同显式恢复预测。版本与使用边界见[模型证据](docs/qlib-model-results.md)。

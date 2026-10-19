@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from .errors import RuntimeIntegrityError, RuntimeStateError
 from .events import RuntimeEvent
@@ -49,34 +49,66 @@ def _transition(current: str | None, target: str, table: dict[str | None, set[st
     return target
 
 
+class _ProjectionAccumulator:
+    """受控写者内部可变；对外只返回隔离的状态快照。"""
+
+    def __init__(self, projection: RuntimeProjection | None = None) -> None:
+        projection = projection or RuntimeProjection()
+        self.run_id = projection.run_id
+        self.run_status = projection.run_status
+        self.node_statuses = dict(projection.node_statuses)
+        self.attempt_statuses = dict(projection.attempt_statuses)
+        self.last_seq = projection.last_seq
+        self.chain_head = projection.chain_head
+        self.command_ids = set(projection.command_ids)
+
+    def validate(self, event: RuntimeEvent, *, validate_chain: bool = True) -> str:
+        event.verify()
+        if validate_chain:
+            if event.seq != self.last_seq + 1 or event.previous_hash != self.chain_head:
+                raise RuntimeIntegrityError("事件序号或前序 hash 不连续")
+        if self.run_id is not None and event.run_id != self.run_id:
+            raise RuntimeStateError("同一事件库不能混入其他 run")
+        target = str(event.payload.get("status", ""))
+        if event.kind == "run_status_changed":
+            _transition(self.run_status, target, RUN_TRANSITIONS, "run")
+        elif event.kind == "node_status_changed":
+            if not event.node_id:
+                raise RuntimeStateError("node 状态事件缺 node_id")
+            _transition(self.node_statuses.get(event.node_id), target, NODE_TRANSITIONS, "node")
+        elif event.kind == "attempt_status_changed":
+            if not event.node_id or not event.attempt_id:
+                raise RuntimeStateError("attempt 状态事件缺关联 ID")
+            _transition(self.attempt_statuses.get(event.attempt_id), target, ATTEMPT_TRANSITIONS, "attempt")
+        elif event.kind not in {"execution_completed", "checkpoint_prepared", "checkpoint_committed", "diagnostic"}:
+            raise RuntimeStateError(f"未知事件类型: {event.kind}")
+        return target
+
+    def accept(self, event: RuntimeEvent, target: str) -> None:
+        if event.kind == "run_status_changed":
+            self.run_status = target
+        elif event.kind == "node_status_changed":
+            self.node_statuses[event.node_id] = target
+        elif event.kind == "attempt_status_changed":
+            self.attempt_statuses[event.attempt_id] = target
+        self.run_id = event.run_id
+        self.last_seq = event.seq
+        self.chain_head = event.event_hash
+        self.command_ids.add(event.command_id)
+
+    def snapshot(self) -> RuntimeProjection:
+        return RuntimeProjection(
+            self.run_id, self.run_status, dict(self.node_statuses),
+            dict(self.attempt_statuses), self.last_seq, self.chain_head,
+            frozenset(self.command_ids),
+        )
+
+
 def apply_event(projection: RuntimeProjection, event: RuntimeEvent, *, validate_chain: bool = True) -> RuntimeProjection:
-    event.verify()
-    if validate_chain:
-        if event.seq != projection.last_seq + 1 or event.previous_hash != projection.chain_head:
-            raise RuntimeIntegrityError("事件序号或前序 hash 不连续")
-    if projection.run_id is not None and event.run_id != projection.run_id:
-        raise RuntimeStateError("同一事件库不能混入其他 run")
-    run_status = projection.run_status
-    nodes = dict(projection.node_statuses)
-    attempts = dict(projection.attempt_statuses)
-    target = str(event.payload.get("status", ""))
-    if event.kind == "run_status_changed":
-        run_status = _transition(run_status, target, RUN_TRANSITIONS, "run")
-    elif event.kind == "node_status_changed":
-        if not event.node_id:
-            raise RuntimeStateError("node 状态事件缺 node_id")
-        nodes[event.node_id] = _transition(nodes.get(event.node_id), target, NODE_TRANSITIONS, "node")
-    elif event.kind == "attempt_status_changed":
-        if not event.node_id or not event.attempt_id:
-            raise RuntimeStateError("attempt 状态事件缺关联 ID")
-        attempts[event.attempt_id] = _transition(attempts.get(event.attempt_id), target, ATTEMPT_TRANSITIONS, "attempt")
-    elif event.kind not in {"execution_completed", "checkpoint_prepared", "checkpoint_committed", "diagnostic"}:
-        raise RuntimeStateError(f"未知事件类型: {event.kind}")
-    return replace(
-        projection, run_id=event.run_id, run_status=run_status, node_statuses=nodes,
-        attempt_statuses=attempts, last_seq=event.seq, chain_head=event.event_hash,
-        command_ids=projection.command_ids | {event.command_id},
-    )
+    state = _ProjectionAccumulator(projection)
+    target = state.validate(event, validate_chain=validate_chain)
+    state.accept(event, target)
+    return state.snapshot()
 
 
 __all__ = ["ATTEMPT_TRANSITIONS", "NODE_TRANSITIONS", "RUN_TRANSITIONS", "RuntimeProjection", "apply_event"]

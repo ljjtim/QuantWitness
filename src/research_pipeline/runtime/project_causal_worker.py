@@ -51,7 +51,9 @@ def run_causal_entry(entry, context, inputs, output_root, causal_context):
             # 原始路径只留在核心闭包，项目只接收 restricted wrapper。
             for path in original._paths.values():
                 with pq.ParquetFile(path) as parquet:
-                    for batch in parquet.iter_batches(columns=list(columns), batch_size=batch_size, use_threads=False):
+                    row_groups = _source_month_row_groups(parquet, source, partition_ids, source_timezone)
+                    for batch in parquet.iter_batches(columns=list(columns), row_groups=row_groups,
+                                                      batch_size=batch_size, use_threads=False):
                         if batch.nbytes > original._max_batch_bytes:
                             raise CausalTimeContractError("因果输入批次超过内存预算")
                         for name in (() if source.daily_time is not None else {source.observation_column, source.available_column}):
@@ -84,7 +86,33 @@ def run_causal_entry(entry, context, inputs, output_root, causal_context):
         if isinstance(value, ProjectCausalMinuteInput):
             value.assert_complete()
     facts = trace.core_time_facts()
-    records = json.loads(facts.to_json(orient="records", date_format="iso", date_unit="ns"))
-    # JSON 仅承载当前有界键批的核心事实，不携带输出/state bytes。
+    # 时间字符串沿用原精度；来源列表保留对象引用，不经逐行JSON展开。
+    record_fields = facts.drop(columns=["source_partition_ids"], errors="ignore")
+    records = json.loads(record_fields.to_json(orient="records", date_format="iso", date_unit="ns"))
+    if "source_partition_ids" in facts:
+        for record, source_ids in zip(records, facts["source_partition_ids"]):
+            record["source_partition_ids"] = source_ids
     return result, {"key_columns": list(plan.key_columns), "records": records,
                     "lineage": list(trace.lineage())}
+
+
+def _source_month_row_groups(parquet, source, partition_ids, source_timezone):
+    """只跳过观测月份确定不相交的行组，缺少统计时保留原读取。"""
+    field = parquet.schema_arrow.field(source.observation_column)
+    if not (pa.types.is_date(field.type) or pa.types.is_timestamp(field.type)):
+        return list(range(parquet.num_row_groups))
+    column = parquet.schema.names.index(source.observation_column)
+    selected = []
+    for index in range(parquet.num_row_groups):
+        stats = parquet.metadata.row_group(index).column(column).statistics
+        if stats is None or not stats.has_min_max or stats.null_count != 0:
+            selected.append(index)
+            continue
+        bounds = [pd.Timestamp(stats.min), pd.Timestamp(stats.max)]
+        if source.daily_time is None and source_timezone is not None:
+            bounds = [value.tz_localize(source_timezone) if value.tzinfo is None
+                      else value.tz_convert(source_timezone) for value in bounds]
+        first, last = [value.strftime("%Y-%m") for value in bounds]
+        if any(first <= partition <= last for partition in partition_ids):
+            selected.append(index)
+    return selected

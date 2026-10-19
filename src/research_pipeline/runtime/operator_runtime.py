@@ -248,12 +248,15 @@ class RuntimeNodeContext:
     resource_lease: ResourceLease | None
     attempt_deadline_monotonic: float | None = None
     process_slots: int | None = None
+    parallel_workers: int = 1
 
     def __post_init__(self) -> None:
         if self.process_slots is not None and (
             type(self.process_slots) is not int or self.process_slots <= 0
         ):
             raise RuntimeIntegrityError("节点进程槽声明无效")
+        if type(self.parallel_workers) is not int or self.parallel_workers < 1:
+            raise RuntimeIntegrityError("节点并行额度必须是正整数")
 
     def remaining_resource_budget(self) -> ResourceBudget:
         """返回当前节点 attempt 剩余的统一资源上限。"""

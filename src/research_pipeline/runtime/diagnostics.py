@@ -118,6 +118,7 @@ def write_finalize_status(
     result_directory: str | None = None,
     result_published: bool = False,
     error: Mapping[str, str] | None = None,
+    retry_failed: bool = False,
 ) -> None:
     """原子写入 inspect 直接消费的 finalize 状态，不把它当作 Result。"""
 
@@ -152,14 +153,54 @@ def write_finalize_status(
         "error": None if error is None else dict(error),
     }
     target = Path(run_root).resolve() / "result-finalize.json"
+    current = None
     if target.is_file():
         current = read_finalize_status(run_root)
         if current == payload:
             return
-        if current["status"] != "pending":
+        if current["status"] != "pending" and not (
+            retry_failed and status == "pending"
+            and current["status"] == "failed"
+            and current["result_published"] is False
+        ):
             raise RuntimeIntegrityError("Result finalize 终态不可覆盖")
     elif status != "pending":
         raise RuntimeIntegrityError("Result finalize 必须先进入 pending")
+    record_path = target.parent / "operator-dag-run.json"
+    if record_path.is_file():
+        from .store import EventStore
+
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        store = EventStore(target.parent)
+        projection = store.replay()
+        if (record.get("status") != "succeeded"
+                or projection.run_status != "succeeded"
+                or record.get("run_id") != projection.run_id):
+            raise RuntimeIntegrityError("Result finalize 要求已成功的 Runtime")
+        # 旧终态保存在追加事件中；状态文件只投影最近一次尝试。
+        def update_record(event):
+            record["event_chain_head"] = event.event_hash
+            pending_record = record_path.with_suffix(".json.tmp")
+            pending_record.write_text(canonical_json(record), encoding="utf-8")
+            os.replace(pending_record, record_path)
+
+        attempt_id = f"finalize:{projection.last_seq + 1}"
+        if status != "pending":
+            attempt_id = next((
+                event.attempt_id for event in reversed(store.read_events())
+                if event.payload.get("diagnostic_type") == "result_finalize_attempt"
+                and event.payload.get("finalize", {}).get("status") == "pending"
+            ), attempt_id)
+        store.append(
+            projection.run_id, "diagnostic",
+            {"diagnostic_type": "result_finalize_attempt", "previous": current,
+             "finalize": payload},
+            command_id=f"result-finalize:{projection.last_seq + 1}:{status}",
+            attempt_id=attempt_id,
+            before_append=update_record,
+        )
+    elif retry_failed:
+        raise RuntimeIntegrityError("Result finalize 重试缺少成功 Runtime 记录")
     temporary = target.with_suffix(".json.tmp")
     temporary.write_text(canonical_json(payload), encoding="utf-8")
     os.replace(temporary, target)

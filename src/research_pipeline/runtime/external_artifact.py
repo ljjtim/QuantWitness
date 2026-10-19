@@ -229,6 +229,9 @@ class ExternalArtifactStore:
         token = uuid.uuid4().hex
         staging = self.staging_root / token
         staging.mkdir(exist_ok=False)
+        from .artifact_lifecycle import external_staging_started
+
+        external_staging_started(staging)
         return staging
 
     def import_verified(
@@ -278,49 +281,55 @@ class ExternalArtifactStore:
         staging = Path(staging_root).resolve()
         if staging.parent != self.staging_root or not staging.is_dir():
             raise RuntimeIntegrityError("ExternalArtifactCommit staging 路径越界")
-        if producer_scope not in {"core", "project"}:
-            raise RuntimeIntegrityError("ExternalArtifactCommit producer_scope 无效")
-        self._materialize_staging_links(staging)
-        if producer_scope == "project":
-            self._apply_project_causal_time_boundary(
-                staging,
-                artifact_type,
-                core_time_facts=core_time_facts,
-                key_columns=causal_time_key_columns,
-                causal_lineage=causal_lineage,
+        from .artifact_lifecycle import external_staging_finished
+
+        try:
+            if producer_scope not in {"core", "project"}:
+                raise RuntimeIntegrityError("ExternalArtifactCommit producer_scope 无效")
+            self._materialize_staging_links(staging)
+            if producer_scope == "project":
+                self._apply_project_causal_time_boundary(
+                    staging,
+                    artifact_type,
+                    core_time_facts=core_time_facts,
+                    key_columns=causal_time_key_columns,
+                    causal_lineage=causal_lineage,
+                )
+            elif core_time_facts is not None or causal_time_key_columns or causal_lineage is not None:
+                raise RuntimeIntegrityError("只有项目扩展提交可以附加核心时间上下文")
+            files, schema_hashes, row_counts = self._inspect(staging, exclude_root_control_files=True)
+            manifest = ExternalArtifactCommit.build(
+                artifact_name=artifact_name,
+                artifact_type=artifact_type,
+                commit_token=staging.name,
+                files=files,
+                schema_hashes=schema_hashes,
+                row_counts=row_counts,
             )
-        elif core_time_facts is not None or causal_time_key_columns or causal_lineage is not None:
-            raise RuntimeIntegrityError("只有项目扩展提交可以附加核心时间上下文")
-        files, schema_hashes, row_counts = self._inspect(staging, exclude_root_control_files=True)
-        manifest = ExternalArtifactCommit.build(
-            artifact_name=artifact_name,
-            artifact_type=artifact_type,
-            commit_token=staging.name,
-            files=files,
-            schema_hashes=schema_hashes,
-            row_counts=row_counts,
-        )
-        (staging / "manifest.json").write_text(canonical_json(manifest.to_dict()), encoding="utf-8")
-        if phase_hook:
-            phase_hook("manifest_written")
-        (staging / "COMMITTED").write_text(manifest.manifest_hash, encoding="ascii")
-        if phase_hook:
-            phase_hook("before_commit")
-        target = self.objects_root / manifest.semantic_hash
-        if target.exists():
-            existing = self.verify(manifest.semantic_hash)
-            shutil.rmtree(staging, ignore_errors=True)
-            if existing.semantic_payload() != manifest.semantic_payload():
-                raise RuntimeIntegrityError("同 external artifact key 出现冲突内容")
-            return existing
-        publish_directory(staging, target)
-        if self.verification_session is None:
-            return self.verify(manifest.semantic_hash)
-        return self.verification_session.remember(
-            "external_artifact",
-            str(target),
-            manifest,
-        )
+            (staging / "manifest.json").write_text(canonical_json(manifest.to_dict()), encoding="utf-8")
+            if phase_hook:
+                phase_hook("manifest_written")
+            (staging / "COMMITTED").write_text(manifest.manifest_hash, encoding="ascii")
+            if phase_hook:
+                phase_hook("before_commit")
+            target = self.objects_root / manifest.semantic_hash
+            if target.exists():
+                existing = self.verify(manifest.semantic_hash)
+                shutil.rmtree(staging, ignore_errors=True)
+                if existing.semantic_payload() != manifest.semantic_payload():
+                    raise RuntimeIntegrityError("同 external artifact key 出现冲突内容")
+                return existing
+            publish_directory(staging, target)
+            if self.verification_session is None:
+                return self.verify(manifest.semantic_hash)
+            return self.verification_session.remember(
+                "external_artifact",
+                str(target),
+                manifest,
+            )
+        finally:
+            external_staging_finished(staging)
+
 
     @staticmethod
     def _materialize_staging_links(staging: Path) -> None:
@@ -527,16 +536,8 @@ class ExternalArtifactStore:
         files: dict[str, str] = {}
         schemas: dict[str, str] = {}
         rows: dict[str, int] = {}
-        for directory, dirnames, filenames in policy.walk(resolved_root):
+        for directory, dirnames, filenames in policy._walk_resolved(resolved_root):
             directory_path = Path(directory)
-            for name in sorted(dirnames):
-                policy.resolve_contained_path(
-                    allowed_root=resolved_root,
-                    candidate=directory_path / name,
-                    root_role="external_artifact_root",
-                    path_role="external_artifact_directory",
-                    expected_kind="directory",
-                )
             for name in sorted(filenames):
                 if (
                     exclude_root_control_files
@@ -544,8 +545,8 @@ class ExternalArtifactStore:
                     and name in {"manifest.json", "COMMITTED"}
                 ):
                     continue
-                path = policy.resolve_contained_path(
-                    allowed_root=resolved_root,
+                path = policy._resolve_contained_path(
+                    root=resolved_root,
                     candidate=directory_path / name,
                     root_role="external_artifact_root",
                     path_role="external_artifact_file",

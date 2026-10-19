@@ -914,6 +914,8 @@ class _AccountReplay:
                 expected.update(shares_arrival_date=action["shares_arrival_date"], shares_sellable_date=action["shares_sellable_date"])
         if action["kind"] == "delisting_cash":
             expected.update(sellable_delta=-before_sellable, unsettled_delta=-before_unsettled, frozen_delta=0, cancel_position_entitlements=True, trading_termination_date=action["trading_termination_date"], settlement_available_time=action["settlement_available_time"])
+            if action.get("recovery_assumption") is not None:
+                expected["recovery_assumption"] = action["recovery_assumption"]
         elif new_quantity >= 0:
             due = action["shares_sellable_date"] if version2 else action["pay_date"]
             if due > at.date().isoformat() and new_quantity:

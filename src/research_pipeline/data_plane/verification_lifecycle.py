@@ -32,8 +32,10 @@ class RunScopedArtifactVerification:
         namespace: str,
         identity: str,
         verifier: Callable[[], _T],
+        *,
+        descriptor: Mapping[str, object] | None = None,
     ) -> _T:
-        """首次调用完整验证；同一 run 后续调用复用冻结结果。"""
+        """首次调用完整验证；descriptor 供同 run 的进程通道定位工件。"""
 
         key = self._key(namespace, identity)
         existing = self._verified.get(key)

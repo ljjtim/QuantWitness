@@ -93,10 +93,13 @@ def adopt_package_execution(*, execution_id, root, workspace_id, allocation_labe
 
 def _execute_package(*, root, workspace_id, allocation_label, base_package,
                     source_archive_root, input_snapshot_manifest, verifier_bundle, binding):
-    from research_pipeline.workspace import initialize_workspace, load_workspace
-    from research_pipeline.workspace import run_workspace_execution, resume_workspace_execution
-    from research_pipeline.packages import load_research_package
-    from .worker import _command, find_or_allocate, runtime_options, failure_diagnostics
+    from research_pipeline.workspace import initialize_workspace
+    from research_pipeline.application.workspace_flow import (
+        WorkspaceVerificationFailedError, execute_workspace, workspace_arguments,
+        normalize_runtime_options,
+    )
+    from .worker import find_or_allocate, failure_diagnostics
+
     root = Path(root)
     feedback = dict(command_status="failed", execution_status="not_run",
                     verification_status="not_run", result_ref=None, verification_ref=None)
@@ -104,100 +107,58 @@ def _execute_package(*, root, workspace_id, allocation_label, base_package,
     try:
         workspace = root / "workspace"
         if not workspace.exists():
-            initialize_workspace(workspace, workspace_id=workspace_id,
-                                 from_package=base_package)
-        config = load_workspace(workspace)
-        package = load_research_package(config.package_root)
-        frozen = package.spec_payload
-        extensions = []
-        for bundle in binding["extension_bundles"]:
-            extensions.extend(["--extension-bundle", bundle])
-        common = ["--package", str(config.package_root), "--catalog-lock", binding["catalog_lock"],
-                  "--source-archive-root", source_archive_root,
-                  "--verifier-bundle", verifier_bundle, *extensions]
-        stage = "lint"
-        lint = _command(["package", "lint", *common, "--json"])
+            initialize_workspace(workspace, workspace_id=workspace_id, from_package=base_package)
         adoption = _read_adoption(root)
         if adoption is not None:
             _validate_adopted_execution(adoption, locals())
-        allocation = find_or_allocate(workspace, allocation_label,
-                                      clock=frozen["fixed_clock"], root_seed=frozen["root_seed"],
-                                      **({"execution_id": adoption["execution_id"]} if adoption else {}))
-        execution = Path(allocation["execution_path"])
-        feedback["execution_ref"] = str(execution)
-        write_json(root / "execution-ref.json", {"execution_id": allocation["execution_id"], "execution_root": str(execution)})
-        stage = "admit"
-        plan = execution / "plan" / "admitted"
-        if not plan.exists():
-            pending_plan = plan.with_name("." + plan.name + ".tmp")
-            if pending_plan.exists():
-                if not pending_plan.resolve().is_relative_to(execution.resolve()):
-                    raise ValueError("未发布准入目录不属于当前 execution")
-                retained = execution / "interrupted-admission"
-                retained.mkdir(exist_ok=True)
-                index = len(tuple(retained.iterdir()))
-                pending_plan.rename(retained / f"attempt-{index:04d}")
-            _command(["package", "admit", *common, "--input-snapshot-manifest", input_snapshot_manifest,
-                      "--output", str(plan), "--json"])
-        stage = "run"
-        run_root = execution / "run"
-        reference = run_root / "result-ref.json"
-        if reference.is_file():
-            from research_pipeline.results import ResultStore
-            identity = json.loads(reference.read_text(encoding="utf-8"))
-            store = ResultStore(execution / "results")
-            bundle = store.load_by_identity(project_id=identity["project_id"], run_id=identity["run_id"], result_id=identity["result_id"])
-            result = {"status": "result_finalized", "result_directory": str(store.result_directory(bundle))}
-        elif (run_root / "operator-dag-invocation.json").exists():
-            inspection = _command(["inspect", "--run-root", str(run_root), "--json"])
-            action = inspection["recommended_action"]
-            if action == "verify" and inspection["finalize"].get("result_published") is True:
-                from research_pipeline.results import ResultStore
-                store = ResultStore(execution / "results")
-                published = Path(inspection["finalize"]["result_directory"]).resolve()
-                if not published.is_relative_to((execution / "results").resolve()):
-                    raise ValueError("已发布 Result 不属于当前 execution")
-                snapshot = store.open_snapshot(published)
-                result = {"status": "result_finalized", "result_directory": str(store.result_directory(snapshot.bundle))}
-            else:
-                if action not in {"resume", "retry-node"}:
-                    raise ValueError(f"Runtime 要求 {action}: {inspection['recommendation_reason']}")
-                retry = None
-                if action == "retry-node":
-                    argv = inspection["next_command_argv"]
-                    retry = argv[argv.index("--node") + 1]
-                result = resume_workspace_execution(workspace, execution_id=allocation["execution_id"], retry_node_id=retry)
-        else:
-            options = runtime_options(binding["runtime_options"], plan=plan, execution=execution,
-                                      clock=frozen["fixed_clock"])
-            result = run_workspace_execution(workspace, execution_id=allocation["execution_id"], plan=plan,
-                data_db=None, clock=frozen["fixed_clock"], root_seed=frozen["root_seed"],
-                input_snapshot_manifest=input_snapshot_manifest, **options)
-        if result.get("status") != "result_finalized":
-            raise ValueError("RP 尚未生成正式 Result")
-        feedback.update(execution_status="succeeded", result_ref=result["result_directory"])
-        stage = "verify"
-        verification_path = execution / "verification" / "result.json"
-        if not verification_path.exists():
-            verification_options = []
-            if "verification_memory_bytes" in binding:
-                verification_options = ["--verification-memory-bytes", str(binding["verification_memory_bytes"])]
-            _command(["verify", "--result", result["result_directory"], "--result-store", str(execution / "results"),
-                      "--output", str(verification_path), "--verification-process-slots", str(binding.get("verification_process_slots", 3)),
-                      *verification_options, "--json"])
+
+        def allocation_handler(workspace, *, clock, root_seed, label):
+            allocation = find_or_allocate(workspace, label, clock=clock, root_seed=root_seed,
+                **({"execution_id": adoption["execution_id"]} if adoption else {}))
+            execution = Path(allocation["execution_path"])
+            feedback["execution_ref"] = str(execution)
+            write_json(root / "execution-ref.json", {"execution_id": allocation["execution_id"], "execution_root": str(execution)})
+            return allocation
+
+        args = workspace_arguments(
+            workspace=str(workspace), label=allocation_label,
+            catalog_lock=binding["catalog_lock"], source_archive_root=source_archive_root,
+            input_snapshot_manifest=input_snapshot_manifest, verifier_bundle=verifier_bundle,
+            extension_bundle=binding["extension_bundles"],
+            verification_memory_bytes=binding.get("verification_memory_bytes"),
+            verification_process_slots=binding.get("verification_process_slots", 3),
+            **normalize_runtime_options(binding["runtime_options"]),
+        )
+        try:
+            outcome = execute_workspace(args, allocation_handler=allocation_handler)
+        except WorkspaceVerificationFailedError as exc:
+            from research_pipeline.evidence import load_verified_result_context
+            outcome = exc.failure_payload
+            verified = load_verified_result_context(
+                outcome["verification_result"], result_store=outcome["result_store"])
+            findings = [item for item in verified.verification.limitations
+                        if not str(item).startswith("simulation_claim_ceiling:")]
+            if (not findings or any(not str(item).startswith("formula.") for item in findings)
+                    or verified.verification.integrity_status != "pass"
+                    or verified.verification.reproducibility_status != "pass"
+                    or any(gate.status not in {"pass", "not_applicable"}
+                           for gate in verified.verification.gate_records)):
+                raise
+            # 公式否定结论交给候选修复，其他验证失败仍保留原 execution 等待处理。
+        feedback.update(command_status="succeeded", execution_status=outcome["execution_status"],
+            verification_status=outcome["verification_status"], result_ref=outcome["result_directory"],
+            verification_ref=outcome["verification_result"], claim_level=outcome["claim_level"])
         from research_pipeline.evidence import load_verified_result_context
-        verified = load_verified_result_context(verification_path, result_store=execution / "results")
-        verdict = verified.verification
-        feedback.update(verification_status=verdict.status, verification_ref=str(verification_path),
-                        claim_level=verdict.claim_level, diagnostics=list(verdict.limitations))
-        stage = "report"
-        report = execution / "report.md"
-        if not report.exists():
-            _command(["report", "--verification-result", str(verification_path), "--result-store", str(execution / "results"),
-                      "--output", str(report), "--format", "markdown", "--json"])
-        feedback["command_status"] = "succeeded"
+        verified = load_verified_result_context(outcome["verification_result"], result_store=outcome["result_store"])
+        feedback["diagnostics"] = list(verified.verification.limitations)
         return feedback
     except Exception as exc:
+        outcome = getattr(exc, "failure_payload", {}) or {}
+        stage = outcome.get("failed_stage", stage)
+        for source, target in (("execution_status", "execution_status"), ("verification_status", "verification_status"),
+                ("result_directory", "result_ref"), ("verification_result", "verification_ref"), ("execution_root", "execution_ref")):
+            if outcome.get(source) is not None:
+                feedback[target] = outcome[source]
         diagnostic = {**feedback, "failed_stage": stage,
             "diagnostics": failure_diagnostics(exc, stage=stage, execution=feedback.get("execution_ref"))}
         if stage in {"admit", "run", "verify", "report"}:
@@ -224,10 +185,11 @@ def _read_adoption(root):
 def _validate_execution(arguments, execution_id):
     from research_pipeline.workspace import load_workspace, inspect_workspace
     from research_pipeline.packages import load_research_package
-    from research_pipeline.cli.research_plan_store import load_operator_graph_research_plan
+    from research_pipeline.application.research_plan_store import load_operator_graph_research_plan
     from research_pipeline.data_plane.archived_inputs import load_archived_input_manifest
     from research_pipeline.extensions import verify_project_operator_bundle, verify_project_verifier_bundle
-    from .worker import _command
+    from research_pipeline.application import research_package
+    from research_pipeline.application.workspace_flow import workspace_arguments
 
     root = Path(arguments["root"])
     config = load_workspace(root / "workspace")
@@ -247,12 +209,11 @@ def _validate_execution(arguments, execution_id):
     if manifest.get("input_snapshot_manifest") != load_archived_input_manifest(arguments["input_snapshot_manifest"]):
         raise ValueError("替代 execution 的冻结输入与候选不一致")
     binding = arguments["binding"]
-    extensions = [part for bundle in binding["extension_bundles"] for part in ("--extension-bundle", bundle)]
-    lint = arguments.get("lint") or _command([
-        "package", "lint", "--package", str(config.package_root), "--catalog-lock", binding["catalog_lock"],
-        "--source-archive-root", arguments["source_archive_root"],
-        "--verifier-bundle", arguments["verifier_bundle"], *extensions, "--json",
-    ])
+    lint = arguments.get("lint") or research_package._execute(workspace_arguments(
+        command="package", package_command="lint", package=str(config.package_root),
+        catalog_lock=binding["catalog_lock"], source_archive_root=arguments["source_archive_root"],
+        verifier_bundle=arguments["verifier_bundle"], extension_bundle=binding["extension_bundles"],
+    ))
     catalog_hash = lint["checks"]["fields"]["catalog_hash"]
     if any(query.catalog_hash != catalog_hash for query in queries.values()):
         raise ValueError("替代 execution 的 Catalog 与冻结候选不一致")
@@ -264,7 +225,7 @@ def _validate_execution(arguments, execution_id):
         raise ValueError("替代 execution 的 Verifier bundle 与候选不一致")
     invocation = json.loads((execution / "run/operator-dag-invocation.json").read_text(encoding="utf-8"))
     paths = {"plan": execution / "plan/admitted", "run_root": execution / "run",
-             "artifact_root": execution / "artifacts", "handoff_out": execution / "handoff.json",
+             "artifact_root": execution / "artifacts",
              "result_store": execution / "results", "input_snapshot_manifest": arguments["input_snapshot_manifest"]}
     if any(Path(invocation[key]).resolve() != Path(value).resolve() for key, value in paths.items()):
         raise ValueError("替代 execution 的正式运行位置或来源与候选不一致")
@@ -288,7 +249,7 @@ def _validate_adopted_execution(adoption, arguments):
 
 
 def _adopt_package_execution(*, execution_id, **arguments):
-    from research_pipeline.cli.research_plan_store import load_operator_graph_research_plan
+    from research_pipeline.application.research_plan_store import load_operator_graph_research_plan
     from research_pipeline.evidence import load_verified_result_context
     from research_pipeline.results import ResultStore
 

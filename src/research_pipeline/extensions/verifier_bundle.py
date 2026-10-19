@@ -7,7 +7,7 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Mapping
@@ -35,6 +35,7 @@ from .project_bundle import (
 
 
 PROJECT_VERIFIER_BUNDLE_VERSION = "project-verifier-extension-bundle-v1"
+_PROJECT_VERIFIER_PROJECTION_VERSION = "project-verifier-extension-bundle-v2"
 PROJECT_VERIFIER_ABI_VERSION = "project-verifier-abi-v1"
 
 
@@ -56,6 +57,7 @@ class ProjectVerifierBundleManifest:
     bundle_hash: str
     contract_version: str = PROJECT_VERIFIER_BUNDLE_VERSION
     abi_version: str = PROJECT_VERIFIER_ABI_VERSION
+    authorized_columns: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for name in ("project_id", "verifier_id", "verifier_version"):
@@ -86,7 +88,13 @@ class ProjectVerifierBundleManifest:
         hashes = (self.source_tree_hash, self.dependency_lock_hash, self.bundle_hash)
         if any(not _HASH_PATTERN.fullmatch(value) for value in hashes):
             raise ExtensionError("项目 Verifier bundle 身份无效")
-        if self.contract_version != PROJECT_VERIFIER_BUNDLE_VERSION:
+        columns = _normalize_authorized_columns(self.authorized_columns, schemas)
+        object.__setattr__(self, "authorized_columns", MappingProxyType(columns))
+        expected_version = (
+            _PROJECT_VERIFIER_PROJECTION_VERSION if columns
+            else PROJECT_VERIFIER_BUNDLE_VERSION
+        )
+        if self.contract_version != expected_version:
             raise ExtensionError("项目 Verifier bundle 版本不受支持")
         if self.abi_version != PROJECT_VERIFIER_ABI_VERSION:
             raise ExtensionError("项目 Verifier ABI 版本不受支持")
@@ -131,6 +139,11 @@ class ProjectVerifierBundleManifest:
 
     def payload(self) -> dict[str, object]:
         return {
+            **({
+                "authorized_columns": {
+                    key: list(value) for key, value in self.authorized_columns.items()
+                }
+            } if self.authorized_columns else {}),
             "project_id": self.project_id,
             "verifier_id": self.verifier_id,
             "verifier_version": self.verifier_version,
@@ -165,6 +178,8 @@ class ProjectVerifierBundleManifest:
             "dependency_lock_hash", "requires_python", "bundle_hash",
             "contract_version", "abi_version",
         }
+        if payload.get("contract_version") == _PROJECT_VERIFIER_PROJECTION_VERSION:
+            expected.add("authorized_columns")
         if set(payload) != expected or not isinstance(payload["entry"], Mapping):
             raise ExtensionError("项目 Verifier manifest schema 无效")
         if set(payload["entry"]) != {"module", "function"}:
@@ -206,7 +221,29 @@ class ProjectVerifierBundleManifest:
             bundle_hash=str(payload["bundle_hash"]),
             contract_version=str(payload["contract_version"]),
             abi_version=str(payload["abi_version"]),
+            authorized_columns=payload.get("authorized_columns", {}),
         )
+
+
+def _normalize_authorized_columns(
+    columns: Mapping[str, tuple[str, ...]],
+    authorized_schema_ids: Iterable[str],
+) -> dict[str, tuple[str, ...]]:
+    """列声明只允许已授权表的非空、无重复顶层列名。"""
+    if not isinstance(columns, Mapping):
+        raise ExtensionError("项目 Verifier authorized_columns 必须是映射")
+    normalized = {}
+    for schema_id, names in columns.items():
+        if schema_id not in authorized_schema_ids:
+            raise ExtensionError("项目 Verifier 列声明必须绑定已授权表")
+        if (
+            not isinstance(names, (list, tuple)) or not names
+            or any(not isinstance(name, str) or not name for name in names)
+            or len(set(names)) != len(names)
+        ):
+            raise ExtensionError("项目 Verifier 列声明必须是非空且无重复的列名列表")
+        normalized[schema_id] = tuple(names)
+    return dict(sorted(normalized.items()))
 
 
 def _validate_verifier_entry(root: Path, module: str, function: str) -> None:
@@ -239,6 +276,7 @@ def compile_project_verifier_bundle(
     entry_module: str,
     entry_function: str,
     authorized_schema_ids: Iterable[str],
+    authorized_columns: Mapping[str, tuple[str, ...]] | None = None,
     authorized_support_artifact_types: Iterable[str] = (),
     metric_definitions: Iterable[MetricDefinition] = (),
     dependency_lock: Mapping[str, str],
@@ -276,6 +314,13 @@ def compile_project_verifier_bundle(
         "contract_version": PROJECT_VERIFIER_BUNDLE_VERSION,
         "abi_version": PROJECT_VERIFIER_ABI_VERSION,
     }
+    columns = _normalize_authorized_columns(
+        {} if authorized_columns is None else authorized_columns,
+        payload["authorized_schema_ids"],
+    )
+    if columns:
+        payload["authorized_columns"] = {key: list(value) for key, value in columns.items()}
+        payload["contract_version"] = _PROJECT_VERIFIER_PROJECTION_VERSION
     manifest = ProjectVerifierBundleManifest(
         project_id=project_id,
         verifier_id=verifier_id,
@@ -295,6 +340,8 @@ def compile_project_verifier_bundle(
         dependency_lock_hash=str(payload["dependency_lock_hash"]),
         requires_python=PROJECT_OPERATOR_REQUIRES_PYTHON,
         bundle_hash=typed_canonical_hash(payload),
+        contract_version=str(payload["contract_version"]),
+        authorized_columns=columns,
     )
     output = Path(output_root).resolve() / manifest.bundle_hash
     if output.exists():

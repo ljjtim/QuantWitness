@@ -6,6 +6,7 @@ import shutil
 import sys
 
 import yaml
+import pytest
 
 
 def test_risk_target_bundle_compiles_with_registered_cash_ports(tmp_path):
@@ -41,12 +42,17 @@ def test_risk_package_binds_complete_design_to_holdout(tmp_path):
     spec = importlib.util.spec_from_file_location("risk_prepare_identity", root / "examples/qlib_risk/prepare.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    prepared = module.prepare(tmp_path / "study", method="enhanced", estimator="shrink")
+    series = {"series_id": "risk-model", "root": str(tmp_path / "series"),
+        "purpose": "风险组合最终评价", "legacy_ledger_roots": []}
+    prepared = module.prepare(tmp_path / "study", method="enhanced", estimator="shrink",
+        research_series=series)
     package = Path(prepared["package"])
     payload = yaml.safe_load((package / "spec/research.yaml").read_text(encoding="utf-8"))
     nodes = {item["node_id"]: item for item in payload["graph"]["nodes"]}
     design = nodes["summary"]["parameters"]["design"]
     identity = typed_canonical_hash(design)
+    assert design["research_series"] == series
+    assert json.loads(nodes["model_holdout"]["parameters"]["research_series_json"]) == series
     assert design["portfolio_risk"]["method"] == "enhanced"
     assert design["portfolio_risk"]["estimator"] == "shrink"
     assert nodes["portfolio_targets"]["parameters"]["design"] == design
@@ -58,3 +64,38 @@ def test_risk_package_binds_complete_design_to_holdout(tmp_path):
     assert request["model_parameters"]["research_identity_hash"] == identity
     sources = yaml.safe_load((package / "sources/sources.yaml").read_text(encoding="utf-8"))
     assert sources["sources"][0]["content_hash"] == identity
+
+
+def load_risk_run():
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("risk_run_series", root / "examples/qlib_risk/run.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_risk_cli_preserves_series_only_during_prepare(tmp_path, monkeypatch):
+    module = load_risk_run()
+    calls = []
+    monkeypatch.setattr(module.risk_prepare, "prepare", lambda root, **kwargs: calls.append(("prepare", kwargs)))
+    monkeypatch.setattr(module.base_run, "execute", lambda root, stage, **kwargs: calls.append((stage, kwargs)))
+    module.main(["--output", str(tmp_path / "study"), "--research-series-id", "risk-model",
+        "--research-series-root", str(tmp_path / "series"), "--research-series-purpose", "风险组合最终评价",
+        "--research-series-legacy-root", str(tmp_path / "legacy")])
+    assert [stage for stage, _ in calls] == ["prepare", "lint", "admit", "run", "verify", "report"]
+    assert calls[0][1]["research_series"] == {"series_id": "risk-model", "root": str(tmp_path / "series"),
+        "purpose": "风险组合最终评价", "legacy_ledger_roots": [str(tmp_path / "legacy")]}
+    assert all("research_series" not in kwargs for _, kwargs in calls[1:])
+
+
+def test_risk_cli_rejects_missing_or_changed_series(tmp_path, monkeypatch):
+    module = load_risk_run()
+    calls = []
+    monkeypatch.setattr(module, "execute", lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(SystemExit):
+        module.main(["--output", str(tmp_path / "study"), "--stage", "prepare"])
+    with pytest.raises(SystemExit):
+        module.main(["--output", str(tmp_path / "study"), "--stage", "resume",
+            "--research-series-id", "other", "--research-series-root", str(tmp_path / "series"),
+            "--research-series-purpose", "风险组合最终评价"])
+    assert not calls

@@ -492,6 +492,7 @@ class ArtifactResolver:
                 "dataset_artifact",
                 identity,
                 lambda: self._resolve_reference(reference),
+                descriptor={"root": self.allowed_root, "reference": reference},
             )
 
             def file_resolver() -> tuple[Path, ...]:

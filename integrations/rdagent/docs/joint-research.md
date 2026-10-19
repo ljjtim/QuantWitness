@@ -80,3 +80,12 @@ adoption = adopt_package_execution(
 ## 固定三轮计划
 
 联合请求可显式声明 `research_schedule=["baseline","factor","model"]`，并设置 `budget.rounds=3`。方向调用分别在已批准的后继因子、模型分支内选择方向和知识引用；不符合计划的响应被拒绝。默认仍自由选择，预算、调用预约与恢复方式不变。计划随请求冻结，恢复不能更换。
+
+
+## 查看中断与请求差异
+
+`joint-inspect --request REQUEST.json` 只读查看已有会话，不创建文件、不调用模型或重跑正式评价。`not_started` 表示尚未建立会话，`incomplete` 表示已冻结但尚无终态，`interrupted` 列出未记录完的轮次及已有执行引用、诊断；原执行锁仍存活时返回 `running` 和 `next_action=wait`。已保存 outcome 保留原状态。
+
+`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `joint-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入已验证开发指标反馈，test/holdout 不参与研究循环。
+
+未取得确定结果的模型调用预约显示在 `unresolved_model_calls`；`next_action=review_model_calls` 要求核对原调用收据，不自动重复调用或释放已预约预算。
