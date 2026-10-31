@@ -37,9 +37,7 @@ class CheckpointStore:
         expectation: CheckpointExpectation,
         attempt_id: str,
         content: bytes,
-        outputs: Mapping[str, ArtifactRef] | None = None,
-        output_name: str | None = None,
-        output_type: str | None = None,
+        outputs: Mapping[str, ArtifactRef],
         audit_environment_digest: str,
         execution_identity_digest: str,
         root_seed: int,
@@ -53,19 +51,6 @@ class CheckpointStore:
             raise RuntimeIntegrityError("checkpoint key 不是安全路径组件")
         target = self.checkpoints_root / node_execution_id
         content_hash = _sha256(content)
-        if outputs is None:
-            if output_name is None or output_type is None:
-                raise RuntimeIntegrityError("checkpoint 必须声明完整 outputs")
-            outputs = {
-                output_name: ArtifactRef(
-                    output_name,
-                    output_type,
-                    node_execution_id,
-                    content_hash,
-                )
-            }
-        elif output_name is not None or output_type is not None:
-            raise RuntimeIntegrityError("checkpoint outputs 与单输出参数不能混用")
         manifest = CheckpointManifest(
             node_execution_id,
             attempt_id,

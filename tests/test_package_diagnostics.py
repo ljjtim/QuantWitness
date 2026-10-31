@@ -188,7 +188,9 @@ def test_complete_lint_delegates_to_original_compiler_and_report(complete, capsy
     resources = {"status": "declared"}
     report = {"status": "linted", "package_hash": package.package_hash, "execution_ready": False}
 
-    def compile_package(loaded, args):
+    def compile_package(loaded, args, **declarations):
+        assert declarations["query_result"].queries
+        assert declarations["recipe"].nodes
         assert loaded.package_hash == package.package_hash
         assert Path(args.package) == complete
         calls.append("compile")

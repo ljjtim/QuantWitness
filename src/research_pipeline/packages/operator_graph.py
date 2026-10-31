@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 import json
 from typing import Mapping, Protocol, runtime_checkable
@@ -11,6 +12,8 @@ from research_pipeline.platform.asset_taxonomy import MINUTE_TARGET_ASSET_CLASSE
 from research_pipeline.platform.operator_contracts import (
     AdmittedOperatorGraph,
     OperatorGraphRecipe,
+    OperatorNodeRecipe,
+    InputBinding,
 )
 from research_pipeline.platform.metric_contracts import compose_metric_registry
 from research_pipeline.research.semantics import ResearchSemantics
@@ -24,7 +27,6 @@ from research_pipeline.data_plane import (
 from .constants import OPERATOR_GRAPH_BUILDER_ID
 from .models import ResearchPackage, ResearchPackageError
 from .plan_contracts import (
-    OPERATOR_GRAPH_PLAN_VERSION,
     OperatorGraphPlan,
     QueryCompileResult,
     RecipeCompileResult,
@@ -63,24 +65,13 @@ def compile_operator_graph_package(
     query_result: QueryCompileResult,
     admission: object | None = None,
     platform_admission: object | None = None,
-    verifier_admission: object | None = None,
+    recipe: OperatorGraphRecipe | None = None,
+    research_semantics: ResearchSemantics | None = None,
 ) -> OperatorGraphPlan:
     if not isinstance(admission, OperatorGraphAdmission):
         raise ResearchPackageError("operator_graph_plan_v1 必须提供可信算子注册表准入")
     payload = package.spec_payload
-    required_fields = {
-        "contract_version", "research_id", "as_of", "requests", "root_seed", "fixed_clock",
-        "graph", "result",
-    }
-    optional_fields = {"research_semantics"}
-    if not required_fields.issubset(payload) or set(payload) - required_fields - optional_fields:
-        expected = required_fields | optional_fields
-        raise ResearchPackageError(
-            f"spec schema 不匹配；缺失={sorted(required_fields - set(payload))}，"
-            f"未知={sorted(set(payload) - expected)}"
-        )
-    if payload["contract_version"] != OPERATOR_GRAPH_PACKAGE_VERSION:
-        raise ResearchPackageError("operator graph package contract_version 不受支持")
+    _validate_operator_graph_spec(payload)
     research_id = payload["research_id"]
     as_of = payload["as_of"]
     graph = payload["graph"]
@@ -89,8 +80,7 @@ def compile_operator_graph_package(
         raise ResearchPackageError("spec.research_id 必须是非空字符串")
     if not isinstance(graph, Mapping):
         raise ResearchPackageError("spec.graph 必须是映射")
-    research_semantics = None
-    if raw_research_semantics is not None:
+    if research_semantics is None and raw_research_semantics is not None:
         if not isinstance(raw_research_semantics, Mapping):
             raise ResearchPackageError("spec.research_semantics 必须是映射")
         try:
@@ -130,18 +120,30 @@ def compile_operator_graph_package(
                 f"Estimand 指标未进入 Package MetricContract: {sorted(undeclared_metrics)}"
             )
     try:
-        recipe = OperatorGraphRecipe.from_dict(
-            _inject_platform_catalog_admission(
-                graph,
-                request_ids=query_result.request_ids,
+        if recipe is None:
+            recipe = OperatorGraphRecipe.from_dict(
+                _inject_platform_catalog_admission(
+                    graph, request_ids=query_result.request_ids,
+                    platform_admission=platform_admission,
+                )
+            )
+        else:
+            recipe = _inject_platform_catalog_admission(
+                recipe, request_ids=query_result.request_ids,
                 platform_admission=platform_admission,
             )
-        )
         admitted = admission.admit(recipe)
         _validate_operator_graph_special_contracts(
             recipe,
             admission=admission,
             request_ids=frozenset(query_result.request_ids),
+        )
+        from .project_strategy_admission import validate_project_strategy_recipe
+        validate_project_strategy_recipe(recipe, admission, dict(zip(query_result.request_ids, query_result.queries, strict=True)))
+        from .minute_scope_admission import validate_minute_scope_graph
+        validate_minute_scope_graph(
+            recipe, dict(zip(query_result.request_ids, query_result.queries, strict=True)),
+            scope_inputs=package.minute_scope_inputs,
         )
         _validate_shared_futures_query_bindings(
             recipe, dict(zip(query_result.request_ids, query_result.queries, strict=True)),
@@ -175,7 +177,10 @@ def compile_operator_graph_package(
             payload["result"],
             recipe=recipe,
             resolver=admission,
+            research_semantics=research_semantics,
         )
+        from .project_strategy_admission import validate_strategy_result_closure
+        validate_strategy_result_closure(recipe, result_spec)
         _validate_adjustment_result_closure(recipe, result_spec)
         _validate_shared_futures_result_closure(recipe, result_spec)
     except Exception as exc:
@@ -185,16 +190,24 @@ def compile_operator_graph_package(
         operator = admission.require_operator(node.operator_id, node.operator_version)
         for output in operator.output_ports:
             producers.append((node.node_id, output.port, output.artifact_type))
-    verifier_metrics = (
-        () if verifier_admission is None
-        else verifier_admission.manifest.metric_definitions
-    )
+    from research_pipeline.platform.metric_contracts import MetricDefinition
+
     package_metric_refs = frozenset(package.metric_contract.metrics)
-    project_metrics = tuple(
-        definition
-        for definition in verifier_metrics
-        if definition.metric_ref in package_metric_refs
-    )
+    declarations = payload.get("metric_definitions", [])
+    if not isinstance(declarations, (list, tuple)):
+        raise ResearchPackageError("metric_definitions 必须是指标定义列表")
+    project_metrics = tuple(MetricDefinition.from_dict(item) for item in declarations)
+    if any(item.metric_ref not in package_metric_refs for item in project_metrics):
+        raise ResearchPackageError("metric_definitions 含未在研究包中声明的指标")
+    if any(node.parameters.get("execution_backend") == "lean" for node in recipe.nodes):
+        from research_pipeline.research.lean_metrics import lean_metric_definitions_for_nodes
+        for node in recipe.nodes:
+            if node.parameters.get("execution_backend") == "lean":
+                initial_cash = node.parameters.get("initial_cash_units")
+                if type(initial_cash) is not int or initial_cash <= 0:
+                    raise ResearchPackageError("LEAN研究初始资金必须为正整数分")
+        project_metrics += tuple(definition for definition in lean_metric_definitions_for_nodes(recipe.nodes)
+                                 if definition.metric_ref in package_metric_refs)
     metric_proofs = compose_metric_registry(project_metrics).prove(
         package.metric_contract.metrics,
         producers,
@@ -214,40 +227,7 @@ def compile_operator_graph_package(
         implementation_id: typed_canonical_hash(dict(identity))
         for implementation_id, identity in implementation_identities.items()
     }
-    verifier_identity = None
-    if verifier_admission is not None:
-        raw_identity = getattr(verifier_admission, "identity", None)
-        if not isinstance(raw_identity, Mapping):
-            raise ResearchPackageError("Verifier bundle 未形成可冻结身份")
-        verifier_identity = dict(raw_identity)
-        expected_project_id = project_id or research_id
-        if verifier_identity.get("project_id") != expected_project_id:
-            raise ResearchPackageError("Verifier bundle project_id 与 Package 不一致")
-    values = {
-        "research_id": research_id,
-        "package_hash": package.package_hash,
-        "requests": [{"request_id": request_id, "query": query.to_dict()} for request_id, query in zip(query_result.request_ids, query_result.queries, strict=True)],
-        "recipe": compiled_recipe.recipe.to_dict(),
-        "topological_order": list(compiled_recipe.topological_order),
-        "registry_hash": compiled_recipe.registry_hash,
-        "admission_hash": compiled_recipe.admission_hash,
-        "metric_proofs": [item.to_dict() for item in compiled_recipe.metric_proofs],
-        "root_seed": root_seed,
-        "fixed_clock": fixed_clock,
-        "contract_version": OPERATOR_GRAPH_PLAN_VERSION,
-    }
-    if project_bundle_hashes:
-        values["project_admission"] = {
-            "project_id": project_id,
-            "bundle_hashes": list(project_bundle_hashes),
-            "implementation_hashes": dict(sorted(project_implementation_hashes.items())),
-        }
-    if verifier_identity is not None:
-        values["verifier_admission"] = verifier_identity
-    values["result_spec"] = result_spec.to_dict()
-    if research_semantics is not None:
-        values["research_semantics"] = research_semantics.to_dict()
-    return OperatorGraphPlan(
+    return OperatorGraphPlan.build(
         research_id=research_id,
         package_hash=package.package_hash,
         request_ids=query_result.request_ids,
@@ -260,13 +240,27 @@ def compile_operator_graph_package(
         result_spec=result_spec,
         root_seed=root_seed,
         fixed_clock=fixed_clock,
-        plan_hash=typed_canonical_hash(values),
         research_semantics=research_semantics,
         project_id=project_id,
         project_bundle_hashes=project_bundle_hashes,
         project_implementation_hashes=project_implementation_hashes,
-        verifier_identity=verifier_identity,
     )
+
+
+def _validate_operator_graph_spec(payload: Mapping[str, object]) -> None:
+    required_fields = {
+        "contract_version", "research_id", "as_of", "requests", "root_seed", "fixed_clock",
+        "graph", "result",
+    }
+    optional_fields = {"research_semantics", "metric_definitions"}
+    if not required_fields.issubset(payload) or set(payload) - required_fields - optional_fields:
+        expected = required_fields | optional_fields
+        raise ResearchPackageError(
+            f"spec schema 不匹配；缺失={sorted(required_fields - set(payload))}，"
+            f"未知={sorted(set(payload) - expected)}"
+        )
+    if payload["contract_version"] != OPERATOR_GRAPH_PACKAGE_VERSION:
+        raise ResearchPackageError("operator graph package contract_version 不受支持")
 
 
 def _validate_query_clock_contract(
@@ -361,12 +355,37 @@ def _validate_adjustment_result_closure(recipe, result_spec) -> None:
 
 
 def _inject_platform_catalog_admission(
-    graph: Mapping[str, object],
+    graph: Mapping[str, object] | OperatorGraphRecipe,
     *,
     request_ids: tuple[str, ...],
     platform_admission: object | None,
-) -> dict[str, object]:
+) -> dict[str, object] | OperatorGraphRecipe:
     """把数据准入作为平台输入注入，ResearchPackage 只声明研究图。"""
+    if isinstance(graph, OperatorGraphRecipe):
+        nodes = graph.nodes
+        if any(node.operator_id == "data.catalog.admission" for node in nodes):
+            raise ResearchPackageError("ResearchPackage 不得声明平台 Catalog admission 节点")
+        if sum(node.operator_id == "data.columnar.materialize" for node in nodes) > 1:
+            raise ResearchPackageError("当前算子图最多包含一个 data.columnar.materialize 节点")
+        data_nodes = [node for node in nodes if node.operator_id in {
+            "data.columnar.materialize", "data.minute.scan",
+        }]
+        if not data_nodes:
+            return graph
+        values = _platform_admission_values(request_ids=request_ids, platform_admission=platform_admission)
+        admission_id = "platform.catalog.admission"
+        if any(node.node_id == admission_id for node in nodes):
+            raise ResearchPackageError("研究图 node_id 与平台保留节点冲突")
+        replacements = {}
+        for node in data_nodes:
+            if node.inputs:
+                raise ResearchPackageError(f"{node.operator_id} 的 admission 输入由平台注入")
+            replacements[node.node_id] = replace(node, inputs=(InputBinding("admission", admission_id, "admission"),))
+        platform_node = OperatorNodeRecipe(admission_id, "data.catalog.admission", "1.0.0", (), values, ())
+        return OperatorGraphRecipe.build(
+            graph_id=graph.graph_id,
+            nodes=tuple(replacements.get(node.node_id, node) for node in nodes) + (platform_node,),
+        )
     if set(graph) != {"contract_version", "graph_id", "nodes"}:
         raise ResearchPackageError("spec.graph schema 无效")
     raw_nodes = graph["nodes"]
@@ -470,181 +489,6 @@ def _platform_admission_values(
     return {"request_ids": list(sorted(request_ids)), **values}
 
 
-def _thaw_mapping(value: object, field: str) -> dict[str, object]:
-    if not isinstance(value, Mapping):
-        raise ResearchPackageError(f"{field} 必须是映射")
-
-    def thaw(item: object) -> object:
-        if isinstance(item, Mapping):
-            return {str(key): thaw(child) for key, child in item.items()}
-        if isinstance(item, (list, tuple)):
-            return [thaw(child) for child in item]
-        return item
-
-    return {str(key): thaw(item) for key, item in value.items()}
-
-
-def _validate_explicit_order_parameters(parameters: Mapping[str, object]) -> None:
-    """编译层只检查订单 JSON 形状与模式，金融合同由运行时验证。"""
-    mode = parameters.get("execution_mode", "target")
-    if mode not in ("target", "explicit_orders"):
-        raise ResearchPackageError("execution_mode 只能是 target 或 explicit_orders")
-    encoded = parameters.get("order_commands", "")
-    if not isinstance(encoded, str):
-        raise ResearchPackageError("order_commands 必须是完整 JSON 字符串")
-    if encoded == "":
-        commands = []
-    else:
-        try:
-            commands = json.loads(encoded)
-        except ValueError as exc:
-            raise ResearchPackageError("order_commands 必须是完整 JSON 数组字符串") from exc
-        if not isinstance(commands, list):
-            raise ResearchPackageError("order_commands 必须是 JSON 数组")
-    if mode == "target":
-        if commands:
-            raise ResearchPackageError("target 模式不能声明非空 order_commands")
-        return
-    if not commands:
-        raise ResearchPackageError("explicit_orders 模式必须声明非空 order_commands")
-    expected = {
-        "command_id", "action", "order_id", "instrument", "decision_time", "submitted_at",
-        "available_at", "source_sequence", "source_hashes", "trading_date", "side", "quantity",
-        "position_effect", "order_type", "time_in_force", "limit_price", "reference_price",
-        "reference_price_available_at", "funds_policy", "slippage_bps", "slippage_ticks",
-    }
-    instrument_fields = {
-        "instrument_id", "asset_class", "venue", "currency", "contract_kind", "contract_version",
-    }
-    for command in commands:
-        if not isinstance(command, dict) or set(command) != expected:
-            raise ResearchPackageError("order_commands 命令 schema 不匹配")
-        instrument = command["instrument"]
-        if not isinstance(instrument, dict) or set(instrument) != instrument_fields:
-            raise ResearchPackageError("order_commands instrument schema 不匹配")
-        if not isinstance(command["source_hashes"], list):
-            raise ResearchPackageError("order_commands source_hashes 必须是数组")
-        for name in ("limit_price", "reference_price"):
-            value = command[name]
-            if value is not None and (
-                not isinstance(value, dict) or set(value) != {"units", "scale", "currency"}
-            ):
-                raise ResearchPackageError(f"order_commands {name} schema 不匹配")
-    if not any(command["action"] == "submit" for command in commands):
-        raise ResearchPackageError("explicit_orders 模式至少需要一条 submit 命令")
-
-
-def _validate_external_cashflow_parameters(encoded: object) -> None:
-    """检查冻结参数形状和声明时序；账户余额与金融执行由 Runtime 验证。"""
-    if not isinstance(encoded, str):
-        raise ResearchPackageError("external_cashflows 必须是完整 JSON 数组字符串")
-    try:
-        rows = [] if encoded == "" else json.loads(encoded)
-    except ValueError as exc:
-        raise ResearchPackageError("external_cashflows 必须是完整 JSON 数组字符串") from exc
-    if not isinstance(rows, list):
-        raise ResearchPackageError("external_cashflows 必须是 JSON 数组")
-    required = {"event_id", "account_id", "currency", "direction", "amount_units", "requested_at",
-                "available_at", "effective_at", "source_ref"}
-    seen = set()
-    for row in rows:
-        if not isinstance(row, dict) or required - set(row) or set(row) - required - {"status", "reason"}:
-            raise ResearchPackageError("外部资金流字段缺失或包含未知字段")
-        if any(not isinstance(row[key], str) or not row[key].strip()
-               for key in ("event_id", "account_id", "source_ref")):
-            raise ResearchPackageError("外部资金流身份和来源必须为非空字符串")
-        if row["event_id"] in seen:
-            raise ResearchPackageError("外部资金流 event_id 重复")
-        seen.add(row["event_id"])
-        if (row["direction"] not in {"deposit", "withdrawal"} or row["currency"] != "CNY"
-                or type(row["amount_units"]) is not int or row["amount_units"] <= 0):
-            raise ResearchPackageError("外部资金流方向、币种或金额无效")
-        status, reason = row.get("status", "settled"), row.get("reason", "")
-        if status not in {"settled", "cancelled", "failed"} or not isinstance(reason, str) or (status != "settled" and not reason.strip()):
-            raise ResearchPackageError("外部资金流状态或终态原因无效")
-        try:
-            stamps = [datetime.fromisoformat(row[key]) for key in ("requested_at", "available_at", "effective_at")]
-            valid = all(value.tzinfo is not None and value.utcoffset() is not None for value in stamps)
-            valid = valid and max(stamps[:2]) <= stamps[2]
-        except (ValueError, TypeError):
-            valid = False
-        if not valid:
-            raise ResearchPackageError("外部资金流时点须带时区且生效不得早于申请或可见时点")
-
-
-def _validate_credit_account_parameters(parameters: Mapping) -> None:
-    """检查账户选择与冻结声明；金融规则计算由执行及独立验证负责。"""
-    model = parameters.get("account_model", "cash")
-    credit = parameters.get("credit_account")
-    if model not in {"cash", "financing_credit"}:
-        raise ResearchPackageError("account_model 只能是 cash 或 financing_credit")
-    if model == "cash":
-        if credit is not None:
-            raise ResearchPackageError("普通现金账户不能携带 credit_account")
-        return
-    if (not isinstance(credit, Mapping) or not isinstance(parameters.get("account"), Mapping)
-            or parameters.get("execution_mode") != "explicit_orders"):
-        raise ResearchPackageError("融资信用账户必须声明 credit_account、account 及显式订单模式")
-    if credit.get("contract_version") != "research-credit-account-v1":
-        raise ResearchPackageError("信用账户输入版本不受支持")
-    fields = {"contract_version", "account_id", "currency", "cash_scale", "as_of", "rules",
-              "contracts", "position_links", "order_allocations", "instructions", "profile_id",
-              "repayment_link_policy", "interest_policy", "risk_sell_policy", "sale_settlement_policy"}
-    if set(credit) != fields:
-        raise ResearchPackageError("credit_account 字段不完整或包含未知字段")
-    if (credit["currency"] != "CNY" or type(credit["cash_scale"]) is not int
-            or credit["cash_scale"] != 2 or not isinstance(credit["account_id"], str)
-            or not credit["account_id"].strip()):
-        raise ResearchPackageError("信用账户身份、币种或金额精度无效")
-    account = parameters["account"].get("opening_snapshot", {})
-    if (not isinstance(account, Mapping)
-            or any(credit[key] != account.get(key) for key in ("account_id", "currency"))):
-        raise ResearchPackageError("融资与现货期初账户身份和时点必须一致")
-    try:
-        as_of = datetime.fromisoformat(credit["as_of"])
-        started_at = datetime.fromisoformat(account.get("started_at"))
-        valid = as_of.tzinfo is not None and as_of.utcoffset() is not None and as_of == started_at
-    except (ValueError, TypeError):
-        valid = False
-    if not valid:
-        raise ResearchPackageError("融资期初时点必须带时区并与现货期初一致")
-    identities = {"rules": "rule_id", "contracts": "contract_id", "position_links": "link_id",
-                  "order_allocations": "order_id", "instructions": "instruction_id"}
-    for field, identity in identities.items():
-        rows = credit[field]
-        if not isinstance(rows, (list, tuple)) or any(not isinstance(row, Mapping) for row in rows):
-            raise ResearchPackageError(f"credit_account {field} 必须是对象数组")
-        ids = [row.get(identity) for row in rows]
-        if any(not isinstance(value, str) or not value.strip() for value in ids) or len(ids) != len(set(ids)):
-            raise ResearchPackageError(f"融资 {identity} 缺失或重复")
-    if not credit["rules"]:
-        raise ResearchPackageError("融资账户必须声明规则历史")
-    for rule in credit["rules"]:
-        if any(not isinstance(rule.get(key), str) or not rule[key].strip()
-               for key in ("source_ref", "assumption_source_ref")):
-            raise ResearchPackageError("融资规则必须声明市场来源和协议来源")
-        try:
-            available = datetime.fromisoformat(rule["available_at"])
-            start = date.fromisoformat(rule["effective_start"])
-            end = None if rule["effective_end"] is None else date.fromisoformat(rule["effective_end"])
-            valid = available.tzinfo is not None and available.utcoffset() is not None and (end is None or end >= start)
-        except (KeyError, ValueError, TypeError):
-            valid = False
-        if not valid:
-            raise ResearchPackageError("融资规则有效区间或可见时点无效")
-    for instruction in credit["instructions"]:
-        try:
-            stamps = [datetime.fromisoformat(instruction[key]) for key in ("requested_at", "available_at", "effective_at")]
-            valid = all(value.tzinfo is not None and value.utcoffset() is not None for value in stamps) and max(stamps[:2]) <= stamps[2]
-            if instruction.get("kind") == "extend" and instruction.get("status") == "approved":
-                approved = datetime.fromisoformat(instruction["approval_at"])
-                valid = valid and approved.tzinfo is not None and approved <= stamps[2]
-        except (KeyError, ValueError, TypeError):
-            valid = False
-        if not valid:
-            raise ResearchPackageError("融资指令或展期批准在生效时点尚不可见")
-
-
 def _validate_operator_graph_special_contracts(
     recipe: OperatorGraphRecipe,
     *,
@@ -666,12 +510,6 @@ def _validate_operator_graph_special_contracts(
                 series_from_parameters(parameters)
             except ValueError as exc:
                 raise ResearchPackageError(str(exc)) from exc
-        if node.operator_id in {"finance.simulation.intraday", "finance.simulation.daily-cash"}:
-            _validate_explicit_order_parameters(parameters)
-        if node.operator_id == "finance.simulation.daily-cash":
-            _validate_credit_account_parameters(parameters)
-        if node.operator_id == "finance.simulation.daily-cash" and "external_cashflows" in parameters:
-            _validate_external_cashflow_parameters(parameters["external_cashflows"])
         if node.operator_id in {
             "research.bars.minute_resample", "research.features.intraday",
             "research.labels.intraday", "research.signals.intraday",
@@ -711,7 +549,7 @@ def _validate_operator_graph_special_contracts(
                 raise ResearchPackageError("股票和 ETF 分钟 target 必须按 100 股/份声明")
             if type(leverage) not in {int, float} or float(leverage) < 1.0:
                 raise ResearchPackageError("分钟 target leverage_limit 无效")
-        elif node.operator_id == "finance.simulation.intraday":
+        elif node.operator_id == "finance.simulation.intraday" or "strategy_declaration" in parameters:
             participation = parameters.get("participation_ppm")
             initial_cash = parameters.get("initial_cash_units")
             rule_hash = parameters.get("rule_bundle_hash")
@@ -725,47 +563,13 @@ def _validate_operator_graph_special_contracts(
                 or any(char not in "0123456789abcdef" for char in rule_hash)
             ):
                 raise ResearchPackageError("分钟 simulation rule_bundle_hash 必须是 sha256")
-            if "rule_bundle" in parameters:
-                from research_pipeline.platform.minute_reference import (
-                    load_minute_capability_manifest,
-                    require_current_minute_capability_binding,
-                )
+            if "minute_scope" in parameters:
+                from research_pipeline.domain.minute_scope_input import validate_minute_scope_reference
 
-                bundle = _thaw_mapping(parameters["rule_bundle"], "rule_bundle")
-                if (bundle.get("bundle_hash") != rule_hash or typed_canonical_hash(
-                    {key: value for key, value in bundle.items() if key != "bundle_hash"}
-                ) != rule_hash):
-                    raise ResearchPackageError("分钟 rule_bundle 与 rule_bundle_hash 不一致")
-                binding = bundle.get("capability_binding")
-                if not isinstance(binding, Mapping):
-                    raise ResearchPackageError("规则 bundle 未绑定当前分钟能力 manifest")
-                try:
-                    require_current_minute_capability_binding(
-                        consumer_id=binding.get("consumer_id"),
-                        manifest_hash=binding.get("minute_capability_manifest_hash"),
-                        contract_version=binding.get("contract_version"),
-                        binding_hash=binding.get("binding_hash"),
-                    )
-                except ValueError as exc:
-                    raise ResearchPackageError("规则 bundle 未绑定当前分钟能力 manifest") from exc
-                if binding.get("consumer_id") != "domain.minute.market_rule_snapshots":
-                    raise ResearchPackageError("分钟规则 consumer 不一致")
-                instruments = bundle.get("instruments")
-                rules = bundle.get("rules")
-                if not isinstance(instruments, list) or not isinstance(rules, list) or any(
-                    not isinstance(item, Mapping) for item in (*instruments, *rules)
-                ):
-                    raise ResearchPackageError("分钟显式规则 instrument/rules schema 无效")
-                manifest = load_minute_capability_manifest()
-                if {item.get("instrument_id") for item in instruments} != {
-                    item.instrument.instrument_id for item in manifest.coverages
-                }:
-                    raise ResearchPackageError("规则 instrument 未完整覆盖平台分钟能力")
-                for coverage in manifest.coverages:
-                    if {item.get("rule_id") for item in rules
-                        if item.get("instrument_id") == coverage.instrument.instrument_id
-                    } != set(coverage.required_rule_ids):
-                        raise ResearchPackageError("规则矩阵缺少能力 manifest 声明的覆盖")
+                reference = parameters["minute_scope"]
+                validate_minute_scope_reference(reference)
+                if reference["rules_hash"] != rule_hash:
+                    raise ResearchPackageError("分钟 minute_scope 与 rule_bundle_hash 不一致")
         if node.operator_id in {"research.features.intraday", "research.signals.intraday"}:
             ancestors = [binding.source_node_id for binding in node.inputs]
             visited: set[str] = set()
@@ -812,10 +616,20 @@ def _validate_research_semantic_graph(
             outputs.values()
         )
     }
-    analysis_graph = bool(feature_nodes or label_nodes)
+    execution_features = set()
+    for feature_node in feature_nodes:
+        consumers = [(node, binding) for node in recipe.nodes for binding in node.inputs
+                     if binding.source_node_id == feature_node
+                     and output_types[feature_node].get(binding.source_output_port) == "research.feature-set.v1"]
+        if consumers and all("strategy_declaration" in node.parameters and binding.input_port == "signals"
+                             for node, binding in consumers):
+            execution_features.add(feature_node)
+    # 已通过策略准入的候选只服务交易执行，不要求构造未来收益标签。
+    analysis_features = feature_nodes - execution_features
+    analysis_graph = bool(analysis_features or label_nodes)
     if analysis_graph and semantics is None:
         raise ResearchPackageError("Feature/Label 分析图必须声明 research_semantics")
-    if semantics is not None and (not feature_nodes or not label_nodes):
+    if semantics is not None and (not analysis_features or not label_nodes):
         raise ResearchPackageError(
             "research_semantics 必须由 Feature 与 Label/事件结果节点共同实现"
         )

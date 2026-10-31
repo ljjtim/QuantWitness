@@ -10,37 +10,6 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="真实RD调度在Linux验收")
 
 
-class ReadOnlySortConnection:
-    """允许独立验证的内存排序；禁止数据库文件和写表语句。"""
-    def __init__(self, connection):
-        self.connection = connection
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.connection.close()
-
-    def execute(self, sql):
-        assert sql.startswith("SET max_temp_directory_size = "), "不得写入数据库表"
-        self.connection.execute(sql)
-        return self
-
-    def from_parquet(self, *args, **kwargs):
-        return self.connection.from_parquet(*args, **kwargs)
-
-    def from_arrow(self, *args, **kwargs):
-        return self.connection.from_arrow(*args, **kwargs)
-
-
-def readonly_sort_factory(connect, calls):
-    def open_sort(database, **kwargs):
-        assert database == ":memory:", "不得打开数据库文件"
-        calls.append("memory_sort")
-        return ReadOnlySortConnection(connect(database, **kwargs))
-    return open_sort
-
-
 @pytest.mark.parametrize("example_name,baseline_id,next_id,expected_rows", [
     ("prepare.py", "window_3", "window_2", 6),
     ("prepare_qlib.py", "ridge_0_1", "ridge_1_0", 1),
@@ -52,9 +21,7 @@ def test_real_package_loop_and_recovery(tmp_path, monkeypatch, example_name, bas
     from rdagent.oai.backend.base import APIBackend
     def forbidden(*args, **kwargs):
         raise AssertionError("合成正式研究不得打开数据库文件或调用语言模型")
-    sorts = []
-    connection = readonly_sort_factory(duckdb.connect, sorts) if example_name == "prepare_qlib.py" else forbidden
-    monkeypatch.setattr(duckdb, "connect", connection)
+    monkeypatch.setattr(duckdb, "connect", forbidden)
     monkeypatch.setattr(sqlite3, "connect", forbidden)
     monkeypatch.setattr(APIBackend, "__init__", forbidden)
     example = Path(__file__).resolve().parents[1] / "examples/package_campaign" / example_name
@@ -94,7 +61,7 @@ def test_real_package_loop_and_recovery(tmp_path, monkeypatch, example_name, bas
     assert calls == [next_id]
     assert before == (baseline.read_bytes(), baseline.stat().st_mtime_ns)
     assert len({row["metrics"]["result_id"] for row in outcome["rounds"]}) == 2
-    assert all(row["metrics"]["verification_status"] == "pass" and row["metrics"]["rows"] == expected_rows for row in outcome["rounds"])
+    assert all(row["metrics"]["execution_status"] == "succeeded" and row["metrics"]["rows"] == expected_rows for row in outcome["rounds"])
     assert len({row["metrics"]["value"] for row in outcome["rounds"]}) == 2
     assert outcome["new_formal_result"] is True and outcome["holdout_evaluated"] is False
     files = {str(p.relative_to(session.root)): (p.stat().st_mtime_ns, p.stat().st_size) for p in session.root.rglob("*") if p.is_file()}
@@ -102,4 +69,4 @@ def test_real_package_loop_and_recovery(tmp_path, monkeypatch, example_name, bas
     assert files == {str(p.relative_to(session.root)): (p.stat().st_mtime_ns, p.stat().st_size) for p in session.root.rglob("*") if p.is_file()}
     from quantwitness_rdagent.contracts import write_json
     write_json(root / "acceptance.json", {"status": "pass", "outcome": outcome, "unchanged_files": len(files),
-        "two_formal_results": True, "baseline_not_reevaluated": True, "database_file_connections": 0, "database_writes": 0, "readonly_memory_sorts": len(sorts), "model_calls": 0})
+        "two_formal_results": True, "baseline_not_reevaluated": True, "database_file_connections": 0, "database_writes": 0, "model_calls": 0})

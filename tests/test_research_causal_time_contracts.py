@@ -17,9 +17,6 @@ from research_pipeline.platform.causal_time import (
 )
 from research_pipeline.runtime import ExternalArtifactStore, RuntimeIntegrityError
 from research_pipeline.evidence.errors import EvidenceContractError
-from research_pipeline.evidence.verification_result import (
-    _verify_causal_time_result_tables,
-)
 
 
 def _at(day: int, hour: int = 15) -> datetime:
@@ -198,143 +195,12 @@ def _result_snapshot_for_causal_table(
     )
 
 
-def test_verifier_rejects_tampered_feature_and_label_row_times() -> None:
-    feature = pd.DataFrame(
-        {
-            "date": ["2024-01-02"],
-            "code": ["000001.XSHE"],
-            "decision_time": [_at(2, 16)],
-            "max_source_observation_time": [_at(2, 17)],
-            "max_source_available_time": [_at(2, 15)],
-            "source_partition_ids": [["part-1"]],
-        }
-    )
-    with pytest.raises(EvidenceContractError, match="源观测时间晚于决策时间"):
-        _verify_causal_time_result_tables(
-            _result_snapshot_for_causal_table(
-                feature,
-                artifact_type="research.feature-set.v1",
-            )
-        )
-
-    label = pd.DataFrame(
-        {
-            "observation_at": [_at(2)],
-            "code": ["000001.XSHE"],
-            "decision_time": [_at(2)],
-            "first_actual_observation_time": [_at(2)],
-            "last_actual_observation_time": [_at(3)],
-            "available_time": [_at(2, 23)],
-        }
-    )
-    with pytest.raises(EvidenceContractError, match="实际首观测必须严格晚于决策"):
-        _verify_causal_time_result_tables(
-            _result_snapshot_for_causal_table(
-                label,
-                artifact_type="research.label.v1",
-            )
-        )
 
 
-def test_verifier_rejects_duplicate_keys_missing_table_and_missing_time_schema() -> None:
-    row = {
-        "date": "2024-01-02",
-        "code": "000001.XSHE",
-        "decision_time": _at(2, 16),
-        "max_source_observation_time": _at(2),
-        "max_source_available_time": _at(2, 15),
-        "source_partition_ids": ["part-1"],
-    }
-    duplicated = pd.DataFrame([row, row])
-    with pytest.raises(EvidenceContractError, match="行键不唯一"):
-        _verify_causal_time_result_tables(
-            _result_snapshot_for_causal_table(
-                duplicated,
-                artifact_type="research.feature-set.v1",
-            )
-        )
-
-    with pytest.raises(EvidenceContractError, match="缺少正式 Feature/Label 逐行表"):
-        _verify_causal_time_result_tables(
-            _result_snapshot_for_causal_table(
-                pd.DataFrame([row]),
-                artifact_type="research.feature-set.v1",
-                include_table=False,
-            )
-        )
-
-    missing_field = pd.DataFrame([row]).drop(columns="source_partition_ids")
-    with pytest.raises(EvidenceContractError, match="缺少逐行时间字段"):
-        _verify_causal_time_result_tables(
-            _result_snapshot_for_causal_table(
-                missing_field,
-                artifact_type="research.feature-set.v1",
-            )
-        )
 
 
-def test_verifier_streams_causal_rows_and_detects_cross_batch_duplicate() -> None:
-    schema_id = "research.causal-time.lazy-fixture.v2"
-    manifest = SimpleNamespace(
-        artifact_type="research.feature-set.v1",
-        schema_id=schema_id,
-    )
-    base_row = {
-        "date": "2024-01-02",
-        "code": "000001.XSHE",
-        "decision_time": _at(2, 16),
-        "max_source_observation_time": _at(2),
-        "max_source_available_time": _at(2, 15),
-        "source_partition_ids": ["part-1"],
-    }
-
-    class LazySnapshot:
-        tables = {}
-        bundle = SimpleNamespace(tables=(manifest,))
-
-        def __init__(self, table: pa.Table) -> None:
-            self._table = table
-
-        def table_schema(self, requested_schema_id: str):
-            assert requested_schema_id == schema_id
-            return self._table.schema
-
-        def iter_table_batches(self, requested_schema_id: str, **kwargs):
-            assert requested_schema_id == schema_id
-            columns = kwargs.get("columns")
-            selected = self._table if columns is None else self._table.select(columns)
-            return iter(selected.to_batches(max_chunksize=1))
-
-        def read_table(self, *_args, **_kwargs):
-            raise AssertionError("因果时间复核不得整表读取")
-
-    distinct = dict(base_row)
-    distinct["code"] = "000002.XSHE"
-    _verify_causal_time_result_tables(
-        LazySnapshot(pa.Table.from_pylist([base_row, distinct]))
-    )
-
-    with pytest.raises(EvidenceContractError, match="行键不唯一"):
-        _verify_causal_time_result_tables(
-            LazySnapshot(pa.Table.from_pylist([base_row, base_row]))
-        )
 
 
-def test_event_window_is_not_treated_as_formal_label() -> None:
-    event_window = pd.DataFrame(
-        {
-            "event_id": ["event-1"],
-            "relative_session": [-1],
-            "session": ["2024-01-02"],
-            "abnormal_return": [0.01],
-        }
-    )
-    _verify_causal_time_result_tables(
-        _result_snapshot_for_causal_table(
-            event_window,
-            artifact_type="research.event-window.v1",
-        )
-    )
 
 
 def test_project_formal_feature_commit_rejects_self_reported_time_facts(

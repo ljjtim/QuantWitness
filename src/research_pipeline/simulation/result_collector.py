@@ -66,7 +66,7 @@ def _append_formal_result(
         return
     fill_id = typed_canonical_hash({
         "order_id": order.order_id,
-        "bar_hash": bar.bar_hash,
+        "bar_id": bar.bar_id,
         "event_hashes": list(event_hashes),
     })
     source_fill_hash = typed_canonical_hash({
@@ -305,7 +305,8 @@ def collect_execution_support(
             "order_id": str(order["order_id"]),
             "decision_price_units": decision_bar.close_units,
             "available_at": decision_bar.available_time,
-            "source_hash": decision_bar.bar_hash,
+            "source_hash": decision_bar.source_snapshot_hash,
+            "bar_id": decision_bar.bar_id,
         })
     for fill in fills:
         if bar.volume <= 0:

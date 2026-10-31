@@ -35,16 +35,6 @@ _PROJECT_MODULE_MARKERS = (
     "research_packages.",
     "retirement_migration.",
 )
-_RESULT_SCHEMA_ID = re.compile(
-    r"^(?:research|data)\.[a-z0-9][a-z0-9_.-]*\.v[0-9]+$"
-)
-_RESULT_PATH = re.compile(
-    r"^(?:evaluation|simulation|project|result|tables)/[A-Za-z0-9_./-]+$"
-)
-_RESULT_SEMANTIC_MODULE_SUFFIXES = frozenset({
-    "research_pipeline/evidence/verification_result.py",
-    "research_pipeline/evidence/result_financial_oracle.py",
-})
 
 
 def _issue(
@@ -336,82 +326,6 @@ def _structural_issues(
             seen.add(key)
             issues.append(issue)
 
-    normalized_path = path.replace("\\", "/")
-    if any(
-        normalized_path.endswith(suffix)
-        or normalized_path.endswith(f"/{Path(suffix).name}")
-        for suffix in _RESULT_SEMANTIC_MODULE_SUFFIXES
-    ):
-        parent: dict[ast.AST, ast.AST] = {
-            child: node
-            for node in ast.walk(tree)
-            for child in ast.iter_child_nodes(node)
-        }
-        allowed_lines = {
-            item.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and _call_name(node) == "_ResultSemanticHandler"
-            for item in ast.walk(node)
-            if isinstance(item, ast.Constant) and isinstance(item.value, str)
-        }
-        for node in ast.walk(tree):
-            if not (
-                isinstance(node, ast.Constant)
-                and isinstance(node.value, str)
-                and (
-                    _RESULT_SCHEMA_ID.fullmatch(node.value)
-                    or _RESULT_PATH.fullmatch(node.value)
-                )
-                and node.lineno not in allowed_lines
-            ):
-                continue
-            ancestors: list[ast.AST] = []
-            current = parent.get(node)
-            while current is not None:
-                ancestors.append(current)
-                current = parent.get(current)
-            if any(
-                isinstance(item, ast.Assign)
-                and any(
-                    isinstance(target, ast.Name)
-                    and target.id.startswith("BUILTIN_RESULT_SCHEMA")
-                    for target in item.targets
-                )
-                for item in ancestors
-            ):
-                continue
-            inside_function = any(
-                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                for item in ancestors
-            )
-            assignment_names = {
-                target.id
-                for item in ancestors
-                if isinstance(item, ast.Assign)
-                for target in item.targets
-                if isinstance(target, ast.Name)
-            }
-            semantic_assignment = any(
-                any(marker in name.upper() for marker in (
-                    "SCHEMA", "PATH", "PREFIX", "RESULT",
-                ))
-                for name in assignment_names
-            )
-            if inside_function or semantic_assignment:
-                append(_issue(
-                    "unregistered_result_semantic_literal",
-                    path,
-                    line=node.lineno,
-                    observed=(
-                        "VerificationResult 执行代码在 handler 声明外固定解释 "
-                        f"schema/path: {node.value}"
-                    ),
-                    remediation=(
-                        "将固定 schema、路径、阶段和 verifier 身份登记到 "
-                        "_ResultSemanticHandler，并从注册表投影执行参数"
-                    ),
-                ))
 
     for node in ast.walk(tree):
         role_inventory = _fixed_business_role_inventory(node)
@@ -589,7 +503,7 @@ def _structural_issues(
                         ),
                         remediation=(
                             "core 只校验通用 envelope；项目阶段和 reason code "
-                            "由当前项目 Verifier 解释"
+                            "由当前项目算法解释"
                         ),
                     ))
     return issues

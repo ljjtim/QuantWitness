@@ -6,7 +6,7 @@
 
 ## 参数与行为说明
 
-组合风险使用[项目扩展](../project_extensions/qlib_portfolio_risk/README.md)进入正式ResearchPackage。风险估计、目标优化、现金执行及独立复核各保留自己的输入和输出。
+组合风险使用[项目扩展](../project_extensions/qlib_portfolio_risk/README.md)进入正式ResearchPackage。风险估计、目标优化、现金执行及报告各保留自己的输入和输出。
 
 ## 数据与金融口径
 
@@ -24,7 +24,7 @@ SciPy与CVXPY返回的实际状态分别保存。默认只接受原约束成功�
 
 增强指数先按epsilon截断小权重，再归一化，随后复核长仓、满仓、换手、基准和因子暴露约束。后处理越界产生postprocessing_rejected；目标不能进入执行。全相同分数的缩放与逆波动零波动输入明确拒绝。
 
-风险方法、估计器和窗口进入完整冻结研究设计，模型拟合与最终holdout绑定同一设计身份。Result保存risk_inputs、risk_optimization_results、risk_optimization_attempts、risk_constraint_residuals以及targets/benchmarks。证据包括证券身份、可见时点、风险矩阵、求解器/版本、每次状态、目标值、实际约束、放宽、回退和后处理。独立oracle从封存原始行情和模型预测重建风险输入，再复算协方差、优化目标值、最终约束与规则。金融执行沿用daily-cash和既有独立现金/费用/TCA门。
+风险方法、估计器及窗口进入冻结设计，模型拟合与最终holdout绑定同一设计。Result保存risk_inputs、risk_optimization_results、risk_optimization_attempts、risk_constraint_residuals及targets/benchmarks，包括证券、可见时点、求解器版本、状态、目标、约束和回退。开发测试手算风险矩阵、目标值及约束；金融执行使用daily-cash的实际资金、费用和TCA口径。
 
 ## 验收与范围
 

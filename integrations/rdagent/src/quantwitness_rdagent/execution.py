@@ -1,7 +1,6 @@
 """Linux RD 到 Windows RP 的串行参数数组桥接。"""
 import json
 import subprocess
-from pathlib import Path
 from .contracts import write_json
 from .feedback import project_feedback
 

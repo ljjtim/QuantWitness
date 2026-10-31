@@ -8,21 +8,28 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-def _expression_values(design, prices, keys, key_columns):
-    """每个09:30决定只把前一会话及更早收盘交给Qlib。"""
-    import pandas as pd
-    from expressions import evaluate_expressions, validate_expression
-
-    expressions = dict(design['feature_expressions'])
-    expression = expressions.get('historical_return')
+def validate_feature_expressions(expressions):
+    """限定示例支持的收盘价公式，窗口只引用过去会话。"""
+    if not isinstance(expressions, dict) or set(expressions) != {'historical_return'}:
+        raise ValueError('表达式只能替换 historical_return')
+    expression = expressions['historical_return']
     compact = re.sub(r"\s+", "", expression) if isinstance(expression, str) else ''
     accepted = (
         r"\$close/(?:Ref|Mean)\(\$close,[1-5]\)-1(?:\.0)?",
         r"Std\(\$close,([2-5])\)/Mean\(\$close,\1\)",
         r"\(\$close-Min\(\$close,([2-5])\)\)/\(Max\(\$close,\1\)-Min\(\$close,\1\)\)",
     )
-    if set(expressions) != {'historical_return'} or not any(re.fullmatch(pattern, compact) for pattern in accepted):
-        raise ValueError('本例仅复核收盘动量、均价偏离、价格离散度和区间位置的有界窗口公式')
+    if not any(re.fullmatch(pattern, compact) for pattern in accepted):
+        raise ValueError('仅支持收盘动量、均价偏离、价格离散度和区间位置；后两类窗口为2至5，前两类为1至5')
+    return dict(expressions)
+
+
+def _expression_values(design, prices, keys, key_columns):
+    """每个09:30决定只把前一会话及更早收盘交给Qlib。"""
+    import pandas as pd
+    from expressions import evaluate_expressions, validate_expression
+
+    expressions = validate_feature_expressions(dict(design['feature_expressions']))
     spec = validate_expression(expressions['historical_return'], ['close'], max_window=5)
     sessions = design['calendar_sessions']
     grouped = {}
@@ -146,6 +153,22 @@ def _table(value, prefix):
     return rows
 
 
+def prediction_metric(predictions, metric_ref):
+    """按传入评价样本计算价格变化MSE及正式样本范围。"""
+    if not predictions:
+        raise ValueError('预测指标缺少评价样本')
+    sessions = [str(row['observation_session'])[:10] for row in predictions]
+    return {
+        'metric_ref': metric_ref,
+        'value': sum((row['prediction'] - row['actual']) ** 2 for row in predictions) / len(predictions),
+        'unit': 'squared_decimal_price_change',
+        'sample_start': min(sessions),
+        'sample_end': max(sessions),
+        'sample_size': len(predictions),
+        'status': 'computed',
+    }
+
+
 def summarize(context, inputs, output_root):
     values = {v.port:v for v in inputs}
     data = values['data'].request('daily_feature')
@@ -157,9 +180,8 @@ def summarize(context, inputs, output_root):
            for b in data.iter_batches(columns=raw_columns,batch_size=8192) for r in b.to_pylist()]
     development = context.parameters['design'].get('mode') == 'development'
     predictions = _table(values['predictions'],'validation_predictions') if development else _table(values['holdout'],'holdout_predictions')
-    mse = sum((r['prediction']-r['actual'])**2 for r in predictions)/len(predictions)
     tables = {'raw_prices':raw,'study_design':[{'design_json':json.dumps(dict(context.parameters['design']),ensure_ascii=False,default=dict)}],
-              'metrics':[{'metric_ref':context.parameters['design']['metric_ref'],'value':mse}]}
+              'metrics':[prediction_metric(predictions, context.parameters['design']['metric_ref'])]}
     if development:
         tables['metrics'][0].update(
             session=max(str(row['observation_session']) for row in predictions),

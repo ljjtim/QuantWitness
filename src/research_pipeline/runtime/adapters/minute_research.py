@@ -18,6 +18,50 @@ def _pre_window_rebaser(payload: Mapping[str, object]):
     """从 post bar 工件恢复单个消费时点所需的 PIT pre 窗口。"""
 
     require_minute_price_mode(payload, consumer="pre 窗口重定基", expected_mode="post")
+    members = payload.get("adjustment_snapshots")
+    if members is not None:
+        if not isinstance(members, Mapping) or not members:
+            raise ValueError("pre 窗口逐证券 PIT 复权上下文不能为空")
+        source_bars_hash = str(payload.get("source_bars_snapshot_hash", ""))
+        expected_source_hash = typed_canonical_hash({
+            "bars": source_bars_hash, "adjustment_snapshots": members,
+        })
+        identities = {}
+        transforms = {}
+        for code, member in members.items():
+            if not isinstance(member, Mapping):
+                raise ValueError("pre 窗口逐证券 PIT 复权上下文必须为对象")
+            snapshot = AdjustmentFactorSnapshot.from_mapping(member["adjustment_snapshot"])
+            if code != snapshot.instrument_id:
+                raise ValueError("pre 窗口逐证券快照身份错配")
+            identities[code] = snapshot.snapshot_identity_hash
+            single_payload = {
+                **member, "price_mode": "post",
+                "source_bars_snapshot_hash": source_bars_hash,
+                "source_snapshot_hash": typed_canonical_hash({
+                    "bars": source_bars_hash,
+                    "adjustment_snapshot": snapshot.snapshot_identity_hash,
+                    "adjustment_candidates": member["adjustment_candidates"],
+                    "adjustment_effective_times": member["adjustment_effective_times"],
+                    "adjustment_previous_closes": member["adjustment_previous_closes"],
+                }),
+            }
+            transforms[code] = _pre_window_rebaser(single_payload)
+        if (
+            payload.get("source_snapshot_hash") != expected_source_hash
+            or payload.get("adjustment_snapshot_identity_hash") != typed_canonical_hash(identities)
+        ):
+            raise ValueError("pre 窗口 PIT 复权上下文身份不一致")
+
+        def transform_multiple(rows, selection_at):
+            if not rows:
+                return ()
+            codes = {str(row["instrument"]) for row in rows}
+            if len(codes) != 1 or not codes.issubset(transforms):
+                raise ValueError("pre 窗口必须包含同一证券且有对应 PIT 快照")
+            return transforms[next(iter(codes))](rows, selection_at)
+
+        return transform_multiple
     raw_snapshot = payload.get("adjustment_snapshot")
     raw_candidates = payload.get("adjustment_candidates")
     raw_effective_times = payload.get("adjustment_effective_times")

@@ -9,11 +9,7 @@ import sys
 def process_budget_advice(declared_slots: int, *, purpose: str) -> dict[str, object]:
     """投影当前解释器的已知进程开销；建议不代表项目代码的进程上限。"""
 
-    parameter = (
-        "--verification-process-slots"
-        if purpose == "verifier"
-        else "OperatorDefinition.resource_profile.process_slots"
-    )
+    parameter = "OperatorDefinition.resource_profile.process_slots"
     advice: dict[str, object] = {
         "purpose": purpose,
         "declared_slots": declared_slots,
@@ -21,8 +17,8 @@ def process_budget_advice(declared_slots: int, *, purpose: str) -> dict[str, obj
         "parameter": parameter,
         "sources": [],
     }
-    if purpose not in {"worker", "verifier"}:
-        return {**advice, "status": "invalid_purpose", "message": "用途须为 worker 或 verifier。"}
+    if purpose != "worker":
+        return {**advice, "status": "invalid_purpose", "message": "用途须为 worker。"}
     if type(declared_slots) is not int or declared_slots <= 0:
         return {
             **advice, "status": "invalid_declared_slots",
@@ -79,15 +75,9 @@ def resource_failure_advice(
         message = "进程槽超限，但失败载荷未提供 actual/limit；请核对进程树与声明，不推算实测峰值。"
     else:
         return None
-    parameter = (
-        "--verification-process-slots" if purpose == "verifier"
-        else "OperatorDefinition.resource_profile.process_slots / --resource-process-slots"
-    )
+    parameter = "OperatorDefinition.resource_profile.process_slots / --resource-process-slots"
     if dimensions and "process_slots" not in dimensions:
-        parameter = (
-            "--verification-memory-bytes / --verification-temp-bytes"
-            if purpose == "verifier" else "OperatorDefinition.resource_profile / --resource-memory-bytes / --resource-scratch-bytes"
-        )
+        parameter = "OperatorDefinition.resource_profile / --resource-memory-bytes / --resource-scratch-bytes"
     return {
         "purpose": purpose,
         "status": status,

@@ -12,7 +12,7 @@ from rdagent.core.serialization import load as load_knowledge
 from rdagent.core.experiment import Workspace
 
 from .contracts import FrozenRequest, write_json
-from .feedback import acceptable, candidate_needs_repair, project_formula_feedback
+from .feedback import acceptable, candidate_needs_repair
 from .generation import _technical_feedback
 from .coding_transfer import formal_refs, select_records
 
@@ -61,29 +61,23 @@ def _read(path):
 
 def _validate_formal_success(request, candidate, evidence):
     """复验 Result、公式覆盖、源码和已准入计划之间的绑定。"""
-    from research_pipeline.evidence import load_verified_result_context
+    from research_pipeline.results import load_result_context
     from research_pipeline.results import ResultStore
-    from research_pipeline.extensions import verify_project_operator_bundle, verify_project_verifier_bundle
+    from research_pipeline.extensions import verify_project_operator_bundle
 
     execution = request._local_path(evidence["execution_ref"])
     store = ResultStore(execution / "results", create=False)
-    verified = load_verified_result_context(request._local_path(evidence["verification_ref"]),
+    context = load_result_context(request._local_path(evidence["result_ref"]),
                                            result_store=execution / "results")
-    bundle = verified.snapshot.bundle
-    if verified.verification.status != "pass":
-        raise ValueError("来源公式未通过正式独立验证")
-    formula = project_formula_feedback(verified, store, request.payload.get("formula_evaluation"))
-    if formula["formula_status"] != "pass":
-        raise ValueError("来源 Result 缺少通过的公式覆盖")
-    verifier = verify_project_verifier_bundle(request._local_path(request.payload["reference_bundle"]))
-    if dict(bundle.verification.verifier_identity) != verifier.identity():
-        raise ValueError("来源 Verifier 与冻结请求不一致")
+    bundle = context.snapshot.bundle
+    if bundle.run.status != "succeeded":
+        raise ValueError("来源候选尚未完成正式执行")
     if store.result_directory(bundle).resolve() != request._local_path(evidence["result_ref"]).resolve():
         raise ValueError("来源候选 Result 引用不一致")
     operator_root = request._local_path(evidence["bundle_ref"])
     operator = verify_project_operator_bundle(operator_root)
     if (operator_root / "sources/compute.py").read_text(encoding="utf-8") != (candidate / "compute.py").read_text(encoding="utf-8"):
-        raise ValueError("来源代码与已验证算子源码不一致")
+        raise ValueError("来源代码与正式算子源码不一致")
     plan = _read(execution / "plan/admitted/research-plan.json")
     if (plan["package_hash"] != bundle.package_hash or plan["package_plan_hash"] != bundle.plan_hash
             or operator.bundle_hash not in plan.get("project_admission", {}).get("bundle_hashes", [])):
@@ -107,7 +101,7 @@ def _source_records(request, root):
     if _read(root / "frozen-inputs.json") != source._materials():
         raise ValueError("来源已冻结材料改变")
     if not acceptable(_read(root / "outcome.json")):
-        raise ValueError("来源会话必须完成公式独立验证和报告")
+        raise ValueError("来源会话必须完成正式执行和报告")
     records = []
     for attempt in _read(root / "coder-attempts.json"):
         candidate_id = attempt["candidate_id"]
@@ -122,7 +116,7 @@ def _source_records(request, root):
                         "technical_feedback": _technical_feedback(evidence), "success": acceptable(evidence),
                         "task": formula_task(source), "formal_refs": formal_refs(evidence)})
     if not any(record["success"] for record in records):
-        raise ValueError("来源知识缺少已验证的修复实现")
+        raise ValueError("来源知识缺少正式执行成功的修复实现")
     return records
 
 

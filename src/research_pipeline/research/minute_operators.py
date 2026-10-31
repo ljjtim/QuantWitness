@@ -405,7 +405,7 @@ def _validate_feature_parameters(
         raise MinuteOperatorError("分钟特征缺口或复权策略不受支持")
     if (
         asset_class not in MINUTE_ASSET_CLASSES
-        or interval_minutes not in {1, 5, 15, 30, 60, 120}
+        or interval_minutes != 1
     ):
         raise MinuteOperatorError("分钟特征资产或周期不受支持")
     if not availability_policy_ref.strip():
@@ -432,7 +432,7 @@ def _validate_label_parameters(
         or horizon_bars < 1
         or adjustment_mode not in MINUTE_ADJUSTMENT_MODES
         or asset_class not in MINUTE_ASSET_CLASSES
-        or interval_minutes not in {1, 5, 15, 30, 60, 120}
+        or interval_minutes != 1
         or not availability_policy_ref.strip()
     ):
         raise MinuteOperatorError("分钟标签 horizon 或资产类别无效")

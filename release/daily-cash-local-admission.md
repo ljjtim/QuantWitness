@@ -72,3 +72,25 @@
 标量来源列表的 typed canonical 流式编码保持原字节与摘要，仅更新 Runtime adapter 依赖身份。金融参数、实现、PIT 和 local_only 范围保持，精确定义登记于 runtime/operator_promotion.py；复核范围见[模型资源与共享编码复核](model-resource-review.md)。新计划重新准入，旧 Result 和已消费 holdout 保持原样。
 
 同日普通hash流式化及单次有界来源编码复用的后续复核见[因果执行性能复核](causal-performance-review.md)。更新范围仍仅为共享编码依赖身份。
+
+
+## 2026-10-20 策略会话共用执行器复核
+
+用户批准策略执行闭环S2。ExplicitOrderExecution增加受控动态命令及金额预算约束，市价按可见参考价和声明滑点预估占款，成交时复核实际支出与批次开始前可用现金，MinuteEventSimulationStateMachine接收显式策略证券和会话日历。原预声明订单和目标路径保持既有语义；策略能力尚未接入公共准入及正式Result。
+
+复核覆盖分钟目标、日频显式订单、费用、订单独立oracle和期货显式订单回归。共享实现源码变化使intraday与daily-cash定义身份更新，daily-cash当前定义为cb827c69a40e4bd36ea18ac5e3a17b9473e06789640b8ee31da7fb3adc2ae75c，精确身份继续由runtime/operator_promotion.py登记。能力上限仍为local_only、research_observation，新身份不复用旧定义的执行checkpoint；历史Result保持只读。
+
+
+## 2026-10-26 行情身份编码复核
+
+分钟行情身份直接对原typed canonical字节计算同一SHA-256摘要；会话按完整不可变证券键复用身份。共享执行模块的源码依赖随之更新，精确定义由runtime/operator_promotion.py登记。4463条真实行情的摘要逐条一致，受影响的20项分钟金融用例通过。公共参数、交易口径与local_only能力上限保持；新计划重新准入，历史Result只读。
+
+
+## 2026-10-27 规则身份与列式输入依赖复核
+
+共享输入按原字段直接写出列式证据，规则包校验复用已生成的规范字节计算不可变规则身份，日历政策身份在对象内复用。前后算子定义逐字段对照仅有实现摘要及依赖摘要变化；参数、输入输出、资源声明、历史可见性和金融口径保持。精确定义同步登记于runtime/operator_promotion.py，能力上限继续为local_only；旧计划与checkpoint不跨实现身份恢复，历史Result只读。
+
+
+## 2026-10-27 运行环境冗余身份清理
+
+运行入口删除没有消费者的整图策略摘要，内部ResearchRunEnvironment删除对应字段。共享适配器定义逐字段对照仅runtime_adapter_ref.code_hash变化，精确身份同步登记于runtime/operator_promotion.py。节点参数隔离、金融参数、输入输出、资源声明与local_only范围保持；新实现仍按实际身份拒绝旧计划及checkpoint，历史Result只读。验证与改动证据见rp-strategy-execution-contracts任务的research/performance-root-cause-redesign.md。

@@ -113,7 +113,7 @@ def initialize_workspace(
         if target.resolve().is_relative_to(source_package):
             raise WorkspaceError("工作区目标不能位于来源研究包内")
         validate_research_package_layout(source_package)
-        load_research_package(source_package)
+        source_declaration = load_research_package(source_package)
         if parameters:
             from .packages.variants import _compatible_value_type
 
@@ -159,6 +159,10 @@ def initialize_workspace(
                 destination = package_root / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source_package / relative, destination)
+            from .domain.minute_scope_input import copy_minute_scope_input
+
+            for source in source_declaration.minute_scope_inputs.values():
+                copy_minute_scope_input(source, package_root)
         if parameters:
             (package_root / "spec/research.yaml").write_text(_yaml_text(variant), encoding="utf-8")
             load_research_package(package_root)
@@ -277,7 +281,7 @@ def allocate_execution(
     execution_id = "exec-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid.uuid4().hex[:12]
     execution_root = config.generated_root / "executions" / execution_id
     execution_root.mkdir(parents=True)
-    for name in ("plan", "run", "draft", "verification", "export-result"):
+    for name in ("plan", "run", "draft", "export-result"):
         (execution_root / name).mkdir()
     payload = {
         "contract_version": "research-workspace-execution-v1",
@@ -375,7 +379,7 @@ def run_workspace_execution(
     """把 Workspace execution 映射到现有 run 服务；本函数不猜测数据库路径。"""
 
     if "acceptance_proof" in options:
-        raise WorkspaceError("acceptance-proof 已删除；研究复现请声明项目 Verifier")
+        raise WorkspaceError("不支持 acceptance-proof 参数")
     config = load_workspace(root)
     _validate_clock(clock)
     index = _read_index(config.generated_root / "index.json", config.workspace_id)
@@ -469,65 +473,54 @@ def record_workspace_result_completion(
 
 
 def export_dashboard_manifest(root: str | Path) -> dict[str, Any]:
-    """导出只含结构化 VerificationResult 的 Dashboard v3 清单。"""
+    """导出与 execution 身份一致的 Result 清单。"""
 
     config = load_workspace(root)
     index = _read_index(config.generated_root / "index.json", config.workspace_id)
     manifest_path = config.generated_root / "workspace.json"
-    from .evidence import EvidenceContractError, load_verified_result_context
-    from .results import ResultContractError
+    from .results import ResultContractError, load_result_context
+    from .runtime.diagnostics import read_finalize_status
 
     entries = []
     for item in index["executions"]:
         entry_id = str(item["execution_id"])
         _, execution_root = _resolve_execution(config, index, entry_id)
-        verification_result = execution_root / "verification" / "result.json"
         result_store = execution_root / "results"
-        if not verification_result.is_file():
+        if not item.get("result_id") or not result_store.is_dir():
             continue
-        try:
-            context = load_verified_result_context(
-                verification_result,
-                result_store=result_store,
-            )
-        except (EvidenceContractError, ResultContractError):
-            continue
-        if context.verification.status != "pass":
-            continue
-        reference = context.verification.result_reference
         recorded_run_ids = {
             item[key] for key in ("run_id", "runtime_run_id")
             if item.get(key) is not None
         }
-        if (
-            recorded_run_ids != {reference.run_id}
-            or reference.result_id != item.get("result_id")
-        ):
+        if len(recorded_run_ids) != 1:
             continue
-        execution_rel = PurePosixPath(
-            execution_root.relative_to(config.generated_root).as_posix()
-        )
+        try:
+            finalized = read_finalize_status(execution_root / "run")
+            directory = finalized.get("result_directory")
+            if not finalized.get("result_published") or not directory:
+                continue
+            context = load_result_context(directory, result_store=result_store)
+        except ResultContractError:
+            continue
+        bundle = context.snapshot.bundle
+        if recorded_run_ids != {bundle.run_id} or bundle.result_id != item["result_id"]:
+            continue
         entries.append({
             "entry_id": entry_id,
             "label": str(item.get("label") or entry_id),
-            "verification_result": (
-                execution_rel / "verification/result.json"
-            ).as_posix(),
-            "result_store": (execution_rel / "results").as_posix(),
+            "result": Path(context.snapshot.directory).relative_to(config.generated_root).as_posix(),
+            "result_store": result_store.relative_to(config.generated_root).as_posix(),
         })
     if not entries:
         manifest_path.unlink(missing_ok=True)
-        raise WorkspaceError(
-            "没有与 execution 身份一致且 status=pass 的结构化 VerificationResult，"
-            "拒绝生成 Dashboard 清单"
-        )
+        raise WorkspaceError("没有与 execution 身份一致的正式 Result，拒绝生成 Dashboard 清单")
     manifest = {
-        "contract_version": "research-dashboard-workspace-v3",
+        "contract_version": "research-dashboard-workspace-v4",
         "entries": sorted(entries, key=lambda item: item["entry_id"]),
     }
     _atomic_replace_text(manifest_path, _json_text(manifest))
     return {
-        "status": "pass",
+        "status": "succeeded",
         "manifest": str(manifest_path),
         "entry_count": len(entries),
     }

@@ -86,7 +86,7 @@ python -m pytest tests/test_release_metadata_ssot.py -q
 
 升级先确定一个目标版本或提交，并说明实际受影响的因子、Processor、模型、求解器及研究调度调用点。同步修改依赖声明、固定上游提交、场景直接依赖和公开文档，在新隔离环境中安装；保留原环境和历史 Result 的身份。升级后的研究使用新冻结请求，不跨依赖身份恢复或复用旧模型节点。
 
-按调用点验证升级：Qlib 因子复核数值、历史窗口及未来输入扰动；模型复核处理器拟合范围、成熟标签、训练与跨进程预测恢复；组合复核求解状态、约束、目标与实际成交；RD-Agent 复核提案、编码、反思、知识引用、预算与中断恢复。新增联合方向还须在同一会话实际执行因子和模型分支，只消费独立验证通过的开发反馈。已有未受影响的正式结果继续作为历史证据，不替代升级后发生变化的行为验收。
+按调用点验证升级：Qlib 因子复核数值、历史窗口及未来输入扰动；模型复核处理器拟合范围、成熟标签、训练与跨进程预测恢复；组合复核求解状态、约束、目标与实际成交；RD-Agent 复核提案、编码、反思、知识引用、预算与中断恢复。新增联合方向还须在同一会话实际执行因子和模型分支，只消费成功Result中的开发反馈。已有未受影响的正式结果继续作为历史证据，不替代升级后发生变化的行为验收。
 
 源码冻结后，从同一公开清单构建核心 wheel、sdist、源码包和可选集成发行文件。在仓库外空环境确认导入来自安装目录、`pip check` 通过及新增入口可用，再运行受影响的公开回归。提交和推送获准后，补齐该提交对应的远端 CI；本地安装或旧提交 CI 不能代替这一记录。
 
@@ -96,15 +96,15 @@ python -m pytest tests/test_release_metadata_ssot.py -q
 
 入口包装器只有同时满足两个条件才不进入身份：属于 console_scripts/gui_scripts 的已声明入口，且安装在当前解释器的 scripts 目录。包内同名程序、未声明的脚本和其他文件仍参与身份。这样同一分发包安装到不同路径时身份保持一致，分发内容记录或入口声明变化仍改变身份。该检查使用安装分发清单，不逐次重新扫描所有依赖文件；手工改动已安装文件而不更新其分发记录，不属于依赖锁能独立发现的变化。
 
-v1 的原始 METADATA/RECORD 摘要与 v2 不兼容；验证器拒绝 v1 锁，不能只改合同版本字段或把旧摘要填进新锁。升级时按可信的同版本分发包重新安装并建立 v2 锁，再执行干净 wheel 脚本和收据复验。旧 BuildManifest、Result 和 VerificationResult 保留原字节，恢复与跨运行复用边界见 [Runtime](runtime.md)。
+v1 的原始 METADATA/RECORD 摘要与 v2 不兼容；验证器拒绝 v1 锁，不能只改合同版本字段或把旧摘要填进新锁。升级时按可信的同版本分发包重新安装并建立 v2 锁，再执行干净 wheel 脚本和收据复验。旧 BuildManifest、Result与历史交付记录 保留原字节，恢复与跨运行复用边界见 [Runtime](runtime.md)。
 
 ## 公开仓库 CI
 
-`tests/test_workspace.py`、`tests/test_cli_failure_details.py` 及依赖身份、恢复边界回归随公开源码分发。公开 CI 在源码环境及隔离 wheel 环境均执行两者，覆盖 Workspace 布局、运行与恢复委托、复用参数转发、无效组合拒绝和 Verifier 进程槽参数转发。
+`tests/test_workspace.py`、`tests/test_cli_failure_details.py` 及依赖身份、恢复边界回归随公开源码分发。公开 CI 在源码环境及隔离 wheel 环境执行相关用例，覆盖 Workspace 布局、运行与恢复委托、复用参数转发、无效组合拒绝及 Result 直接交付。
 
-公开 CI 运行于 Ubuntu。Windows venv 的 Verifier 启动器可能增加进程层级，独立验证可显式传入 `--verification-process-slots 3`；省略时默认仍为 2，详见 [Workspace 合成研究入门](workspace-quickstart.md) 和[资源预算](project_resource_budgets.md)。
+公开CI的平台与版本范围以该候选实际工作流为准。项目Worker的进程额度覆盖Supervisor、启动器与后代，Windows虚拟环境按实际进程树声明，见[资源预算](project_resource_budgets.md)。
 
-公开 `ci` 保留 Python 3.10 与 3.13 矩阵，检查公开源码清单、框架边界、公共 Operator 的内建身份和未经批准的晋级，以及 `sealed` 声明必须具备当前候选的独立发布证据。每个矩阵环境都从正式 allowlist 构建 wheel，在独立虚拟环境安装，从仓库外检查导入位置，并在临时合成 DuckDB 上运行四个示例的 `lint → admit → run → Result → verify → VerificationResult → report` 闭环。完整整改基线依赖父仓库材料，不进入公开候选；公开 CI 的能力状态限制以独立仓库可执行的门禁为准。
+公开 `ci` 保留 Python 3.10 与 3.13 矩阵，检查公开源码清单、框架边界、公共 Operator 的内建身份和未经批准的晋级，以及 `sealed` 声明必须具备当前候选的独立发布证据。每个矩阵环境都从正式 allowlist 构建 wheel，在独立虚拟环境安装，从仓库外检查导入位置，并在临时合成 DuckDB 上运行四个示例的 `lint → admit → run → Result → report` 闭环。完整整改基线依赖父仓库材料，不进入公开候选；公开 CI 的能力状态限制以独立仓库可执行的门禁为准。
 
 公开仓库中的 `python tools/public_source_inventory.py --project . --check` 要在独立 Git 仓库根运行：它比较 Git 已跟踪文件与公开允许清单，拒绝额外提交或未纳入 Git 的允许文件，并要求正式治理文件 `.github/CODEOWNERS` 已跟踪。父仓库内的 `research_pipeline/` 仍用该工具的导出命令生成独立候选，不以嵌套目录的 `--check` 代替公开仓库检查。
 
@@ -140,27 +140,29 @@ ReleaseEnvelope 汇总同一干净候选的六类验收，`profile=local` 只说
 | Gate | 当前验收内容 |
 | --- | --- |
 | A | 安装态股票研究、checkpoint 后中断恢复、恢复结果与正常运行一致、篡改结果被拒绝 |
-| C | 四个研究、至少三类 DAG；完整 Result v3、匹配且通过的独立 VerificationResult、独立 Verifier 源码和显式数据窗口 |
+| C | 四个研究、至少三类 DAG；正式Result、显式数据窗口、算法开发用例与生产时点约束 |
 | D | checkpoint 提交和恢复、内容损坏拒绝、金融状态恢复不重复成交与费用 |
 | F | 合成输入下股票/ETF/期货、资金精度、交易语义与 DSR 数学合同 |
 | I/B | 确定性公共 CLI 发现、草稿诊断和四个研究完整执行，不作为真人或陌生 AI 试用证明 |
-| L | 自包含 Result 与 VerificationResult 消费、项目身份隔离、指标或结果篡改拒绝 |
+| L | Result直接消费、项目身份隔离、必需表及结果身份不符拒绝 |
 
 在完整公开源码目录准备好当前构建产物、BuildManifest 和不继承系统包的安装态 Python 后，使用 `tools/run_release_workflows.py --help`、`tools/build_gate_c_evidence.py --help` 和 `tools/run_release_gate_tests.py --help` 查看完整参数。所有验收输出使用不存在的仓库外目录；工作流生产器会在该目录创建合成数据库，执行前取得所在环境要求的写入批准。运行与验证阶段只读访问这些数据库。
 
 Gate D/F/L 使用候选内的 `release/gate-test-protocol.json`，测试源码和协议均进入 BuildManifest。执行时关闭源码导入配置，从仓库外使用安装态 runtime；有失败、跳过或零测试均不生成通过收据。Gate L 的前置 Gate C 必须属于相同候选，不能沿用其他批次的通过记录。
 
+Gate C 先通过正式 Recipe codec 复验完整定义与 `recipe_hash`，再按正式计划的 `validated-recipe-ref-v1` 身份投影核对 `plan_hash`；日期或 Recipe 内容变动仍须与 Result的原计划绑定一致。
+
 `tools/build_release_envelope.py` 接受六个 `--gate-evidence gate-id=path`，校验候选、BuildManifest 和 Gate 类型，并把原始证据、能力清单、依赖锁与 BuildManifest 一起封存。能力清单和依赖锁必须与构建输入一致。工具中的 `verify_release_envelope_files` 可在搬移目录后复验封套及封存内容；执行日志、测试报告和研究工件另随验收目录保留。
 
 ## 能力声明与晋级
 
-当前能力状态由 `src/research_pipeline/capabilities.json` 声明。公开门禁允许已有 `local_only` 能力；任何 `sealed` 声明必须同时给出授权的能力基线、当前候选发布封套、正式执行、负例和独立验证三类可核验记录。证据须覆盖该能力公开承诺的全部范围，不能把四个合成示例外推为分钟交易、费用真实性或任意规模资源保证。
+当前能力状态由 `src/research_pipeline/capabilities.json` 声明。公开门禁允许已有 `local_only` 能力；任何 `sealed` 声明必须同时给出授权的能力基线、当前候选发布封套、正式执行、算法错误样本和独立开发审查记录。证据须覆盖该能力公开承诺的全部范围，不能把四个合成示例外推为分钟交易、费用真实性或任意规模资源保证。
 
 独立公开仓库可通过 `QUANTWITNESS_CAPABILITY_BASELINE`、`QUANTWITNESS_RELEASE_EVIDENCE_ROOT` 和 `QUANTWITNESS_RELEASE_CANDIDATE_ID` 显式提供晋级材料。没有这些材料时，`sealed` 声明会失败；材料存在但候选、源码、测试结果或授权上限不匹配时同样失败。历史证据保留原身份，不自动迁移。
 
 ## 原生回测阶段验收
 
-原生回测P9的真实窗口和工程证据按[真实覆盖与验收](native_backtest_acceptance.md)分别认定。新增本地正式研究结果不改变公共能力上限，也不生成新的公开发布封套；历史Result及VerificationResult保持原身份。
+原生回测P9的真实窗口和工程证据按[真实覆盖与验收](native_backtest_acceptance.md)分别认定。新增本地正式研究结果不改变公共能力上限，也不生成新的公开发布封套；历史Result及验收记录保持原身份。
 
 ## 分钟来源清单的公开分发
 
@@ -168,4 +170,4 @@ Gate D/F/L 使用候选内的 `release/gate-test-protocol.json`，测试源码�
 
 加载时，原件存在就完整核验原件，读取失败或摘要不符均报错。原件不存在时，只有已登记的能力身份才能读取对应公开摘要，并核对摘要内容及原始证据身份；缺失、篡改或未登记版本均拒绝。公开摘要用于规则来源追溯，不包含行情数据，也不代替使用者自己的只读数据源与PIT准入。原始清单、历史能力清单、交易日历和规则正文保持原身份。
 
-来源清单按原始字节固定保存，Git 检出与归档不得转换换行；历史版本保留各自已登记的原件字节。独立金融复核的 README 同步进入三类分发物。当前默认分钟规则 v6 随 wheel 分发，安装态验收核对规则资源及其发布身份。
+来源清单按原始字节保存，Git检出和归档不转换换行；历史版本保留登记原件。当前默认分钟规则v6随wheel分发，安装态开发验收检查规则资源与发布身份。

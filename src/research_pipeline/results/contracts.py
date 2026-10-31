@@ -1,4 +1,4 @@
-"""`research-result-v3` 的纯数据合同与身份规则。"""
+"""`research-result-v4` 的纯数据合同与身份规则。"""
 
 from __future__ import annotations
 
@@ -10,22 +10,35 @@ from typing import Mapping, Sequence
 
 from research_pipeline.platform import typed_canonical_hash
 from research_pipeline.platform.claim_levels import CLAIM_LEVELS, weakest_claim_level
-from research_pipeline.platform.metric_contracts import MetricReachabilityProof
+from research_pipeline.platform.metric_contracts import MetricDefinition, MetricReachabilityProof
 from .errors import ResultContractError
 
 
 ORDER_LIFECYCLE_SCHEMA_ID = "research.order-lifecycle.v1"
 ORDER_LIFECYCLE_PATH_PREFIX = "simulation/context-tables/order-lifecycle"
 
+STRATEGY_SCHEMA_IDS = {"events": "research.strategy.events.v2", "decisions": "research.strategy.decisions.v1",
+    "state": "research.strategy.state.v2", "market": "research.strategy.market.v2"}
+STRATEGY_PATHS = {name: f"simulation/strategy/{name}" for name in STRATEGY_SCHEMA_IDS}
+STRATEGY_INPUTS_SCHEMA_ID = "research.strategy.inputs.v1"
+STRATEGY_INPUTS_PATH = "simulation/strategy/inputs"
+STRATEGY_SIGNAL_SOURCE_SCHEMA_ID = "research.strategy.signal-source.v1"
+STRATEGY_SIGNALS_CONTRACT_VERSION = "research-strategy-signals-v1"
+
+def strategy_schema_ids(declared):
+    """只接收当前策略证据合同，旧版本直接拒绝。"""
+    declared = {item for item in declared if item.startswith("research.strategy.")}
+    allowed = set(STRATEGY_SCHEMA_IDS.values()) | {STRATEGY_INPUTS_SCHEMA_ID, STRATEGY_SIGNAL_SOURCE_SCHEMA_ID}
+    if declared - allowed:
+        raise ResultContractError("策略证据schema版本不受支持")
+    return STRATEGY_SCHEMA_IDS
+
+
 RESULT_SPEC_VERSION = "research-result-spec-v1"
-RESULT_BUNDLE_VERSION = "research-result-v3"
+RESULT_BUNDLE_VERSION = "research-result-v4"
 RESULT_TABLE_MANIFEST_VERSION = "research-result-table-manifest-v2"
 RESULT_SUPPORT_FILE_VERSION = "research-result-support-file-v2"
 RESULT_RUN_SUMMARY_VERSION = "research-result-run-summary-v2"
-RESULT_VERIFICATION_CLOSURE_VERSION = "research-result-verification-closure-v2"
-RESULT_EMBEDDED_VERIFIER_CLOSURE_VERSION = (
-    "research-result-verification-closure-v3"
-)
 RESULT_INPUT_REVISION_VERSION = "research-result-input-revision-v1"
 RESULT_REF_VERSION = "research-result-ref-v1"
 QLIB_MODEL_INVENTORY_SCHEMA_ID = "research.qlib-model-inventory.v1"
@@ -43,9 +56,9 @@ BAR_TCA_SCHEMA_IDS = MappingProxyType({
     for name in ("orders", "fills", "daily", "research")
 })
 MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS = MappingProxyType({
-    "execution_bars": "research.minute-financial-context.execution-bars.v1",
+    "execution_bars": "research.minute-financial-context.execution-bars.v2",
     "decision_benchmarks": (
-        "research.minute-financial-context.decision-benchmarks.v1"
+        "research.minute-financial-context.decision-benchmarks.v2"
     ),
     "execution_observations": (
         "research.minute-financial-context.execution-observations.v1"
@@ -178,6 +191,18 @@ class ResultSpec:
         minute_context_ids = set(MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS.values())
         if declared & minute_context_ids and not minute_context_ids <= declared:
             raise ResultContractError("分钟金融上下文必须完整包含三张列式事实表")
+        strategy_ids = set(strategy_schema_ids(declared).values())
+        if declared & {STRATEGY_INPUTS_SCHEMA_ID, STRATEGY_SIGNAL_SOURCE_SCHEMA_ID}:
+            if not strategy_ids <= declared or not {STRATEGY_INPUTS_SCHEMA_ID, STRATEGY_SIGNAL_SOURCE_SCHEMA_ID} <= declared:
+                raise ResultContractError("策略signals必须同时封存完整策略证据和正式Feature源表")
+            source = next(item for item in self.tables if item.schema_id == STRATEGY_SIGNAL_SOURCE_SCHEMA_ID)
+            if source.artifact_type != "research.feature-set.v1":
+                raise ResultContractError("策略signals源表必须是正式causal Feature")
+        if declared & strategy_ids:
+            required = strategy_ids | minute_context_ids | tca_ids | set(CANONICAL_SIMULATION_SCHEMA_IDS.values()) | {ORDER_LIFECYCLE_SCHEMA_ID, "research.minute-targets.payload.v1"}
+            snapshots = declared & {"data.adjustment-factor-snapshot.payload.v1", "data.adjustment-factor-snapshot.payload.v2"}
+            if not required <= declared or len(snapshots) != 1:
+                raise ResultContractError("策略结果必须完整封存当前版本策略证据和正式金融事实")
         if self.contract_version != RESULT_SPEC_VERSION:
             raise ResultContractError("ResultSpec 版本不受支持")
         if self.result_spec_hash != typed_canonical_hash(self.payload()):
@@ -242,6 +267,8 @@ class ResultInputRevision:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "ResultInputRevision":
+        if payload.get("contract_version") == "result-source-revision-v1":
+            return ResultSourceRevision.from_dict(payload)
         expected = {
             "request_id", "physical_snapshot_id", "manifest_hash", "schema_hash",
             "source_revision_hash", "contract_version",
@@ -251,6 +278,37 @@ class ResultInputRevision:
             "request_id", "physical_snapshot_id", "manifest_hash", "schema_hash",
             "source_revision_hash", "contract_version",
         )))
+
+
+@dataclass(frozen=True)
+class ResultSourceRevision:
+    """记录直接来源身份，不把外部来源标成已保存的物理快照。"""
+
+    request_id: str
+    source_identity: str
+    descriptor_hash: str
+    schema_hash: str
+    source_revision_hash: str
+    contract_version: str = "result-source-revision-v1"
+
+    def __post_init__(self) -> None:
+        _require_id(self.request_id, "input source request_id")
+        for name in ("source_identity", "descriptor_hash", "schema_hash", "source_revision_hash"):
+            _require_hash(getattr(self, name), f"input source {name}")
+        if self.contract_version != "result-source-revision-v1":
+            raise ResultContractError("直接来源Result版本无效")
+
+    def to_dict(self):
+        return {name: getattr(self, name) for name in (
+            "request_id", "source_identity", "descriptor_hash", "schema_hash",
+            "source_revision_hash", "contract_version")}
+
+    @classmethod
+    def from_dict(cls, payload):
+        expected = {"request_id", "source_identity", "descriptor_hash", "schema_hash",
+                    "source_revision_hash", "contract_version"}
+        _require_exact(payload, expected, "ResultSourceRevision")
+        return cls(**payload)
 
 
 @dataclass(frozen=True)
@@ -398,15 +456,7 @@ class ResultSupportFile:
                 source_path,
             ) is not None
         )
-        futures_context = (
-            self.artifact_type == "research.futures-daily-context.v1"
-            and re.fullmatch(
-                r"simulation/futures-context-tables/(?:intents|fills|settlements|nav|rule_snapshots|rejections|contributions|portfolio|market_inputs|settlement_inputs|tick_size_inputs)"
-                + r"/(?:session=[0-9]{4}-[0-9]{2}-[0-9]{2}/data|part-[0-9]{5,})\.parquet",
-                source_path,
-            ) is not None
-        )
-        if source_path.endswith(".parquet") and not (sequence_window or order_lifecycle or futures_context):
+        if source_path.endswith(".parquet") and not (sequence_window or order_lifecycle):
             raise ResultContractError("Result support file 不能代替正式 Parquet 表")
         if self.contract_version != RESULT_SUPPORT_FILE_VERSION:
             raise ResultContractError("ResultSupportFile 版本不受支持")
@@ -446,6 +496,7 @@ class ResultRunSummary:
     mode: str
     fixed_clock: str
     node_statuses: Mapping[str, str]
+    limitations: tuple[str, ...] = ()
     contract_version: str = RESULT_RUN_SUMMARY_VERSION
 
     def __post_init__(self) -> None:
@@ -474,6 +525,9 @@ class ResultRunSummary:
         ):
             raise ResultContractError("Result 节点终态必须完整 succeeded")
         object.__setattr__(self, "node_statuses", MappingProxyType(statuses))
+        if any(not isinstance(item, str) or not item for item in self.limitations):
+            raise ResultContractError("Result 运行限制必须是非空文字")
+        object.__setattr__(self, "limitations", tuple(sorted(set(self.limitations))))
         if self.contract_version != RESULT_RUN_SUMMARY_VERSION:
             raise ResultContractError("ResultRunSummary 版本不受支持")
 
@@ -487,6 +541,7 @@ class ResultRunSummary:
             "mode": self.mode,
             "fixed_clock": self.fixed_clock,
             "node_statuses": dict(self.node_statuses),
+            "limitations": list(self.limitations),
             "contract_version": self.contract_version,
         }
 
@@ -494,7 +549,7 @@ class ResultRunSummary:
     def from_dict(cls, payload: Mapping[str, object]) -> "ResultRunSummary":
         expected = {
             "project_id", "run_id", "parent_run_id", "dag_id", "status", "mode",
-            "fixed_clock", "node_statuses", "contract_version",
+            "fixed_clock", "node_statuses", "limitations", "contract_version",
         }
         _require_exact(payload, expected, "ResultRunSummary")
         if not isinstance(payload["node_statuses"], Mapping):
@@ -509,109 +564,10 @@ class ResultRunSummary:
             mode=str(payload["mode"]),
             fixed_clock=str(payload["fixed_clock"]),
             node_statuses={str(key): str(value) for key, value in payload["node_statuses"].items()},
+            limitations=tuple(payload["limitations"]),
             contract_version=str(payload["contract_version"]),
         )
 
-
-@dataclass(frozen=True)
-class ResultVerificationClosure:
-    """Verifier 直接从 ResultStore 读取的最小当前验证闭包。"""
-
-    policy_id: str
-    validity_artifact_key: str
-    validity_source_path: str
-    validity_content_hash: str
-    validity_producer_hash: str
-    run: ResultRunSummary
-    verifier_identity: Mapping[str, object] | None = None
-    verifier_bundle_path: str | None = None
-    contract_version: str = RESULT_VERIFICATION_CLOSURE_VERSION
-
-    def __post_init__(self) -> None:
-        _require_id(self.policy_id, "result verification policy_id")
-        for field in (
-            "validity_artifact_key", "validity_content_hash", "validity_producer_hash",
-        ):
-            _require_hash(getattr(self, field), f"result verification {field}")
-        object.__setattr__(
-            self, "validity_source_path", _safe_prefix(self.validity_source_path)
-        )
-        if self.contract_version not in {
-            RESULT_VERIFICATION_CLOSURE_VERSION,
-            RESULT_EMBEDDED_VERIFIER_CLOSURE_VERSION,
-        }:
-            raise ResultContractError("ResultVerificationClosure 版本不受支持")
-        if self.verifier_identity is not None:
-            if not isinstance(self.verifier_identity, Mapping):
-                raise ResultContractError("ResultVerifier identity 必须是映射")
-            required = {
-                "project_id", "verifier_id", "verifier_version", "bundle_hash",
-                "implementation_hash", "authorized_schema_ids",
-                "authorized_support_artifact_types", "metric_definitions", "abi_version",
-            }
-            if set(self.verifier_identity) != required:
-                raise ResultContractError("ResultVerifier identity schema 无效")
-            object.__setattr__(self, "verifier_identity", dict(self.verifier_identity))
-        if self.contract_version == RESULT_VERIFICATION_CLOSURE_VERSION:
-            if self.verifier_bundle_path is not None:
-                raise ResultContractError("旧 Result 验证闭包不得声明内嵌 Verifier")
-        else:
-            if self.verifier_identity is None:
-                raise ResultContractError("内嵌 Verifier 闭包缺少身份")
-            bundle_hash = str(self.verifier_identity["bundle_hash"])
-            expected_path = f"verifiers/{bundle_hash}"
-            if self.verifier_bundle_path != expected_path:
-                raise ResultContractError("内嵌 Verifier 路径与冻结身份不一致")
-
-    def to_dict(self) -> dict[str, object]:
-        payload = {
-            "policy_id": self.policy_id,
-            "validity_artifact_key": self.validity_artifact_key,
-            "validity_source_path": self.validity_source_path,
-            "validity_content_hash": self.validity_content_hash,
-            "validity_producer_hash": self.validity_producer_hash,
-            "run": self.run.to_dict(),
-            "contract_version": self.contract_version,
-        }
-        if self.verifier_identity is not None:
-            payload["verifier_identity"] = dict(self.verifier_identity)
-        if self.verifier_bundle_path is not None:
-            payload["verifier_bundle_path"] = self.verifier_bundle_path
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, object]) -> "ResultVerificationClosure":
-        expected = {
-            "policy_id", "validity_artifact_key", "validity_source_path",
-            "validity_content_hash", "validity_producer_hash", "run",
-            "contract_version",
-        }
-        if "verifier_identity" in payload:
-            expected.add("verifier_identity")
-        if "verifier_bundle_path" in payload:
-            expected.add("verifier_bundle_path")
-        _require_exact(payload, expected, "ResultVerificationClosure")
-        if not isinstance(payload["run"], Mapping):
-            raise ResultContractError("ResultVerificationClosure run 必须是映射")
-        return cls(
-            policy_id=str(payload["policy_id"]),
-            validity_artifact_key=str(payload["validity_artifact_key"]),
-            validity_source_path=str(payload["validity_source_path"]),
-            validity_content_hash=str(payload["validity_content_hash"]),
-            validity_producer_hash=str(payload["validity_producer_hash"]),
-            run=ResultRunSummary.from_dict(payload["run"]),
-            verifier_identity=(
-                None
-                if "verifier_identity" not in payload
-                else dict(payload["verifier_identity"])
-            ),
-            verifier_bundle_path=(
-                None
-                if "verifier_bundle_path" not in payload
-                else str(payload["verifier_bundle_path"])
-            ),
-            contract_version=str(payload["contract_version"]),
-        )
 
 @dataclass(frozen=True)
 class ResultBundle:
@@ -624,6 +580,7 @@ class ResultBundle:
     formal_input_request_ids: tuple[str, ...]
     input_claim_ceilings: Mapping[str, str]
     effective_input_claim_ceiling: str
+    claim_level: str
     execution_identity_hash: str
     runtime_hash: str
     implementation_manifest_hash: str
@@ -631,9 +588,11 @@ class ResultBundle:
     result_spec: ResultSpec
     metric_proofs: tuple[MetricReachabilityProof, ...]
     tables: tuple[ResultTableManifest, ...]
-    verification: ResultVerificationClosure
+    run: ResultRunSummary
     result_id: str
     support_files: tuple[ResultSupportFile, ...] = ()
+    metric_definitions: tuple[MetricDefinition, ...] = ()
+    research_cost_assumption: Mapping[str, object] | None = None
     status: str = "finalized"
     contract_version: str = RESULT_BUNDLE_VERSION
 
@@ -674,6 +633,15 @@ class ResultBundle:
             "input_claim_ceilings",
             MappingProxyType(dict(sorted(self.input_claim_ceilings.items()))),
         )
+        if self.claim_level not in CLAIM_LEVELS or self.claim_level != weakest_claim_level(
+            self.claim_level, self.effective_input_claim_ceiling
+        ):
+            raise ResultContractError("Result 声明结论不得超过输入允许范围")
+        if self.research_cost_assumption is not None:
+            object.__setattr__(self, "research_cost_assumption", MappingProxyType(dict(self.research_cost_assumption)))
+        definitions = tuple(item.metric_ref for item in self.metric_definitions)
+        if definitions != tuple(sorted(set(definitions))):
+            raise ResultContractError("Result 项目指标定义必须唯一并按 metric_ref 排序")
         proof_refs = tuple(item.metric_ref for item in self.metric_proofs)
         if not proof_refs or proof_refs != tuple(sorted(proof_refs)) or len(proof_refs) != len(set(proof_refs)):
             raise ResultContractError("ResultBundle metric proofs 必须非空、唯一并规范排序")
@@ -718,21 +686,9 @@ class ResultBundle:
             or len(support_identities) != len(set(support_identities))
         ):
             raise ResultContractError("ResultBundle support files 必须唯一并规范排序")
-        validity_support = tuple(
-            item
-            for item in self.support_files
-            if (
-                item.artifact_key == self.verification.validity_artifact_key
-                and item.source_path == self.verification.validity_source_path
-                and item.content_hash == self.verification.validity_content_hash
-                and item.artifact_type == "research.validity-facts.v1"
-            )
-        )
-        if len(validity_support) != 1:
-            raise ResultContractError("ResultBundle 缺少唯一 validity facts 验证材料")
         if (
-            self.verification.run.project_id != self.project_id
-            or self.verification.run.run_id != self.run_id
+            self.run.project_id != self.project_id
+            or self.run.run_id != self.run_id
         ):
             raise ResultContractError("ResultBundle 运行摘要与结果身份不一致")
         if self.status != "finalized" or self.contract_version != RESULT_BUNDLE_VERSION:
@@ -751,6 +707,7 @@ class ResultBundle:
             "formal_input_request_ids": list(self.formal_input_request_ids),
             "input_claim_ceilings": dict(self.input_claim_ceilings),
             "effective_input_claim_ceiling": self.effective_input_claim_ceiling,
+            "claim_level": self.claim_level,
             "execution_identity_hash": self.execution_identity_hash,
             "runtime_hash": self.runtime_hash,
             "implementation_manifest_hash": self.implementation_manifest_hash,
@@ -758,8 +715,10 @@ class ResultBundle:
             "result_spec": self.result_spec.to_dict(),
             "metric_proofs": [item.to_dict() for item in self.metric_proofs],
             "tables": [item.to_dict() for item in self.tables],
-            "verification": self.verification.to_dict(),
+            "run": self.run.to_dict(),
             "support_files": [item.to_dict() for item in self.support_files],
+            "metric_definitions": [item.to_dict() for item in self.metric_definitions],
+            "research_cost_assumption": None if self.research_cost_assumption is None else dict(self.research_cost_assumption),
             "status": self.status,
             "contract_version": self.contract_version,
         }
@@ -788,7 +747,7 @@ class ResultBundle:
         effective_input_claim_ceiling = str(
             kwargs.get(
                 "effective_input_claim_ceiling",
-                "tradable_simulation",
+                weakest_claim_level(*input_claim_ceilings.values()),
             )
         )
         payload = {
@@ -801,6 +760,7 @@ class ResultBundle:
             "formal_input_request_ids": list(formal_input_request_ids),
             "input_claim_ceilings": dict(sorted(input_claim_ceilings.items())),
             "effective_input_claim_ceiling": effective_input_claim_ceiling,
+            "claim_level": kwargs["claim_level"],
             "execution_identity_hash": kwargs["execution_identity_hash"],
             "runtime_hash": kwargs["runtime_hash"],
             "implementation_manifest_hash": kwargs["implementation_manifest_hash"],
@@ -808,8 +768,10 @@ class ResultBundle:
             "result_spec": kwargs["result_spec"].to_dict(),
             "metric_proofs": [item.to_dict() for item in kwargs["metric_proofs"]],
             "tables": [item.to_dict() for item in kwargs["tables"]],
-            "verification": kwargs["verification"].to_dict(),
+            "run": kwargs["run"].to_dict(),
             "support_files": [item.to_dict() for item in kwargs.get("support_files", ())],
+            "metric_definitions": [item.to_dict() for item in kwargs.get("metric_definitions", ())],
+            "research_cost_assumption": kwargs.get("research_cost_assumption"),
             "status": "finalized",
             "contract_version": RESULT_BUNDLE_VERSION,
         }
@@ -819,6 +781,7 @@ class ResultBundle:
         values["input_claim_ceilings"] = input_claim_ceilings
         values["effective_input_claim_ceiling"] = effective_input_claim_ceiling
         values["support_files"] = tuple(kwargs.get("support_files", ()))
+        values["metric_definitions"] = tuple(kwargs.get("metric_definitions", ()))
         return cls(**values, result_id=typed_canonical_hash(payload))
 
     @classmethod
@@ -827,9 +790,9 @@ class ResultBundle:
             "project_id", "run_id", "package_hash", "plan_hash", "catalog_hashes",
             "input_revisions", "execution_identity_hash", "runtime_hash",
             "formal_input_request_ids", "input_claim_ceilings",
-            "effective_input_claim_ceiling",
+            "effective_input_claim_ceiling", "claim_level",
             "implementation_manifest_hash", "backend_fidelity_hash", "result_spec",
-            "metric_proofs", "tables", "verification", "support_files", "result_id", "status",
+            "metric_proofs", "metric_definitions", "research_cost_assumption", "tables", "run", "support_files", "result_id", "status",
             "contract_version",
         }
         _require_exact(payload, expected, "ResultBundle")
@@ -837,13 +800,14 @@ class ResultBundle:
             "catalog_hashes",
             "input_claim_ceilings",
             "result_spec",
-            "verification",
+            "run",
         ):
             if not isinstance(payload[field], Mapping):
                 raise ResultContractError(f"ResultBundle {field} 必须是映射")
         for field in (
             "input_revisions",
             "metric_proofs",
+            "metric_definitions",
             "tables",
             "support_files",
         ):
@@ -868,14 +832,17 @@ class ResultBundle:
                 for key, value in payload["input_claim_ceilings"].items()
             },
             effective_input_claim_ceiling=str(payload["effective_input_claim_ceiling"]),
+            claim_level=str(payload["claim_level"]),
             execution_identity_hash=str(payload["execution_identity_hash"]),
             runtime_hash=str(payload["runtime_hash"]),
             implementation_manifest_hash=str(payload["implementation_manifest_hash"]),
             backend_fidelity_hash=str(payload["backend_fidelity_hash"]),
             result_spec=ResultSpec.from_dict(payload["result_spec"]),
             metric_proofs=tuple(MetricReachabilityProof.from_dict(item) for item in payload["metric_proofs"]),
+            metric_definitions=tuple(MetricDefinition.from_dict(item) for item in payload["metric_definitions"]),
+            research_cost_assumption=payload["research_cost_assumption"],
             tables=tuple(ResultTableManifest.from_dict(item) for item in payload["tables"]),
-            verification=ResultVerificationClosure.from_dict(payload["verification"]),
+            run=ResultRunSummary.from_dict(payload["run"]),
             support_files=tuple(
                 ResultSupportFile.from_dict(item) for item in payload["support_files"]
             ),

@@ -88,6 +88,7 @@ def _execute(args) -> dict[str, object]:
             resource_stale_seconds=args.resource_stale_seconds,
             source_db=source_dbs,
             input_snapshot_manifest=getattr(args, "input_snapshot_manifest", None),
+            persist_inputs=getattr(args, "persist_inputs", False),
             minute_data_root=args.minute_data_root,
             reuse_run_root=args.reuse_run_root,
             require_reused_node=args.require_reused_node,

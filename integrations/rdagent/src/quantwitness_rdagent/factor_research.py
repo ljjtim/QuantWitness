@@ -243,7 +243,7 @@ class FactorResearch:
         from research_pipeline.data_plane import PathRolePolicy
         template = self.payload["package_template"]
         source = template["source"]
-        paths = {"output": str(self.root), **{k: source[k] for k in ("path", "catalog_lock", "verifier_bundle", "input_snapshot_manifest", "source_archive_root")}}
+        paths = {"output": str(self.root), **{k: source[k] for k in ("path", "catalog_lock", "input_snapshot_manifest", "source_archive_root")}}
         paths.update({"extension_"+str(i): x for i,x in enumerate(source["extension_bundles"])})
         paths.update({"confirmation_"+k: v for k,v in self.payload["confirmed_spec"].items() if k != "kind"})
         paths.update({"response_"+str(i): x for i,x in enumerate(self.payload["proposer"].get("responses", []))})
@@ -262,9 +262,9 @@ class FactorResearch:
             raise ValueError("因子请求与正式设计的合同不同")
         if self.factor_contract == DAI_FACTOR_CONTRACT and self.design.get("feature_expressions") != {"dai_following": "$dai"}:
             raise ValueError("日级模板必须声明唯一dai_following槽及$dai基线")
-        from research_pipeline.extensions.verifier_bundle import verify_project_verifier_bundle
-        verifier = verify_project_verifier_bundle(source["verifier_bundle"])
-        definitions = [definition for definition in verifier.metric_definitions
+        from research_pipeline.platform.metric_contracts import MetricDefinition
+        definitions_from_package = tuple(MetricDefinition.from_dict(item) for item in package.spec_payload.get("metric_definitions", ()))
+        definitions = [definition for definition in definitions_from_package
                        if definition.metric_ref == self.design["metric_ref"] and
                        definition.result_schema_id == template["objective"]["schema_id"]]
         if len(definitions) != 1:
@@ -328,6 +328,7 @@ class FactorResearch:
             item = {key: row[key] for key in ("candidate_id", "expression", "hypothesis", "reason", "status") if key in row}
             if row["status"] == "evaluated":
                 item["metrics"] = {k: row["metrics"][k] for k in ("value", "rows")}
+                item["limitations"] = list(row["metrics"].get("limitations", ()))
             if "reflection" in row:
                 item["reflection"] = row["reflection"]
             history.append(item)
@@ -424,7 +425,7 @@ class FactorResearch:
                 metrics = session.evaluate_metrics(session.payload["candidates"][0])
                 result.update(status="evaluated", metrics=metrics)
             except ValueError as exc:
-                result.update(status="failed", reason="formal_verification_or_metric_failed", error_type=type(exc).__name__)
+                result.update(status="failed", reason="formal_execution_or_metric_failed", error_type=type(exc).__name__)
         write_json(path, result)
         return result
 
@@ -438,6 +439,7 @@ class FactorResearch:
             context = self.context()
             context["current"] = {k: evaluation[k] for k in ("candidate_id", "expression", "hypothesis", "reason", "status")}
             context["current"]["metrics"] = {k: evaluation["metrics"][k] for k in ("value", "rows")}
+            context["current"]["limitations"] = list(evaluation["metrics"].get("limitations", ()))
             try:
                 result["reflection"] = reflect_factor(context, ResearchCalls(self, f"{index:04d}-reflection"))
             except ResearchBudgetExhausted:
@@ -480,7 +482,6 @@ class FactorResearch:
                   "generated_candidates": sum(r["round"] > 0 for r in passed),
                   "selected_candidate_id": best["candidate_id"] if best else None,
                   "selected_result_ref": best["metrics"]["result_ref"] if best else None,
-                  "selected_verification_ref": best["metrics"]["verification_ref"] if best else None,
                   "paid_model_calls": sum(_read(p)["transport"] == "live" for p in (self.root / "calls").glob("*.json"))}
         write_json(output, result)
         return result

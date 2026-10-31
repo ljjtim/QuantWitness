@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ChinaRuleBook.cs" />
+    <Compile Include="ChinaOrderProperties.cs" />
+    <Compile Include="ChinaAStockModels.cs" />
+    <Compile Include="ChinaExecution.cs" />
+    <Compile Include="DirectSessionData.cs" />
+    <Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath></Reference>
+    <Reference Include="QuantConnect.Algorithm"><HintPath>$(LeanBin)/QuantConnect.Algorithm.dll</HintPath></Reference>
+    <Reference Include="QuantConnect.Logging"><HintPath>$(LeanBin)/QuantConnect.Logging.dll</HintPath></Reference>
+    <Reference Include="NodaTime"><HintPath>$(LeanBin)/NodaTime.dll</HintPath></Reference>
+    <Reference Include="Python.Runtime"><HintPath>$(LeanBin)/Python.Runtime.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>
+

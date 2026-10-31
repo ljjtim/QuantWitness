@@ -465,22 +465,20 @@ def _expected_slots(
     resolver = SessionCalendarResolver(bundle)
     result: set[tuple[str, datetime]] = set()
     for code, instrument in instruments.items():
-        policies = tuple(
-            item
-            for item in bundle.policies
-            if item.instrument == instrument
-            and item.policy_id == scan_plan.minute_session_policy_ref
-            and item.revision == 1
-        )
-        if len(policies) != 1:
-            raise QualityGateError("质量审计没有唯一 session policy")
-        (policy,) = policies
-        for trading_date in policy.trading_dates:
-            session = resolver.resolve_trading_date(
-                instrument,
-                trading_date,
-                policy_revision=1,
-            )
+        if bundle.contract_version == "minute-project-session-bundle-v2":
+            from research_pipeline.domain.minute_request_scope import minute_request_sessions
+            sessions = (policy.build_session(day, scope_binding_hash=bundle.capability_binding_hash)
+                        for policy, day, _, _ in minute_request_sessions(bundle, instruments=(code,),
+                            start_at=scan_plan.start_at, end_at=scan_plan.end_at,
+                            policy_id=scan_plan.minute_session_policy_ref))
+        else:
+            policies = tuple(item for item in bundle.policies if item.instrument == instrument
+                             and item.policy_id == scan_plan.minute_session_policy_ref and item.revision == 1)
+            if len(policies) != 1:
+                raise QualityGateError("质量审计没有唯一 session policy")
+            sessions = (resolver.resolve_trading_date(instrument, day, policy_revision=1)
+                        for day in policies[0].trading_dates)
+        for session in sessions:
             for segment in session.segments:
                 cursor = segment.starts_at + timedelta(minutes=1)
                 while cursor <= segment.ends_at:

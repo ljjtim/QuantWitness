@@ -32,19 +32,6 @@ def prepared(tmp_path_factory):
     return _prepare().make_request(root, template, [])
 
 
-def test_optional_verification_memory_bytes_preserves_old_requests(prepared):
-    old = validate_package_campaign(prepared)
-    assert "verification_memory_bytes" not in old["source"]
-    updated = copy.deepcopy(prepared)
-    updated["source"]["verification_memory_bytes"] = 4 * 1024 ** 3
-    assert validate_package_campaign(updated)["source"]["verification_memory_bytes"] == 4 * 1024 ** 3
-    for value in (0, -1, 1.5, True):
-        invalid = copy.deepcopy(prepared)
-        invalid["source"]["verification_memory_bytes"] = value
-        with pytest.raises(ValueError, match="verification_memory_bytes"):
-            validate_package_campaign(invalid)
-
-
 def test_prepare_and_freeze_have_distinct_formal_variants(prepared, monkeypatch):
     import duckdb
     import sqlite3
@@ -86,20 +73,20 @@ def test_invalid_request_rejected(prepared, fault):
 
 
 def _projection(monkeypatch, prepared, **updates):
-    import research_pipeline.evidence
+    import research_pipeline.results
     payload = copy.deepcopy(prepared)
     row = {"session": "2025-01-08", "available_at": "2025-01-08T15:00:00+08:00", "rolling_value": 0.1,
            "rolling_status": "computed", "holdout_metric": 999.0, **updates}
     class Snapshot:
-        bundle = SimpleNamespace(result_id="result1", tables=[SimpleNamespace(table_id="daily", schema_id=payload["objective"]["schema_id"])])
+        bundle = SimpleNamespace(result_id="result1", run=SimpleNamespace(status="succeeded"), tables=[SimpleNamespace(table_id="daily", schema_id=payload["objective"]["schema_id"])])
         def table_schema(self, schema):
             return pa.Table.from_pylist([row]).schema
         def iter_table_batches(self, schema, *, columns, batch_size):
             assert "holdout_metric" not in columns
             yield pa.Table.from_pylist([row]).select(columns).to_batches()[0]
-    context = SimpleNamespace(snapshot=Snapshot(), verification=SimpleNamespace(status="pass"))
-    monkeypatch.setattr(research_pipeline.evidence, "load_verified_result_context", lambda *a, **kw: context)
-    result = {"verification_ref": "verification", "execution_ref": "execution", "result_ref": "result"}
+    context = SimpleNamespace(snapshot=Snapshot(), limitations=("lean_next_completed_close_v1",))
+    monkeypatch.setattr(research_pipeline.results, "load_result_context", lambda *a, **kw: context)
+    result = {"execution_status": "succeeded", "execution_ref": "execution", "result_ref": "result"}
     return payload, result, context
 
 
@@ -108,19 +95,21 @@ def test_only_whitelisted_development_metric_is_projected(prepared, monkeypatch)
     projected = project_development_metric(result, payload)
     assert projected["value"] == 0.1
     assert projected["rows"] == 1
+    assert projected["limitations"] == ["lean_next_completed_close_v1"]
     assert "holdout_metric" not in projected
     campaign = object.__new__(PackageCampaign)
     campaign.payload = payload
     campaign.history = lambda: [{"round": 0, "status": "evaluated", "candidate_id": "window_3", "metrics": projected,
                                  "diagnostic": "private secret"}]
     prompt = campaign.prompt()
-    assert "private secret" not in prompt and "verification_ref" not in prompt and '"result_ref"' not in prompt
+    assert "private secret" not in prompt and '"result_ref"' not in prompt
+    assert "lean_next_completed_close_v1" in prompt
     assert campaign.loss(projected) == 0.1
     payload["objective"]["direction"] = "maximize"
     assert campaign.loss(projected) == -0.1
 
 
-@pytest.mark.parametrize("fault", ["future_label", "future_day", "failed_verification", "nonfinite", "stage_test", "wrong_schema"])
+@pytest.mark.parametrize("fault", ["future_label", "future_day", "failed_execution", "nonfinite", "stage_test", "wrong_schema"])
 def test_invalid_development_result_never_reaches_feedback(prepared, monkeypatch, fault):
     updates = {}
     if fault == "future_label":
@@ -132,8 +121,8 @@ def test_invalid_development_result_never_reaches_feedback(prepared, monkeypatch
     elif fault == "stage_test":
         updates["stage"] = "test"
     payload, result, context = _projection(monkeypatch, prepared, **updates)
-    if fault == "failed_verification":
-        context.verification.status = "fail"
+    if fault == "failed_execution":
+        context.snapshot.bundle.run.status = "failed"
     elif fault == "wrong_schema":
         payload["objective"]["schema_id"] = "wrong"
     elif fault == "stage_test":
@@ -155,7 +144,7 @@ def test_interrupted_evaluation_keeps_reservation_and_can_resume(prepared, tmp_p
     path = campaign.root / "rounds/0000/evaluation.json"
     reserved = json.loads(path.read_text(encoding="utf-8"))
     assert reserved["evaluation_reserved"] and reserved["status"] == "reserved"
-    campaign.evaluate_metrics = lambda candidate: {"value": 0.1, "result_ref": "result", "verification_ref": "verification"}
+    campaign.evaluate_metrics = lambda candidate: {"value": 0.1, "result_ref": "result"}
     result = campaign.evaluate(0, proposal)
     assert result["status"] == "evaluated"
     assert len(list(campaign.root.glob("rounds/*/evaluation.json"))) == 1

@@ -6,7 +6,7 @@ complete(prompt, *, instructions, max_output_tokens)返回文本或含text的字
 context包含confirmed_spec、fields、max_window、expression_contract、history，
 max_output_tokens可显式限制单次响应；反思另传current。history/current由主循环
 从已验证开发结果构建，仅传metrics.value及metrics.rows，不传Result正文、日志
-或最终隔离集。此模块不执行研究或替代主循环的独立验证。
+或最终隔离集。此模块只投影开发反馈。
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ _CONTEXT_FIELDS = {
     "history", "max_output_tokens", "current", "development", "objective",
     "knowledge", "direction", "joint_knowledge", "joint_direction", "factor_contract",
 }
-_RECORD_FIELDS = {"candidate_id", "hypothesis", "reason", "expression", "metrics", "reflection", "status"}
+_RECORD_FIELDS = {"candidate_id", "hypothesis", "reason", "expression", "metrics", "reflection", "status", "limitations"}
 _REFLECTION_FIELDS = {"observations", "hypothesis_evaluation", "new_hypothesis", "reason", "decision"}
 _HYPOTHESIS_FIELDS = (
     "hypothesis", "reason", "concise_reason", "concise_observation",
@@ -37,6 +37,9 @@ def _text(value, name):
 def _record(value):
     if not isinstance(value, dict) or set(value) - _RECORD_FIELDS:
         raise ValueError("研究历史必须使用开发记录字段")
+    limitations = value.get("limitations", [])
+    if not isinstance(limitations, list) or any(not isinstance(item, str) or not item for item in limitations):
+        raise ValueError("研究限制必须是非空文字列表")
     status = value.get("status", "evaluated")
     if status in {"failed", "rejected", "stopped"}:
         if "metrics" in value or "reflection" in value:
@@ -130,7 +133,7 @@ def _native_components():
             return "正式开发范围内的因子研究"
 
         def get_runtime_environment(self):
-            return "Qlib表达式；RP执行与独立验证；仅开发数据"
+            return "Qlib表达式；RP正式执行；仅开发数据"
 
         def get_scenario_all_desc(self, task=None, filtered_tag=None, simple_background=None):
             facts = {key: self.context[key] for key in (

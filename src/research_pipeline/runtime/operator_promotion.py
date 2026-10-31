@@ -1,11 +1,10 @@
-"""公共 OperatorDefinition 的内建、待迁出与正式晋级门禁。"""
+"""公共 OperatorDefinition 的内建、本地准入与正式晋级门禁。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from hashlib import sha256
 from types import MappingProxyType
-from typing import Iterable, Mapping
+from typing import Iterable
 
 from research_pipeline.extensions import (
     CompiledOperatorManifest,
@@ -23,7 +22,6 @@ from research_pipeline.platform.semantic_governance import (
 
 
 BUILTIN_CLASSIFICATION = "builtin"
-LEGACY_EXIT_CLASSIFICATION = "legacy_exit"
 PROMOTED_CLASSIFICATION = "promoted"
 OperatorIdentity = tuple[str, str, str, str]
 BUILTIN_ARTIFACT_TYPE_IDENTITIES = frozenset({
@@ -38,7 +36,6 @@ BUILTIN_ARTIFACT_TYPE_IDENTITIES = frozenset({
     "research.minute-labels.v1",
     "research.minute-observation.v1",
     "research.minute-signals.v1",
-    "research.minute-simulation.v1",
     "research.minute-statistics.v1",
     "research.minute-targets.v1",
     "research.model-fits.v2",
@@ -47,20 +44,13 @@ BUILTIN_ARTIFACT_TYPE_IDENTITIES = frozenset({
     "research.model-selection.v2",
     "research.model-split-manifest.v2",
     "research.model-validation-predictions.v2",
-    "research.validity-facts.v1",
 })
 
 
 # 公共定义集合经审查固定；有意修改实现需同步复核本常量。
 BUILTIN_OPERATOR_DEFINITION_SET_HASH = (
-    "ef8b60cdf66d0c38e18ac71e45098707fe2f6009fb3a3ebdef59ad6518ce4d0e"
+    "5ee1f879ae775b0ba67d4275cfb07e523cea37465ab50331d4aa9c6382e87c40"
 )
-
-
-@dataclass(frozen=True)
-class LegacyOperatorDisposition:
-    remediation_item: str
-    target: str
 
 
 # 该清单固定 00A 验收后的既有公共合同，不从 manifest 或 baseline 自动生成。
@@ -89,12 +79,6 @@ BUILTIN_OPERATOR_IDENTITIES: frozenset[OperatorIdentity] = frozenset(
             "1.0.0",
             "data.minute.scan.v1",
             "research_pipeline.data_plane.minute_scan",
-        ),
-        (
-            "finance.simulation.intraday",
-            "3.0.0",
-            "finance.simulation.intraday.v3",
-            "research_pipeline.simulation.minute_execution",
         ),
         (
             "research.bars.minute_adjust",
@@ -180,72 +164,11 @@ BUILTIN_OPERATOR_IDENTITIES: frozenset[OperatorIdentity] = frozenset(
             "research.targets.intraday.v1",
             "research_pipeline.runtime.adapters.minute_research",
         ),
-        (
-            "research.validity.adjusted-minute-observation",
-            "1.0.0",
-            "research.validity.adjusted-minute-observation.v1",
-            "research_pipeline.runtime.adapters.minute_data",
-        ),
-        (
-            "research.validity.data-observation",
-            "1.0.0",
-            "research.validity.data-observation.v1",
-            "research_pipeline.runtime.operator_graph_evidence",
-        ),
-        (
-            "research.validity.minute",
-            "1.0.0",
-            "research.validity.minute.v1",
-            "research_pipeline.runtime.operator_graph_evidence",
-        ),
-        (
-            "research.validity.minute-observation",
-            "1.0.0",
-            "research.validity.minute-observation.v1",
-            "research_pipeline.runtime.adapters.minute_data",
-        ),
     }
-)
-
-LEGACY_OPERATOR_DISPOSITIONS: Mapping[OperatorIdentity, LegacyOperatorDisposition] = (
-    MappingProxyType({})
-)
-
-LEGACY_OPERATOR_DEFINITION_HASHES: Mapping[OperatorIdentity, str] = MappingProxyType(
-    {}
 )
 
 # 通用晋级记录与一次性的 local_only 人工准入分别保存。
 MAINLINE_OPERATOR_PROMOTION_REVIEWS: tuple[OperatorPromotionReview, ...] = ()
-
-DAILY_CASH_LOCAL_APPROVAL = MappingProxyType({
-    "operator_identity": (
-        "finance.simulation.daily-cash", "1.0.0",
-        "finance.simulation.daily-cash.v1",
-        "research_pipeline.runtime.qlib_portfolio_execution",
-    ),
-    "definition_hash": "1bf79376276192d456979dd5d8c26e1fe7b96eb69dba2ab752867b44b51b018c",
-    "approved_at": "2026-10-03",
-    "approval_ref": "release/daily-cash-local-admission.md",
-    "maximum_state": "local_only",
-    "heterogeneous_reuse_confirmed": False,
-})
-
-
-SHARED_FUTURES_LOCAL_DEFINITION_HASHES = MappingProxyType({'daily': '5baa3ed25343f700d55847c32522ead13baac162ecbccec4992af28a53c32281', 'intraday': 'd61ac1e53073cc92e726a834c29f423e46fac54038b51f92f5a8f57431e206c1'})
-
-SHARED_FUTURES_LOCAL_APPROVALS = tuple(MappingProxyType({
-    "operator_identity": (
-        f"finance.simulation.shared-futures.{frequency}", "1.0.0",
-        f"finance.simulation.shared-futures.{frequency}.v1",
-        "research_pipeline.simulation.shared_futures",
-    ),
-    "definition_hash": SHARED_FUTURES_LOCAL_DEFINITION_HASHES[frequency],
-    "approved_at": "2026-10-09",
-    "approval_ref": "release/shared-futures-local-admission.md",
-    "maximum_state": "local_only",
-    "heterogeneous_reuse_confirmed": False,
-}) for frequency in ("daily", "intraday"))
 
 
 def operator_identity(definition: OperatorDefinition) -> OperatorIdentity:
@@ -268,36 +191,6 @@ def operator_mainline_governance(
         return {
             "mainline_classification": BUILTIN_CLASSIFICATION,
             "promotion_status": "not_required",
-        }
-    if identity == DAILY_CASH_LOCAL_APPROVAL["operator_identity"]:
-        if definition.definition_hash != DAILY_CASH_LOCAL_APPROVAL["definition_hash"]:
-            raise ExtensionError("日频现金 local_only 人工准入定义已漂移，需重新评审")
-        return {
-            "mainline_classification": "local_only",
-            "promotion_status": "approved_local_only",
-            "maximum_state": "local_only",
-            "approval_ref": DAILY_CASH_LOCAL_APPROVAL["approval_ref"],
-            "heterogeneous_reuse_confirmed": False,
-        }
-    approval = next((item for item in SHARED_FUTURES_LOCAL_APPROVALS
-                     if item["operator_identity"] == identity), None)
-    if approval is not None:
-        if definition.definition_hash != approval["definition_hash"]:
-            raise ExtensionError("共享期货 local_only 人工准入定义已漂移，需重新评审")
-        return {
-            "mainline_classification": "local_only",
-            "promotion_status": "approved_local_only",
-            "maximum_state": "local_only",
-            "approval_ref": approval["approval_ref"],
-            "heterogeneous_reuse_confirmed": False,
-        }
-    disposition = LEGACY_OPERATOR_DISPOSITIONS.get(identity)
-    if disposition is not None:
-        return {
-            "mainline_classification": LEGACY_EXIT_CLASSIFICATION,
-            "promotion_status": "pending_removal",
-            "remediation_item": disposition.remediation_item,
-            "target": disposition.target,
         }
     matches = tuple(
         review
@@ -338,12 +231,6 @@ def validate_mainline_operator_promotions(
     )
     if len(set(review_keys)) != len(review_keys):
         raise ExtensionError("公共算子晋级记录的 operator/version 重复")
-    overlap = BUILTIN_OPERATOR_IDENTITIES.intersection(LEGACY_OPERATOR_DISPOSITIONS)
-    if overlap:
-        raise ExtensionError("内建算子与待迁出存量分类重叠")
-    if set(LEGACY_OPERATOR_DEFINITION_HASHES) != set(LEGACY_OPERATOR_DISPOSITIONS):
-        raise ExtensionError("待迁出存量定义摘要与责任清单不一致")
-
     definitions_by_identity = {
         operator_identity(item): item for item in manifest.definitions
     }
@@ -373,16 +260,6 @@ def validate_mainline_operator_promotions(
             module_name=reference.module_name,
             dependency_modules=reference.dependency_modules,
         )
-        identity = operator_identity(definition)
-        expected_legacy_hash = LEGACY_OPERATOR_DEFINITION_HASHES.get(identity)
-        if (
-            expected_legacy_hash is not None
-            and definition.definition_hash != expected_legacy_hash
-        ):
-            raise ExtensionError(
-                f"待迁出公共算子定义已漂移: {definition.name}@{definition.version}"
-            )
-
     approved = tuple(item for item in review_items if item.is_public)
     for review in approved:
         identity = (
@@ -391,12 +268,9 @@ def validate_mainline_operator_promotions(
             review.implementation_id,
             review.module_name,
         )
-        if (
-            identity in BUILTIN_OPERATOR_IDENTITIES
-            or identity in LEGACY_OPERATOR_DISPOSITIONS
-        ):
+        if identity in BUILTIN_OPERATOR_IDENTITIES:
             raise ExtensionError(
-                f"既有内建或待迁出算子不得重复伪造晋级: "
+                f"既有内建算子不得重复伪造晋级: "
                 f"{review.operator_id}@{review.operator_version}"
             )
         definition = definitions_by_identity.get(identity)
@@ -454,12 +328,8 @@ __all__ = [
     "BUILTIN_CLASSIFICATION",
     "BUILTIN_OPERATOR_DEFINITION_SET_HASH",
     "BUILTIN_OPERATOR_IDENTITIES",
-    "LEGACY_EXIT_CLASSIFICATION",
-    "LEGACY_OPERATOR_DISPOSITIONS",
-    "LEGACY_OPERATOR_DEFINITION_HASHES",
     "MAINLINE_OPERATOR_PROMOTION_REVIEWS",
     "PROMOTED_CLASSIFICATION",
-    "LegacyOperatorDisposition",
     "operator_identity",
     "operator_mainline_governance",
     "validate_mainline_operator_promotions",

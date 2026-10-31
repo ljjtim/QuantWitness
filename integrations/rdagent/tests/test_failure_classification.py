@@ -16,16 +16,11 @@ from research_pipeline.runtime.errors import RuntimeWorkerError
     ({"stage": "run", "error_code": "resource_measurement_unavailable", "candidate_operator": True}, False),
     ({"stage": "run", "error_code": "TypeError", "candidate_operator": True, "recommended_action": "wait"}, False),
     ({"stage": "report", "error_type": "OSError"}, False),
-    ({"stage": "verify", "error_type": "RuntimeWorkerError"}, False),
+    ({"stage": "report", "error_type": "RuntimeWorkerError"}, False),
     ({"stage": "run", "error_type": "RuntimeWorkerError"}, False),
 ])
 def test_only_explicit_candidate_failures_are_repairable(diagnostic, expected):
     assert candidate_needs_repair({"command_status": "failed", "diagnostics": [diagnostic]}) is expected
-
-
-def test_formula_fail_repairs_only_after_command_complete():
-    assert candidate_needs_repair({"command_status": "succeeded", "formula_status": "fail", "diagnostics": ["formula.value_mismatch"]})
-    assert not candidate_needs_repair({"command_status": "failed", "formula_status": "fail", "diagnostics": [{"stage": "report"}]})
 
 
 def test_runtime_error_code_preserved_with_formal_node_inspection(tmp_path, monkeypatch):

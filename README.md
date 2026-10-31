@@ -1,200 +1,97 @@
 # QuantWitness
 
-### 让 AI 探索，让研究有据可查。
+QuantWitness 是面向个人、由 AI 协作开展量化研究与回测的框架。研究包声明问题、数据、算法和范围，框架负责按当时可见的信息取数、执行算法、保存结果并支持中断恢复。
 
-**QuantWitness 是一个 AI 协作的量化研究与回测框架。** 你提供研究问题、论文或研报与数据，它通过可选的 RD-Agent 生成和改进研究代码，把数据检查、因子计算、模型训练、回测和独立验证接成可追溯的实验流程。
+主链为：**研究声明 → 准备与准入 → 计算或回测 → Result → 报告与开发反馈**。项目日线与一分钟策略使用本地 LEAN，日频模型使用 Qlib；RD-Agent 是可选的因子与模型提案层。报告、比较、分析、导出和 Dashboard 直接读取正式 Result。
 
-目标不只是画出一条好看的收益曲线，而是让你能回答：**用了什么数据？当时能不能知道？试过哪些方案？这个结果能否被另一套检查复核？**
+[入门教程](docs/workspace-quickstart.md) · [数据接入](docs/catalog.md) · [研究包](docs/research_package.md) · [LEAN 执行](docs/lean-execution.md) · [RD-Agent](integrations/rdagent/README.md) · [文档导航](docs/index.md) · [模块职责](docs/architecture.md) · [框架约定](docs/framework-contracts.md)
 
-[快照布局](docs/snapshot-layout.md) · [中间产物保留与回收](docs/artifact-lifecycle.md) · [执行接续与模板](docs/workspace-continuation.md) · [运行效率与进度](docs/research-execution-improvements.md) · [入门教程](docs/workspace-quickstart.md) · [基本数据接入](docs/catalog.md) · [AI 复现研报](integrations/rdagent/docs/formula-reproduction.md) · [文档导航](docs/index.md) · [框架约定](docs/framework-contracts.md) · [架构图集](docs/architecture/README.md)
+## 一次研究怎样完成
 
-当前 checkpoint 使用 v4：内容复验与资源验收通过后才发布，旧 v1/v2/v3 不用于恢复或复用。分钟并行任务的实际临时空间限制与分摊额度一致，在途任务不超过 worker 数，失败后停止补交并保留成功分区供恢复；已发布 Result 的工作区接续会补齐完成索引。边界见[运行与恢复](docs/runtime.md#checkpoint-发布与资源验收)。
+1. 用 `package init` 创建草稿，填写研究问题、来源、证券、日期、时点和指标。已有完整研究包可通过 Workspace 复制并修改已声明参数。
+2. 用 `package lint` 主动检查声明，或直接通过 Workspace `execute` 进入准备与准入。准入在重数据计算前检查物理来源、数据时点、算子输入和资源声明。
+3. 执行算子图，保存可恢复检查点。项目日线与一分钟策略由 LEAN 撮合和记账，日频模型按冻结训练窗口拟合。
+4. 成功后原子发布 Result，直接生成 Markdown／HTML 报告，或交给 AI 读取开发指标。
 
-分钟复权验证从 Result 封存事实独立重建金额换算、参考价舍位、行动版本、因子区间及逐决策 pre 锚点，验证算法身份为 `verifier.adjustment-snapshot.v3`。详见[独立金融复核](src/research_pipeline/evidence/financial_oracle/README.md)。
+`package init` 生成的是中性草稿，补齐前不能准入。目前没有公共 Recipe。命令及参数以 `python -m research_pipeline --help` 和各子命令的 `--help` 为准。
 
-Workspace 与 RD-Agent 复用同一套包检查、执行、恢复和独立验证服务。`run` 无需提供 `--handoff-out`；`--artifact-root` 继续保留工件和留出集账本的持久位置。接续沿用原 execution 与冻结计划，详情见[执行接续](docs/workspace-continuation.md)。RD-Agent inspect 只读显示请求差异和中断记录，不启动研究或加载上游循环依赖。
+查询输入默认直接读取已准入的只读数据库或既有归档，保留小型来源描述。`run`、`workspace run` 和 `workspace execute` 使用 `--persist-inputs` 才保存查询输入。LEAN 按天消费行情并预读下一交易日，分钟月文件由读取层按天整理，不生成日行情和逐日规则副本。日线策略通过同一列式bundle内的 `bars_request_id` 和 `open_request_id` 分别绑定完整OHLCV及独立开盘价；上一日完整行情在下一交易日开盘可见，开盘执行只使用当时可见的开盘来源。正式 Result、模型、运行计划及 holdout 账本继续保存。直接来源变化后拒绝原运行恢复；迁移运行时须同时保留引用来源。详见[直接输入](docs/direct-inputs.md)。
 
-模型最终评价显式声明持久研究系列，同系列变体共享已打开的留出区间；打开前重检重叠，失败消费继续保留，Result 封存完整系列证据供独立复核。入口与恢复见[研究系列与最终留出集](docs/holdout-series.md)。
+```powershell
+python -m pip install -e ".[dev]" "pyarrow==21.0.0"
+python -m research_pipeline package init work/my_research --json
+python -m research_pipeline package lint --package work/my_research --catalog-lock <Catalog目录> --json
+python -m research_pipeline package admit --package work/my_research --catalog-lock <Catalog目录> --data-db <只读数据库> --output work/plan --json
+python -m research_pipeline run --plan work/plan --data-db <只读数据库> --artifact-root work/artifacts --run-root work/run --result-store work/results --clock <声明时钟> --root-seed <声明种子> --json
+python -m research_pipeline report --result <Result目录> --result-store work/results --output work/report.md --format markdown --json
+```
 
-[![QuantWitness：总体概览：从研究想法到可验证结果，RD-Agent 位于研究提案与迭代层](docs/architecture/overview.svg)](https://ljjtim.github.io/QuantWitness/overview.html)
+核心要求 Python 3.10+。RD-Agent 集成要求 Python 3.11+；Qlib 与 LEAN 按各自指南安装。公开包不包含个人数据库或真实行情，第一次运行可使用[合成研究示例](examples/README.md)。
 
-*点击图片打开交互架构图，可查看模块职责、上下游和源码位置。在线图册使用 GitHub Pages；离线使用请下载仓库并打开 `docs/architecture/index.html`。*
+Windows x64 用户可从[LEAN 合成日线与一分钟回测](examples/lean_quickstart/README.md)开始：先生成完整包和 Parquet 输入，再创建独立 LEAN 安装，最后执行正式准入、回测与报告。该流程使用完整公开源码；wheel 只提供 Python 框架，不包含独立 LEAN 引擎。当前安装脚本要求 PowerShell 7。
 
-正式主链默认 `deterministic_serial`、`workers=1`。显式 `bounded_parallel` 或 `partitioned_batch` 可在总资源预算内执行独立节点和模型 candidate×fold；选择、最终训练和 holdout 保持原顺序。事件状态在独占写者会话内增量维护，逐条日志仍同步落盘，恢复重新验证原配置、完整日志和成功 checkpoint。详见[运行与恢复](docs/runtime.md)。
+## 数据、计算与恢复
 
-## 你交给它什么，它交还你什么
+- **数据只读。** 数据库输入与输出目录分离；研究执行不会发布或改写数据库。在聚宽数据库仓库中，`data_factor.duckdb` 默认只读，研究主链不导入 `FactorPublisher`；正式因子库仍只能由 `factor_calc.publish` 写入，因子发布必须走独立授权流程。
+- **只使用当时已知的信息。** 公告按可见日期对齐，分钟行情必须已完成，规则按历史版本选择。股票分红送股采用供应商当前历史事件，实施公告后下一交易日可见，源维护时间不作为事件可见性；ETF沿用版本选择合同。Feature 不得读取未来 Label；训练处理器只拟合允许的训练样本。
+- **交易规则由执行实现负责。** 可用资金、可卖数量、T+1、数量格点、费用、成交顺序和权益到账在实际状态转换处处理。生产算法使用确定性案例、手算与开发期差分测试验收。
+- **开发与最终评价隔离。** RD-Agent 只读取成功运行的开发指标；test／holdout 不进入研究循环。同系列变体共享持久留出消费账本，失败消费不重置。
+- **中断可以继续。** 已提交检查点只在输入、配置和实现相符时复用。Result 组装失败可以接续组装；发布成功的结果保持只读。Workspace `execute --execution-id ID` 继续原 execution。
 
-| 你要做的事 | QuantWitness 帮你完成 | 最后得到 |
-| --- | --- | --- |
-| 复现一篇研报中的因子 | 提取指定 PDF 页面的定义，人工确认歧义，生成代码，用独立实现核对公式 | 公式来源、确认记录、候选代码、计算结果及验证结论 |
-| 找到更合适的因子或模型 | 在固定数据范围与调用预算内，让 RD-Agent 提案、评价、反思 | 每轮实验记录、开发指标、入选理由；最终留出数据不进入 AI 反馈 |
-| 研究股票、ETF 或期货策略 | 按声明的交易时点、市场规则、费用和账户状态进行仿真 | 持仓、资金、订单、成交、费用及风险分析所需的结果表 |
-| 接手他人的研究或恢复中断实验 | 保留输入、配置、代码与结果的对应关系，复用已完整提交的步骤 | 可以继续验证、生成报告或追溯来源的研究交付物 |
+正式 DAG 默认 `deterministic_serial`、`workers=1`；显式并行仍受总预算限制。运行记录保存阶段进度和资源观测，资源不足不会自动改变样本、参数或种子。详见[运行与恢复](docs/runtime.md)、[进度](docs/runtime-progress.md)和[资源预算](docs/project_resource_budgets.md)。
 
-**三个核心交付物：** `Result` 是实验的完整结果包，`VerificationResult` 是独立检查单，报告是供人阅读的展示。程序跑完和验证通过分别记录，不用一条“成功”掩盖差别。
+## Result 与项目算法
 
-## 示例：给一份 PDF，复现其中的因子
+Result 保存正式表、指标、运行摘要、配置与实现及输入引用。`ResultContext` 提供 `snapshot`、`metrics`、`claim_level` 和 `limitations`；结论级别描述研究声明及数据范围。报告按实际需要读取表与列。
 
-假设你想研究：“成交量集中在少数分钟的股票，之后的表现是否不同？”
+LEAN的simulation输出为orders、intents、daily、trace四张执行表和metrics指标表；账户终态、策略state、运行锁与策略输入作为必要支持文件保存。行情、规则、公司行动及信号来源使用持久工件和计划引用，归档与清理时同时保留这些依赖。模型最终holdout账本继续长期保存。
 
-1. **给材料和数据。** 指定 PDF 中的公式页，准备分钟行情、交易日历和数据说明。框架不会替你猜证券池、频率或交易规则。
-2. **AI 提取，人来确认。** 把“如何计算”变成待审阅说明，保留页码与原文位置。你确认窗口、缺失值、停牌和信号可用时点。
-3. **RD-Agent 写代码。** 在固定接口与预算内生成、修复候选；复现任务不能为了收益更高而改写确认过的公式。
-4. **QuantWitness 执行与复核。** 检查数据当时是否可见，运行研究，再由不调用候选实现的验证器重新核算。
-5. **拿到可追溯结果。** 从报告回到结果表、候选代码、确认记录和论文来源。若要检验预测力或交易收益，再明确标签、样本外划分、成交与费用假设。
+项目算法通过算子 bundle 接入。自定义指标在 `spec/research.yaml` 的 `metric_definitions` 中声明，格式为 `MetricDefinition.to_dict()`，实现引用绑定实际计算算法。项目保留相应公式、边界和时点测试。
 
-仓库自带一个**无需购买数据、无需付费模型调用的教学案例**：
+归档或迁移时应同时保留 Result 所引用的持久输入、模型和工件；恢复仍以原计划、invocation 和检查点为准。布局与生命周期见[快照布局](docs/snapshot-layout.md)、[工件保留与回收](docs/artifact-lifecycle.md)。
 
-> 两只虚构证券、五个交易日、2,400 条合成分钟记录。由自编 PDF 定义成交量集中度 `C = Σvᵢ² / (Σvᵢ)²`；先给出一个故意加错数的候选，再用正确候选通过独立复算。均匀成交一天 240 根分钟线时，日指标应为 `1/240`。
-
-[运行这个教学案例](integrations/rdagent/examples/volume_concentration/README.md) · [换成自己的 PDF 与实时模型](integrations/rdagent/docs/formula-reproduction.md)
-
-教学案例使用固定响应演示真实调度与验证流程，不冒充实时 AI 推理。真实 PDF 场景需要模型服务、已有研究包、数据来源和对应的独立验证器；目前不是“上传任意论文就全自动复现”。
-
-## 示例：让 AI 继续提出新研究
-
-复现回答“有没有实现对”；探索回答“还值得试什么”。两者使用不同目标。
+## AI 研究循环
 
 ```text
-你：在固定开发样本中探索收盘价因子，并限制实验轮数与模型调用预算。
-         ↓
-RD-Agent：提出因子或模型方案，生成候选代码
-         ↓
-QuantWitness：检查数据时点 → 运行 → 独立验证
-         ↓
-只把通过验证的开发指标返回给 RD-Agent → 决定下一轮
-         ↓
-选定方案后，另行执行最终留出样本评价
+个人提出问题并冻结开发范围
+  → RD-Agent 提出因子或模型
+  → ResearchPackage / Workspace 执行
+  → Result 中的开发指标反馈
+  → 下一轮候选
+  → 选定方案后单独进行最终评价
 ```
 
-可选入口包括[因子研究](integrations/rdagent/docs/factor-research.md)、[生成式模型研究](integrations/rdagent/docs/model-research.md)和[因子与模型联合研究](integrations/rdagent/docs/joint-research.md)。当前各入口有明确的表达式、模型结构和数据范围，不代表任意策略代码都能自动验证。
-
-## 为什么不直接写一个回测脚本
-
-- **避免“今天知道的事，昨天就拿来交易”。** 用公告或可见日期对齐数据；盘中使用已完成的行情条目。训练处理器只拟合允许的训练样本，最终留出集不参与 AI 迭代。这称为时点一致性，或 PIT（Point-in-Time）。
-- **避免“换了数据，却以为复现了同一实验”。** 研究范围、输入来源、参数和实现随计划固定；关键来源变化会阻止继续使用原计划。
-- **避免“跑出来了，就当它是对的”。** 独立验证检查已声明的公式、时间与金融关系，失败会留下具体发现。
-- **避免“机器中断，前面全白跑”。** 已完整提交的步骤可以复用；未完成或身份不一致的输出不能冒充缓存命中。
-- **避免“AI 反复看最终答案”。** 开发反馈与最终评价分开，记录候选、预算和数据消费过程。
-
-这些机制依赖正确的数据说明和具体研究的验证范围，不能凭空证明供应商历史数据准确，也不能保证策略盈利。
-
-## 六张图看懂框架
-
-开头的**总体概览图**回答“它能帮我完成什么”。下面五张图进一步解释模块组成、数据来源、操作顺序和运行状态。README 中的六张图是简明预览；点击任一图片，直接打开对应的详细交互 HTML，查看完整节点、连线和说明。详细版支持主题与风格切换、动态连线、搜索和关系追踪。
-
-### 1. 总体架构：模块怎样协作
-
-14 个核心模块分工明确：RD-Agent 经正式入口提交研究，Qlib 提供算法组件，运行时调度数据和计算，结果再交给独立验证。
-
-[![总体架构：核心模块、RD-Agent、Qlib 与数据接入](docs/architecture/research-pipeline-architecture.svg)](https://ljjtim.github.io/QuantWitness/research-pipeline-architecture.html)
-
-### 2. 数据流：结果从哪里来
-
-从原始数据、数据说明和准入计划，到正式输入、结果包及检查单，保留可追溯的关联。
-
-[![数据流：输入、计算、结果与验证之间的关联](docs/architecture/dataflow-research-lineage.svg)](https://ljjtim.github.io/QuantWitness/dataflow-research-lineage.html)
-
-### 3. 工作流：一次研究怎么完成
-
-按研究说明、检查、准入、执行、封存、验证和报告逐步完成；遇到中断再进入诊断与恢复。
-
-[![工作流：完成研究的步骤及失败恢复入口](docs/architecture/workflow-research-task.svg)](https://ljjtim.github.io/QuantWitness/workflow-research-task.html)
-
-### 4. 时序图：运行时谁先调用谁
-
-以普通列式取数路径为例，区分命令层、运行时、节点适配器、结果封存和独立验证。
-
-[![调用时序：数据读取、节点执行、结果封存与验证](docs/architecture/sequence-research-run.svg)](https://ljjtim.github.io/QuantWitness/sequence-research-run.html)
-
-### 5. 状态图：怎样判断真正完成
-
-程序运行、结果封存和验证各有状态。节点跑完，并不自动代表整项研究已经通过检查。
-
-[![运行状态：运行、封存、验证及异常恢复的区别](docs/architecture/lifecycle-research-run.svg)](https://ljjtim.github.io/QuantWitness/lifecycle-research-run.html)
-
-六张图的离线入口和维护说明见[交互图册](docs/architecture/README.md)。
-
-## 与熟悉的框架如何配合
-
-这些工具并非互相排斥，下面比较的是各自主要关注点，而不是断言其他框架没有某项能力。
-
-| 工具 | 主要关注点 | 在 QuantWitness 中的位置 |
-| --- | --- | --- |
-| [Qlib](https://github.com/microsoft/qlib) | 面向 AI 的量化研究平台，提供数据、特征、模型与评估组件 | 复用模型、处理器、因子表达式与部分组合组件；由本框架统一约束数据时点与结果交付 |
-| [RQAlpha](https://github.com/ricequant/rqalpha) | 可扩展的事件驱动回测与交易框架 | 借鉴市场和账户职责划分；本框架使用自己的仿真与独立复核实现，不直接调用 RQAlpha 引擎 |
-| [RD-Agent](https://github.com/microsoft/RD-Agent) | 自动提出、实现和改进数据与模型研究 | 位于可选 AI 提案层，经固定接口提交实验、接收开发反馈 |
-| **QuantWitness** | **把人和 AI 的实验变成按时点执行、可追溯、可独立检查的研究结果** | 连接提案、数据、计算、金融仿真与研究交付；重点是实验过程与结果的可信边界 |
-
-## 开始使用
-
-建议先跑合成数据示例，看懂交付物，再接自己的数据，最后加入 AI。
-
-```bash
-git clone https://github.com/ljjtim/QuantWitness.git
-cd QuantWitness
-python -m pip install -e ".[dev]" "pyarrow==21.0.0"
-python -m research_pipeline --help
-```
-
-核心要求 **Python 3.10+**。模型研究需要可选 Qlib 依赖；RD-Agent 集成要求 **Python 3.11+**，并有单独的调度环境要求。安装时请按对应指南，不必为了第一次研究安装所有 AI 依赖。
-
-| 下一步 | 阅读入口 |
-| --- | --- |
-| 不接模型服务，先得到一份结果与验证报告 | [合成研究入门](docs/workspace-quickstart.md) |
-| 我有自己的数据和研究问题 | [基本数据接入](docs/catalog.md) → [创建研究](docs/getting-started.md) |
-| 我想复现论文、探索因子或模型 | [AI 研究指南](docs/ai_workflow.md) → [RD-Agent 安装与场景](integrations/rdagent/README.md) |
-| 我关心交易规则与账户处理 | [金融仿真](docs/financial_simulation.md) → [真实覆盖与验收](docs/native_backtest_acceptance.md) |
-| 我想看系统内部如何工作 | [六张交互图](docs/architecture/README.md) → [模块边界](docs/architecture.md) |
+[因子研究](integrations/rdagent/docs/factor-research.md)、[模型研究](integrations/rdagent/docs/model-research.md)和[联合研究](integrations/rdagent/docs/joint-research.md)各有明确的数据与算法范围。失败运行只反馈诊断，不能伪装成金融指标。
 
 ## 当前范围
 
-- 支持声明式研究流程、日频模型研究、股票／ETF／期货的已实现仿真路径；具体市场、频率、账户事件与验证范围见对应文档。期权、完整融券、组合保证金优惠和实物交割不在当前通用能力承诺中。
-- 研究阶段只读访问数据。行情采集、数据库写入和实盘交易不属于这条研究流程。
-- 不附带真实行情或个人数据库配置。合成示例用于理解和验证工程行为，不能作为投资效果证明。
-- 独立验证针对声明的规则与检查范围；自定义算法需要相应验证实现。目前没有免配置适用于一切策略的公共 Recipe。
+日线与一分钟策略统一由LEAN撮合和记账，Qlib组合使用同一日频执行路径，冻结目标在执行开盘交付。Python层保留当前金融规则、类型与历史Result读取；旧现货和期货撮合执行入口不再导出。公开分钟行情、特征及标签只接受 `interval_minutes=1`，日线直接使用日频源。历史Result按其冻结合同读取，旧计划和checkpoint不跨实现身份恢复。
+
+框架支持声明式研究、日频模型和已准入的中国股票／ETF 日线与一分钟 LEAN 策略。期货文档保留历史结果与来源语义，当前没有可运行的期货策略入口。期权、完整融券、组合保证金优惠和实物交割尚不属于通用能力。
+
+合成示例用于理解与检查工程行为，不构成投资效果证据。供应商历史数据的准确性和策略盈利需要研究者根据实际来源和研究设计判断。`local_only` 表示本地实现范围，不能解读为覆盖全部市场和机器的发行认证。
 
 <details>
-<summary>查看精确能力状态与适用边界</summary>
+<summary>精确能力状态</summary>
 
-状态以 `src/research_pipeline/capabilities.json` 为准。`local_only` 表示已有本地实现／验收，不能解读为覆盖所有市场和机器的发行认证；`planned` 表示尚不可据此执行。
+状态来自 `src/research_pipeline/capabilities.json`。
 
 <!-- CAPABILITIES_TABLE:START -->
+
 | capability | 状态 | 命令 | 证据 / 信任 | 边界说明 |
 | --- | --- | --- | --- | --- |
 | `catalog.lock` | `local_only` | `catalog` | `local_acceptance` / `local_only` | Catalog 编译、锁定和漂移检查由显式来源文件驱动；公开仓库不附带个人 Catalog 或独立发布验收记录。 |
 | `research_package.plan` | `local_only` | `package lint`<br>`package admit` | `local_acceptance` / `local_only` | ResearchPackage 只能声明受控合同，不接受自由 SQL、动态模块或项目 runner。lint 一次返回声明、算子、指标、结果和准入缺口；admit 从显式只读数据源生成漂移/PIT 闭包并在发布/加载时校验准入事实。 |
 | `runtime.recovery` | `local_only` | `resume`<br>`retry-node`<br>`inspect`<br>`rerun-from`<br>`run --reuse-run-root`<br>`run --require-reused-node`<br>`run --reuse-failed-run-root`<br>`workspace run --reuse-run-root`<br>`workspace run --require-reused-node`<br>`workspace run --reuse-failed-run-root` | `local_acceptance` / `local_only` | resume、retry-node、inspect 和 rerun-from 消费当前 invocation、计划内算子闭包和已验证 checkpoint；run 与 workspace run 共用复用参数和正式运行校验；--reuse-run-root 只按显式顺序接受现行节点局部身份下已成功发布 Result 的完成态 run，并机会式复用 pure/cacheable 节点。配合 --require-reused-node 时，指定节点及其必要上游允许不是 pure/cacheable，但必须在 Worker 启动前全部通过节点局部身份、输入、checkpoint、typed 输出和 ExternalArtifact 内容复验，且不得回退执行。run --reuse-failed-run-root 只接受一个显式失败终态 run，要求新旧 DAG、节点身份环境、clock 和 seed 完全一致，只把状态为成功且完整复验通过的 checkpoint 复制进目标 run，再从首个未成功节点继续。两种跨运行来源不能混用，不扫描磁盘或依赖裸 ResultStore。同一次 execute 复用 Supervisor 已冻结的工件验证结果，新的 resume 进程、rerun child 或新 run 必须重新完整验证。多请求 data 节点另以 run 内 partial index 逐项复验已提交 DatasetArtifactRef，只重做失效 request；partial 不进入正式输出。旧计划仍可 inspect/resume/retry，但不能开启跨运行复用。该边界仍为 local_only。 |
-| `evidence.consume` | `local_only` | `verify`<br>`report`<br>`export-result`<br>`compare`<br>`analysis run`<br>`analysis compare` | `local_acceptance` / `local_only` | verify 直接从自包含 Result 生成结构化 VerificationResult；report、compare、analysis、export-result 和 Dashboard 不依赖 run-root。analysis run 只消费 status=pass 的 VerificationResult，要求外部请求显式声明表列、窗口、值语义、频率、单位、费用口径和处理政策，只投影日期和值两列并生成独立 AnalysisResult，不修改 Result、VerificationResult 或 claim。analysis compare 只对同规格、同实际窗口和同 claim 事实的 AnalysisResult 排名，任一必要事实不一致时不输出部分排名。直接 compare 仍只比较已验证指标事实并明示未检查 package 合同；package compare 由 delivery 唯一检查 metric/claim 合同。export-result 仅复制并复核已验证 Result，不重新执行研究。该合同尚未通过独立发布验收，因此保持 local_only。 |
-| `evidence.validity_recompute` | `local_only` | `verify` | `local_acceptance` / `local_only` | 独立 verify 从已封存的 canonical 六表与 Bar TCA 四表复核金融守恒、费用与 lineage；金融 oracle 使用有界 Arrow 批次和受配额 DuckDB 扫描，篡改或资源不足均阻止生成 VerificationResult。公开源码提供合同测试，不附带个人真实数据 Result 或独立发布验收；能力保持 local_only，不代表策略盈利、实盘成交或可交易性。 |
-| `operator_graph.generic_run` | `local_only` | `run`<br>`resume`<br>`retry-node`<br>`inspect` | `local_acceptance` / `local_only` | 正式 run 由 Runtime v2 调度，节点返回按端口索引的 typed refs，checkpoint 绑定全部端口；成功后唯一 finalize 自包含 Result，再由独立 verify 生成 VerificationResult。该边界尚缺独立发布验收，因此仍是 local_only。 |
+| `result.consume` | `local_only` | `report`<br>`export-result`<br>`compare`<br>`analysis run`<br>`analysis compare` | `local_acceptance` / `local_only` | report、compare、analysis、export-result 和 Dashboard 直接消费正式 Result，不依赖 run-root。报告只投影需要的表与列。analysis 的请求显式声明窗口、值语义、单位、费用和处理政策；只有规格与实际窗口相同的结果才能排名。package compare 另检查研究包的指标与结论合同。Result 中的结论级别是研究声明及输入范围，不是独立认证。 |
+| `operator_graph.generic_run` | `local_only` | `run`<br>`resume`<br>`retry-node`<br>`inspect` | `local_acceptance` / `local_only` | 正式 run 由统一 Runtime 调度，节点返回按端口索引的类型化工件，checkpoint 绑定全部端口；成功后原子发布 Result，报告与开发反馈直接读取结果。恢复继续核对输入、配置、实现和检查点，失败不能作为成功研究反馈。当前范围保持 local_only。 |
 | `research.walk_forward_model` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Qlib 六节点负责日频回归模型：Linear、LightGBM、XGBoost；Processor 与 Model 按候选/fold 一起训练保存。保留 purge/embargo、开发区 validation 选择及隔离 holdout；模型文件随 Result 封存。只接受 v2 模型工件，不恢复旧七阶段 ML checkpoint。本地技术验收不代表真实策略、可交易性或样本外盈利。 |
-| `minute_line.complete` | `local_only` | `run` | `local_acceptance` / `local_only` | 四类中国市场资产可按当前 Catalog、已完成分钟 bar、PIT 快照与历史规则进入同一研究主链；随包规则仅覆盖文档列明的参考标的及窗口，范围外无默认规则。公开源码提供合同与合成示例，不附带真实分钟数据或研究结果；能力保持 local_only，不代表全历史、全品种或实盘可交易。 |
-| `minute_line.real_data_smoke` | `local_only` | `run` | `local_acceptance` / `local_only` | 公开包提供四资产分钟输入和只读 Result/VerificationResult 合同，不附带供应商原始数据或个人真实运行收据。真实数据观察须由使用者在自己的来源、窗口和规则下重新执行并独立验证；当前能力只到 local_only，不宣称供应商历史版本精确重放或分钟交易仿真。 |
+| `minute_line.complete` | `local_only` | `run` | `local_acceptance` / `local_only` | 股票与ETF的一分钟策略使用LEAN原生订单与账户，按已准入来源、完成bar和历史可见规则执行。读取层按月整理、按天消费并预读下一交易日；预读不改变策略可见时点。日线使用独立开盘来源。当前策略频率为1m或1d，能力保持local_only。 |
+| `minute_line.real_data_smoke` | `local_only` | `run` | `local_acceptance` / `local_only` | 公开包提供四资产分钟输入和只读 Result 合同，不附带供应商原始数据或个人运行记录。真实数据观察由使用者在自己的来源、窗口和规则下执行；当前能力为 local_only，不代表供应商历史版本精确重放或分钟交易仿真。 |
 | `simulation.bar_tca` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Bar TCA 只消费统一 SimulationResult 的正式订单与成交和账本身份，不二次撮合。分钟路径要求决策时可见基准、已完成执行 bar、可见容量与正式 fill，缺任何必要事实均失败关闭。随包参考规则只有有界中国市场标的窗口；公开源码不包含个人真实研究结果，能力保持 local_only。 |
 | `capability.discovery` | `local_only` | `capabilities --format json`<br>`operator list/describe/scaffold/validate/build`<br>`artifact describe`<br>`recipe list/describe/scaffold`<br>`catalog dataset/field search`<br>`package lint`<br>`package expand-variants` | `local_acceptance` / `local_only` | capabilities 命令逐字段读取本清单；operator、artifact、catalog 和 package lint 的发现结果来自正式 registry、schema、Catalog Lock 或 package compiler。package expand-variants 只覆盖基包中已存在的 node 参数，原子生成普通完整包，不接受深层 YAML 合并、模板、Python 或 SQL。当前没有获准的公共 recipe，使用 package init 创建通用起点；项目完整拓扑由 ResearchPackage 声明。operator scaffold 生成可验证的最小项目算子；正式 Feature/Label 需必填 causal_plan，且来源必须可由已准入请求证明。validate/build 只复验显式源码闭包，不扫描目录或自动安装。 |
 | `resource.governance` | `local_only` | `run --resource-state-dir` | `local_acceptance` / `local_only` | 数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。合成探针不进入正式运行校准总体。 |
+
 <!-- CAPABILITIES_TABLE:END -->
 
 </details>
-
-## 开源与贡献
-
-QuantWitness 自有代码采用 **Apache-2.0**。Qlib 与 RD-Agent 等上游组件保留各自许可证，详见[第三方说明](THIRD_PARTY_NOTICES.md)。欢迎从可手算的新研究示例、独立验证器、数据接入或文档改进开始：[贡献指南](CONTRIBUTING.md)。
-
-## 退市零回收假设
-
-v2 `delisting_cash` 可显式声明 `recovery_assumption: zero_recovery`，将退市剩余持仓核销且现金回收为零。该字段属于研究假设，必须封存来源说明、公告可见时间、终止交易日和生效日；它不代表实际清算结果。未声明假设时仍要求正清算金额，普通行情价格仍必须为正。核销记录进入金融事件及独立复核，不能生成卖出成交，也不能在公告可见或终止交易前生效。
-
-
-日频 Qlib 模型的 split 与 locked holdout 默认声明 16 GiB；完整来源逐批核验后只保留模型必需列，完整证据仍随研究封存。预算变化要求重新准入，旧 Result 和已消费 holdout 保持原样。工作集测量与边界见[资源预算](docs/project_resource_budgets.md#日频模型长表加载)。
-
-因果Feature／Label的Worker事实以列式文件和共享来源清单传递；键批调用边界固定。输入按已核验Parquet的月份统计裁剪，仍保留逐条可见时间与来源检查。执行与恢复边界见[Runtime](docs/runtime.md#因果事实列式传输)。
-
-紧凑因果键允许使用`key_axes/key_order`冻结笛卡尔积，运行时仍按原8,192键批次提供完整行键。跨批键顺序、唯一性和时间来源规则不变，具体结构见[运行合同](docs/runtime.md#紧凑因果键声明)。
-
-全部节点成功但 Result 组装失败且未发布时，可用原 `resume --run-root` 仅重试组装。原计划、当前实现及全部成功 checkpoint 须复验通过，组装尝试追加留痕，不重新训练或消费 holdout；已发布 Result 不重开。
-
-有序归档输入按批流式重放，无序输入保留有界排序和预算拒绝；PIT 与发布门禁继续逐批检查。共享资源池使用 v3 活动状态及冷历史日志，升级需新的仓库外 state dir，Worker 与治理采样共用实际读数。操作见[数据读取](docs/data_plane.md)和[资源历史](docs/resource-history.md)。
-
-模型 facts 使用正式表引用 `result_tables_v2`，序列证据以共享 context 和紧凑成员索引保存窗口；独立验证仍从原始特征、标签与日历重建。旧 Result 保持只读，封存模型可按原依赖合同显式恢复预测。版本与使用边界见[模型证据](docs/qlib-model-results.md)。

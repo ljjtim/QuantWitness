@@ -107,7 +107,7 @@ def _build_time_range(value: object, prefix: str) -> tuple[DateRangeV1 | Instant
     field = f"{prefix}.time_range"
     if not isinstance(value, Mapping):
         raise ResearchPackageError(f"{field} 必须是映射")
-    # 未标记的旧形状只解释为 v1，绝不根据 start_at/end_at 猜测 v2。
+    # 日频日期范围使用 start/end；分钟时点范围须显式声明 instant-range-v2。
     if "contract_version" not in value:
         payload = _mapping(value, {"start", "end"}, field)
         try:

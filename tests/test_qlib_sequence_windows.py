@@ -1,4 +1,4 @@
-"""无数据库的序列窗口、PIT 独立复核及 Qlib 实际采样验收。"""
+"""无数据库的生产序列窗口、PIT 和 Qlib 实际采样验收。"""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -7,9 +7,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from research_pipeline.evidence.sequence_validity import (
-    SequenceWindowVerificationError, verify_sequence_window_facts,
-)
 from research_pipeline.research.modeling.sequence import build_sequence_windows, qlib_sequence_dataset
 from research_pipeline.research.modeling.walk_forward import ModelMainlineError, assemble_daily_model_samples
 
@@ -38,14 +35,6 @@ def plan(features=None, targets=None, *, step_len=3, columns=COLUMNS):
                                   calendar_sessions=calendar, feature_columns=columns, step_len=step_len)
 
 
-def verify(windows, *, features=None, targets=None):
-    raw, ends, calendar = fixture()
-    return verify_sequence_window_facts(features=raw if features is None else features,
-        targets=ends if targets is None else targets, calendar_sessions=calendar,
-        feature_columns=windows.feature_columns, step_len=windows.step_len,
-        context=windows.context, members=windows.members, exclusions=windows.exclusions)
-
-
 def test_calendar_members_preserve_purge_rows_and_holdout_warmup_without_labels():
     raw, ends, calendar = fixture()
     # 只有训练、验证、holdout 末端有标签资格，窗口仍须保留中间的历史日。
@@ -58,7 +47,11 @@ def test_calendar_members_preserve_purge_rows_and_holdout_warmup_without_labels(
         context = windows.context.set_index("context_index").loc[members.context_index]
         assert context.observation_session.tolist() == list(expected_days)
         assert context.entity_id.tolist() == ["A"]*3
-    assert verify(windows, targets=ends) == dict(target_count=4, window_count=4, excluded_count=0, member_count=12)
+    assert len(windows.targets) == 4
+    assert windows.members.sample_id.nunique() == 4
+    assert len(windows.members) == 12
+    assert set(windows.members) == {"sample_id", "step", "context_index"}
+    assert windows.exclusions.empty
 
 
 def test_missing_session_does_not_shorten_or_fill_window():
@@ -67,7 +60,8 @@ def test_missing_session_does_not_shorten_or_fill_window():
     windows = plan(features=raw)
     assert dict(windows.exclusions.values) == {"A0":"insufficient_history", "B0":"insufficient_history",
         "A1":"insufficient_history", "B1":"insufficient_history", "B2":"missing_feature", "B3":"missing_feature"}
-    assert verify(windows, features=raw)["window_count"] == 12
+    assert windows.members.sample_id.nunique() == 12
+    assert len(windows.members) == 36
 
 
 def test_historical_feature_visibility_is_checked_at_each_endpoint():
@@ -78,7 +72,11 @@ def test_historical_feature_visibility_is_checked_at_each_endpoint():
     assert dict(windows.exclusions.values)["A2"] == "feature_not_visible"
     # 等于后一个决策时点允许使用，不能因为原会话尚不可见就永久删掉历史行。
     assert "A3" in set(windows.members.sample_id)
-    assert verify(windows, features=raw)["window_count"] == 13
+    assert windows.members.sample_id.nunique() == 13
+    members = windows.members.loc[windows.members.sample_id == "A3"]
+    context = windows.context.set_index("context_index").loc[members.context_index]
+    assert context.observation_session.tolist() == list(calendar[1:4])
+    np.testing.assert_array_equal(context.loc[:, list(COLUMNS)], [[10, 11], [20, 21], [30, 31]])
 
 
 def test_missing_one_feature_is_distinct_from_explicit_nan():
@@ -94,7 +92,7 @@ def test_missing_one_feature_is_distinct_from_explicit_nan():
     values = windows.context.set_index(["observation_session", "entity_id"])[list(COLUMNS)].fillna(0)
     sampler = qlib_sequence_dataset(windows, segments={"test":["B2"]}, transformed_features=values).prepare("test", col_set=["feature", "label"])
     assert sampler[0][1, 1] == 0
-    assert verify(windows, features=raw)["window_count"] == 14
+    assert windows.members.sample_id.nunique() == 14
 
 
 def test_qlib_actual_sampler_has_only_endpoints_and_keeps_unlabelled_history():
@@ -121,31 +119,6 @@ def test_prediction_nan_labels_feature_order_and_endpoint_order():
     assert np.isnan(sampler[0][:, -1]).all() and np.isnan(sampler[1][:, -1]).all()
 
 
-@pytest.mark.parametrize("change", ["entity", "session", "available", "lineage", "step", "omit", "duplicate", "value", "exclude"])
-def test_independent_verifier_rejects_altered_window_evidence(change):
-    windows = plan()
-    if change == "entity":
-        windows.members.loc[0, "context_index"] = windows.context.loc[windows.context.entity_id.eq("B"), "context_index"].iloc[0]
-    elif change == "session":
-        windows.members.loc[0, "context_index"] = windows.context.loc[windows.context.observation_session.eq(windows.calendar_sessions[1]), "context_index"].iloc[0]
-    elif change == "available":
-        windows.context.loc[0, "feature_available_time"] += pd.Timedelta(minutes=1)
-    elif change == "lineage":
-        windows.context.loc[0, "feature_lineage_hash"] = "other"
-    elif change == "step":
-        windows.members.loc[0, "step"] = 9
-    elif change == "omit":
-        windows = replace(windows, members=windows.members.iloc[1:])
-    elif change == "duplicate":
-        windows = replace(windows, members=pd.concat([windows.members, windows.members.iloc[:1]]))
-    elif change == "value":
-        windows.context.loc[0, "x__w1"] += 1
-    else:
-        windows.exclusions.loc[0, "reason_code"] = "missing_feature"
-    with pytest.raises(SequenceWindowVerificationError):
-        verify(windows)
-
-
 @pytest.mark.parametrize("kwargs", [
     dict(segments={"test":["A7"]}, labels=pd.Series({"A7":1.0})),
     dict(segments={"train":["A2"], "valid":["A5"]}),
@@ -159,7 +132,7 @@ def test_dataset_rejects_label_leakage_and_invalid_endpoint_selection(kwargs):
         qlib_sequence_dataset(plan(), **kwargs)
 
 
-def test_window_evidence_round_trip_plain_parquet(tmp_path):
+def test_window_tables_round_trip_plain_parquet(tmp_path):
     windows = plan()
     tables = {}
     for name in ("context", "targets", "members", "exclusions"):
@@ -167,7 +140,9 @@ def test_window_evidence_round_trip_plain_parquet(tmp_path):
         getattr(windows, name).to_parquet(path, index=False)
         tables[name] = pd.read_parquet(path)
     restored = replace(windows, **tables)
-    assert verify(restored)["member_count"] == 42
+    for name, table in tables.items():
+        pd.testing.assert_frame_equal(table, getattr(windows, name))
+    assert len(restored.members) == 42
     dataset = qlib_sequence_dataset(restored, segments={"test":["A7"]})
     np.testing.assert_array_equal(dataset.prepare("test", col_set="feature")[0], [[50,51],[60,61],[70,71]])
 
@@ -208,33 +183,3 @@ def test_rejected_and_future_rows_do_not_change_earlier_qlib_window():
         np.testing.assert_array_equal(sampler[0], [[0,1],[10,11],[20,21]])
 
 
-def test_verifier_does_not_call_window_builder(monkeypatch):
-    windows = plan()
-    def reject(*args, **kwargs):
-        raise AssertionError("独立复核不得调用生产窗口构建器")
-    import research_pipeline.research.modeling.sequence as sequence
-    monkeypatch.setattr(sequence, "build_sequence_windows", reject)
-    monkeypatch.setattr(sequence, "assemble_daily_feature_context", reject)
-    assert verify(windows)["window_count"] == 14
-
-
-@pytest.mark.parametrize("mutation", ["unknown_index", "duplicate_context", "float_member_index"])
-def test_compact_indices_reject_incomplete_or_ambiguous_binding(mutation):
-    windows = plan()
-    assert set(windows.members) == {"sample_id", "step", "context_index"}
-    if mutation == "unknown_index": windows.members.loc[0, "context_index"] = 99999
-    elif mutation == "duplicate_context": windows.context.loc[1, "context_index"] = windows.context.loc[0, "context_index"]
-    else: windows = replace(windows, members=windows.members.astype({"context_index": "float64"}))
-    with pytest.raises(SequenceWindowVerificationError):
-        verify(windows)
-
-
-def test_historical_expanded_windows_keep_verification_and_qlib_sampling():
-    windows = plan()
-    members = windows.members.merge(windows.context.drop(columns=list(COLUMNS) + ["feature_count"]),
-                                    on="context_index", validate="many_to_one").drop(columns="context_index")
-    old = replace(windows, context=windows.context.drop(columns="context_index"), members=members)
-    assert verify(old) == verify(windows)
-    for value in (old, windows):
-        sampler = qlib_sequence_dataset(value, segments={"test": ["A7"]}).prepare("test", col_set="feature")
-        np.testing.assert_array_equal(sampler[0], [[50, 51], [60, 61], [70, 71]])

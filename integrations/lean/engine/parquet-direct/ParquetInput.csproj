@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="ParquetDataFeed.cs" />
+    <Compile Include="MonthlyParquetStore.cs" />
+    <Compile Include="DirectDailyStreamStore.cs" />
+    <ProjectReference Include="../china-rules/ChinaRules.csproj" />
+    <InternalsVisibleTo Include="EngineContracts" />
+    <PackageReference Include="ParquetSharp" Version="25.0.1" />
+    <Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Lean.Engine"><HintPath>$(LeanBin)/QuantConnect.Lean.Engine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Configuration"><HintPath>$(LeanBin)/QuantConnect.Configuration.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Logging"><HintPath>$(LeanBin)/QuantConnect.Logging.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NodaTime"><HintPath>$(LeanBin)/NodaTime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Python.Runtime"><HintPath>$(LeanBin)/Python.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="System.ComponentModel.Composition"><HintPath>$(LeanBin)/System.ComponentModel.Composition.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

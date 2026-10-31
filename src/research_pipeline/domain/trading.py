@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from datetime import datetime
 from decimal import Decimal
 import math
@@ -60,7 +61,7 @@ class InstrumentKey:
         if self.contract_version != INSTRUMENT_KEY_VERSION:
             raise DomainContractError("InstrumentKey 版本不受支持")
 
-    @property
+    @cached_property
     def instrument_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 

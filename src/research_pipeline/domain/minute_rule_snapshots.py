@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from functools import cached_property
+from functools import cached_property, lru_cache
+import hashlib
 from importlib.resources import files
 import json
 from pathlib import Path
 import re
-from typing import Mapping
 
 from research_pipeline.platform import typed_canonical_hash
+from research_pipeline.platform.canonical import typed_canonical_bytes
 from research_pipeline.platform.minute_reference import (
     require_published_minute_capability_binding,
 )
@@ -24,6 +26,7 @@ from .session_calendar import (
 
 
 MINUTE_RULE_BUNDLE_VERSION = "minute-rule-snapshot-bundle-v1"
+PROJECT_RULE_BUNDLE_VERSION = "minute-project-rule-bundle-v2"
 MINUTE_RULE_VERSION = "minute-rule-snapshot-v1"
 MINUTE_RULE_SOURCE_VERSION = "minute-rule-source-v1"
 MINUTE_RULE_CAPABILITY_CONSUMER = "domain.minute.market_rule_snapshots"
@@ -34,6 +37,58 @@ CURRENT_MINUTE_RULE_COVERAGE_HASH = (
     "340fca44d5986732e1ed636ddd9f10a9b235bb8748c7e473e20616d83487a8d8"
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+# 只复用通用 codec 生成的片段；完整身份仍使用原有规范字节。
+_NULL_IDENTITY_BYTES = typed_canonical_bytes(None)
+_CANONICAL_VALUE_PREFIX = _NULL_IDENTITY_BYTES[:-len(b'{"type":"null"}') - 1]
+_NULL_IDENTITY_VALUE = _NULL_IDENTITY_BYTES[len(_CANONICAL_VALUE_PREFIX):-1]
+
+
+def _identity_value_bytes(value: object) -> bytes:
+    return typed_canonical_bytes(value)[len(_CANONICAL_VALUE_PREFIX):-1]
+
+
+@lru_cache(maxsize=8192)
+def _instrument_identity_bytes(instrument_id: str) -> bytes:
+    return _identity_value_bytes(instrument_id)
+
+
+_SNAPSHOT_METADATA_FIELDS = (
+    "rule_id", "revision", "asset_class", "status", "effective_from", "effective_to",
+    "available_at", "source_ids", "unsupported_reason", "contract_version",
+)
+
+
+@lru_cache(maxsize=4096)
+def _snapshot_identity_parts(
+    metadata: tuple[object, ...], revision_type: type,
+) -> tuple[bytes, bytes, bytes]:
+    payload = dict(zip(_SNAPSHOT_METADATA_FIELDS, metadata))
+    payload.update(instrument_id=None, parameters=None)
+    encoded = typed_canonical_bytes(payload)
+    before, rest = encoded.split(b'"instrument_id":' + _NULL_IDENTITY_VALUE, 1)
+    middle, after = rest.split(b'"parameters":' + _NULL_IDENTITY_VALUE, 1)
+    return before + b'"instrument_id":', middle + b'"parameters":', after
+
+
+@lru_cache(maxsize=8192)
+def _scalar_parameters_bytes(
+    parameters: tuple[tuple[str, type, object], ...],
+) -> bytes:
+    # 类型标签区分 True/1/1.0；浮点十六进制还区分正零和负零。
+    return _identity_value_bytes({
+        key: float.fromhex(value) if kind is float else value
+        for key, kind, value in parameters
+    })
+
+
+@lru_cache(maxsize=256)
+def _binding_identity_parts(source_hashes: tuple[tuple[str, str], ...]) -> tuple[bytes, bytes]:
+    encoded = typed_canonical_bytes({
+        "snapshot_hash": "0" * 64, "source_hashes": dict(source_hashes),
+    })
+    return tuple(encoded.split(b"0" * 64, 1))
 
 
 class MinuteRuleSnapshotError(DomainContractError):
@@ -144,7 +199,34 @@ class MinuteRuleSnapshot:
 
     @property
     def snapshot_hash(self) -> str:
+        # 标量参数不可变；含列表或mapping的规则继续按当前内容计算。
+        if self._scalar_parameters:
+            return self._scalar_snapshot_hash
         return typed_canonical_hash(self.to_dict())
+
+    @cached_property
+    def _scalar_parameters(self) -> bool:
+        return all(type(value) in (str, int, float, bool, type(None)) for _, value in self.parameters)
+
+    @cached_property
+    def _scalar_snapshot_hash(self) -> str:
+        return hashlib.sha256(self._scalar_identity_bytes()).hexdigest()
+
+    def _scalar_identity_bytes(self) -> bytes:
+        before, middle, after = _snapshot_identity_parts((
+            self.rule_id, self.revision, self.asset_class, self.status,
+            self.effective_from.isoformat(), self.effective_to.isoformat(),
+            None if self.available_at is None else self.available_at.isoformat(timespec="seconds"),
+            self.source_ids, self.unsupported_reason, self.contract_version,
+        ), type(self.revision))
+        parameters = tuple(
+            (key, type(value), value.hex() if type(value) is float else value)
+            for key, value in self.parameters
+        )
+        return b"".join((
+            before, _instrument_identity_bytes(self.instrument_id), middle,
+            _scalar_parameters_bytes(parameters), after,
+        ))
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -195,10 +277,10 @@ class MinuteRuleBinding:
 
     @property
     def identity_hash(self) -> str:
-        return typed_canonical_hash({
-            "snapshot_hash": self.rule.snapshot_hash,
-            "source_hashes": dict(self.source_hashes),
-        })
+        before, after = _binding_identity_parts(self.source_hashes)
+        return hashlib.sha256(b"".join((
+            before, self.rule.snapshot_hash.encode("ascii"), after,
+        ))).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -212,7 +294,7 @@ class MinuteRuleSnapshotBundle:
     contract_version: str = MINUTE_RULE_BUNDLE_VERSION
 
     def __post_init__(self) -> None:
-        if self.contract_version != MINUTE_RULE_BUNDLE_VERSION:
+        if self.contract_version not in {MINUTE_RULE_BUNDLE_VERSION, PROJECT_RULE_BUNDLE_VERSION}:
             raise MinuteRuleSnapshotError("规则 bundle 版本不受支持")
         binding = dict(self.capability_binding)
         if set(binding) != {
@@ -237,7 +319,7 @@ class MinuteRuleSnapshotBundle:
         if len(source_ids) != len(self.sources):
             raise MinuteRuleSnapshotError("规则来源 ID 重复")
         for source in self.sources:
-            if source.source_kind == "repository_snapshot":
+            if source.source_kind == "repository_snapshot" and self.contract_version == MINUTE_RULE_BUNDLE_VERSION:
                 _require_locator_hash(
                     source.locator,
                     published_session_bundle_hash(binding["minute_capability_manifest_hash"]),
@@ -267,6 +349,28 @@ class MinuteRuleSnapshotBundle:
             for item in self.rules
         ):
             raise MinuteRuleSnapshotError("规则与 instrument classification 不一致")
+        revisions_by_instrument: dict[str, dict[str, list[int]]] = {}
+        for rule in self.rules:
+            revisions_by_instrument.setdefault(rule.instrument_id, {}).setdefault(
+                rule.rule_id, [],
+            ).append(rule.revision)
+        if self.contract_version == PROJECT_RULE_BUNDLE_VERSION:
+            for instrument in self.instruments:
+                if instrument.asset_class not in {"cn_stock", "cn_etf"}:
+                    raise MinuteRuleSnapshotError("项目规则当前仅支持股票与ETF")
+                required = set(next(item.required_rule_ids for item in manifest.coverages
+                                    if item.instrument.asset_class == instrument.asset_class))
+                rules = revisions_by_instrument.get(instrument.instrument_id, {})
+                missing = required - rules.keys()
+                if missing:
+                    raise MinuteRuleSnapshotError(f"规则覆盖缺失: {instrument.instrument_id} {sorted(missing)}")
+                for rule_id, revisions in rules.items():
+                    revisions = sorted(revisions)
+                    if revisions != list(range(1, max(revisions) + 1)):
+                        raise MinuteRuleSnapshotError(f"规则版本流不完整: {instrument.instrument_id} {rule_id}")
+            if self.bundle_hash != self._identity_hash():
+                raise MinuteRuleSnapshotError("规则 bundle hash 不一致")
+            return
         expected_instruments = {
             item.instrument.instrument_id: item for item in manifest.coverages
         }
@@ -281,14 +385,38 @@ class MinuteRuleSnapshotBundle:
                 or instrument.metadata_hash != coverage.instrument.identity_hash
             ):
                 raise MinuteRuleSnapshotError("规则 instrument 与平台分钟能力不一致")
-            actual_rule_ids = {
-                item.rule_id for item in self.rules
-                if item.instrument_id == instrument_id
-            }
+            actual_rule_ids = set(revisions_by_instrument.get(instrument_id, {}))
             if actual_rule_ids != set(coverage.required_rule_ids):
                 raise MinuteRuleSnapshotError("规则矩阵缺少能力 manifest 声明的覆盖")
-        if self.bundle_hash != typed_canonical_hash(self.identity_payload()):
+        if self.bundle_hash != self._identity_hash():
             raise MinuteRuleSnapshotError("规则 bundle hash 不一致")
+
+    def _identity_hash(self) -> str:
+        # 可变嵌套参数仍由通用 codec 按当前完整内容校验和编码。
+        if any(
+            type(value) not in (str, int, float, bool, type(None))
+            for rule in self.rules for _, value in rule.parameters
+        ):
+            return typed_canonical_hash(self.identity_payload())
+        encoded = typed_canonical_bytes({
+            "bundle_id": self.bundle_id,
+            "capability_binding": dict(self.capability_binding),
+            "sources": [item.to_dict() for item in self.sources],
+            "instruments": [item.to_dict() for item in self.instruments],
+            "rules": None,
+            "contract_version": self.contract_version,
+        })
+        before, after = encoded.split(b'"rules":' + _NULL_IDENTITY_VALUE, 1)
+        digest = hashlib.sha256()
+        digest.update(before + b'"rules":{"type":"list","value":[')
+        # 逐条交付原规范字节，不构造整包 typed 副本，也不改成子规则摘要。
+        for position, rule in enumerate(self.rules):
+            if position:
+                digest.update(b",")
+            encoded_rule = rule._scalar_identity_bytes()
+            digest.update(encoded_rule[len(_CANONICAL_VALUE_PREFIX):-1])
+        digest.update(b"]}" + after)
+        return digest.hexdigest()
 
     def identity_payload(self) -> dict[str, object]:
         return {
@@ -344,40 +472,61 @@ class MinuteRuleSnapshotBundle:
 class MinuteRuleResolver:
     def __init__(self, bundle: MinuteRuleSnapshotBundle) -> None:
         self.bundle = bundle
+        self._sources = {item.source_id: item.source_hash for item in bundle.sources}
+        rules = {}
+        self._source_bindings = {}
+        for rule in bundle.rules:
+            rules.setdefault((rule.instrument_id, rule.rule_id), []).append(rule)
+            if rule.source_ids not in self._source_bindings:
+                self._source_bindings[rule.source_ids] = tuple(
+                    (source_id, self._sources[source_id]) for source_id in rule.source_ids
+                )
+        self._rules = {key: tuple(revisions) for key, revisions in rules.items()}
+        self._visible_rules = {}
+
+    def revisions(self, *, rule_id: str, instrument_id: str) -> tuple[MinuteRuleSnapshot, ...]:
+        """读取同一证券规则的完整版本流；可见性由消费时点决定。"""
+        return self._rules.get((instrument_id, rule_id), ())
 
     def resolve(self, *, rule_id: str, instrument_id: str, effective_on: date, as_of: datetime) -> MinuteRuleBinding:
         current = _aware(as_of, "as_of")
         if type(effective_on) is not date:
             raise MinuteRuleSnapshotError("effective_on 必须是明确交易日，不能传 datetime")
-        candidates = tuple(
-            item for item in self.bundle.rules
-            if item.rule_id == rule_id
-            and item.instrument_id == instrument_id
-            and item.effective_from <= effective_on <= item.effective_to
-        )
-        if not candidates:
+        key = (instrument_id, rule_id)
+        cached = self._visible_rules.get(key)
+        if cached is not None:
+            cached_date, first_at, next_at, selected = cached
+            if effective_on == cached_date and first_at <= current and (next_at is None or current < next_at):
+                return MinuteRuleBinding(selected, self._source_bindings[selected.source_ids], current)
+        has_candidates = False
+        rule = None
+        next_at = None
+        for item in self._rules.get(key, ()):
+            if not item.effective_from <= effective_on <= item.effective_to:
+                continue
+            has_candidates = True
+            # 不可见修订既不参与选版，也不产生区间冲突。
+            if item.status != "unsupported" and (
+                item.available_at is None or item.available_at > current
+            ):
+                if item.available_at is not None and (next_at is None or item.available_at < next_at):
+                    next_at = item.available_at
+                continue
+            if rule is None:
+                rule = item
+            elif item.effective_from != rule.effective_from or item.effective_to != rule.effective_to:
+                raise MinuteRuleSnapshotError("rule_snapshot_missing_or_conflicting")
+            elif item.revision > rule.revision:
+                rule = item
+        if not has_candidates:
             raise MinuteRuleSnapshotError("rule_snapshot_missing_or_conflicting")
-        # 尚未可见的修订不能使当时唯一可见的历史规则失效。
-        visible = tuple(
-            item for item in candidates
-            if item.status == "unsupported"
-            or (item.available_at is not None and item.available_at <= current)
-        )
-        if not visible:
+        if rule is None:
             raise MinuteRuleSnapshotError("rule_snapshot_unavailable_at_decision")
-        intervals = {(item.effective_from, item.effective_to) for item in visible}
-        if len(intervals) != 1:
-            raise MinuteRuleSnapshotError("rule_snapshot_missing_or_conflicting")
-        # 同一适用区间的修订按可见版本选取，交叉适用区间仍拒绝。
-        rule = max(visible, key=lambda item: item.revision)
         if rule.status != "supported":
             raise MinuteRuleSnapshotError(f"rule_snapshot_unsupported:{rule.unsupported_reason}")
-        sources = {item.source_id: item.source_hash for item in self.bundle.sources}
-        return MinuteRuleBinding(
-            rule,
-            tuple((source_id, sources[source_id]) for source_id in rule.source_ids),
-            current,
-        )
+        # 只在同一业务日期及已检查的可见区间内复用；时间回退或新版本可见时重新选版。
+        self._visible_rules[key] = (effective_on, current, next_at, rule)
+        return MinuteRuleBinding(rule, self._source_bindings[rule.source_ids], current)
 
     def resolve_actual_contract(self, *, requested_id: str, effective_on: date, as_of: datetime) -> str:
         binding = self.resolve(
@@ -443,8 +592,8 @@ def _integer(value: object, field: str) -> int:
     return value
 
 
-def _list(value: object, field: str, *, allow_empty: bool = False) -> list[object]:
-    if not isinstance(value, list) or (not allow_empty and not value):
+def _list(value: object, field: str, *, allow_empty: bool = False) -> list[object] | tuple[object, ...]:
+    if not isinstance(value, (list, tuple)) or (not allow_empty and not value):
         raise MinuteRuleSnapshotError(f"{field} 必须是列表")
     return value
 

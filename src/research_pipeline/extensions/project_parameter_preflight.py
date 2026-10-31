@@ -44,7 +44,10 @@ def preflight_project_operator_parameters(
             attempt_id="parameter-preflight",
             fixed_clock=fixed_clock,
             root_seed=root_seed,
-            parameters=node.parameters,
+            parameters=(node.parameters if token.manifest.parameter_preflight_parameters is None
+                        else {name: node.parameters[name]
+                              for name in token.manifest.parameter_preflight_parameters
+                              if name in node.parameters}),
             effective_resource_budget={
                 key: int(profile[key])
                 for key in ("memory_bytes", "cpu_slots", "temp_bytes", "wall_seconds")

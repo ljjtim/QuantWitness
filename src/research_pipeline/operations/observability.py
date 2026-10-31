@@ -19,7 +19,7 @@ METADATA_FIELDS = frozenset({
     "research.run.id", "research.run.parent_id", "research.plan.hash", "research.dag.id",
     "research.node.id", "research.attempt.id", "research.snapshot.hash", "research.artifact.id",
     "research.artifact.hash", "research.extension.id", "research.claim.hash",
-    "research.result.id", "research.verification_result.id",
+    "research.result.id",
 })
 _DENY_KEY = re.compile(
     r"(password|passwd|secret|token|cookie|private.?key|pem|credential|database.?url|sql|env)",

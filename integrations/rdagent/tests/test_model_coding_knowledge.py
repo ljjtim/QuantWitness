@@ -13,13 +13,9 @@ BROKEN = "class LinearModel(:"
 
 
 def evidence(success=True):
-    value = {"command_status": "succeeded", "execution_status": "succeeded", "verification_status": "pass",
-             "model_status": "pass", "diagnostics": [],
-             "execution_ref": "formal/execution", "result_ref": "formal/result",
-             "verification_ref": "formal/verification", "bundle_ref": "formal/bundle"}
+    value = {'command_status': 'succeeded', 'execution_status': 'succeeded', 'diagnostics': [], 'execution_ref': 'formal/execution', 'result_ref': 'formal/result', 'bundle_ref': 'formal/bundle'}
     if not success:
-        value.update(command_status="failed", execution_status="not_run", verification_status="not_run", model_status="not_run",
-                     diagnostics=[{"stage": "code_validation", "error_type": "SyntaxError", "message": "I:/private/test_auc=0.987 holdout=99"}])
+        value.update(command_status='failed', execution_status='not_run', diagnostics=[{'stage': 'code_validation', 'error_type': 'SyntaxError', 'message': 'I:/private/test_auc=0.987 holdout=99'}])
     return value
 
 
@@ -48,7 +44,7 @@ def test_cross_model_query_preserves_error_repair_and_excludes_metrics(tmp_path)
     assert "SyntaxError" in text and BROKEN in text and "source-linear/candidate-0001" in text
     assert all(value not in text for value in ("test_auc", "holdout", "0.987", "I:/private", "formal/"))
     frozen = json.loads((knowledge.root / "input.json").read_text(encoding="utf-8"))
-    assert frozen["records"][1]["formal_refs"]["verification_ref"] == "formal/verification"
+    assert frozen["records"][1]["formal_refs"]["result_ref"] == "formal/result"
 
 
 def test_model_resume_uses_frozen_source_and_query_without_revalidation(tmp_path):
@@ -96,7 +92,7 @@ def test_unrepaired_source_is_not_reusable(tmp_path):
     source = tmp_path / "only-error"
     knowledge = ModelCodingKnowledge(source, task=TASK)
     knowledge.record(candidate_id="candidate-0000", source=BROKEN, evidence=evidence(False))
-    with pytest.raises(ValueError, match="缺少正式验证"):
+    with pytest.raises(ValueError, match="缺少正式执行成功"):
         ModelCodingKnowledge(tmp_path / "next", task=TASK, source_sessions=[source], validate_source=lambda *args: None)
 
 
@@ -182,7 +178,7 @@ DEFINITION = {"nodes": [{"inputs": [-1], "width": 1, "activation": "identity"}]}
 def test_current_model_compile_error_is_consumed_before_any_success(tmp_path):
     knowledge = ModelCodingKnowledge(tmp_path, task=GENERATED)
     invalid = '{"definition":{"nodes":[{"inputs":[-1],"width":0,"activation":"identity"}]}}'
-    feedback = {"model_status": "fail", "diagnostics": [{"stage": "model_validation", "error_code": "model.definition_invalid", "error_type": "ValueError"}]}
+    feedback = {'diagnostics': [{'stage': 'model_validation', 'error_code': 'model.definition_invalid', 'error_type': 'ValueError'}]}
     knowledge.record(candidate_id="model_0001_attempt_0", source=invalid, evidence=feedback)
     records = knowledge.query(0)
     assert records[0]["source"] == invalid
@@ -194,7 +190,7 @@ def test_generated_model_definition_is_per_candidate_and_cross_structure(tmp_pat
     root = tmp_path / "source"
     knowledge = ModelCodingKnowledge(root, task=GENERATED)
     invalid = '{"definition":{"nodes":[{"inputs":[-1],"width":0,"activation":"identity"}]}}'
-    feedback = {"model_status": "fail", "diagnostics": [{"stage": "model_validation", "error_code": "model.definition_invalid"}]}
+    feedback = {'diagnostics': [{'stage': 'model_validation', 'error_code': 'model.definition_invalid'}]}
     knowledge.record(candidate_id="model_0001_attempt_0", source=invalid, evidence=feedback)
     source = "import torch\nfrom torch import nn\nclass Net(nn.Module):\n    def forward(self, x):\n        return self.layer(x)\n"
     knowledge.record(candidate_id="model_0001", source=source, task={**GENERATED, "definition": DEFINITION}, evidence=evidence())
@@ -230,7 +226,7 @@ def test_actual_generated_compile_receipt_is_required(tmp_path):
     knowledge = ModelCodingKnowledge(tmp_path, task=GENERATED)
     response = '{"definition":{"nodes":[]}}'
     record = knowledge.record(candidate_id="model_0001_attempt_0", source=response,
-        evidence={"model_status": "fail", "diagnostics": [{"stage": "model_validation", "error_code": "model.definition_invalid"}]})
+        evidence={'diagnostics': [{'stage': 'model_validation', 'error_code': 'model.definition_invalid'}]})
     receipt = tmp_path / "rounds/0001/compile-00.json"
     receipt.parent.mkdir(parents=True)
     receipt.write_text(json.dumps({"status": "fail", "response": response, "error": "生成网络需要1至8个节点"}), encoding="utf-8")
@@ -252,16 +248,20 @@ def formal_network_context(tmp_path, monkeypatch):
     plan.parent.mkdir(parents=True)
     plan.write_text(json.dumps({"package_hash": "package", "package_plan_hash": "plan"}), encoding="utf-8")
     config = {"candidate": {"model": {"class": "GeneratedModel"}}, "generated": {"definition": DEFINITION, "source_path": "fold/network.py"}}
-    model = {"mode": "walk_forward_development_v1", "design": {"mode": "development"},
-             "table_bindings": {"models": "model.models.v1"}, "model_configs": {"fold/config.json": config}}
-    facts = {"model_diagnostics": model}
-    support_bytes = {"validity.json": json.dumps(facts).encode(), "support/config.json": json.dumps(config).encode(), "support/network.py": SOURCE.encode()}
+    import pyarrow as pa
+    model = {"mode": "development"}
+    support_bytes = {"support/config.json": json.dumps(config).encode(), "support/network.py": SOURCE.encode()}
     bundle = SimpleNamespace(project_id="project", run_id="run", result_id="result", package_hash="package", plan_hash="plan",
-        verification=SimpleNamespace(validity_source_path="validity.json"), tables=[SimpleNamespace(schema_id="model.models.v1", artifact_key="models")],
+        run=SimpleNamespace(status="succeeded"),
+        tables=[SimpleNamespace(table_id="models", schema_id="model.models.v1", artifact_key="models"),
+                SimpleNamespace(table_id="study_design", schema_id="model.design.v1")],
         support_files=[SimpleNamespace(artifact_key="models", source_path="fold/config.json", relative_path="support/config.json"),
                        SimpleNamespace(artifact_key="models", source_path="fold/network.py", relative_path="support/network.py")])
-    snapshot = SimpleNamespace(bundle=bundle, support_bytes=support_bytes)
-    context = SimpleNamespace(verification=SimpleNamespace(status="pass"), snapshot=snapshot)
+    def batches(schema, *, columns, batch_size):
+        rows = [{"design_json": json.dumps(model)}] if schema == "model.design.v1" else [{"status": "fitted", "config_path": "fold/config.json"}]
+        return pa.Table.from_pylist(rows).select(columns).to_batches()
+    snapshot = SimpleNamespace(bundle=bundle, support_bytes=support_bytes, iter_table_batches=batches)
+    context = SimpleNamespace(snapshot=snapshot)
     class Store:
         def __init__(self, *args, **kwargs):
             pass
@@ -269,18 +269,17 @@ def formal_network_context(tmp_path, monkeypatch):
             assert value is bundle
             return result_root
         def load_snapshot_by_identity(self, **kwargs):
-            assert kwargs["support_paths"] == ("support/config.json", "support/network.py")
+            assert set(kwargs["support_paths"]) <= {"support/config.json", "support/network.py"}
             return snapshot
-    monkeypatch.setitem(sys.modules, "research_pipeline.evidence", SimpleNamespace(load_verified_result_context=lambda *args, **kwargs: context))
-    monkeypatch.setitem(sys.modules, "research_pipeline.results", SimpleNamespace(ResultStore=Store))
+    monkeypatch.setitem(sys.modules, "research_pipeline.results", SimpleNamespace(ResultStore=Store, load_result_context=lambda *a, **kw: context))
     knowledge = ModelCodingKnowledge(source_root, task=GENERATED)
-    source_file = source_root / "rounds/0000/verified-network.py"
+    source_file = source_root / "rounds/0000/result-network.py"
     source_file.parent.mkdir(parents=True)
     source_file.write_text(SOURCE, encoding="utf-8")
-    metric = {"result_id": "result", "result_ref": str(result_root), "verification_ref": str(execution / "verification/result.json")}
-    feedback = {**evidence(), "execution_ref": str(execution), **{key: metric[key] for key in ("result_ref", "verification_ref")}, "bundle_ref": str(source_file)}
+    metric = {'result_id': 'result', 'result_ref': str(result_root)}
+    feedback = {**evidence(), "execution_ref": str(execution), **{key: metric[key] for key in ("result_ref",)}, "bundle_ref": str(source_file)}
     record = knowledge.record(candidate_id="model_0000", source=SOURCE, task={**GENERATED, "definition": DEFINITION}, evidence=feedback)
-    return SimpleNamespace(root=source_root, execution=execution, result_root=result_root, plan=plan, facts=facts, model=model,
+    return SimpleNamespace(root=source_root, execution=execution, result_root=result_root, plan=plan, model=model,
         config=config, context=context, snapshot=snapshot, source_file=source_file, record=record, metric=metric, knowledge=knowledge)
 
 
@@ -290,12 +289,12 @@ def test_generated_source_validator_binds_formal_context_and_sealed_network(form
     assert validate_generated_model_source(fixture.root, fixture.record) == {"result_id": "result"}
 
 
-@pytest.mark.parametrize("change", ["verification", "result_ref", "plan", "definition", "source", "sealed_source", "holdout"])
+@pytest.mark.parametrize("change", ["execution", "result_ref", "plan", "definition", "source", "sealed_source", "holdout"])
 def test_generated_source_validator_rejects_binding_failures(formal_network_context, change):
     from quantwitness_rdagent.model_knowledge import validate_generated_model_source
     fixture = formal_network_context
-    if change == "verification":
-        fixture.context.verification.status = "fail"
+    if change == "execution":
+        fixture.context.snapshot.bundle.run.status = "failed"
     elif change == "result_ref":
         fixture.result_root = fixture.execution / "other"
         fixture.record["formal_refs"]["result_ref"] = str(fixture.result_root)
@@ -305,14 +304,13 @@ def test_generated_source_validator_rejects_binding_failures(formal_network_cont
         fixture.plan.write_text(json.dumps({"package_hash": "other", "package_plan_hash": "plan"}), encoding="utf-8")
     elif change == "definition":
         fixture.config["generated"]["definition"] = {"nodes": []}
-        fixture.snapshot.support_bytes["validity.json"] = json.dumps(fixture.facts).encode()
+        fixture.snapshot.support_bytes["support/config.json"] = json.dumps(fixture.config).encode()
     elif change == "source":
         fixture.source_file.write_text("另一源码", encoding="utf-8")
     elif change == "sealed_source":
         fixture.snapshot.support_bytes["support/network.py"] = b"other source"
     else:
-        fixture.model["mode"] = "walk_forward_prediction_v1"
-        fixture.snapshot.support_bytes["validity.json"] = json.dumps(fixture.facts).encode()
+        fixture.model["mode"] = "model"
     with pytest.raises(ValueError):
         validate_generated_model_source(fixture.root, fixture.record)
 

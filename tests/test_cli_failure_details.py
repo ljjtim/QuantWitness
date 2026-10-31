@@ -49,6 +49,24 @@ def test_runtime_worker_failure_json_includes_root_error_and_inspect_command(
     ]
 
 
+def test_rerun_failure_uses_child_diagnostic_and_inspect_path(capfd, tmp_path):
+    parent, child = tmp_path / "parent", tmp_path / "child"
+    for root, node in ((parent, "snapshot"), (child, "selection")):
+        EventStore(root).append(
+            root.name, "diagnostic", {"error_code": "extension_invalid", "exception_type": "ExtensionError", "message": node},
+            command_id=node + ":diagnostic", node_id=node, attempt_id="attempt-1",
+        )
+    args = SimpleNamespace(json=True, command="rerun-from", run_root=str(parent), output_run_root=str(child))
+    def fail(_args):
+        raise RuntimeWorkerError("operator 节点执行失败: selection")
+    assert execute_guarded(args, fail) == 1
+    payload = json.loads(capfd.readouterr().out)
+    assert payload["data"]["failed_node"] == "selection"
+    assert payload["data"]["root_error"]["message"] == "selection"
+    assert payload["data"]["run_root"] == str(child)
+    assert payload["data"]["next_command_argv"][-2] == str(child)
+
+
 def test_non_runtime_failure_does_not_project_stale_runtime_diagnostic(
     capfd,
     tmp_path: Path,
@@ -77,26 +95,6 @@ def test_non_runtime_failure_does_not_project_stale_runtime_diagnostic(
     assert payload["message"] == "package input invalid"
 
 
-def test_verify_cli_forwards_default_and_explicit_process_slots(monkeypatch, capfd, tmp_path):
-    from research_pipeline.cli import main
-    from research_pipeline.application import evidence_lifecycle
-
-    observed = []
-
-    def capture(*args, **kwargs):
-        observed.append(kwargs["project_verifier_process_slots"])
-        raise ValueError("预算已转发")
-
-    monkeypatch.setattr(evidence_lifecycle, "verify_result", capture)
-    for options, expected in (([], 2), (["--verification-process-slots", "3"], 3)):
-        assert main([
-            "verify", "--result", str(tmp_path / "result"),
-            "--result-store", str(tmp_path / "store"),
-            "--output", str(tmp_path / "verification.json"),
-            *options, "--json",
-        ]) == 1
-        assert json.loads(capfd.readouterr().out)["message"] == "预算已转发"
-        assert observed[-1] == expected
 
 
 @pytest.fixture

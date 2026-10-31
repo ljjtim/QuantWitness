@@ -252,7 +252,6 @@ def build(root, repo, windows_python, linux_repo, linux_output):
         SortKey, UniverseSelection, admit_query)
     from research_pipeline.data_plane.archived_inputs import ArchivedInputInspector
     from research_pipeline.data_plane.minute_scan import build_minute_scan_plan, build_minute_partitioned_dataset
-    from research_pipeline.extensions import compile_project_verifier_bundle
     from research_pipeline.packages.source_provenance import ingest_source_snapshot
     from research_pipeline.platform import load_minute_capability_manifest
 
@@ -315,11 +314,7 @@ def build(root, repo, windows_python, linux_repo, linux_output):
     source = root / "candidate"
     shutil.copytree(EXAMPLE_ROOT / "candidate", source, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copy2(EXAMPLE_ROOT / "operator.yaml", root / "operator.yaml")
-    verifier = yaml.safe_load((EXAMPLE_ROOT / "verifier.yaml").read_text(encoding="utf-8"))
-    verifier_bundle = compile_project_verifier_bundle(source_root=EXAMPLE_ROOT / "verifier", output_root=root / "verifier-bundles",
-        project_id=verifier["project_id"], verifier_id=verifier["verifier_id"], verifier_version=verifier["verifier_version"],
-        entry_module=verifier["entry"]["module"], entry_function=verifier["entry"]["function"],
-        authorized_schema_ids=tuple(verifier["authorized_schema_ids"]), metric_definitions=(), dependency_lock=verifier["dependency_lock"])
+
     package = root / "package"
     (package / "spec").mkdir(parents=True)
     (package / "sources").mkdir()
@@ -328,7 +323,7 @@ def build(root, repo, windows_python, linux_repo, linux_output):
     yaml_file(package / "package.yaml", {"package_slug": "synthetic_volume_concentration", "display_name": "合成成交量集中度教学案例",
         "package_version": "1.0.0", "builder_id": "operator_graph_plan_v1",
         "metric_contract": {"contract_id": "synthetic_minute_observation", "version": "v1", "metrics": ["minute.row_count@1.0.0"],
-                            "semantics": {"minute.row_count@1.0.0": "合成分钟输入观察行数，公式结论由独立Verifier给出"}},
+                            "semantics": {"minute.row_count@1.0.0": "合成分钟输入观察行数，公式数值由项目算法用例验收"}},
         "claim_contract": {"allowed_claim_levels": ["research_observation"], "max_claim_level": "research_observation"}})
     def edge(port, node, output):
         return {"input_port": port, "source_node_id": node, "source_output_port": output}
@@ -342,9 +337,7 @@ def build(root, repo, windows_python, linux_repo, linux_output):
                  "availability_policy_ref": "available.minute.completed_bar.v1"}, [edge("minute_1m", "scan", "minute_1m")]),
              node("formula", "project.volume-concentration.formula", {"calendar_json": json.dumps(calendar), "entities_json": json.dumps(ENTITIES),
                  "decision_time": CLOCK, "window_sessions": 3}, [edge("bars", "bars_1m", "bars")]),
-             node("observe", "research.observation.minute-bars", {"request_id": "raw_stock_minute"}, [edge("bars", "bars_1m", "bars")]),
-             node("validity", "research.validity.minute-observation", {"request_id": "raw_stock_minute"},
-                 [edge("minute_1m", "scan", "minute_1m"), edge("decision_minute_1m", "scan", "minute_1m"), edge("observation", "observe", "observation")])]
+             node("observe", "research.observation.minute-bars", {"request_id": "raw_stock_minute"}, [edge("bars", "bars_1m", "bars")])]
     tables = [{"table_id": name, "role": "diagnostic", "source_node_id": "formula", "source_port": name,
                "artifact_type": "project.volume-concentration.evidence.v1", "schema_id": "project.volume-concentration." + name + ".v1", "path_prefix": name}
               for name in ("bars", "calendar", "coverage", "daily")]
@@ -389,14 +382,12 @@ def build(root, repo, windows_python, linux_repo, linux_output):
         "interface": "daily_value(volumes, expected_count)与rolling_value(history)均返回{value,status}；volumes按分钟位置索引，history保留session/value/status。",
         "review_notes": ""})
     correct = (source / "compute.py").read_text(encoding="utf-8")
-    wrong = correct.replace(" / (total * total)", " / (total * total) + 0.01")
+    wrong = correct.replace("total = math.fsum(values)", "total = missing_candidate_value")
     if wrong == correct:
-        raise ValueError("错误候选必须与正确公式不同")
+        raise ValueError("失败候选必须与正确实现不同")
     payload = {"request_id": "volume-concentration-synthetic", "mode": "formula_reproduction", "base_package": str(package),
         "source_archive_root": str(archive), "input_snapshot_manifest": str(manifest_path), "editable_source_root": str(source),
-        "reference_bundle": str(verifier_bundle), "development_scope": {"role": "development", "start": "2025-01-06", "end": "2025-01-10", "synthetic": True},
-        "formula_evaluation": {"verifier_id": verifier["verifier_id"], "verifier_version": verifier["verifier_version"],
-                               "coverage_schema_id": "project.volume-concentration.coverage.v1"},
+        "development_scope": {"role": "development", "start": "2025-01-06", "end": "2025-01-10", "synthetic": True},
         "budget": {"outer_loops": 1, "coder_attempts": 3, "parallel": 1, "live_llm_calls": 0},
         "runtime_binding": {"windows_python": str(Path(windows_python).resolve()), "windows_repo": str(repo), "linux_repo": linux_repo,
             "windows_session_root": str(root / "session"), "linux_session_root": linux_output.rstrip("/") + "/session",

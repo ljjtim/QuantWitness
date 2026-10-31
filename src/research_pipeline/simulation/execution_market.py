@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from functools import cached_property
+import re
 from zoneinfo import ZoneInfo
 
 from research_pipeline.domain import Price
@@ -20,6 +21,7 @@ from .orders import SimulationContractError
 INTRADAY_EXECUTION_POLICY_VERSION = "intraday-execution-policy-v1"
 _ZONE = ZoneInfo("Asia/Shanghai")
 _SUPPORTED_INTERVALS = (1, 5, 15, 30, 60, 120)
+_SHA256_FORMAT = re.compile(r"[0-9a-f]{64}")
 
 
 def _require_minute_asset(asset_class: str, *, tradable: bool) -> None:
@@ -122,8 +124,12 @@ class MinuteExecutionBar:
         _hash(self.source_snapshot_hash, "source_snapshot_hash")
 
     @cached_property
-    def bar_hash(self) -> str:
-        return typed_canonical_hash(self.to_dict())
+    def bar_id(self) -> str:
+        """引用封存行情中的具体行；内容完整性由来源工件负责。"""
+        return (
+            f"{self.source_snapshot_hash}:{self.instrument_id}:"
+            f"{self.bar_end.isoformat()}:{self.source_sequence}"
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -154,7 +160,7 @@ def _hash(value: object, field: str) -> str:
     if (
         not isinstance(value, str)
         or len(value) != 64
-        or any(char not in "0123456789abcdef" for char in value)
+        or _SHA256_FORMAT.fullmatch(value) is None
     ):
         raise SimulationContractError(f"{field} 必须是 sha256")
     return value

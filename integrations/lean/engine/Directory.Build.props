@@ -1,0 +1,11 @@
+<Project>
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(BuildRoot)/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+    <OutputPath>$(BuildRoot)/bin/$(MSBuildProjectName)/</OutputPath>
+    <RestorePackagesPath>$(BuildRoot)/cache/nuget</RestorePackagesPath>
+  </PropertyGroup>
+  <Target Name="RequireExternalBuildPaths" BeforeTargets="PrepareForBuild;Restore">
+    <Error Condition="'$(BuildRoot)' == '' Or '$(LeanBin)' == ''" Text="请通过 build.ps1 提供外部构建目录与 LEAN Launcher 依赖目录。" />
+  </Target>
+</Project>

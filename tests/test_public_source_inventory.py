@@ -54,7 +54,6 @@ def test_public_source_inventory_reuses_package_inventory() -> None:
         "tests/test_qlib_transformer_integration.py",
         "src/research_pipeline/research/modeling/generated.py",
         "src/research_pipeline/research/modeling/generated_definition.py",
-        "src/research_pipeline/evidence/generated_model_validity.py",
         "integrations/rdagent/src/quantwitness_rdagent/model_research.py",
         "integrations/rdagent/src/quantwitness_rdagent/model_loop.py",
         "integrations/rdagent/src/quantwitness_rdagent/native_model_research.py",
@@ -68,7 +67,6 @@ def test_public_source_inventory_reuses_package_inventory() -> None:
         "src/research_pipeline/research/modeling/gru.py",
         "src/research_pipeline/research/modeling/inputs.py",
         "src/research_pipeline/runtime/model_sequence.py",
-        "src/research_pipeline/evidence/model_sequence_validity.py",
         "src/research_pipeline/packages/model_sequence_admission.py",
         "tests/test_model_sequence_validity.py",
         "tests/test_qlib_sequence_example.py",
@@ -77,7 +75,8 @@ def test_public_source_inventory_reuses_package_inventory() -> None:
         "tests/test_qlib_horizon_group.py",
         "tests/test_qlib_sequence_admission.py",
         "src/research_pipeline/research/modeling/sequence.py",
-        "src/research_pipeline/evidence/sequence_validity.py",
+        "src/research_pipeline/research/validation/holdout.py",
+        "src/research_pipeline/research/validation/holdout_series.py",
         "examples/qlib_portfolio/extension/expressions.py",
         "examples/qlib_portfolio/horizons.py",
         "integrations/rdagent/docs/factor-research.md",
@@ -91,10 +90,16 @@ def test_public_source_inventory_reuses_package_inventory() -> None:
     } <= public
     for project_name in PUBLIC_EXAMPLE_PROJECTS:
         prefix = f"examples/{project_name}/"
+        if project_name == "lean_quickstart":
+            assert {f"{prefix}{name}" for name in (
+                "build.py", "inputs.py", "lean_scope.py", "strategy.py",
+                "verify.py", "expected.yaml", "README.md",
+            )} <= public
+            continue
         assert f"{prefix}package/package.yaml" in public
+        assert f"{prefix}package/spec/research.yaml" in public
         assert f"{prefix}extension/operator.yaml" in public
         assert f"{prefix}extension/source/operator.py" in public
-        assert f"{prefix}verifier/source/check.py" in public
         assert f"{prefix}synthetic.py" in public
         assert f"{prefix}test_operator.py" in public
 
@@ -160,6 +165,7 @@ def test_public_checkout_rejects_extra_tracked_file(tmp_path: Path) -> None:
     owners = output / ".github" / "CODEOWNERS"
     owners.unlink(missing_ok=True)
     subprocess.run(["git", "init", "-q"], cwd=output, check=True)
+    subprocess.run(["git", "config", "core.longpaths", "true"], cwd=output, check=True)
     subprocess.run(["git", "add", "--all"], cwd=output, check=True)
     missing = inspect_public_source(output, check_tracked=True)
     assert {"kind": "missing_governance_file", "path": ".github/CODEOWNERS"} in missing["issues"]
@@ -216,6 +222,8 @@ def test_public_test_helper_imports_are_included():
             continue
         tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("test_"):
-                dependency = "tests/" + node.module.replace(".", "/") + ".py"
-                assert dependency in paths, (relative, dependency)
+            if isinstance(node, ast.ImportFrom) and node.module:
+                module = node.module.removeprefix("tests.")
+                if module.startswith("test_"):
+                    dependency = "tests/" + module.replace(".", "/") + ".py"
+                    assert dependency in paths, (relative, dependency)

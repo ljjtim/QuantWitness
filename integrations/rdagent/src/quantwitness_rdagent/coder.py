@@ -1,6 +1,5 @@
 """真实CoSTEER编码循环，支持固定响应与受预算约束的代码生成。"""
 from copy import deepcopy
-from pathlib import Path
 import json
 from rdagent.components.coder.CoSTEER import CoSTEER
 from rdagent.components.coder.CoSTEER.config import CoSTEERSettings

@@ -14,10 +14,10 @@ from .command_suggestion import render_powershell_command
 _DETAIL_FIELDS = (
     "result_id", "result_directory", "run_id", "runtime_run_id", "run_root",
     "execution_id", "execution_root", "execution_path", "output", "report_path",
-    "verification_path", "verification_result", "result_store", "package_path",
+    "result_store", "package_path",
     "plan_path", "plan_directory", "failed_stage", "failed_node",
     "root_error", "identity_issue", "issues", "stages", "resource_advice",
-    "resource_measurement_status", "process_cleanup_status", "validity_status",
+    "resource_measurement_status", "process_cleanup_status",
     "claim_level", "next_action", "recommended_action", "recommendation_reason",
 )
 _RUN_COMMANDS = {"run", "resume", "retry-node", "rerun-from"}
@@ -30,7 +30,7 @@ def build_summary(
     data: object,
     error_code: str | None = None,
 ) -> dict[str, object]:
-    """命令完成、Result 封存和验证结论分别投影，缺少证据不记作成功。"""
+    """命令完成与 Result 封存分别投影，缺少证据不记作成功。"""
 
     details = data if isinstance(data, Mapping) else {}
     command = getattr(args, "command", None)
@@ -39,7 +39,6 @@ def build_summary(
     summary: dict[str, object] = {
         "command_status": status,
         "execution_status": None,
-        "verification_status": None,
     }
     summary.update({key: details[key] for key in _DETAIL_FIELDS if key in details})
     if action in _RUN_COMMANDS or (workspace and action == "execute"):
@@ -56,14 +55,10 @@ def build_summary(
                 summary[key] = finalize[key]
         if finalize.get("error"):
             summary["finalize_error"] = finalize["error"]
-    if command == "verify":
-        summary["verification_status"] = details.get("status")
-    elif "verification_status" in details:
-        summary["verification_status"] = details["verification_status"]
     advice = resource_failure_advice(
         details,
         error_code=error_code,
-        purpose="verifier" if command == "verify" or details.get("failed_stage") == "verify" else "worker",
+        purpose="worker",
     )
     if advice is not None:
         summary["resource_advice"] = [*details.get("resource_advice", []), advice]
@@ -148,12 +143,12 @@ def render_summary_text(
     """展示状态、主要路径、问题和下一步，不倾倒完整服务返回值。"""
 
     lines = [f"命令状态: {summary['command_status']}"]
-    for key, label in (("execution_status", "执行状态"), ("verification_status", "验证状态")):
+    for key, label in (("execution_status", "执行状态"),):
         if summary.get(key) is not None:
             lines.append(f"{label}: {summary[key]}")
     for key in (
         "execution_id", "execution_root", "execution_path", "result_id", "result_directory",
-        "run_root", "output", "report_path", "verification_path", "verification_result",
+        "run_root", "output", "report_path",
         "package_path", "plan_path", "plan_directory", "failed_stage", "failed_node",
     ):
         if summary.get(key) is not None:

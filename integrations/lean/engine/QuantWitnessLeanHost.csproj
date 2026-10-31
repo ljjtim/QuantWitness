@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>QuantWitnessLeanHost</AssemblyName><TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="LeanStrategyHost.cs" />
+    <ProjectReference Include="parquet-direct/ParquetInput.csproj" />
+    <Reference Include="QuantConnect.Algorithm"><HintPath>$(LeanBin)/QuantConnect.Algorithm.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Configuration"><HintPath>$(LeanBin)/QuantConnect.Configuration.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Indicators"><HintPath>$(LeanBin)/QuantConnect.Indicators.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NodaTime"><HintPath>$(LeanBin)/NodaTime.dll</HintPath><Private>false</Private></Reference>
+  <Reference Include="Python.Runtime"><HintPath>$(LeanBin)/Python.Runtime.dll</HintPath><Private>false</Private></Reference><ProjectReference Include="china-rules/ChinaRules.csproj" />
+<ProjectReference Include="corporate-actions/CorporateActions.csproj" />
+</ItemGroup>
+</Project>
+

@@ -39,7 +39,9 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
     formal_type = "research.feature-set.v1" if plan.kind == "feature" else "research.label.v1"
     if {port.port: port.artifact_type for port in token.manifest.operator_spec.output_ports}.get(plan.output_port) != formal_type:
         raise RuntimeIntegrityError("项目 causal_plan 输出端口或类型未绑定")
-    inputs, identities, timezones = _causal_inputs(node_context, environment, plan)
+    causal_inputs = _causal_inputs(node_context, environment, plan)
+    inputs, identities, timezones = causal_inputs
+    direct_sources = getattr(causal_inputs, "direct_sources", {})
     external = node_context.external_store
     committed_by_port = {}
     inherited = ()
@@ -73,7 +75,8 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
                 process_slots=node_context.process_slots,
                 worker_session=worker_session,
                 causal_context={"plan": worker_plan, "inherited_lineage": list(lineage),
-                                "partition_identities": identities, "source_timezones": timezones},
+                                "partition_identities": identities, "source_timezones": timezones,
+                                "direct_sources": direct_sources},
             )
             facts = result.causal_facts
             if facts is None or tuple(facts["key_columns"]) != plan.key_columns:
@@ -103,6 +106,8 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
                     producer_scope="project",
                     core_time_facts=output_facts if output.port == plan.output_port else None,
                     causal_time_key_columns=plan.key_columns if output.port == plan.output_port else (),
+                    causal_lineage=facts["lineage"] if output.port == plan.output_port and any(
+                        source.daily_time is not None for source in plan.sources) else None,
                 )
                 committed_by_port.setdefault(output.port, []).append(committed)
             state = result.state
@@ -127,10 +132,20 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
             and "observation_session" in schema.names
             and pa.types.is_date(schema.field("observation_session").type)
         )
-        if port == plan.output_port and (
-            any(source.daily_time is not None for source in plan.sources) or is_daily_research
-        ):
+        if port == plan.output_port and is_daily_research:
             _write_daily_causal_artifact(staging, commits, external, plan, environment)
+            final = external.commit(staging, artifact_name=port, artifact_type=commits[0].artifact_type)
+            values[port] = RuntimeNodeValue.external(final)
+            continue
+        if port == plan.output_port and any(source.daily_time is not None for source in plan.sources):
+            # 各决定时点保留各自来源证据，不能把首批 metadata 广播给其他日期。
+            target_root = staging / port
+            target_root.mkdir()
+            for index, commit in enumerate(commits):
+                external.verify(commit.semantic_hash)
+                relative = next(name for name in commit.files if name.endswith(".parquet"))
+                shutil.copyfile(external.objects_root / commit.semantic_hash / relative,
+                                target_root / f"part-{index:05d}.parquet")
             final = external.commit(staging, artifact_name=port, artifact_type=commits[0].artifact_type)
             values[port] = RuntimeNodeValue.external(final)
             continue
@@ -175,13 +190,16 @@ def _write_daily_causal_artifact(staging, commits, external, plan, environment):
     if semantics is None:
         raise RuntimeIntegrityError("正式日频因果输出缺少冻结 ResearchSemantics")
     table_name = "features" if plan.kind == "feature" else "labels"
+    source_schemas = []
 
     def frames():
         for commit in commits:
             external.verify(commit.semantic_hash)
             for relative in commit.files:
                 if relative.endswith(".parquet"):
-                    frame = pq.ParquetFile(external.objects_root / commit.semantic_hash / relative).read().to_pandas()
+                    parquet = pq.ParquetFile(external.objects_root / commit.semantic_hash / relative)
+                    source_schemas.append(parquet.schema_arrow)
+                    frame = parquet.read().to_pandas()
                     time_columns = (
                         ("observation_time", "available_time", "decision_time", "max_source_observation_time", "max_source_available_time")
                         if plan.kind == "feature" else
@@ -197,13 +215,33 @@ def _write_daily_causal_artifact(staging, commits, external, plan, environment):
         extra={"contract_version": "project-causal-daily-v1", "semantics_hash": semantics.semantics_hash,
                "causal_plan": plan.to_dict()},
     )
+    # 模型分区身份按记录计算；外层提交仍对保留日期证据后的完整文件封存。
+    for index, source_schema in enumerate(source_schemas):
+        if b"research_pipeline_causal_lineage" not in (source_schema.metadata or {}):
+            continue
+        target = staging / table_name / f"part-{index:05d}.parquet"
+        table = pq.ParquetFile(target).read()
+        fields = [field.with_metadata(source_schema.field(field.name).metadata) for field in table.schema]
+        schema = pa.schema(fields, metadata={**(table.schema.metadata or {}), **(source_schema.metadata or {})})
+        pq.write_table(table.cast(schema), target)
+
+
+class _CausalInputs(tuple):
+    """保留原三项输入交接，并携带核心直接来源引用。"""
+
+    def __new__(cls, inputs, identities, timezones, direct_sources):
+        value = super().__new__(cls, (inputs, identities, timezones))
+        value.direct_sources = direct_sources
+        return value
 
 
 def _causal_inputs(node_context, environment, plan):
+    from research_pipeline.data_plane.direct_sources import DirectDatasetRef
     from research_pipeline.runtime.adapters.common import _input_data_bundle, _input_external_root
 
     context = OperatorRuntimeContext(node_context, environment)
     inputs, identities, timezones = [], {}, {}
+    direct_sources = {}
     if set(node_context.inputs) != {source.port for source in plan.sources}:
         raise RuntimeIntegrityError("正式 causal 输入必须全部由冻结来源覆盖")
     for source in plan.sources:
@@ -228,6 +266,18 @@ def _causal_inputs(node_context, environment, plan):
         verified = ArtifactResolver(root).resolve(reference)
         if verified.manifest.get("admitted_plan_hash") != admitted.plan_hash:
             raise RuntimeIntegrityError("正式 causal snapshot 与准入计划身份不一致")
+        if isinstance(reference, DirectDatasetRef):
+            value = node_context.inputs[source.port]
+            inputs.append(ProjectRuntimeInput.from_verified(
+                ArtifactRef(source.port, value.artifact_ref.artifact_type,
+                            reference.source_identity, reference.descriptor_hash),
+                b"", reference.schema_hash, source_root=root,
+                files={reference.relative_path: reference.descriptor_hash},
+            ))
+            direct_sources[source.port] = reference.to_dict()
+            identities[source.port] = {partition: [reference.source_identity] for partition in partitions}
+            timezones[source.port] = admitted.minute_timezone or admitted.temporal_selection.source_timezone
+            continue
         snapshot_root = root / reference.relative_path
         files = {str(item["relative_path"]): str(item["sha256"]) for item in verified.manifest["files"]}
         value = node_context.inputs[source.port]
@@ -238,7 +288,7 @@ def _causal_inputs(node_context, environment, plan):
         ))
         identities[source.port] = {partition: [f"{reference.physical_snapshot_id}/{name}" for name in files] for partition in partitions}
         timezones[source.port] = admitted.minute_timezone or admitted.temporal_selection.source_timezone
-    return tuple(inputs), identities, timezones
+    return _CausalInputs(tuple(inputs), identities, timezones, direct_sources)
 
 
 def prepare_causal_minute_input(

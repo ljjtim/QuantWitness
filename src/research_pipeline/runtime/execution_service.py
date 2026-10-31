@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from contextlib import ExitStack
+from dataclasses import replace
 from datetime import datetime
 import importlib
 import json
@@ -107,6 +108,7 @@ class RuntimeExecutionService:
         resource_capacity: ResourceCapacity | None = None,
         resource_governor: ResourceGovernor | None = None,
         resource_timeout_seconds: float | None = None,
+        no_node_timeout: bool = False,
         project_registry: AdmittedProjectOperatorRegistry | None = None,
         project_parameters_by_node: Mapping[str, Mapping[str, object]] | None = None,
         result_table_requirements_by_node: Mapping[
@@ -122,6 +124,7 @@ class RuntimeExecutionService:
             raise ValueError("启用资源治理时必须显式提供正数 timeout")
         self.resource_governor = resource_governor
         self.resource_timeout_seconds = resource_timeout_seconds
+        self.no_node_timeout = no_node_timeout
         self.project_registry = project_registry
         self.project_parameters_by_node = {
             key: dict(value)
@@ -443,6 +446,7 @@ class RuntimeExecutionService:
             node.node_id: _effective_resource_budget(
                 node.resource_budget,
                 capacity=self.resource_capacity,
+                no_node_timeout=self.no_node_timeout,
             )
             for node in dag.nodes
         }
@@ -858,7 +862,8 @@ class RuntimeExecutionService:
                     details=running_payload,
                 )
                 work_dir.mkdir(parents=True, exist_ok=False)
-                attempt_deadline = time.monotonic() + node.resource_budget.wall_seconds
+                wall_seconds = effective_budgets[node_id].wall_seconds
+                attempt_deadline = time.monotonic() + wall_seconds if wall_seconds else None
 
                 def phase_hook(phase: str) -> None:
                     if phase == "checkpoint_prepared":
@@ -1523,6 +1528,12 @@ class RuntimeExecutionService:
         token = registry.project_token_by_implementation(node.implementation_id)
         if token is None:
             raise RuntimeIntegrityError("项目实现未被当前组合注册表准入")
+        if "strategy_declaration" in self.project_parameters_by_node.get(node.node_id, {}):
+            if self.project_parameters_by_node[node.node_id].get("execution_backend") != "lean":
+                raise ValueError("项目策略执行后端必须显式声明lean")
+            from .lean_strategy_execution import execute_lean_strategy_node
+            return execute_lean_strategy_node(self, node_context=node_context, run_id=run_id,
+                attempt_id=attempt_id, environment=environment)
         if "causal_plan" in self.project_parameters_by_node.get(node.node_id, {}):
             from .project_causal_execution import execute_project_causal_node
 
@@ -2132,6 +2143,17 @@ class RuntimeExecutionService:
                 raise RuntimeIntegrityError(
                     f"项目数据 bundle 的 request={request_id} 工件无效"
                 ) from exc
+            if reference.contract_version == "direct-dataset-ref-v1":
+                result[request_id] = {
+                    "admitted_plan_hash": str(admitted_plan_hashes[request_id]),
+                    "source_identity": reference.source_identity,
+                    "schema_hash": reference.schema_hash,
+                    "source_revision_hash": reference.source_revision_hash,
+                    "source_kind": "direct",
+                    "direct_reference": reference.to_dict(),
+                    "direct_root": str(source_root / "data"),
+                }
+                continue
             files = tuple(
                 {
                     "relative_path": (
@@ -2197,7 +2219,8 @@ class RuntimeExecutionService:
                 else plan.factor_publication.publication_id
             ),
             "source_revision_hash": descriptor["source_revision_hash"],
-            "physical_snapshot_id": descriptor["physical_snapshot_id"],
+            **({"source_identity": descriptor["source_identity"]} if descriptor.get("source_kind") == "direct"
+               else {"physical_snapshot_id": descriptor["physical_snapshot_id"]}),
         }
 
     @staticmethod
@@ -2253,6 +2276,11 @@ class RuntimeExecutionService:
                     )
                 ):
                     raise RuntimeIntegrityError("项目 request 消费身份或字段漂移")
+                if descriptor.get("source_kind") == "direct":
+                    # 核心读取器仅在流完整结束后交付轨迹；直接来源没有物化行数。
+                    if type(row.get("row_count")) is not int or row["row_count"] < 0:
+                        raise RuntimeIntegrityError("项目直接request消费行数无效")
+                    continue
                 import pyarrow.parquet as pq
 
                 expected_rows = sum(
@@ -2674,8 +2702,9 @@ def _require_sampled_resources(
         "memory_bytes": (sampler.peak_rss_bytes, min(budget.memory_bytes, reservation.memory_bytes)),
         "temp_bytes": (sampler.peak_scratch_bytes, min(budget.temp_bytes, reservation.scratch_bytes)),
         "process_slots": (sampler.max_processes, reservation.process_slots),
-        "wall_milliseconds": (sampler.wall_milliseconds, budget.wall_seconds * 1000),
     }
+    if budget.wall_seconds:
+        limits["wall_milliseconds"] = (sampler.wall_milliseconds, budget.wall_seconds * 1000)
     exceeded = {name: {"actual": actual, "limit": limit} for name, (actual, limit) in limits.items() if actual > limit}
     if exceeded:
         raise RuntimeWorkerError(
@@ -2723,9 +2752,12 @@ def _effective_resource_budget(
     budget: ResourceBudget,
     *,
     capacity: ResourceCapacity | None,
+    no_node_timeout: bool = False,
 ) -> ResourceBudget:
-    """验证节点声明可被本次运行容量承载，并保持声明上限。"""
+    """验证节点容量；显式无限时运行以0记录累计时长上限。"""
 
+    if no_node_timeout:
+        budget = replace(budget, wall_seconds=0)
     if capacity is None:
         return budget
     if (

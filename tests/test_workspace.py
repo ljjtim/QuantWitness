@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import subprocess
 from types import SimpleNamespace
 
@@ -35,7 +36,7 @@ def test_workspace_init_validate_and_allocate_never_opens_database(tmp_path) -> 
     assert (root / ".research" / "executions" / first["execution_id"] / "execution.json").is_file()
     assert (
         root / ".research" / "executions" / first["execution_id"] / "verification"
-    ).is_dir()
+    ).exists() is False
     assert not (root / ".research" / "stores" / "sealed").exists()
     assert not (root / "data.duckdb").exists()
 
@@ -244,203 +245,105 @@ def test_workspace_completion_rejects_canonical_identity_drift(tmp_path) -> None
         )
 
 
-def test_workspace_dashboard_fails_closed_without_verification_result(tmp_path) -> None:
+def test_workspace_dashboard_rejects_without_result(tmp_path) -> None:
     root = tmp_path / "workspace"
     initialize_workspace(root)
-    with pytest.raises(WorkspaceError, match="VerificationResult"):
+    with pytest.raises(WorkspaceError, match="Result"):
         export_dashboard_manifest(root)
     assert not (root / ".research" / "workspace.json").exists()
 
 
 @pytest.mark.parametrize("run_identity_key", ["run_id", "runtime_run_id"])
-def test_workspace_dashboard_exports_only_identity_bound_v3_entry(
+def test_workspace_dashboard_exports_only_identity_bound_result(
     tmp_path, monkeypatch, run_identity_key
 ) -> None:
+    import research_pipeline.results as results
+    from research_pipeline.runtime.diagnostics import write_finalize_status
+
     root = tmp_path / "workspace"
     initialize_workspace(root)
-    formal = allocate_execution(
-        root, clock="2026-08-06T09:00:00+08:00", root_seed=1, label="正式结果"
-    )
-    unverified = allocate_execution(
-        root, clock="2026-08-06T09:00:00+08:00", root_seed=2, label="草稿"
-    )
-    mismatched = allocate_execution(
-        root, clock="2026-08-06T09:00:00+08:00", root_seed=3, label="错绑结果"
-    )
-    run_id = "a" * 64
-    result_id = "b" * 64
-    run_workspace_execution(
-        root,
-        execution_id=formal["execution_id"],
-        plan=tmp_path / "plan",
-        data_db=tmp_path / "unused.duckdb",
-        clock="2026-08-06T09:00:00+08:00",
-        root_seed=1,
-        handler=lambda _args: {
-            "status": "result_finalized",
-            run_identity_key: run_id,
-            "result_id": result_id,
-        },
-    )
-    execution_root = root / ".research" / "executions" / formal["execution_id"]
-    verification = execution_root / "verification" / "result.json"
-    verification.write_text("{}", encoding="utf-8")
-    run_workspace_execution(
-        root,
-        execution_id=mismatched["execution_id"],
-        plan=tmp_path / "plan",
-        data_db=tmp_path / "unused.duckdb",
-        clock="2026-08-06T09:00:00+08:00",
-        root_seed=3,
-        handler=lambda _args: {
-            "status": "result_finalized",
-            "run_id": run_id,
-            "runtime_run_id": "c" * 64,
-            "result_id": result_id,
-        },
-    )
-    mismatched_root = (
-        root / ".research" / "executions" / mismatched["execution_id"]
-    )
-    (mismatched_root / "verification" / "result.json").write_text(
-        "{}", encoding="utf-8"
-    )
-    import research_pipeline.evidence as evidence
-
-    context = SimpleNamespace(
-        verification=SimpleNamespace(
-            result_reference=SimpleNamespace(run_id=run_id, result_id=result_id),
-            status="pass",
-        )
-    )
-    monkeypatch.setattr(
-        evidence,
-        "load_verified_result_context",
-        lambda *args, **kwargs: context,
-    )
-    result = export_dashboard_manifest(root)
-    payload = json.loads((root / ".research" / "workspace.json").read_text(encoding="utf-8"))
-    assert result["entry_count"] == 1
-    assert payload["contract_version"] == "research-dashboard-workspace-v3"
-    assert payload["entries"][0]["entry_id"] == formal["execution_id"]
-    assert payload["entries"][0]["verification_result"].endswith(
-        "/verification/result.json"
-    )
-    assert set(payload["entries"][0]) == {
-        "entry_id",
-        "label",
-        "verification_result",
-        "result_store",
-    }
-    assert unverified["execution_id"] not in json.dumps(payload)
-    assert mismatched["execution_id"] not in json.dumps(payload)
-    assert ".." not in json.dumps(payload)
-
-
-def test_workspace_dashboard_exports_pass_and_skips_fail(tmp_path, monkeypatch) -> None:
-    root = tmp_path / "workspace"
-    initialize_workspace(root)
-    identities = {}
-    for seed, status in ((1, "pass"), (2, "fail")):
+    allocations = []
+    run_id, result_id = "a" * 64, "b" * 64
+    for seed, label in ((1, "正式结果"), (2, "草稿"), (3, "错绑结果")):
         allocation = allocate_execution(
-            root,
-            clock="2026-08-06T09:00:00+08:00",
-            root_seed=seed,
-            label=status,
+            root, clock="2026-08-06T09:00:00+08:00", root_seed=seed, label=label,
         )
-        run_id = str(seed) * 64
-        result_id = str(seed + 2) * 64
-        identities[allocation["execution_id"]] = (run_id, result_id, status)
+        allocations.append(allocation)
+        if seed == 2:
+            continue
         run_workspace_execution(
-            root,
-            execution_id=allocation["execution_id"],
-            plan=tmp_path / "plan",
-            data_db=tmp_path / "unused.duckdb",
-            clock="2026-08-06T09:00:00+08:00",
-            root_seed=seed,
-            handler=lambda _args, run_id=run_id, result_id=result_id: {
-                "status": "result_finalized",
-                "run_id": run_id,
+            root, execution_id=allocation["execution_id"], plan=tmp_path / "plan",
+            data_db=None, clock="2026-08-06T09:00:00+08:00", root_seed=seed,
+            handler=lambda _args, seed=seed: {
+                "status": "result_finalized", run_identity_key: run_id,
                 "result_id": result_id,
+                **({"run_id": run_id, "runtime_run_id": "c" * 64} if seed == 3 else {}),
             },
         )
-        execution_root = root / ".research" / "executions" / allocation["execution_id"]
-        (execution_root / "verification" / "result.json").write_text(
-            "{}", encoding="utf-8"
+        execution_root = Path(allocation["execution_path"])
+        directory = execution_root / "results" / "project" / run_id / result_id
+        directory.mkdir(parents=True)
+        write_finalize_status(execution_root / "run", status="pending")
+        write_finalize_status(
+            execution_root / "run", status="succeeded", result_published=True,
+            result_id=result_id, result_directory=str(directory),
         )
 
-    import research_pipeline.evidence as evidence
-
-    def fake_load(verification_result, **_kwargs):
-        entry_id = verification_result.parents[1].name
-        run_id, result_id, status = identities[entry_id]
-        return SimpleNamespace(verification=SimpleNamespace(
-            result_reference=SimpleNamespace(run_id=run_id, result_id=result_id),
-            status=status,
+    def load_result(directory, **kwargs):
+        return SimpleNamespace(snapshot=SimpleNamespace(
+            directory=Path(directory), bundle=SimpleNamespace(run_id=run_id, result_id=result_id),
         ))
 
-    monkeypatch.setattr(evidence, "load_verified_result_context", fake_load)
+    monkeypatch.setattr(results, "load_result_context", load_result)
     result = export_dashboard_manifest(root)
-    payload = json.loads((root / ".research" / "workspace.json").read_text(encoding="utf-8"))
-
+    payload = json.loads((root / ".research/workspace.json").read_text(encoding="utf-8"))
     assert result["entry_count"] == 1
-    assert [item["label"] for item in payload["entries"]] == ["pass"]
+    assert payload["contract_version"] == "research-dashboard-workspace-v4"
+    entry = payload["entries"][0]
+    assert entry["entry_id"] == allocations[0]["execution_id"]
+    assert set(entry) == {"entry_id", "label", "result", "result_store"}
+    assert entry["result"].endswith("/" + result_id)
+    assert not Path(entry["result"]).is_absolute()
+    assert ".." not in entry["result"]
+    assert not any("verif" in key for key in entry)
 
 
-def test_workspace_dashboard_all_fail_removes_stale_manifest(
-    tmp_path, monkeypatch
-) -> None:
+def test_workspace_dashboard_removes_stale_manifest_when_result_unavailable(tmp_path, monkeypatch) -> None:
+    import research_pipeline.results as results
+    from research_pipeline.runtime.diagnostics import write_finalize_status
+
     root = tmp_path / "workspace"
     initialize_workspace(root)
-    allocation = allocate_execution(
-        root,
-        clock="2026-08-06T09:00:00+08:00",
-        root_seed=1,
-        label="fail",
-    )
-    run_id = "a" * 64
-    result_id = "b" * 64
+    allocation = allocate_execution(root, clock="2026-08-06T09:00:00+08:00", root_seed=1)
+    run_id, result_id = "a" * 64, "b" * 64
     run_workspace_execution(
-        root,
-        execution_id=allocation["execution_id"],
-        plan=tmp_path / "plan",
-        data_db=tmp_path / "unused.duckdb",
-        clock="2026-08-06T09:00:00+08:00",
-        root_seed=1,
-        handler=lambda _args: {
-            "status": "result_finalized",
-            "run_id": run_id,
-            "result_id": result_id,
-        },
+        root, execution_id=allocation["execution_id"], plan=tmp_path / "plan",
+        data_db=None, clock="2026-08-06T09:00:00+08:00", root_seed=1,
+        handler=lambda _args: {"status": "result_finalized", "run_id": run_id, "result_id": result_id},
     )
-    verification = (
-        root
-        / ".research"
-        / "executions"
-        / allocation["execution_id"]
-        / "verification"
-        / "result.json"
+    execution_root = Path(allocation["execution_path"])
+    directory = execution_root / "results/project" / run_id / result_id
+    directory.mkdir(parents=True)
+    write_finalize_status(execution_root / "run", status="pending")
+    write_finalize_status(
+        execution_root / "run", status="succeeded", result_published=True,
+        result_id=result_id, result_directory=str(directory),
     )
-    verification.write_text("{}", encoding="utf-8")
+    available = {"value": True}
 
-    import research_pipeline.evidence as evidence
+    def load_result(*args, **kwargs):
+        if not available["value"]:
+            raise results.ResultContractError("Result 不可读取")
+        return SimpleNamespace(snapshot=SimpleNamespace(
+            directory=directory, bundle=SimpleNamespace(run_id=run_id, result_id=result_id),
+        ))
 
-    verification_status = {"value": "pass"}
-    monkeypatch.setattr(
-        evidence,
-        "load_verified_result_context",
-        lambda *_args, **_kwargs: SimpleNamespace(verification=SimpleNamespace(
-            result_reference=SimpleNamespace(run_id=run_id, result_id=result_id),
-            status=verification_status["value"],
-        )),
-    )
-
+    monkeypatch.setattr(results, "load_result_context", load_result)
     export_dashboard_manifest(root)
-    manifest = root / ".research" / "workspace.json"
+    manifest = root / ".research/workspace.json"
     assert manifest.is_file()
-
-    verification_status["value"] = "fail"
-    with pytest.raises(WorkspaceError, match="status=pass"):
+    available["value"] = False
+    with pytest.raises(WorkspaceError, match="Result"):
         export_dashboard_manifest(root)
     assert not manifest.exists()
 
@@ -448,7 +351,8 @@ def test_workspace_dashboard_all_fail_removes_stale_manifest(
 def test_workspace_dashboard_cli_help_has_no_historical_trust_store(capsys) -> None:
     assert main(["workspace", "dashboard", "--help"]) == 0
     help_text = capsys.readouterr().out
-    assert "VerificationResult" in help_text
+    assert "导出 Result 的 Dashboard 清单" in help_text
+    assert "VerificationResult" not in help_text
     assert "--trust-store" not in help_text
 
 

@@ -304,29 +304,22 @@ def test_gru_bundle_works_without_explicit_d_feat_and_preserves_rank_label_scope
     assert np.isfinite(predict_bundle(tmp_path, row, test, sequence_context=windows)).all()
 
 
-def test_historical_v1_sealed_model_keeps_explicit_prediction(tmp_path):
-    """历史模型及展开窗口只读加载，预测使用原处理器与权重。"""
-    train, valid, test, windows, spec = inputs()
-    row = fit(tmp_path, train, valid, windows, spec)
-    expected = predict_bundle(tmp_path, row, test, sequence_context=windows)
-    config_path = tmp_path / row["config_path"]
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    for name, source in config["sequence"]["files"].items():
-        frame = pd.read_parquet(tmp_path / source)
-        if name == "context":
-            context = frame
-    for name, source in config["sequence"]["files"].items():
-        frame = pd.read_parquet(tmp_path / source)
-        if name == "members":
-            frame = frame.merge(context.drop(columns=list(windows.feature_columns) + ["feature_count"]),
-                                on="context_index", validate="many_to_one").drop(columns="context_index")
-        elif name == "context":
-            frame = frame.drop(columns="context_index")
-        frame.to_parquet(tmp_path / source, index=False)
-    config["schema"] = "research.qlib-sequence-model-bundle.v1"
-    config["sequence"]["schema"] = "research.qlib-sequence-input.v1"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-    old_members = windows.members.merge(windows.context.drop(columns=list(windows.feature_columns) + ["feature_count"]),
-        on="context_index", validate="many_to_one").drop(columns="context_index")
-    historical = replace(windows, context=windows.context.drop(columns="context_index"), members=old_members)
-    np.testing.assert_array_equal(expected, predict_bundle(tmp_path, row, test, sequence_context=historical))
+@pytest.mark.parametrize("bundle_schema,input_schema", [
+    ("research.qlib-sequence-model-bundle.v1", "research.qlib-sequence-input.v1"),
+    ("research.qlib-sequence-model-bundle.v1", "research.qlib-sequence-input.v2"),
+    ("research.qlib-sequence-model-bundle.v2", "research.qlib-sequence-input.v1"),
+])
+def test_retired_sequence_contract_rejected_before_model_loading(tmp_path, monkeypatch, bundle_schema, input_schema):
+    from qlib.utils.serial import Serializable
+    config = {"schema": bundle_schema, "feature_columns": ["x1__w1"],
+              "candidate": {"model": {"class": "GRU"}},
+              "sequence": {"schema": input_schema}}
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("拒绝旧合同前不能加载模型或处理器")
+    monkeypatch.setattr(Serializable, "load", forbidden)
+    from research_pipeline.research.modeling import gru
+    # 本用例只核对加载格式；真实训练与恢复另行验证固定依赖环境。
+    monkeypatch.setattr(gru, "require_sequence_environment", lambda: None)
+    with pytest.raises(QlibModelError, match="序列模型文件合同"):
+        predict_bundle(tmp_path, {"config_path": "config.json"}, None)

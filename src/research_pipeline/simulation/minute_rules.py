@@ -118,9 +118,8 @@ def minute_cash_bar_suspended(
     rule_id = f"rule.{namespace}.suspension.v1"
     points = {bar_start, available_at}
     points.update(
-        rule.available_at for rule in bundle.rules
-        if rule.rule_id == rule_id and rule.instrument_id == instrument_id
-        and rule.effective_from <= trading_date <= rule.effective_to
+        rule.available_at for rule in resolver.revisions(rule_id=rule_id, instrument_id=instrument_id)
+        if rule.effective_from <= trading_date <= rule.effective_to
         and rule.available_at is not None
         and bar_start < rule.available_at <= bar_end
     )
@@ -186,7 +185,7 @@ def minute_cash_price_limits(parameters: Mapping[str, object], *, decision_at: d
 
     require_aware_datetime(decision_at, "decision_at")
     mode = parameters.get("price_limit_mode")
-    if mode not in {"bounded", "unbounded"}:
+    if mode not in {"bounded", "unbounded", "suspended"}:
         raise SimulationContractError("分钟现货缺少明确价格限制模式")
     scale = _integer_parameter(parameters, "price_scale")
     if scale > 8:
@@ -195,11 +194,8 @@ def minute_cash_price_limits(parameters: Mapping[str, object], *, decision_at: d
         if any(parameters.get(key) is not None for key in ("high_limit_units", "low_limit_units", "price_limit_ratio_ppm")):
             raise SimulationContractError("无涨跌幅限制阶段不能携带固定涨跌停值")
         return MinuteCashPriceLimits(mode, scale, None, None)
-    high = _positive_integer(parameters, "high_limit_units")
-    low = _positive_integer(parameters, "low_limit_units")
-    ratio = _integer_parameter(parameters, "price_limit_ratio_ppm", minimum=1)
-    if ratio >= 1_000_000:
-        raise SimulationContractError("分钟现货价格限制比例无效")
+    high = _integer_parameter(parameters, "high_limit_units", minimum=0 if mode == "suspended" else 1)
+    low = _integer_parameter(parameters, "low_limit_units", minimum=0 if mode == "suspended" else 1)
     reference = _positive_integer(parameters, "reference_previous_close_units")
     raw = parameters.get("reference_price_available_at")
     if not isinstance(raw, str):
@@ -211,6 +207,13 @@ def minute_cash_price_limits(parameters: Mapping[str, object], *, decision_at: d
     require_aware_datetime(visible, "reference_price_available_at")
     if visible > decision_at:
         raise SimulationContractError("分钟前收参考值在决策时尚不可见")
+    if mode == "suspended":
+        if parameters.get("paused") is not True or parameters.get("trading_status") != "suspended":
+            raise SimulationContractError("停牌价格模式必须绑定当时停牌事实")
+        return MinuteCashPriceLimits(mode, scale, high, low)
+    ratio = _integer_parameter(parameters, "price_limit_ratio_ppm", minimum=1)
+    if ratio >= 1_000_000:
+        raise SimulationContractError("分钟现货价格限制比例无效")
     rounding = parameters.get("price_limit_rounding")
     if rounding != "half_up_to_quote_unit":
         raise SimulationContractError("分钟现货必须明确声明报价单位四舍五入规则")

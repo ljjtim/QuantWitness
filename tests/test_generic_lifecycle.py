@@ -1,35 +1,26 @@
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+from datetime import date
 import importlib
-import json
 import shutil
 from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-import research_pipeline.evidence.verification_result as verification_result_module
-
-from research_pipeline.evidence import (
-    compare_verification_results,
-    load_verified_result_context,
-    render_verification_report,
-    export_verified_result,
-    verify_result,
-)
-from research_pipeline.evidence.errors import EvidenceContractError
-from research_pipeline.evidence.validity_recompute import (
-    VALIDITY_FACTS_PRODUCER_HASH,
-    policy_id_for_claim,
-)
-from research_pipeline.platform import canonical_json, typed_canonical_hash
+from research_pipeline.platform import typed_canonical_hash
 from research_pipeline.platform.metric_contracts import (
     MetricReachabilityProof,
     build_mainline_metric_registry,
 )
 from research_pipeline.results import (
     ResultAssembler,
+    load_result_context,
+    render_result_report,
+    build_result_report,
+    compare_results,
+    export_result,
     ResultContractError,
     ResultSpec,
     ResultStore,
@@ -48,7 +39,6 @@ from research_pipeline.runtime import (
     RuntimeNodeValue,
 )
 from research_pipeline.runtime.operator_definitions import build_mainline_operator_manifest
-from validity_facts_support import default_passing_validity_facts
 
 
 def _dag_from_operator_ids(dag_id: str, operator_ids: tuple[str, ...]) -> tuple[DagSpec, list[NodeSpec]]:
@@ -76,12 +66,10 @@ def _formal_dag() -> DagSpec:
         (
             "data.catalog.admission",
             "data.columnar.materialize",
-            "research.validity.data-observation",
         ),
     )
     edge_specs = (
         (0, "admission", 1, "admission"),
-        (1, "data", 2, "data"),
     )
     edges = tuple(
         Edge(
@@ -146,7 +134,7 @@ def _run_to_result(
     implementation_manifest_hash: str | None = None,
     package_hash: str | None = None,
     plan_hash: str | None = None,
-    validity_facts: dict[str, object] | None = None,
+    research_cost_assumption: dict[str, object] | None = None,
     metric_sample_start: str = "2026-01-01",
     analysis_table: pa.Table | None = None,
 ):
@@ -178,21 +166,6 @@ def _run_to_result(
             return RuntimeNodeValue.external(context.external_store.commit(
                 staging,
                 artifact_name="data",
-                artifact_type=context.node.output_types[0][1],
-            ))
-        if context.node.implementation_id == "research.validity.data-observation.v1":
-            staging = context.external_store.prepare()
-            (staging / "result.json").write_text(
-                canonical_json(
-                    default_passing_validity_facts()
-                    if validity_facts is None
-                    else validity_facts
-                ),
-                encoding="utf-8",
-            )
-            return RuntimeNodeValue.external(context.external_store.commit(
-                staging,
-                artifact_name="validity",
                 artifact_type=context.node.output_types[0][1],
             ))
         return RuntimeNodeValue.inline(
@@ -258,16 +231,16 @@ def _run_to_result(
             implementation_manifest_hash
             or build_mainline_operator_manifest().manifest_hash
         ),
-        verification_policy_id=policy_id_for_claim("research_observation"),
-        validity_producer_hash=VALIDITY_FACTS_PRODUCER_HASH,
+        claim_level="research_observation",
+        formal_input_request_ids=("prices",),
+        input_claim_ceilings={"prices": "research_observation"},
+        research_cost_assumption=research_cost_assumption,
     )
     return runtime, run_root, result_root, bundle, result_directory, reference
 
 
-def _facts_with_stock_cost_assumption() -> dict[str, object]:
-    facts = default_passing_validity_facts()
-    financial = facts["financial_tradability"]
-    assumption = {
+def _stock_cost_assumption() -> dict[str, object]:
+    return {
         "contract_version": "research-cost-assumption-v1",
         "assumption_id": "fixture-cn-stock-cost-v1",
         "currency": "CNY",
@@ -282,292 +255,104 @@ def _facts_with_stock_cost_assumption() -> dict[str, object]:
         "transfer_fee_ppm": 10,
         "slippage_per_share_units": 1,
     }
-    financial["research_cost_assumption"] = assumption
-    financial["simulation_window"] = {
-        "start": "2024-01-02",
-        "end": "2024-01-03",
-    }
-    summary = financial["simulation_semantics"]["summary"]
-    summary["cost_model_id"] = "research-cost-assumption"
-    summary["cost_model_version"] = "v1"
-    for block in financial["simulation_semantics"]["blocks"]:
-        for session in block["sessions"]:
-            session["cost_model_id"] = "research-cost-assumption"
-            session["cost_model_version"] = "v1"
-            session["semantics_hash"] = typed_canonical_hash({
-                key: value
-                for key, value in session.items()
-                if key not in {"session", "semantics_hash"}
-            })
-    return facts
 
 
-def test_verification_result_survives_run_root_removal(tmp_path, monkeypatch) -> None:
-    runtime, run_root, result_root, bundle, result_directory, _reference = _run_to_result(
-        tmp_path, "generic.structured-verification"
-    )
-    verification_path = tmp_path / "verification-result.json"
-    context = verify_result(
-        result_directory,
-        result_store=result_root,
-        output=verification_path,
+def test_result_consumers_survive_run_root_removal(tmp_path, monkeypatch) -> None:
+    runtime, run_root, result_root, bundle, directory, _ = _run_to_result(
+        tmp_path, "generic.direct-result"
     )
     assert runtime["status"] == "succeeded"
+    context = load_result_context(directory, result_store=result_root)
     assert context.snapshot.bundle == bundle
     assert context.metrics[0].to_dict() == {
-        "metric_ref": "data.row_count@1.0.0",
-        "value": 1.0,
-        "unit": "rows",
-        "sample_start": "2026-01-01",
-        "sample_end": "2026-06-30",
-        "sample_size": 120,
-        "status": "computed",
-        "table_id": "dataset_statistics",
+        "metric_ref": "data.row_count@1.0.0", "value": 1.0, "unit": "rows",
+        "sample_start": "2026-01-01", "sample_end": "2026-06-30",
+        "sample_size": 120, "status": "computed", "table_id": "dataset_statistics",
     }
-
-    original = json.loads(verification_path.read_text(encoding="utf-8"))
-    for field, value in (
-        ("algorithm_version", "verifier.fake.v1"),
-        ("result_hash", "0" * 64),
-    ):
-        tampered = json.loads(json.dumps(original))
-        tampered["gate_records"][0][field] = value
-        tampered["verification_hash"] = typed_canonical_hash({
-            key: item for key, item in tampered.items() if key != "verification_hash"
-        })
-        tampered_path = tmp_path / f"tampered-{field}.json"
-        tampered_path.write_text(canonical_json(tampered), encoding="utf-8")
-        with pytest.raises(EvidenceContractError):
-            load_verified_result_context(tampered_path, result_store=result_root)
-
+    assert context.snapshot.bundle.run.status == "succeeded"
+    assert context.claim_level == "research_observation"
+    assert not hasattr(context, "verification")
     shutil.rmtree(run_root)
-    monkeypatch.setattr(
-        verification_result_module,
-        "verify_result",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("report/compare/export 不应重新执行完整 verify")
-        ),
-    )
-    loaded = load_verified_result_context(verification_path, result_store=result_root)
-    report = render_verification_report(loaded)
+
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("Result 消费不得重新执行研究")
+
+    monkeypatch.setattr(RuntimeExecutionService, "execute", unexpected_run)
+    loaded = load_result_context(directory, result_store=result_root)
+    report = render_result_report(loaded)
     assert "1.0 rows" in report
     assert "2026-01-01 至 2026-06-30，n=120" in report
-    assert compare_verification_results(loaded, loaded).comparable is True
-    exported = export_verified_result(loaded, tmp_path / "exported")
-    assert ResultStore(tmp_path / "exported", create=False).verify(exported)
+    assert compare_results(loaded, loaded).comparable is True
+    exported = export_result(loaded, tmp_path / "exported")
+    assert ResultStore(tmp_path / "exported", create=False).verify(exported) == bundle
 
 
-def test_stock_cost_assumption_survives_verification_and_report(tmp_path) -> None:
-    facts = _facts_with_stock_cost_assumption()
-    expected = facts["financial_tradability"]["research_cost_assumption"]
-    _, _, result_root, _, result_directory, _ = _run_to_result(
-        tmp_path,
-        "generic.stock-cost-assumption",
-        validity_facts=facts,
+def test_stock_cost_assumption_survives_result_and_report(tmp_path) -> None:
+    expected = _stock_cost_assumption()
+    _, _, store, _, directory, _ = _run_to_result(
+        tmp_path, "generic.stock-cost-assumption", research_cost_assumption=expected,
     )
-    verification_path = tmp_path / "stock-cost-verification.json"
-
-    context = verify_result(
-        result_directory,
-        result_store=result_root,
-        output=verification_path,
-    )
-
-    assert context.verification.status == "pass"
-    assert context.verification.research_cost_assumption == expected
-    assert json.loads(verification_path.read_text(encoding="utf-8"))[
-        "research_cost_assumption"
-    ] == expected
-    report = render_verification_report(context)
-    assert "研究假设（不是历史真实费率）" in report
-    assert "适用 2024-01-01 至 2024-12-31" in report
-    assert "佣金 300 ppm" in report
-    assert "最低佣金 500 分" in report
-    assert "卖出税 1000 ppm" in report
-    assert "过户费 10 ppm" in report
-    assert "每股滑点 1 分" in report
+    context = load_result_context(directory, result_store=store)
+    assert dict(context.research_cost_assumption) == expected
+    assert build_result_report(context).to_dict()["research_cost_assumption"] == expected
+    report = render_result_report(context)
+    assert "研究费用假设" in report
+    for field, value in expected.items():
+        assert field in report
+        assert str(value) in report
 
 
-def test_stock_cost_assumption_tamper_or_uncovered_window_is_rejected(
-    tmp_path,
-) -> None:
-    facts = _facts_with_stock_cost_assumption()
-    _, _, result_root, _, result_directory, _ = _run_to_result(
-        tmp_path,
-        "generic.stock-cost-rejection",
-        validity_facts=facts,
-    )
-    verification_path = tmp_path / "stock-cost-verification.json"
-    verify_result(
-        result_directory,
-        result_store=result_root,
-        output=verification_path,
+@pytest.mark.parametrize("window", [
+    {"applicable_start": "2024-01-03"},
+    {"applicable_end": "2024-01-02"},
+])
+def test_stock_execution_rejects_cost_assumption_outside_research_window(window) -> None:
+    from research_pipeline.platform.research_cost_assumption import (
+        ResearchCostAssumptionError, normalize_stock_research_cost_assumption,
     )
 
-    tampered = json.loads(verification_path.read_text(encoding="utf-8"))
-    tampered["research_cost_assumption"]["commission_ppm"] = 1
-    tampered["verification_hash"] = typed_canonical_hash({
-        key: value
-        for key, value in tampered.items()
-        if key != "verification_hash"
-    })
-    tampered_path = tmp_path / "tampered-stock-cost-verification.json"
-    tampered_path.write_text(canonical_json(tampered), encoding="utf-8")
-    with pytest.raises(EvidenceContractError, match="绑定不一致"):
-        load_verified_result_context(tampered_path, result_store=result_root)
-
-    uncovered = _facts_with_stock_cost_assumption()
-    uncovered["financial_tradability"]["research_cost_assumption"][
-        "applicable_end"
-    ] = "2024-01-02"
-    _, _, uncovered_store, _, uncovered_result, _ = _run_to_result(
-        tmp_path,
-        "generic.stock-cost-uncovered",
-        validity_facts=uncovered,
-    )
-    uncovered_context = verify_result(
-        uncovered_result,
-        result_store=uncovered_store,
-    )
-    assert uncovered_context.verification.status == "fail"
-    financial_gate = next(
-        item
-        for item in uncovered_context.verification.gate_records
-        if item.gate_id == "financial.tradability"
-    )
-    assert {item.code for item in financial_gate.findings} >= {
-        "financial.capacity_semantics_invalid"
-    }
+    assumption = {**_stock_cost_assumption(), **window}
+    with pytest.raises(ResearchCostAssumptionError, match="未覆盖完整研究窗口"):
+        normalize_stock_research_cost_assumption(
+            assumption, research_start=date(2024, 1, 2), research_end=date(2024, 1, 3),
+        )
 
 
-def test_result_export_stream_verification_rejects_source_tamper(tmp_path) -> None:
-    _, _, result_root, bundle, result_directory, _ = _run_to_result(
-        tmp_path,
-        "generic.export-integrity",
-    )
-    verification_path = tmp_path / "verification-result.json"
-    verify_result(
-        result_directory,
-        result_store=result_root,
-        output=verification_path,
-    )
-    context = load_verified_result_context(
-        verification_path,
-        result_store=result_root,
-    )
-    table_path = result_directory / next(iter(bundle.tables[0].files))
+def test_result_export_rejects_source_tamper_and_cleans_partial_output(tmp_path) -> None:
+    _, _, store, bundle, directory, _ = _run_to_result(tmp_path, "generic.export-integrity")
+    context = load_result_context(directory, result_store=store)
+    table_path = directory / next(iter(bundle.tables[0].files))
     with table_path.open("ab") as handle:
-        handle.write(b"tampered-after-verification")
-
-    destination = tmp_path / "tampered-export"
+        handle.write(b"changed-content")
+    destination = tmp_path / "changed-export"
     with pytest.raises(ResultContractError, match="hash 漂移"):
-        export_verified_result(context, destination)
+        export_result(context, destination)
     assert not destination.exists()
-    assert not (tmp_path / ".tampered-export.tmp").exists()
+    assert not (tmp_path / ".changed-export.tmp").exists()
 
 
-def test_verified_result_consumer_rejects_required_metric_table_tamper(
-    tmp_path,
-) -> None:
-    _, _, result_root, bundle, result_directory, _ = _run_to_result(
-        tmp_path,
-        "generic.report-integrity",
-    )
-    verification_path = tmp_path / "verification-result.json"
-    verify_result(
-        result_directory,
-        result_store=result_root,
-        output=verification_path,
-    )
-    metric_schema_ids = {
-        proof.result_schema_id for proof in bundle.metric_proofs
-    }
-    metric_manifest = next(
-        table for table in bundle.tables if table.schema_id in metric_schema_ids
-    )
-    metric_path = result_directory / next(iter(metric_manifest.files))
-    with metric_path.open("ab") as handle:
-        handle.write(b"tampered-after-verification")
-
+def test_result_consumer_rejects_required_metric_table_tamper(tmp_path) -> None:
+    _, _, store, bundle, directory, _ = _run_to_result(tmp_path, "generic.report-integrity")
+    metric_schema_ids = {proof.result_schema_id for proof in bundle.metric_proofs}
+    manifest = next(table for table in bundle.tables if table.schema_id in metric_schema_ids)
+    with (directory / next(iter(manifest.files))).open("ab") as handle:
+        handle.write(b"changed-content")
     with pytest.raises(ResultContractError, match="hash 漂移"):
-        load_verified_result_context(
-            verification_path,
-            result_store=result_root,
-        )
+        load_result_context(directory, result_store=store)
 
 
-def test_verifier_publishes_failed_validity_as_a_verification_result(
-    tmp_path,
-) -> None:
-    facts = default_passing_validity_facts()
-    facts["data_pit"]["observations"][0]["available_at_ns"] = 101
-    facts["data_pit"]["observations"][0]["decision_at_ns"] = 100
-    _, _, result_root, _, result_directory, _ = _run_to_result(
-        tmp_path,
-        "generic.failed-validity",
-        validity_facts=facts,
-    )
-    output = tmp_path / "failed-verification-result.json"
-
-    context = verify_result(
-        result_directory,
-        result_store=result_root,
-        output=output,
-    )
-
-    assert context.verification.status == "fail"
-    assert context.verification.integrity_status == "pass"
-    assert context.verification.reproducibility_status == "pass"
-    assert context.verification.validity_status == "fail"
-    pit_gate = next(
-        item
-        for item in context.verification.gate_records
-        if item.gate_id == "data.pit"
-    )
-    assert pit_gate.status == "fail"
-    assert [item.code for item in pit_gate.findings] == ["pit.future_data"]
-    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "fail"
-    loaded = load_verified_result_context(output, result_store=result_root)
-    assert "pass / pass / fail" in render_verification_report(loaded)
-    assert compare_verification_results(loaded, loaded).comparable
-    exported = export_verified_result(loaded, tmp_path / "failed-exported")
-    assert ResultStore(tmp_path / "failed-exported", create=False).verify(
-        exported
-    )
-
-
-def test_two_projects_keep_result_and_verification_identities_isolated(tmp_path) -> None:
-    contexts = []
-    stores = []
-    verification_paths = []
-    result_directories = []
-    bundles = []
+def test_two_projects_keep_result_identities_isolated(tmp_path) -> None:
+    contexts, stores, bundles, directories = [], [], [], []
     for project_id in ("generic.alpha", "generic.beta"):
-        _, _, result_root, bundle, result_directory, _ = _run_to_result(tmp_path, project_id)
-        verification_path = tmp_path / project_id / "verification-result.json"
-        context = verify_result(
-            result_directory,
-            result_store=result_root,
-            output=verification_path,
-        )
-        assert context.verification.result_reference.project_id == project_id
+        _, _, store, bundle, directory, _ = _run_to_result(tmp_path, project_id)
+        context = load_result_context(directory, result_store=store)
+        assert context.snapshot.bundle.run.project_id == project_id
         contexts.append(context)
-        stores.append(result_root)
-        verification_paths.append(verification_path)
-        result_directories.append(result_directory)
+        stores.append(store)
         bundles.append(bundle)
-
+        directories.append(directory)
     assert bundles[0].package_hash != bundles[1].package_hash
     assert bundles[0].run_id != bundles[1].run_id
     assert bundles[0].result_id != bundles[1].result_id
-    assert contexts[0].verification.verification_hash != contexts[1].verification.verification_hash
     with pytest.raises(ResultContractError):
-        load_verified_result_context(verification_paths[0], result_store=stores[1])
-
-    validity_path = (
-        result_directories[0] / bundles[0].verification.validity_source_path
-    )
-    with validity_path.open("ab") as handle:
-        handle.write(b"tampered-validity")
-    with pytest.raises(ResultContractError):
-        verify_result(result_directories[0], result_store=stores[0])
+        load_result_context(directories[0], result_store=stores[1])

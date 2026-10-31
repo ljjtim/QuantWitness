@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import date, datetime
 import re
 from types import MappingProxyType
 from typing import Mapping
 from urllib.parse import urlparse
 
-from research_pipeline.evidence.facets import CLAIM_LEVELS
+from research_pipeline.platform.claim_levels import CLAIM_LEVELS
 from research_pipeline.platform import MainlineError, typed_canonical_hash
 from research_pipeline.platform.asset_taxonomy import (
     AssetTaxonomyError,
@@ -44,6 +44,8 @@ def _require_hash(value: object, field: str) -> str:
 
 
 def _freeze(value: object) -> object:
+    if value is None or type(value) in (bool, int, float, str):
+        return value
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise ResearchPackageError("spec_payload 的 mapping key 必须是字符串")
@@ -283,11 +285,19 @@ class ResearchPackage:
     claim_contract: PackageClaimContract
     spec_payload: Mapping[str, object]
     contract_version: str = RESEARCH_PACKAGE_VERSION
+    minute_scope_inputs: Mapping[str, object] = dataclass_field(default_factory=dict, compare=False, repr=False)
 
     def __post_init__(self) -> None:
-        for field in ("package_id", "package_hash", "package_slug", "display_name", "package_version", "builder_id"):
-            _require_text(getattr(self, field), field)
+        _require_text(self.package_id, "package_id")
         _require_hash(self.package_hash, "package_hash")
+        if self.package_hash != self._validated_hash():
+            raise ResearchPackageError("package_hash 与声明内容不一致")
+        if self.package_id != f"research_package_{self.package_hash[:16]}":
+            raise ResearchPackageError("package_id 必须由 package_hash 派生")
+
+    def _validated_hash(self) -> str:
+        for field in ("package_slug", "display_name", "package_version", "builder_id"):
+            _require_text(getattr(self, field), field)
         if not self.sources or not any(item.status == "available" for item in self.sources):
             raise ResearchPackageError("package 至少需要一个 available source")
         source_ids = tuple(item.source_id for item in self.sources)
@@ -305,10 +315,7 @@ class ResearchPackage:
         object.__setattr__(self, "spec_payload", _freeze(self.spec_payload))
         if self.contract_version != RESEARCH_PACKAGE_VERSION:
             raise ResearchPackageError("research package contract version 不受支持")
-        if self.package_hash != typed_canonical_hash(self.payload()):
-            raise ResearchPackageError("package_hash 与声明内容不一致")
-        if self.package_id != f"research_package_{self.package_hash[:16]}":
-            raise ResearchPackageError("package_id 必须由 package_hash 派生")
+        return typed_canonical_hash(self.payload())
 
     def payload(self) -> dict[str, object]:
         return {
@@ -341,24 +348,38 @@ class ResearchPackage:
         return typed_canonical_hash({"sources": [item.to_dict() for item in self.sources]})
 
     @classmethod
-    def build(cls, *, package_slug: str, display_name: str, package_version: str, builder_id: str, sources: tuple[PackageSource, ...], localizations: tuple[LocalizationDecision, ...], metric_contract: MetricContract, claim_contract: PackageClaimContract, spec_payload: Mapping[str, object]) -> "ResearchPackage":
-        values = {
-            "package_slug": package_slug,
-            "display_name": display_name,
-            "package_version": package_version,
-            "builder_id": builder_id,
-            "sources": [item.to_dict() for item in sources],
-            "localizations": [item.to_dict() for item in localizations],
-            "metric_contract": {"contract_hash": metric_contract.contract_hash, **metric_contract.payload()},
-            "claim_contract": {"contract_hash": claim_contract.contract_hash, **claim_contract.payload()},
-            "spec_payload": dict(spec_payload),
-            "contract_version": RESEARCH_PACKAGE_VERSION,
-        }
-        package_hash = typed_canonical_hash(values)
-        return cls(f"research_package_{package_hash[:16]}", package_hash, package_slug, display_name, package_version, builder_id, sources, localizations, metric_contract, claim_contract, spec_payload)
+    def build(cls, *, package_slug: str, display_name: str, package_version: str, builder_id: str, sources: tuple[PackageSource, ...], localizations: tuple[LocalizationDecision, ...], metric_contract: MetricContract, claim_contract: PackageClaimContract, spec_payload: Mapping[str, object], minute_scope_inputs: Mapping[str, object] | None = None) -> "ResearchPackage":
+        result = object.__new__(cls)
+        for field, value in (
+            ("package_slug", package_slug), ("display_name", display_name),
+            ("package_version", package_version), ("builder_id", builder_id),
+            ("sources", sources), ("localizations", localizations),
+            ("metric_contract", metric_contract), ("claim_contract", claim_contract),
+            ("spec_payload", spec_payload), ("contract_version", RESEARCH_PACKAGE_VERSION),
+            ("minute_scope_inputs", MappingProxyType(dict(minute_scope_inputs or {}))),
+        ):
+            object.__setattr__(result, field, value)
+        package_hash = result._validated_hash()
+        object.__setattr__(result, "package_hash", package_hash)
+        object.__setattr__(result, "package_id", f"research_package_{package_hash[:16]}")
+        return result
 
 
 __all__ = ["LocalizationDecision", "MetricContract", "PACKAGE_CLAIM_LEVELS", "PackageClaimContract", "PackageSource", "RESEARCH_PACKAGE_VERSION", "ResearchPackage", "ResearchPackageError", "SOURCE_PROVENANCE_MODES", "SOURCE_PROVENANCE_VERSION", "SourceProvenance"]
 
 
 PACKAGE_CLAIM_LEVELS = CLAIM_LEVELS
+
+
+def _thaw_mapping(value: object, field: str) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise ResearchPackageError(f"{field} 必须是映射")
+
+    def thaw(item: object) -> object:
+        if isinstance(item, Mapping):
+            return {str(key): thaw(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [thaw(child) for child in item]
+        return item
+
+    return {str(key): thaw(item) for key, item in value.items()}

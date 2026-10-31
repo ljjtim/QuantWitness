@@ -6,11 +6,12 @@ from research_pipeline.platform.metric_contracts import builtin_metric_output_pa
 
 from .grid_data_contract import _columnar_materialization_plans, _verify_data_bundle
 from datetime import datetime
+from contextlib import ExitStack
 from pathlib import Path
 from research_pipeline.data_plane import ArtifactResolver, DataPlaneError, DataPlaneRequestExecutionError, DatasetArtifactRef, SnapshotIntegrityError
 from research_pipeline.data_plane import DataPlaneExecutionBudget
 from research_pipeline.data_plane.execution_estimate import ExecutionEstimate, load_execution_estimates
-from research_pipeline.data_plane.service import _write_json_atomic, materialize_dataset_plan
+from research_pipeline.data_plane.service import _write_json_atomic, materialize_dataset_plan, reference_dataset_plan
 from research_pipeline.platform.metric_contracts import build_mainline_metric_registry
 from research_pipeline.runtime.adapters.common import _environment, _external_result
 from research_pipeline.runtime.operator_runtime import OperatorRuntimeContext, RuntimeNodeValue
@@ -33,8 +34,12 @@ def execute_operator_graph_data(
     execution_budget: DataPlaneExecutionBudget,
     scratch_root: str | Path,
     request_recovery_root: str | Path | None = None,
+    persist_inputs: bool = False,
 ) -> dict[str, object]:
     """只执行数据物化节点，避免统一 Runtime 中一个节点代跑后续节点。"""
+    persist_inputs = manifest.get("persist_inputs", persist_inputs)
+    if type(persist_inputs) is not bool:
+        raise ValueError("persist_inputs 必须是布尔值")
     archived = manifest.get("input_snapshot_manifest")
     if archived is not None:
         if data_db is not None or source_databases:
@@ -50,6 +55,7 @@ def execute_operator_graph_data(
             manifest=archived, admitted_plans=_columnar_materialization_plans(admitted_plans),
             execution_estimates={key: estimates[key] for key in _columnar_materialization_plans(admitted_plans)}, execution_budget=execution_budget,
             artifact_root=Path(artifact_root).resolve() / "data",
+            persist_inputs=persist_inputs,
         )
         return {
             "status": "data_succeeded", "data_bundle_hash": bundle["bundle_hash"],
@@ -85,6 +91,7 @@ def execute_operator_graph_data(
         verified_manifests_out=verified_dataset_manifests,
         execution_budget=execution_budget,
         scratch_root=scratch_root,
+        persist_inputs=persist_inputs,
         partial_index_path=(
             None
             if request_recovery_root is None
@@ -126,7 +133,12 @@ def _materialize_or_load_data(
     execution_budget: DataPlaneExecutionBudget,
     scratch_root: str | Path,
     partial_index_path: str | Path | None = None,
+    persist_inputs: bool = False,
 ) -> dict[str, object]:
+    if type(persist_inputs) is not bool:
+        raise ValueError("persist_inputs 必须是布尔值")
+    import duckdb
+
     columnar_plans = _columnar_materialization_plans(admitted_plans)
     artifact_root = Path(artifact_root).resolve()
     artifact_root.mkdir(parents=True, exist_ok=True)
@@ -139,65 +151,95 @@ def _materialize_or_load_data(
     completed_request_ids: list[str] = []
     partials = _load_request_partial_index(partial_index_path)
     resolver = ArtifactResolver(artifact_root)
-    for request_id, plan in sorted(columnar_plans.items()):
-        partial = partials.get(request_id)
-        if partial is not None and partial["admitted_plan_hash"] == plan.plan_hash:
-            try:
-                reference = DatasetArtifactRef.from_dict(partial["reference"])
-                dataset = resolver.resolve(reference)
-                if dataset.manifest.get("admitted_plan_hash") != plan.plan_hash:
-                    raise SnapshotIntegrityError(
-                        "partial DatasetArtifactRef 与当前 plan 不一致"
-                    )
-            except (DataPlaneError, KeyError, OSError, TypeError):
+    factor_source_paths = {
+        source_databases[plan.source_profile].resolve()
+        for plan in columnar_plans.values()
+        if getattr(plan, "factor_publication", None) is not None
+        and plan.source_profile in source_databases
+    }
+    with ExitStack() as source_connections:
+        connected_paths: set[Path] = set()
+        for request_id, plan in sorted(columnar_plans.items()):
+            partial = partials.get(request_id)
+            if partial is not None and partial["admitted_plan_hash"] == plan.plan_hash:
+                try:
+                    reference = DatasetArtifactRef.from_dict(partial["reference"])
+                    from research_pipeline.data_plane.direct_sources import DirectDatasetRef
+                    if isinstance(reference, DirectDatasetRef) == persist_inputs:
+                        raise SnapshotIntegrityError("partial 输入保存模式与当前请求不同")
+                    dataset = resolver.resolve(reference)
+                    if dataset.manifest.get("admitted_plan_hash") != plan.plan_hash:
+                        raise SnapshotIntegrityError(
+                            "partial DatasetArtifactRef 与当前 plan 不一致"
+                        )
+                except (DataPlaneError, KeyError, OSError, TypeError) as exc:
+                    if partial["reference"].get("contract_version") == "direct-dataset-ref-v1":
+                        raise _request_execution_error(
+                            request_id=request_id,
+                            plan=plan,
+                            execution_budget=execution_budget,
+                            completed_request_ids=completed_request_ids,
+                            request_status="recovery_source_invalid",
+                            cause=exc,
+                        ) from exc
+                    partials.pop(request_id, None)
+                    _save_request_partial_index(partial_index_path, partials)
+                else:
+                    references[request_id] = reference.to_dict()
+                    fingerprints.append(dict(partial["database_fingerprint"]))
+                    completed_request_ids.append(request_id)
+                    continue
+            elif partial is not None:
                 partials.pop(request_id, None)
                 _save_request_partial_index(partial_index_path, partials)
-            else:
-                references[request_id] = reference.to_dict()
-                fingerprints.append(dict(partial["database_fingerprint"]))
-                completed_request_ids.append(request_id)
-                continue
-        elif partial is not None:
-            partials.pop(request_id, None)
+            source_database = source_databases.get(plan.source_profile)
+            if source_database is None:
+                raise _request_execution_error(
+                    request_id=request_id,
+                    plan=plan,
+                    execution_budget=execution_budget,
+                    completed_request_ids=completed_request_ids,
+                    request_status="not_opened",
+                    cause=ValueError("Catalog source_profile 未绑定只读数据库"),
+                )
+            try:
+                # 只在实际取数时保活源实例；完整 partial 恢复不打开数据库。
+                # 因子源仍由单请求租约管理连接，不能在租约外延长其生命周期。
+                source_path = source_database.resolve()
+                if persist_inputs and source_path not in factor_source_paths:
+                    if source_path not in connected_paths:
+                        source_connections.enter_context(
+                            duckdb.connect(str(source_path), read_only=True)
+                        )
+                        connected_paths.add(source_path)
+                execute_request = materialize_dataset_plan if persist_inputs else reference_dataset_plan
+                result = execute_request(
+                    plan=plan,
+                    data_db=source_database,
+                    artifact_root=artifact_root,
+                    execution_budget=execution_budget,
+                    execution_estimate=columnar_estimates[request_id],
+                    scratch_root=Path(scratch_root) / request_id,
+                )
+            except Exception as exc:
+                raise _request_execution_error(
+                    request_id=request_id,
+                    plan=plan,
+                    execution_budget=execution_budget,
+                    completed_request_ids=completed_request_ids,
+                    request_status="opened",
+                    cause=exc,
+                ) from exc
+            references[request_id] = result["reference"]
+            fingerprints.append(result["database_fingerprint_after"])
+            completed_request_ids.append(request_id)
+            partials[request_id] = {
+                "request_id": request_id,
+                "admitted_plan_hash": plan.plan_hash,
+                "reference": dict(result["reference"]),
+                "database_fingerprint": dict(result["database_fingerprint_after"]),
+            }
             _save_request_partial_index(partial_index_path, partials)
-        source_database = source_databases.get(plan.source_profile)
-        if source_database is None:
-            raise _request_execution_error(
-                request_id=request_id,
-                plan=plan,
-                execution_budget=execution_budget,
-                completed_request_ids=completed_request_ids,
-                request_status="not_opened",
-                cause=ValueError("Catalog source_profile 未绑定只读数据库"),
-            )
-        try:
-            result = materialize_dataset_plan(
-                plan=plan,
-                data_db=source_database,
-                artifact_root=artifact_root,
-                execution_budget=execution_budget,
-                execution_estimate=columnar_estimates[request_id],
-                scratch_root=Path(scratch_root) / request_id,
-            )
-        except Exception as exc:
-            raise _request_execution_error(
-                request_id=request_id,
-                plan=plan,
-                execution_budget=execution_budget,
-                completed_request_ids=completed_request_ids,
-                request_status="opened",
-                cause=exc,
-            ) from exc
-        references[request_id] = result["reference"]
-        fingerprints.append(result["database_fingerprint_after"])
-        completed_request_ids.append(request_id)
-        partials[request_id] = {
-            "request_id": request_id,
-            "admitted_plan_hash": plan.plan_hash,
-            "reference": dict(result["reference"]),
-            "database_fingerprint": dict(result["database_fingerprint_after"]),
-        }
-        _save_request_partial_index(partial_index_path, partials)
     from research_pipeline.data_plane.research_data_bundle import (
         build_research_data_bundle,
     )
@@ -376,7 +418,7 @@ def execute_data_columnar_materialize_v1(
         context,
         result,
         directories={"data": request_recovery_root / "data"},
-        parquet_rows=({builtin_metric_output_path("data.columnar-bundle.v1"): metric_rows} if metric_rows else None),
+        parquet_rows=({f"{builtin_metric_output_path('data.columnar-bundle.v1')}/{row['request_id']}": [row] for row in metric_rows} if metric_rows else None),
     )
 
 
@@ -413,6 +455,8 @@ def _dataset_manifest_observations(
         if not isinstance(manifest, Mapping):
             raise ValueError(f"columnar data manifest 无效: {request_id}")
         row_count = manifest.get("row_count")
+        if row_count is None:
+            continue
         if type(row_count) is not int or row_count < 0:
             raise ValueError(f"columnar data manifest 行数无效: {request_id}")
         query = getattr(plan, "query", None)
@@ -421,11 +465,14 @@ def _dataset_manifest_observations(
             raise ValueError(f"columnar data 请求缺少时间范围: {request_id}")
         sample_start = time_range.start.isoformat()
         sample_end = time_range.end.isoformat()
+        from research_pipeline.data_plane.direct_sources import DirectDatasetRef
+        reference_id = reference.source_identity if isinstance(reference, DirectDatasetRef) else reference.physical_snapshot_id
+        manifest_hash = reference.descriptor_hash if isinstance(reference, DirectDatasetRef) else reference.manifest_hash
         observation = {
             "contract_version": "dataset-manifest-observation-v1",
             "request_id": request_id,
-            "dataset_reference_id": reference.physical_snapshot_id,
-            "manifest_hash": reference.manifest_hash,
+            "dataset_reference_id": reference_id,
+            "manifest_hash": manifest_hash,
             "row_count": row_count,
             "metric_ref": metric_ref,
             "sample_start": sample_start,

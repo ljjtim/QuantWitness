@@ -24,8 +24,9 @@ from .project_bundle import (
 
 
 PROJECT_OPERATOR_SCAFFOLD_VERSION = "project-operator-scaffold-v1"
-_SCAFFOLD_PORT = "validity"
-_SCAFFOLD_ARTIFACT_TYPE = "research.validity-facts.v1"
+_SCAFFOLD_PORT = "data"
+_SCAFFOLD_INPUT_TYPE = "data.columnar-bundle.v1"
+_SCAFFOLD_OUTPUT_TYPE = "project.identity-observation.v1"
 _SOURCE = '''"""项目算子最小 identity 示例；正式使用前替换为研究算法并补齐贴身测试。"""
 
 import hashlib
@@ -36,10 +37,10 @@ def run(context, inputs, output_root):
     if len(inputs) != 1:
         raise ValueError("identity 算子要求恰好一个输入")
     source = inputs[0]
-    if source.port != "validity" or source.artifact_type != "research.validity-facts.v1":
+    if source.port != "data" or source.artifact_type != "data.columnar-bundle.v1":
         raise ValueError("identity 算子输入端口或 Artifact 类型不符")
     source_path = output_root.parent / source.relative_path
-    target = output_root / "validity" / "content.bin"
+    target = output_root / "data" / "content.bin"
     target.parent.mkdir(parents=True)
     digest = hashlib.sha256()
     with source_path.open("rb") as reader, target.open("wb") as writer:
@@ -47,9 +48,9 @@ def run(context, inputs, output_root):
             writer.write(block)
             digest.update(block)
     return {
-        "port": "validity",
-        "artifact_type": "research.validity-facts.v1",
-        "relative_path": "validity/content.bin",
+        "port": "data",
+        "artifact_type": "project.identity-observation.v1",
+        "relative_path": "data/content.bin",
         "content_hash": digest.hexdigest(),
         "schema_hash": source.schema_hash,
         "byte_size": target.stat().st_size,
@@ -115,8 +116,8 @@ def scaffold_project_operator(
         specification = OperatorSpec.build(
             operator_id=operator_id,
             operator_version=operator_version,
-            input_ports=(PortSpec(_SCAFFOLD_PORT, _SCAFFOLD_ARTIFACT_TYPE),),
-            output_ports=(PortSpec(_SCAFFOLD_PORT, _SCAFFOLD_ARTIFACT_TYPE),),
+            input_ports=(PortSpec(_SCAFFOLD_PORT, _SCAFFOLD_INPUT_TYPE),),
+            output_ports=(PortSpec(_SCAFFOLD_PORT, _SCAFFOLD_OUTPUT_TYPE),),
             parameters=(),
             strategy_roles=(),
             resource_profile={
@@ -134,6 +135,7 @@ def scaffold_project_operator(
         validate_project_operator_artifacts(
             specification,
             registered_operator_specs,
+            project_artifact_types=(_SCAFFOLD_OUTPUT_TYPE,),
         )
         declaration = ProjectOperatorDeclaration(
             project_id=project_id,
@@ -142,6 +144,7 @@ def scaffold_project_operator(
             entry_function="run",
             dependency_lock={},
             permissions=ProjectOperatorPermissionProfile(),
+            project_artifact_types=(_SCAFFOLD_OUTPUT_TYPE,),
         )
         declaration_path = staging / "operator.yaml"
         declaration_path.write_text(
@@ -186,6 +189,12 @@ def _readme(project_id: str, operator_id: str, operator_version: str) -> str:
 - operator：`{operator_id}@{operator_version}`
 - 声明：`operator.yaml`
 - 唯一源码闭包：`source/`
+- 输入：`data` 端口，类型 `{_SCAFFOLD_INPUT_TYPE}`
+- 输出：`data` 端口，类型 `{_SCAFFOLD_OUTPUT_TYPE}`
+
+示例逐字节复制输入，输出使用 `project_artifact_types` 登记的项目样例类型。
+该输出可以接入观察研究包，不会成为第二个 `data.row_count` 指标生产端口。
+替换算法时，同步修改声明中的输出类型、`project_artifact_types` 和源码返回类型。
 
 ```powershell
 python -m research_pipeline operator validate --spec operator.yaml --source source --format json

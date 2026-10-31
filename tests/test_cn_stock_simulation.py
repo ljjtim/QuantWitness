@@ -6,15 +6,10 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from research_pipeline.domain import InstrumentId, MarketRuleSnapshot, Price
+from research_pipeline.domain import MarketRuleSnapshot
 from research_pipeline.simulation import (
-    ExecutionGroup,
-    OpeningSnapshot,
-    Order,
     SimulationContractError,
-    SpotLedgerState,
     audit_stock_after_close,
-    execute_cash_order,
     stock_policy_from_contract,
     stock_policy_from_rule,
 )
@@ -39,12 +34,6 @@ def _contract_market_rule() -> MarketRuleSnapshot:
         "sell_remainder_allowed": True,
     }
     return replace(_rule(), parameters=tuple(sorted(parameters.items())))
-
-
-def _snapshot(**overrides: object) -> OpeningSnapshot:
-    values = {"instrument_hash": "i" * 64, "open_price": Price(1000, 2, "CNY"), "high_limit": Price(1100, 2, "CNY"), "low_limit": Price(900, 2, "CNY"), "paused": False, "visible_capacity": 100, "available_time": NOW}
-    values.update(overrides)
-    return OpeningSnapshot(**values)  # type: ignore[arg-type]
 
 
 def _cost_assumption(**updates: object) -> dict[str, object]:
@@ -100,51 +89,14 @@ def test_stock_contract_rejects_cost_assumption_not_covering_research() -> None:
         )
 
 
-def test_stock_buy_uses_fixed_fee_t1_and_visible_capacity_only() -> None:
-    order = Order("o1", InstrumentId("000001.XSHE", "cn_stock", "stock"), "buy", 200, "market", "DAY", NOW)
-    state = SpotLedgerState(ExecutionGroup("stock", "cn_stock", "CNY", "t1"), 500_000)
-    result = execute_cash_order(order, policy=stock_policy_from_rule(_rule()), snapshot=_snapshot(), state=state)
-    assert result.filled_quantity == 100
-    assert result.reason_code == "partially_filled"
-    assert result.state.positions[0].unsettled == 100
-    assert result.state.available_cash_units == 399_499
-
-
-def test_open_limit_rejects_but_post_close_audit_does_not_mutate_execution() -> None:
-    order = Order("o1", InstrumentId("000001.XSHE", "cn_stock", "stock"), "buy", 100, "market", "DAY", NOW)
-    state = SpotLedgerState(ExecutionGroup("stock", "cn_stock", "CNY", "t1"), 500_000)
-    result = execute_cash_order(order, policy=stock_policy_from_rule(_rule()), snapshot=_snapshot(open_price=Price(1100, 2, "CNY")), state=state)
-    assert result.reason_code == "limit_up_buy_blocked"
+def test_post_close_audit_reports_limit_board_and_zero_volume() -> None:
     audit = audit_stock_after_close(high_units=1100, low_units=1100, limit_units=1100, full_day_volume=0)
     assert audit.one_price_limit_board and audit.zero_full_day_volume
 
 
-def test_stock_limit_price_and_cash_admission_are_explicit() -> None:
-    state = SpotLedgerState(ExecutionGroup("stock", "cn_stock", "CNY", "t1"), 100_000)
-    limit = Order("limit", InstrumentId("000001.XSHE", "cn_stock", "stock"), "buy", 100, "limit", "DAY", NOW, limit_price=Price(999, 2, "CNY"))
-    assert execute_cash_order(limit, policy=stock_policy_from_rule(_rule()), snapshot=_snapshot(), state=state).reason_code == "limit_price_not_reached"
-    market = Order("cash", InstrumentId("000001.XSHE", "cn_stock", "stock"), "buy", 100, "market", "DAY", NOW)
-    assert execute_cash_order(market, policy=stock_policy_from_rule(_rule()), snapshot=_snapshot(), state=state).reason_code == "insufficient_cash"
-
-
-def test_adjustable_slippage_and_cash_clipping_are_part_of_policy_identity() -> None:
-    order = Order("clip", InstrumentId("000001.XSHE", "cn_stock", "stock"), "buy", 200, "market", "DAY", NOW)
-    state = SpotLedgerState(ExecutionGroup("stock", "cn_stock", "CNY", "t1"), 150_000)
+def test_slippage_and_cash_shortage_policy_affect_identity() -> None:
     base = stock_policy_from_rule(_rule())
-    policy = stock_policy_from_rule(
-        _rule(),
-        slippage_per_share=0.01,
-        cash_shortage_policy="clip_current_lot_continue_v1",
-    )
-    result = execute_cash_order(
-        order,
-        policy=policy,
-        snapshot=_snapshot(visible_capacity=200),
-        state=state,
-    )
-    fill = next(event for event in result.events if event.kind == "fill")
-
-    assert result.filled_quantity == 100
-    assert result.reason_code == "partially_filled"
-    assert fill.values()["notional_units"] == 100_100
+    policy = stock_policy_from_rule(_rule(), slippage_per_share=0.01, cash_shortage_policy="clip_current_lot_continue_v1")
+    assert policy.slippage_units_per_share == 1
+    assert policy.cash_shortage_policy == "clip_current_lot_continue_v1"
     assert base.policy_hash != policy.policy_hash

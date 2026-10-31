@@ -1,4 +1,4 @@
-"""复用公开模型ResearchPackage，接入风险组合目标和独立oracle。"""
+"""复用公开模型ResearchPackage，接入风险组合目标和正式Result。"""
 from importlib.metadata import version
 import json
 from pathlib import Path
@@ -12,12 +12,10 @@ BASE = HERE.parent / "qlib_portfolio"
 SOURCE = HERE.parents[1] / "project_extensions/qlib_portfolio_risk"
 sys.path.insert(0, str(BASE))
 import prepare as model_prepare  # noqa: E402
-import portfolio_plan  # noqa: E402
 
 
-def prepare(root, *, method="inv", estimator="empirical", lookback=20, research_series=None):
-    from research_pipeline.extensions import (load_project_operator_declaration, compile_project_operator_bundle,
-        compile_project_verifier_bundle, verify_project_verifier_bundle)
+def prepare(root, *, method="inv", estimator="empirical", lookback=20, research_series=None, lean_home=None, input_config=None):
+    from research_pipeline.extensions import (load_project_operator_declaration, compile_project_operator_bundle)
     from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
     from research_pipeline.platform import typed_canonical_hash
     root = Path(root).resolve()
@@ -25,7 +23,8 @@ def prepare(root, *, method="inv", estimator="empirical", lookback=20, research_
         raise ValueError("风险组合方法无效")
     if estimator not in {"empirical", "shrink"}:
         raise ValueError("风险估计方法无效")
-    bundle = model_prepare.prepare(root, mode="portfolio", research_series=research_series)
+    bundle = model_prepare.prepare(root, mode="portfolio", research_series=research_series,
+        lean_home=lean_home, input_config=input_config)
     package = Path(bundle["package"])
     path = package / "spec/research.yaml"
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -72,26 +71,13 @@ def prepare(root, *, method="inv", estimator="empirical", lookback=20, research_
         entry_function=declared.entry_function, dependency_lock=declared.dependency_lock,
         project_artifact_types=declared.project_artifact_types, permissions=declared.permissions,
         registered_operator_specs=build_mainline_operator_registry().operator_specs)
-    # 原目标bundle不再用于本研究；其余正式节点与现金执行合同继续复用。
+    # 原目标bundle不再用于本研究；其余正式节点与LEAN执行合同继续复用。
     bundle["extensions"] = [value for value in bundle["extensions"] if Path(value).parent.name != "targets"] + [str(built)]
     tables = payload["result"]["tables"]
     for name in ("risk_inputs", "risk_optimization_results", "risk_optimization_attempts", "risk_constraint_residuals"):
         tables.append({"table_id": name, "role": "diagnostic", "source_node_id": "portfolio_targets", "source_port": "targets",
             "artifact_type": "research.portfolio-targets.v1", "schema_id": "project.qlib_demo."+name+".v1", "path_prefix": name})
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    verifier_source = root / "risk-verifier-source"
-    verifier_source.mkdir()
-    for source in (BASE/"verifier").glob("*.py"):
-        shutil.copyfile(source, verifier_source/source.name)
-    shutil.copyfile(BASE/"extension/factor_baseline_oracle.py", verifier_source/"factor_baseline_oracle.py")
-    shutil.copyfile(SOURCE/"oracle.py", verifier_source/"portfolio.py")
-    old = verify_project_verifier_bundle(bundle["verifier"])
-    metrics = tuple(item for item in old.metric_definitions if not item.metric_id.startswith("portfolio."))
-    metrics += portfolio_plan.metric_definitions(verifier_source/"portfolio.py")
-    bundle["verifier"] = str(compile_project_verifier_bundle(source_root=verifier_source, output_root=root/"risk-verifier-bundles",
-        project_id="qlib-public", verifier_id="public-qlib-risk-independent", verifier_version="1.0.0",
-        entry_module="check", entry_function="verify", authorized_schema_ids=tuple(item["schema_id"] for item in tables),
-        metric_definitions=metrics, dependency_lock={"pyarrow": "21.0.0"}))
     bundle["portfolio_risk"] = config
     (root/"bundle-paths.json").write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
     return bundle

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 from research_pipeline.catalog import CatalogPreflight, DuckDBSourceInspector
 from research_pipeline.data_plane import (
@@ -30,12 +32,17 @@ from research_pipeline.data_plane.service import load_compiled_catalog
 from research_pipeline.packages import (
     OPERATOR_GRAPH_BUILDER_ID,
     OperatorGraphPlan,
-    compile_research_package,
     compile_package_queries,
     load_research_package,
     verify_package_source_provenance,
 )
 from research_pipeline.platform import MainlineError, typed_canonical_hash
+from research_pipeline.platform.operator_contracts import OperatorGraphRecipe
+from research_pipeline.platform.metric_contracts import MetricDefinition
+from research_pipeline.runtime import ResourceBudget
+from research_pipeline.packages.operator_graph import (
+    _validate_operator_graph_spec, compile_operator_graph_package,
+)
 from research_pipeline.runtime.operator_registry import (
     build_mainline_operator_registry,
     compile_operator_graph_dag,
@@ -75,7 +82,13 @@ def admit_package(
     *, documents=None,
 ) -> dict[str, object]:
     """执行当前算子图 ResearchPackage 的正式准入。"""
-    package = load_research_package(args.package, documents=documents)
+    return prepare_package(args, documents=documents)[0]
+
+
+def prepare_package(args, *, documents=None, package=None):
+    """编译并发布计划，同次执行直接使用返回的准入对象。"""
+    if package is None:
+        package = load_research_package(args.package, documents=documents)
     if package.builder_id != OPERATOR_GRAPH_BUILDER_ID:
         raise ValueError("ResearchPackage builder 不受支持；请使用当前 operator graph 模板")
     missing = [
@@ -123,23 +136,11 @@ def admit_package(
         getattr(args, "extension_bundle", ()),
         builtin_registry=build_mainline_operator_registry(),
     )
-    verifier = None
-    if getattr(args, "verifier_bundle", None):
-        from research_pipeline.extensions import admit_project_verifier_bundle
-
-        verifier = admit_project_verifier_bundle(
-            args.verifier_bundle,
-            expected_project_id=(
-                getattr(registry, "project_id", None)
-                or package.spec_payload["research_id"]
-            ),
-        )
     return _execute_operator_graph(
         args,
         package,
         registry,
         source_verification,
-        verifier,
     )
 
 
@@ -148,29 +149,25 @@ def _execute_operator_graph(
     package,
     registry,
     source_verification,
-    verifier=None,
-) -> dict[str, object]:
-    _reject_audit_query_formal_consumers(package)
+):
+    query_result = compile_package_queries(package)
+    _reject_audit_query_formal_consumers(package, query_result=query_result)
     catalog = load_compiled_catalog(args.catalog_lock)
-    # 先用占位平台准入编译同一研究图，只为取得唯一正式 data-plane 节点预算。
-    # 真正 Catalog/PIT 身份仍在只读准入后重新编译并进入最终 plan identity。
-    provisional_plan = compile_research_package(
-        package,
-        admission=registry,
-        platform_admission=None,
-        verifier_admission=verifier,
-    )
-    provisional_dag = compile_operator_graph_dag(provisional_plan, registry)
+    _validate_operator_graph_spec(package.spec_payload)
+    recipe = OperatorGraphRecipe.from_dict(package.spec_payload["graph"])
+    # 数据预算与最终 DAG 同取 OperatorDefinition，其他节点只在正式编译时构建。
+    data_nodes = []
+    for node in recipe.nodes:
+        if node.operator_id not in {"data.columnar.materialize", "data.minute.scan"}:
+            continue
+        spec = registry.require_operator(node.operator_id, node.operator_version)
+        profile = dict(spec.resource_profile)
+        profile.pop("process_slots")
+        data_nodes.append(SimpleNamespace(node_id=node.node_id, resource_budget=ResourceBudget(**profile)))
     execution_budgets = bind_data_plane_request_budgets(
-        request_queries=dict(
-            zip(
-                provisional_plan.request_ids,
-                provisional_plan.queries,
-                strict=True,
-            )
-        ),
-        recipe_nodes=provisional_plan.recipe.nodes,
-        dag=provisional_dag,
+        request_queries=dict(zip(query_result.request_ids, query_result.queries, strict=True)),
+        recipe_nodes=recipe.nodes,
+        dag=SimpleNamespace(nodes=tuple(data_nodes)),
     )
     input_snapshot_manifest = None
     archive_path = getattr(args, "input_snapshot_manifest", None)
@@ -186,9 +183,8 @@ def _execute_operator_graph(
             {"plan_output": args.output, **source_roles},
             read_only_roles=tuple(source_roles),
         )
-        compiled_queries = compile_package_queries(package)
         admitted, execution_estimates, platform_admission = admit_archived_queries(
-            dict(zip(compiled_queries.request_ids, compiled_queries.queries, strict=True)), catalog=catalog,
+            dict(zip(query_result.request_ids, query_result.queries, strict=True)), catalog=catalog,
             manifest=input_snapshot_manifest, execution_budgets=execution_budgets,
         )
         source_status = {"input_source": "archived_snapshot", "database_opened": False}
@@ -196,27 +192,33 @@ def _execute_operator_graph(
         admitted, execution_estimates, platform_admission, database_unchanged = _auto_admit_queries(
             package, catalog=catalog, data_db=getattr(args, "data_db", None),
             source_db=getattr(args, "source_db", ()), execution_budgets=execution_budgets,
+            query_result=query_result,
         )
         source_status = {"database_unchanged": database_unchanged}
-    package_plan = compile_research_package(
-        package,
+    package_plan = compile_operator_graph_package(
+        package, query_result=query_result, recipe=recipe,
         admission=registry,
         platform_admission=platform_admission,
-        verifier_admission=verifier,
     )
     if not isinstance(package_plan, OperatorGraphPlan):
         raise ValueError("operator graph builder 返回了错误计划类型")
-    from research_pipeline.packages.project_causal_admission import (
-        validate_project_causal_admitted_sources,
-    )
-
-    validate_project_causal_admitted_sources(package_plan.recipe, admitted)
     dag = compile_operator_graph_dag(package_plan, registry)
+    metric_definitions = tuple(
+        MetricDefinition.from_dict(item)
+        for item in package.spec_payload.get("metric_definitions", ())
+    )
+    if any(node.parameters.get("execution_backend") == "lean" for node in recipe.nodes):
+        from research_pipeline.research.lean_metrics import lean_metric_definitions_for_nodes
+        metric_definitions += tuple(
+            item for item in lean_metric_definitions_for_nodes(recipe.nodes)
+            if item.metric_ref in package.metric_contract.metrics
+        )
     metric = {"contract_hash": package.metric_contract.contract_hash, **package.metric_contract.payload()}
     claim = {"contract_hash": package.claim_contract.contract_hash, **package.claim_contract.payload()}
     output = publish_operator_graph_research_plan(
         args.output,
         package_id=package.package_id,
+        minute_scope_inputs=package.minute_scope_inputs,
         plan=package_plan,
         research_identity=package.research_identity_payload(plan_hash=package_plan.plan_hash),
         metric_contract=metric,
@@ -225,8 +227,9 @@ def _execute_operator_graph(
         execution_estimates=execution_estimates,
         dag=dag,
         registry=registry,
-        verifier=verifier,
         input_snapshot_manifest=input_snapshot_manifest,
+        catalog=catalog,
+        metric_definitions=metric_definitions,
     )
     return {
         "package_id": package.package_id,
@@ -238,15 +241,15 @@ def _execute_operator_graph(
         "query_count": len(admitted),
         **source_status,
         "source_verification": source_verification,
-        "output": str(output),
+        "output": str(output.directory),
         "execution_ready": True,
         "next_action": "使用 run，提供相同来源、产物目录、固定时钟和 seed。",
-    }
+    }, output
 
 
-def _reject_audit_query_formal_consumers(package) -> None:
+def _reject_audit_query_formal_consumers(package, *, query_result=None) -> None:
     """AUDIT 查询只能做数据观察，不能成为正式研究或交易结论的祖先。"""
-    query_result = compile_package_queries(package)
+    query_result = query_result if query_result is not None else compile_package_queries(package)
     audit_request_ids = {
         request_id
         for request_id, query in zip(
@@ -312,141 +315,136 @@ def _auto_admit_queries(
     data_db,
     source_db,
     execution_budgets: dict[str, DataPlaneExecutionBudget],
+    query_result=None,
 ):
     sources = _source_database_map(data_db=data_db, source_db=source_db)
-    query_result = compile_package_queries(package)
+    query_result = query_result if query_result is not None else compile_package_queries(package)
     database_paths = tuple(sorted({path.resolve() for path in sources.values()}, key=str))
     before = {str(path): _database_fingerprint(path) for path in database_paths}
     attestation_by_binding = {}
-    inspector_by_binding = {}
+    inspectors = {}
     factor_publication_id = None
     admitted = {}
     execution_estimates = {}
-    for request_id, query in zip(query_result.request_ids, query_result.queries, strict=True):
-        execution_budget = execution_budgets.get(request_id)
-        if execution_budget is None:
-            raise PlanRequirementsMissingError(
-                f"request={request_id} 缺少实际数据节点 ResourceBudget",
-                f"data_plane_resource_budget:{request_id}",
-            )
-        validate_provider_execution_budget(execution_budget)
-        candidates = [
-            (key, binding)
-            for key, binding in catalog.binding_resolutions.items()
-            if key[0] == query.dataset_id
-            and key[1] == query.dataset_version
-            and key[2] in sources
-        ]
-        if len(candidates) != 1:
-            raise PlanRequirementsMissingError(
-                f"Catalog Lock 无法从显式只读数据源唯一解析 binding: {query.dataset_id}",
-                f"source_profile:{query.dataset_id}",
-            )
-        key, binding = candidates[0]
-        binding_id = str(binding["binding_id"])
-        cached = attestation_by_binding.get(binding_id)
-        if cached is None:
-            inspector = DuckDBSourceInspector(
-                sources[str(key[2])],
-                source_profile=str(key[2]),
-                environment=str(key[3]),
-            )
-            resolved, attestation = CatalogPreflight(catalog).resolve_current_binding(
-                inspector=inspector,
-                dataset_id=query.dataset_id,
-                dataset_version=query.dataset_version,
-                source_profile=str(key[2]),
-                environment=str(key[3]),
-                binding_version=int(key[4]),
-            )
-            cached = (resolved, attestation)
-            attestation_by_binding[binding_id] = cached
-            inspector_by_binding[binding_id] = inspector
-        resolved, attestation = cached
-        factor_publication = (
-            observe_factor_publication(
-                sources[str(key[2])],
-                storage_table=str(resolved["object_name"]),
-            )
-            if str(key[2]) == "factor"
-            else None
-        )
-        if factor_publication is not None:
-            if factor_publication_id not in {None, factor_publication.publication_id}:
+    with ExitStack() as sessions:
+        for request_id, query in zip(query_result.request_ids, query_result.queries, strict=True):
+            execution_budget = execution_budgets.get(request_id)
+            if execution_budget is None:
                 raise PlanRequirementsMissingError(
-                    "同一研究计划不能混用不同因子publication",
-                    "factor_publication_consistency",
+                    f"request={request_id} 缺少实际数据节点 ResourceBudget",
+                    f"data_plane_resource_budget:{request_id}",
                 )
-            factor_publication_id = factor_publication.publication_id
-            require_factor_query_covered(
-                factor_publication,
-                storage_table=str(resolved["object_name"]),
-                start=query.time_range.start,
-                end=query.time_range.end,
-            )
-        plan = admit_query(
-            query,
-            catalog=catalog,
-            binding=resolved,
-            attestation=attestation,
-            factor_publication=factor_publication,
-        )
-        inspector = inspector_by_binding.get(binding_id)
-        if inspector is None:
-            inspector = DuckDBSourceInspector(
-                sources[str(key[2])],
-                source_profile=str(key[2]),
-                environment=str(key[3]),
-            )
-            inspector_by_binding[binding_id] = inspector
-        scan_fields = plan.temporal_selection.required_scan_fields
-        field_types = dict(plan.field_types)
-        variable_fields = tuple(
-            field_id
-            for field_id in scan_fields
-            if field_types[field_id].lower() == "string"
-        )
-        statistics_sql, statistics_parameters = compile_duckdb_scope_statistics(
-            plan,
-            variable_fields=variable_fields,
-        )
-        time_range = plan.query.time_range
-        if isinstance(time_range, InstantRangeV2):
-            range_start = source_local_naive(time_range.start_at)
-            range_end = source_local_naive(time_range.end_at)
-            range_end_inclusive = False
-        else:
-            range_start = time_range.start
-            range_end = time_range.end
-            range_end_inclusive = True
-        columns = dict(plan.columns)
-        evidence = inspector.observe_execution_evidence(
-            plan.object_name,
-            projected_columns=columns,
-            variable_fields=variable_fields,
-            query_scope_hash=typed_canonical_hash(plan.query.to_dict()),
-            statistics_sql=statistics_sql,
-            statistics_parameters=tuple(statistics_parameters),
-            event_column=columns[plan.event_time_field],
-            range_start=range_start,
-            range_end=range_end,
-            range_end_inclusive=range_end_inclusive,
-            scope_filters=tuple(
-                (
-                    columns[predicate.field_id],
-                    predicate.operator.value,
-                    predicate.values,
+            validate_provider_execution_budget(execution_budget)
+            candidates = [
+                (key, binding)
+                for key, binding in catalog.binding_resolutions.items()
+                if key[0] == query.dataset_id
+                and key[1] == query.dataset_version
+                and key[2] in sources
+            ]
+            if len(candidates) != 1:
+                raise PlanRequirementsMissingError(
+                    f"Catalog Lock 无法从显式只读数据源唯一解析 binding: {query.dataset_id}",
+                    f"source_profile:{query.dataset_id}",
                 )
-                for predicate in plan.query.filters
-            ),
-        )
-        estimate = build_execution_estimate(
-            plan,
-            evidence=evidence,
-            execution_budget=execution_budget,
-        )
-        admitted[request_id] = plan
-        execution_estimates[request_id] = estimate
+            key, binding = candidates[0]
+            binding_id = str(binding["binding_id"])
+            inspector_key = (sources[str(key[2])], str(key[2]), str(key[3]))
+            inspector = inspectors.get(inspector_key)
+            if inspector is None:
+                inspector = sessions.enter_context(DuckDBSourceInspector(
+                    inspector_key[0], source_profile=inspector_key[1], environment=inspector_key[2],
+                ))
+                inspectors[inspector_key] = inspector
+            cached = attestation_by_binding.get(binding_id)
+            if cached is None:
+                resolved, attestation = CatalogPreflight(catalog).resolve_current_binding(
+                    inspector=inspector,
+                    dataset_id=query.dataset_id,
+                    dataset_version=query.dataset_version,
+                    source_profile=str(key[2]),
+                    environment=str(key[3]),
+                    binding_version=int(key[4]),
+                )
+                cached = (resolved, attestation)
+                attestation_by_binding[binding_id] = cached
+            resolved, attestation = cached
+            factor_publication = (
+                observe_factor_publication(
+                    sources[str(key[2])],
+                    storage_table=str(resolved["object_name"]),
+                )
+                if str(key[2]) == "factor"
+                else None
+            )
+            if factor_publication is not None:
+                if factor_publication_id not in {None, factor_publication.publication_id}:
+                    raise PlanRequirementsMissingError(
+                        "同一研究计划不能混用不同因子publication",
+                        "factor_publication_consistency",
+                    )
+                factor_publication_id = factor_publication.publication_id
+                require_factor_query_covered(
+                    factor_publication,
+                    storage_table=str(resolved["object_name"]),
+                    start=query.time_range.start,
+                    end=query.time_range.end,
+                )
+            plan = admit_query(
+                query,
+                catalog=catalog,
+                binding=resolved,
+                attestation=attestation,
+                factor_publication=factor_publication,
+            )
+            scan_fields = plan.temporal_selection.required_scan_fields
+            field_types = dict(plan.field_types)
+            variable_fields = tuple(
+                field_id
+                for field_id in scan_fields
+                if field_types[field_id].lower() == "string"
+            )
+            statistics_sql, statistics_parameters = compile_duckdb_scope_statistics(
+                plan,
+                variable_fields=variable_fields,
+            )
+            time_range = plan.query.time_range
+            if isinstance(time_range, InstantRangeV2):
+                range_start = source_local_naive(time_range.start_at)
+                range_end = source_local_naive(time_range.end_at)
+                range_end_inclusive = False
+            else:
+                range_start = time_range.start
+                range_end = time_range.end
+                range_end_inclusive = True
+            columns = dict(plan.columns)
+            evidence = inspector.observe_execution_evidence(
+                plan.object_name,
+                projected_columns=columns,
+                variable_fields=variable_fields,
+                query_scope_hash=typed_canonical_hash(plan.query.to_dict()),
+                statistics_sql=statistics_sql,
+                statistics_parameters=tuple(statistics_parameters),
+                event_column=columns[plan.event_time_field],
+                range_start=range_start,
+                range_end=range_end,
+                range_end_inclusive=range_end_inclusive,
+                scope_filters=tuple(
+                    (
+                        columns[predicate.field_id],
+                        predicate.operator.value,
+                        predicate.values,
+                    )
+                    for predicate in plan.query.filters
+                ),
+            )
+            estimate = build_execution_estimate(
+                plan,
+                evidence=evidence,
+                execution_budget=execution_budget,
+            )
+            admitted[request_id] = plan
+            execution_estimates[request_id] = estimate
     after = {str(path): _database_fingerprint(path) for path in database_paths}
     if before != after:
         raise ValueError("只读 Catalog/PIT 准入前后数据库 size/mtime 发生变化")

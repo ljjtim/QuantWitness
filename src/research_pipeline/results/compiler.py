@@ -28,6 +28,7 @@ def compile_result_spec(
     *,
     recipe: OperatorGraphRecipe,
     resolver: ResultOperatorResolver,
+    research_semantics: object | None = None,
 ) -> ResultSpec:
     if not isinstance(payload, Mapping) or set(payload) != {"contract_version", "tables"}:
         raise ResultContractError("result spec 顶层 schema 无效")
@@ -82,6 +83,16 @@ def compile_result_spec(
         for port in getattr(operator, "output_ports", ()):
             artifact_type = str(port.artifact_type)
             path_prefix = _FORMAL_CAUSAL_TABLE_PATHS.get(artifact_type)
+            causal = node.parameters.get("causal_plan")
+            if path_prefix is not None and isinstance(causal, Mapping) and causal.get("output_port") == port.port:
+                daily_keys = (
+                    {"entity_id", "observation_session", "window_sessions", "feature_id"}
+                    if causal.get("kind") == "feature" else
+                    {"entity_id", "observation_session", "horizon_sessions"}
+                )
+                standardized_daily = research_semantics is not None and set(causal.get("key_columns", ())) == daily_keys
+                if not standardized_daily:
+                    path_prefix = str(port.port)
             identity = (
                 node.node_id,
                 str(port.port),

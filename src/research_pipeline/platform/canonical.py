@@ -45,8 +45,6 @@ def typed_canonical_bytes(value: object) -> bytes:
 
 def typed_canonical_hash(value: object) -> str:
     """按带类型标签的治理 codec 计算 sha256。"""
-    # 先保持原有拒绝顺序，再编码，避免 UTF-8 错误提前遮住非法输入。
-    _validate_typed_canonical_value(value)
     return _typed_canonical_digest(value, allow_iterators=False)
 
 
@@ -70,6 +68,9 @@ def _typed_canonical_digest(value: object, *, allow_iterators: bool) -> str:
 _SCALAR_BATCH_MAX_ITEMS = 256
 _SCALAR_BATCH_MAX_CHARACTERS = 16384
 _SCALAR_MAPPING_MAX_ITEMS = 64
+_COMPACT_MAX_NODES = 256
+_COMPACT_MAX_CHARACTERS = 65536
+_STRING_TOKEN_PREFIX_LENGTH = len('{"type":"str","value":')
 _SOURCE_CACHE_MAX_CHARACTERS = 65536
 _SCALAR_TOKEN_CACHE_MAX_ITEMS = 2048
 _SCALAR_TOKEN_MAX_CHARACTERS = 256
@@ -85,11 +86,14 @@ class _TypedCanonicalEncoder:
 
     def __init__(self, *, allow_iterators: bool = True) -> None:
         self._allow_iterators = allow_iterators
+        self._root_pending = True
         self._source_snapshot: tuple[str, ...] | None = None
         self._source_part: str | None = None
         self._scalar_tokens: dict[tuple[type, str | int], str] = {}
 
     def parts(self, value: object) -> Iterator[str]:
+        root = self._root_pending
+        self._root_pending = False
         if isinstance(value, Mapping):
             if any(not isinstance(key, str) for key in value):
                 raise CanonicalEncodingError("canonical payload 的 mapping key 必须是字符串")
@@ -98,17 +102,34 @@ class _TypedCanonicalEncoder:
             ):
                 yield self._mapping_part(value)
                 return
+            # 独立小对象沿单次 JSON 快路径；集合内的嵌套记录复用标量 token。
+            if root and len(value) <= _SCALAR_MAPPING_MAX_ITEMS and all(
+                _scalar_or_scalar_sequence(item) or (
+                    isinstance(item, Mapping) and len(item) <= _SCALAR_MAPPING_MAX_ITEMS
+                    and all(_scalar_or_scalar_sequence(child) for child in item.values())
+                ) for item in value.values()
+            ):
+                yield canonical_json(_typed_canonical_value(value))
+                return
+            compact = self._bounded_container_part(value)
+            if compact is not None:
+                yield compact
+                return
             yield '{"type":"object","value":{'
             for position, key in enumerate(sorted(value)):
                 if position:
                     yield ","
-                yield canonical_json(key)
+                yield self._key_part(key)
                 yield ":"
                 yield from self.parts(value[key])
             yield "}}"
         elif isinstance(value, (list, tuple)) and _scalar_or_scalar_sequence(value):
             yield self._sequence_part(value)
         elif isinstance(value, (list, tuple)) or (self._allow_iterators and isinstance(value, Iterator)):
+            compact = self._bounded_container_part(value)
+            if compact is not None:
+                yield compact
+                return
             yield '{"type":"list","value":['
             for position, item in enumerate(value):
                 if position:
@@ -116,7 +137,54 @@ class _TypedCanonicalEncoder:
                 yield from self.parts(item)
             yield "]}"
         else:
-            yield canonical_json(_typed_canonical_value(value))
+            yield self._scalar_part(value)
+
+    def _key_part(self, key: str) -> str:
+        if type(key) is str and len(key) <= _SCALAR_TOKEN_MAX_CHARACTERS:
+            return self._scalar_part(key)[_STRING_TOKEN_PREFIX_LENGTH:-1]
+        return canonical_json(key)
+
+    def _bounded_container_part(self, value: object) -> str | None:
+        """小嵌套结构共用一个有界缓冲；大集合和惰性来源仍逐段交付。"""
+        if type(value) not in (dict, list, tuple) and not isinstance(value, Mapping):
+            return None
+        if len(value) > _SCALAR_MAPPING_MAX_ITEMS:
+            return None
+        fragments: list[str] = []
+        # 所有嵌套层共用额度，缓冲不随深度或行数增大。
+        budget = [_COMPACT_MAX_NODES, _COMPACT_MAX_CHARACTERS]
+        if self._append_compact(value, fragments, budget):
+            return "".join(fragments)
+        return None
+
+    def _append_compact(self, value: object, fragments: list[str], budget: list[int]) -> bool:
+        budget[0] -= 1
+        if budget[0] < 0:
+            return False
+        value_type = type(value)
+        if value is None or value_type in (bool, int, float, str):
+            part = self._scalar_part(value)
+            fragments.append(part)
+            budget[1] -= len(part)
+        else:
+            mapping = value_type is dict or isinstance(value, Mapping)
+            if not mapping and not isinstance(value, (list, tuple)):
+                return False
+            if len(value) > _SCALAR_MAPPING_MAX_ITEMS:
+                return False
+            if mapping and any(not isinstance(key, str) for key in value):
+                raise CanonicalEncodingError("canonical payload 的 mapping key 必须是字符串")
+            part = '{"type":"object","value":{' if mapping else '{"type":"list","value":['
+            fragments.append(part)
+            budget[1] -= len(part) + 2
+            for position, key in enumerate(sorted(value) if mapping else range(len(value))):
+                prefix = ("," if position else "") + (self._key_part(key) + ":" if mapping else "")
+                fragments.append(prefix)
+                budget[1] -= len(prefix)
+                if budget[1] < 0 or not self._append_compact(value[key], fragments, budget):
+                    return False
+            fragments.append("}}" if mapping else "]}")
+        return budget[1] >= 0
 
     def _sequence_part(self, value: list | tuple) -> str:
         if not value or not all(type(item) is str for item in value):
@@ -134,6 +202,14 @@ class _TypedCanonicalEncoder:
 
     def _scalar_part(self, value: object) -> str:
         value_type = type(value)
+        if value is None:
+            return '{"type":"null"}'
+        if value_type is bool:
+            return '{"type":"bool","value":true}' if value else '{"type":"bool","value":false}'
+        if value_type is float:
+            if not math.isfinite(value):
+                raise CanonicalEncodingError("canonical payload 不接受 NaN 或 Inf")
+            return '{"type":"float","value":"' + value.hex() + '"}'
         cacheable = (
             value_type is str and len(value) <= _SCALAR_TOKEN_MAX_CHARACTERS
         ) or (
@@ -193,21 +269,6 @@ def _scalar_or_scalar_sequence(value: object) -> bool:
                 return False
     return True
 
-
-def _validate_typed_canonical_value(value: object) -> None:
-    """按普通编码的顺序验证，不构造容器的 typed 副本。"""
-    if value is None or isinstance(value, (bool, str)):
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _validate_typed_canonical_value(item)
-    elif isinstance(value, Mapping):
-        if any(not isinstance(key, str) for key in value):
-            raise CanonicalEncodingError("canonical payload 的 mapping key 必须是字符串")
-        for key in sorted(value):
-            _validate_typed_canonical_value(value[key])
-    else:
-        _typed_canonical_value(value)
 
 
 def _typed_canonical_value(value: object) -> object:

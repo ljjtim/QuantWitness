@@ -1,4 +1,4 @@
-"""从已验证 Result 流式生成通用时间序列分析。"""
+"""从正式 Result 流式生成通用时间序列分析。"""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .analysis_contracts import (
     AnalysisYear,
 )
 from .errors import EvidenceContractError
-from .verification_result import load_verified_result_context
+from research_pipeline.results import ResultReference, load_result_context
 
 
 DEFAULT_ANALYSIS_MEMORY_BYTES = 8 * 1024 * 1024
@@ -64,10 +64,10 @@ def load_analysis_comparison(source: str | Path) -> AnalysisComparison:
     return comparison
 
 
-def analyze_verified_result(
-    verification_result: str | Path,
+def analyze_result(
+    result: str | Path,
     *,
-    result_store: str | Path,
+    result_store: str | Path | None = None,
     request: AnalysisRequest,
     memory_bytes: int = DEFAULT_ANALYSIS_MEMORY_BYTES,
 ) -> AnalysisResult:
@@ -75,21 +75,14 @@ def analyze_verified_result(
 
     if type(memory_bytes) is not int or memory_bytes <= 0:
         raise EvidenceContractError("analysis memory budget 必须是正整数字节")
-    context = load_verified_result_context(
-        verification_result,
+    context = load_result_context(
+        result,
         result_store=result_store,
         additional_table_ids=(request.selection.table_id,),
     )
-    verification = context.verification
     bundle = context.snapshot.bundle
-    if verification.status != "pass":
-        raise EvidenceContractError("analysis 只接受 status=pass 的 VerificationResult")
     if request.result_id != bundle.result_id:
         raise EvidenceContractError("AnalysisRequest result_id 与 Result 不一致")
-    if request.verification_hash != verification.verification_hash:
-        raise EvidenceContractError(
-            "AnalysisRequest verification_hash 与 VerificationResult 不一致"
-        )
 
     manifests = tuple(
         table for table in bundle.tables
@@ -182,19 +175,12 @@ def analyze_verified_result(
     aggregations = request.aggregations
     year_results = _build_year_results(request, yearly)
     source = AnalysisSource(
-        result_reference=verification.result_reference,
-        package_hash=verification.source_package_hash,
-        plan_hash=verification.source_plan_hash,
-        runtime_hash=verification.source_runtime_hash,
-        implementation_manifest_hash=(
-            verification.source_implementation_manifest_hash
-        ),
-        verification_hash=verification.verification_hash,
-        policy_id=verification.policy_id,
-        policy_hash=verification.policy_hash,
-        claim_level=verification.claim_level,
-        claim_ceiling=verification.claim_ceiling,
-        limitations=verification.limitations,
+        result_reference=ResultReference.build(bundle),
+        package_hash=bundle.package_hash, plan_hash=bundle.plan_hash,
+        runtime_hash=bundle.runtime_hash,
+        implementation_manifest_hash=bundle.implementation_manifest_hash,
+        claim_level=context.claim_level,
+        claim_ceiling=bundle.effective_input_claim_ceiling, limitations=context.limitations,
     )
     table = AnalysisTableBinding(
         table_id=manifest.table_id,
@@ -468,12 +454,6 @@ def _comparison_reasons(
         reasons.add("date_type_mismatch")
     if any(item.table.value_arrow_type != first.table.value_arrow_type for item in results[1:]):
         reasons.add("value_type_mismatch")
-    if any(
-        (item.source.policy_id, item.source.policy_hash)
-        != (first.source.policy_id, first.source.policy_hash)
-        for item in results[1:]
-    ):
-        reasons.add("claim_policy_mismatch")
     if any(item.source.claim_level != first.source.claim_level for item in results[1:]):
         reasons.add("claim_level_mismatch")
     if any(item.source.claim_ceiling != first.source.claim_ceiling for item in results[1:]):
@@ -507,13 +487,10 @@ def _comparison_source(result: AnalysisResult) -> dict[str, object]:
     return {
         "analysis_hash": result.analysis_hash,
         "result_reference": result.source.result_reference.to_dict(),
-        "verification_hash": result.source.verification_hash,
         "package_hash": result.source.package_hash,
         "plan_hash": result.source.plan_hash,
         "runtime_hash": result.source.runtime_hash,
         "implementation_manifest_hash": result.source.implementation_manifest_hash,
-        "policy_id": result.source.policy_id,
-        "policy_hash": result.source.policy_hash,
         "claim_level": result.source.claim_level,
         "claim_ceiling": result.source.claim_ceiling,
         "table_id": result.table.table_id,
@@ -586,7 +563,7 @@ def _write_canonical_document(
 
 
 __all__ = [
-    "DEFAULT_ANALYSIS_MEMORY_BYTES", "analyze_verified_result",
+    "DEFAULT_ANALYSIS_MEMORY_BYTES", "analyze_result",
     "compare_analysis_results", "load_analysis_comparison", "load_analysis_request",
     "load_analysis_result", "write_analysis_comparison", "write_analysis_result",
 ]

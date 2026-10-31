@@ -1,4 +1,4 @@
-"""VerificationResult 报告的规范输出。"""
+"""Result 报告的规范输出。"""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from typing import Mapping
 from research_pipeline.platform.exclusive_output import write_text_exclusive_atomic
 
 
-REPORT_DOCUMENT_VERSION = "research-verification-report-v1"
+REPORT_DOCUMENT_VERSION = "research-result-report-v1"
 
 
-def write_verification_report(
+def write_result_report(
     destination: str | Path,
     *,
     output_format: str,
@@ -41,11 +41,11 @@ def write_verification_report(
         raise FileExistsError(f"报告输出已存在: {Path(destination).resolve()}") from exc
 
 
-__all__ = ["REPORT_DOCUMENT_VERSION", "write_verification_report"]
+__all__ = ["REPORT_DOCUMENT_VERSION", "write_result_report"]
 
 
 def prepare_qlib_request(args):
-    """在读取 Result 前检查 HTML 参数，并确定需要验证的表。"""
+    """在读取 Result 前检查 HTML 参数，并确定需要读取的表。"""
     request_path = getattr(args, "request", None)
     if args.format == "html":
         if not args.output or not request_path:
@@ -75,5 +75,5 @@ def write_qlib_report(destination, *, context, request, markdown):
     if output.exists():
         raise FileExistsError(f"报告输出已存在: {output}")
     return write_text_exclusive_atomic(
-        output, render_qlib_report(context, request, verification_summary=markdown)
+        output, render_qlib_report(context, request, result_summary=markdown)
     )

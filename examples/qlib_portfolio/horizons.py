@@ -110,10 +110,10 @@ def prepare_horizons(root, horizons, mode="model", input_config=None, sequence_s
             horizon_sessions=horizon, window_config=deepcopy(windows), research_series=research_series)
         member = {"horizon_sessions": horizon, "root": str(child), "package": bundle["package"],
             "bundle_paths": str(child / "bundle-paths.json"), "result_directory": None,
-            "verification_result": None, "report": None}
+            "result_id": None, "result_store": str(child / "results"), "report_path": None}
         _require_member_declaration(member, plan)
         members.append(member)
-    group = {"schema": "qlib-horizon-group-v1", "plan": plan, "members": members}
+    group = {"schema": "qlib-horizon-group-v2", "plan": plan, "members": members}
     _save(root / GROUP_FILE, group)
     return {"stage": "prepare", "status": "prepared", "group_manifest": str(root / GROUP_FILE),
         "mode": mode, "horizons": horizons, "members": deepcopy(members)}
@@ -124,52 +124,36 @@ def _run_receipt(member):
     return _read(path) if path.exists() else {}
 
 
-def _verification_pass(member):
-    path = Path(member["root"]) / "verification.json"
-    if not path.exists():
-        return False
-    verification = _read(path)
-    if verification.get("status") != "pass":
-        return False
-    receipt = _run_receipt(member)
-    if (receipt.get("status") != "result_finalized"
-            or verification["result_reference"]["result_id"] != receipt["result_id"]):
-        raise ValueError("成员VerificationResult与当前正式Result不一致")
-    return True
-
-
 def _record_references(member):
     root = Path(member["root"])
     receipt = _run_receipt(member)
     if receipt.get("status") == "result_finalized":
         member["result_directory"] = receipt["result_directory"]
-    verification = root / "verification.json"
-    if verification.exists():
-        member["verification_result"] = str(verification)
+        member["result_id"] = receipt["result_id"]
     report = root / "report.md"
     if report.exists():
-        member["report"] = str(report)
+        member["report_path"] = str(report)
 
 
 def execute_horizons(root, stage):
-    """每个期限独立执行；resume跳过已封存Result并补齐验证及报告。"""
+    """每个期限独立执行；resume跳过已封存Result并补齐报告。"""
     root = Path(root).resolve()
     path = root / GROUP_FILE
     group = _read(path)
-    if group["schema"] != "qlib-horizon-group-v1":
+    if group["schema"] != "qlib-horizon-group-v2":
         raise ValueError("不支持的多期限组索引")
-    if stage not in {"lint", "admit", "run", "resume", "verify", "report", "all"}:
+    if stage not in {"lint", "admit", "run", "resume", "report", "all"}:
         raise ValueError("不支持的组阶段")
     plan = group["plan"]
     for member in group["members"]:
         _require_member_declaration(member, plan)
-    stages = (("lint", "admit", "run", "verify", "report") if stage == "all"
-        else ("resume", "verify", "report") if stage == "resume" else (stage,))
+    stages = (("lint", "admit", "run", "report") if stage == "all"
+        else ("resume", "report") if stage == "resume" else (stage,))
     for current in stages:
         if current == "report":
             for member in group["members"]:
-                if not _verification_pass(member):
-                    raise RuntimeError("组成员独立验证未全部通过，请先执行verify")
+                if _run_receipt(member).get("status") != "result_finalized":
+                    raise RuntimeError("组成员尚未全部封存Result，请先完成原运行")
         for member in group["members"]:
             child = Path(member["root"])
             receipt = _run_receipt(member)
@@ -180,10 +164,6 @@ def execute_horizons(root, stage):
                 continue
             if current == "run" and (child / "run").exists():
                 raise ValueError("成员已有运行，请使用组resume继续原研究")
-            if current == "verify" and _verification_pass(member):
-                _record_references(member)
-                _save(path, group)
-                continue
             if current == "report" and (child / "report.md").exists():
                 _record_references(member)
                 _save(path, group)
@@ -193,11 +173,9 @@ def execute_horizons(root, stage):
                 result = _execute_member(child, operation, mode=plan["mode"])
                 if operation in {"run", "resume"} and result.get("status") != "result_finalized":
                     raise RuntimeError("成员研究尚未封存，请恢复原目录")
-                if operation == "verify" and (result.get("status") != "pass" or not _verification_pass(member)):
-                    raise RuntimeError("组成员独立验证未通过")
             finally:
                 _record_references(member)
                 _save(path, group)
-    status = "pass" if stage in {"verify", "resume", "all"} else "result_finalized" if stage == "run" else "completed"
+    status = "succeeded" if stage in {"run", "report", "resume", "all"} else "completed"
     return {"stage": stage, "status": status, "group_manifest": str(path), "mode": plan["mode"],
         "horizons": list(plan["horizons"]), "members": deepcopy(group["members"])}

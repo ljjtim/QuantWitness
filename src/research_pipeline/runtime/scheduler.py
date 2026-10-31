@@ -12,6 +12,7 @@ from .contracts import ResourceBudget
 from .errors import RuntimeAdmissionError
 
 
+DEFAULT_RUNTIME_CPU_SLOTS = 4
 DEFAULT_RUNTIME_MEMORY_BYTES = 16 * 1024**3
 DEFAULT_RUNTIME_SCRATCH_BYTES = 64 * 1024**3
 

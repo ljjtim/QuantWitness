@@ -1,5 +1,6 @@
 """金融 checkpoint 恢复不重复记账，损坏内容不得复用。"""
 from datetime import datetime
+import hashlib
 import json
 from zoneinfo import ZoneInfo
 
@@ -85,8 +86,14 @@ def test_financial_checkpoint_resume_does_not_repeat_fill_fee_or_ledger_event(
             expectation=expectation,
             attempt_id="attempt-1",
             content=_financial_payload(),
-            output_name="simulation",
-            output_type="research.simulation.v1",
+            outputs={
+                "simulation": ArtifactRef(
+                    "simulation",
+                    "research.simulation.v1",
+                    expectation.node_execution_id,
+                    hashlib.sha256(_financial_payload()).hexdigest(),
+                ),
+            },
             audit_environment_digest="5" * 64,
             execution_identity_digest="6" * 64,
             root_seed=7,
@@ -141,8 +148,14 @@ def test_corrupt_financial_checkpoint_is_never_reused(tmp_path) -> None:
         expectation=expectation,
         attempt_id="attempt-1",
         content=_financial_payload(),
-        output_name="simulation",
-        output_type="research.simulation.v1",
+        outputs={
+            "simulation": ArtifactRef(
+                "simulation",
+                "research.simulation.v1",
+                expectation.node_execution_id,
+                hashlib.sha256(_financial_payload()).hexdigest(),
+            ),
+        },
         audit_environment_digest="5" * 64,
         execution_identity_digest="6" * 64,
         root_seed=7,

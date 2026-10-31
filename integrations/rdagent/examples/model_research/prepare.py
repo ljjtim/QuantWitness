@@ -20,7 +20,7 @@ def build(output, *, model_env_file=None, coding_sources=(), model_family="Gener
     definition = root / "model-definition.md"
     definition.write_text("# 合成模型研究定义\n\n使用虚构ETF与冻结特征研究下一期价格变化。\n"
         "基线是单层线性网络，后续提出新的前馈连接与激活。\n"
-        "训练设置固定；各轮仅评价独立验证通过的validation均方误差。\n", encoding="utf-8")
+        "训练设置固定；各轮仅评价正式执行成功的validation均方误差。\n", encoding="utf-8")
     def reflection(text):
         return {"Observations": text, "Feedback for Hypothesis": "结论以正式开发指标为准",
                 "New Hypothesis": "检验带原输入跳连的非线性网络", "Reasoning": "比较不同结构的开发误差", "Decision": False}

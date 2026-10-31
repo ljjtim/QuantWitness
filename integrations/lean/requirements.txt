@@ -1,0 +1,13 @@
+# Python 3.11，LEAN Python.NET 与正式研究共用独立虚拟环境。
+pandas==2.3.1
+numpy==2.2.6
+duckdb==1.5.5
+PyYAML==6.0.3
+psutil==7.2.2
+pyarrow==21.0.0
+matplotlib==3.11.2
+scipy==1.17.1
+wrapt==1.16.0
+ijson==3.6.0
+plotly==6.9.0
+

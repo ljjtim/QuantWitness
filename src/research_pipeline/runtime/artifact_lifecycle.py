@@ -33,11 +33,10 @@ def external_staging_finished(staging: Path) -> None:
         owner._safe_finish_external_staging(Path(staging))
 
 
-def protection_reasons(path: Path, boundary: Path) -> tuple[str, ...]:
-    """保护标记对其所在目录及后代生效。"""
+def _ancestor_protection_reasons(path: Path, boundary: Path) -> list[str]:
     path, boundary = path.resolve(), boundary.resolve()
     if not path.is_relative_to(boundary):
-        return ("path_outside_owner",)
+        return ["path_outside_owner"]
     reasons = []
     for parent in (path, *path.parents):
         for marker in PROTECTION_MARKERS:
@@ -45,6 +44,15 @@ def protection_reasons(path: Path, boundary: Path) -> tuple[str, ...]:
                 reasons.append(f"{parent.relative_to(boundary).as_posix()}/{marker}")
         if parent == boundary:
             break
+    return reasons
+
+
+def protection_reasons(path: Path, boundary: Path) -> tuple[str, ...]:
+    """保护标记对其所在目录及后代生效。"""
+    path, boundary = path.resolve(), boundary.resolve()
+    reasons = _ancestor_protection_reasons(path, boundary)
+    if "path_outside_owner" in reasons:
+        return tuple(reasons)
     if path.is_dir():
         for child in path.rglob("*"):
             if child.name in PROTECTION_MARKERS:
@@ -225,30 +233,46 @@ class AttemptArtifactLifecycle:
             reasons.append("node_checkpoint_or_resource_not_accepted")
         if not handoff.worker_exited:
             reasons.append("worker_not_exited")
-        reasons.extend(protection_reasons(source, self.root))
+        reasons.extend(_ancestor_protection_reasons(source, self.root))
         if reasons or not source.exists():
             return item
         try:
+            source_is_dir = source.is_dir()
+            sources = {}
+            if source_is_dir:
+                # 同一次目录遍历同时检查保护标记与交接文件集合。
+                for path in source.rglob("*"):
+                    relative = path.relative_to(source).as_posix()
+                    if path.name in PROTECTION_MARKERS:
+                        reasons.append(path.relative_to(self.root).as_posix())
+                    if path.is_file():
+                        sources[relative] = path
+            else:
+                sources[""] = source
+            if reasons:
+                item["protection_reasons"] = sorted(set(reasons))
+                return item
             commit = self.external.verify(handoff.commit.semantic_hash)
             if commit != handoff.commit:
                 raise ValueError("正式替代工件与交接引用不一致")
             target = (self.external.objects_root / commit.semantic_hash).resolve()
-            sources = {p.relative_to(source).as_posix(): p for p in source.rglob("*") if p.is_file()} if source.is_dir() else {"": source}
             if not sources or set(sources) != set(handoff.files):
                 reasons.append("source_file_set_changed")
                 return item
             sizes = {}
+            source_boundary = source if source_is_dir else source.parent
             for relative, path in sources.items():
                 replacement_relative = handoff.files[relative]
                 replacement = (target / replacement_relative).resolve()
-                if (not path.resolve().is_relative_to(source if source.is_dir() else source.parent)
+                source_size = path.stat().st_size
+                if (not path.resolve().is_relative_to(source_boundary)
                     or not replacement.is_relative_to(target)
                     or replacement_relative not in commit.files
                     or not replacement.is_file()
-                    or replacement.stat().st_size != path.stat().st_size):
+                    or replacement.stat().st_size != source_size):
                     reasons.append("replacement_not_closed")
                     return item
-                sizes[relative] = path.stat().st_size
+                sizes[relative] = source_size
             # 仅删除本次登记且已经逐项找到正式替代位置的载荷文件。
             for relative, path in sources.items():
                 path.unlink()

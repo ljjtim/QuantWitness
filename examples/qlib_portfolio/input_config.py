@@ -17,6 +17,8 @@ def load_input_config(path, *, mode, feature_fields=()):
     required = {"contract_version", "research_id", "display_name", "catalog_lock", "input_snapshot_manifest",
                 "calendar_sessions", "calendar_id", "calendar_source", "entities", "columns", "sources",
                 "localization", "snapshot_scope", "finance", "fixed_clock"}
+    if mode == 'portfolio':
+        required.add('lean_execution')
     if set(config) != required or config["contract_version"] != "qlib-own-input-v1":
         raise ValueError("自有输入配置字段不完整或版本不受支持")
     for key in ("research_id", "display_name", "calendar_id", "calendar_source", "snapshot_scope"):
@@ -38,7 +40,10 @@ def load_input_config(path, *, mode, feature_fields=()):
     if len(codes) < 3 or codes != sorted(set(codes)) or any(not code for code in codes):
         raise ValueError("固定证券池至少三只，必须排序且不重复")
     columns = config["columns"]
-    if set(columns) != set(COLUMN_ROLES).union(feature_fields) or len(set(columns.values())) != len(set(COLUMN_ROLES).union(feature_fields)):
+    role_fields = set(COLUMN_ROLES).union(feature_fields)
+    if mode == 'portfolio':
+        role_fields.update(('high', 'low', 'volume'))
+    if set(columns) != role_fields or len(set(columns.values())) != len(role_fields):
         raise ValueError("行情字段映射必须包含七个不同逻辑字段")
     if not config["sources"] or not config["localization"]:
         raise ValueError("自有输入必须说明来源和固定证券池的研究边界")
@@ -65,14 +70,53 @@ def load_input_config(path, *, mode, feature_fields=()):
     profile.require_covers(date.fromisoformat(days[0]), date.fromisoformat(days[-1]))
     catalog = CompiledCatalog.load(config["catalog_lock"])
     archive = load_archived_input_manifest(config["input_snapshot_manifest"])
-    if set(archive["requests"]) != {"daily_feature", "daily_label"}:
-        raise ValueError("归档必须恰好包含daily_feature和daily_label")
+    expected_requests = {'daily_feature', 'daily_label'}
+    execution_ids = set()
+    if mode == 'portfolio':
+        from lean_config import EXECUTION_FIELDS
+        execution = config['lean_execution']
+        if not isinstance(execution, dict) or not EXECUTION_FIELDS <= set(execution):
+            raise ValueError('组合配置缺少完整lean_execution来源声明')
+        for key in ('scope_root', 'lean_home'):
+            if key in execution:
+                target = Path(execution[key])
+                execution[key] = str((target if target.is_absolute() else path.parent/target).resolve())
+        execution_ids = {execution[key] for key in ('bars_request_id', 'open_request_id', 'factor_request_id', 'corporate_action_request_id')}
+        if len(execution_ids) != 4 or execution_ids & expected_requests:
+            raise ValueError('组合四类执行来源须独立命名且不能替代模型请求')
+        expected_requests |= execution_ids
+    if set(archive["requests"]) != expected_requests:
+        raise ValueError('归档请求必须与模型及显式LEAN来源声明完全一致')
     boundary_index = len(days) - 23
     end = days[boundary_index - 1] if mode == "development" else days[-3]
     requests = []
     for request_id, entry in archive["requests"].items():
         plan = admitted_plan_from_dict(entry["original_plan"])
         query = plan.query
+        if request_id in execution_ids:
+            from research_pipeline.packages.project_strategy_admission import validate_daily_strategy_plan, validate_daily_open_plan
+            execution = config['lean_execution']
+            if query.purpose.value == 'audit' or set(query.universe.instruments) != set(codes):
+                raise ValueError('LEAN执行来源不得为AUDIT且须覆盖相同证券')
+            binding = catalog.bindings.get(entry['binding_id'])
+            if not binding or binding['status'] != 'approved' or binding['dataset_id'] != query.dataset_id:
+                raise ValueError('LEAN执行来源缺少已批准Catalog binding')
+            bars = admitted_plan_from_dict(archive['requests'][execution['bars_request_id']]['original_plan'])
+            if request_id == execution['bars_request_id']:
+                validate_daily_strategy_plan(plan)
+            elif request_id == execution['open_request_id']:
+                validate_daily_open_plan(plan, bars, catalog=catalog)
+            elif request_id == execution['factor_request_id']:
+                if not {'fld_etf_date', 'fld_etf_code', 'fld_etf_close', 'fld_etf_factor'} <= set(query.field_ids):
+                    raise ValueError('ETF快照来源须包含正式date/code/close/factor字段')
+            elif query.dataset_id != 'cn_etf.corporate_action':
+                raise ValueError('ETF行动来源须声明正式公司行动dataset')
+            request = query.to_dict()
+            for key in ('contract_version', 'ir_version', 'as_of'):
+                request.pop(key, None)
+            request['request_id'] = request_id
+            requests.append(request)
+            continue
         if query.purpose.value != request_id.removeprefix("daily_"):
             raise ValueError("归档请求用途不匹配")
         request = query.to_dict()
@@ -118,6 +162,14 @@ def write_input_template(root, *, design, research_id, display_name, catalog_loc
         "columns": dict(zip(COLUMN_ROLES, design["market_fields"])), "sources": sources,
         "localization": localization, "snapshot_scope": design["snapshot_scope"],
         "finance": finance, "fixed_clock": fixed_clock}
+    if 'lean_execution' in design:
+        execution = dict(design['lean_execution'])
+        execution['scope_root'] = str((root/'package').resolve())
+        execution['lean_home'] = execution.pop('lean_runtime')['installation_root']
+        execution.pop('initial_cash_units')
+        execution.pop('as_of')
+        payload['lean_execution'] = execution
+        payload['columns'].update(high='fld_demo_high', low='fld_demo_low', volume='fld_demo_volume')
     if "factor_fields" in design:
         payload["columns"].update(design["factor_fields"])
     path = root / "input-config.json"

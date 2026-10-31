@@ -168,6 +168,10 @@ class MetricDefinition:
     def metric_ref(self) -> str:
         return f"{self.metric_id}@{self.version}"
 
+    def to_dict(self) -> dict[str, object]:
+        """供研究包保存完整计算定义。"""
+        return {**self.payload(), "definition_digest": self.definition_digest}
+
     def payload(self) -> dict[str, object]:
         payload = {
             "metric_id": self.metric_id,
@@ -508,6 +512,17 @@ class MetricRegistry:
                 for producer in producers
                 if producer[2] == definition.input_artifact_type
             )
+            if len(matches) > 1:
+                matches = tuple(
+                    producer for producer in matches
+                    if any(
+                        getattr(table, "source_node_id", None) == producer[0]
+                        and getattr(table, "source_port", None) == producer[1]
+                        and getattr(table, "artifact_type", None) == producer[2]
+                        and getattr(table, "schema_id", None) == definition.result_schema_id
+                        for table in result_tables
+                    )
+                )
             if len(matches) != 1:
                 raise UnreachableMetricError(
                     f"metric 产出端口必须唯一可达: {metric_ref}; matches={len(matches)}"

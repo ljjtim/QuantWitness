@@ -10,17 +10,15 @@ from research_pipeline.platform.metric_contracts import (
     build_mainline_metric_registry, builtin_metric_output_path,
 )
 from research_pipeline.research.statistics import MinuteLabelReturn, MinuteStatisticsProfile, stream_minute_statistics_artifact
-from ..operator_graph_evidence import build_minute_intraday_validity_facts
 from ..operator_runtime import OperatorRuntimeContext, RuntimeCompletionMetadata, RuntimeNodeOutputs, RuntimeNodeValue
-from .common import _environment, _external_result, _input_admitted_plans, _input_external_payload, _input_external_root, _input_merged_data_bundle, _json_ready, _parameters
-from .minute_io import _aware, _external_parquet_rows, _minute_artifact_partitions
+from .common import _environment, _input_external_payload, _json_ready, _parameters
+from .minute_io import _aware, _minute_artifact_partitions
 
 
 def execute_research_statistics_minute_v1(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeOutputs:
     labels = _input_external_payload(context, "labels")
-    _input_external_payload(context, "simulation")
     parameters = _parameters(context)
     candidates = tuple(str(item) for item in parameters["trial_candidate_ids"])
     if len(candidates) != 1:
@@ -198,36 +196,3 @@ def execute_research_statistics_minute_v1(
             },
         ),
     )
-
-
-def execute_research_validity_minute_v1(
-    context: OperatorRuntimeContext,
-) -> RuntimeNodeValue:
-    environment = _environment(context)
-    simulation = _input_external_payload(context, "simulation")
-    statistics = _input_external_payload(context, "statistics")
-    statistics_root = _input_external_root(context, "statistics")
-    data_bundle = _input_merged_data_bundle(
-        context, "data", "minute_1m", "decision_minute_1m",
-    )
-    facts = build_minute_intraday_validity_facts(
-        admitted_plans=_input_admitted_plans(environment, data_bundle),
-        data_bundle=data_bundle,
-        simulation=simulation,
-        statistics=statistics,
-        statistic_observations=_external_parquet_rows(
-            statistics_root,
-            "observations",
-            columns=(
-                "candidate_id", "observation_id", "decision_at_ns",
-                "entry_at_ns", "exit_at_ns", "return_value",
-            ),
-        ),
-        statistic_split_assignments=_external_parquet_rows(
-            statistics_root,
-            "split-assignments",
-            columns=("observation_id", "candidate_id", "split"),
-        ),
-        fixed_clock=environment.fixed_clock,
-    )
-    return _external_result(context, facts)

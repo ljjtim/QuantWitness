@@ -83,10 +83,6 @@ def stubbed(entry, monkeypatch):
             result = {"status": "result_finalized", "result_id": "R" + str(horizon), "result_directory": str(root / "results" / ("R" + str(horizon)))}
             save(root / "run-receipt.json", result)
             return result
-        if stage == "verify":
-            result = {"status": "pass", "result_reference": {"result_id": "R" + str(horizon)}}
-            save(root / "verification.json", result)
-            return result
         if stage == "report":
             root.joinpath("report.md").write_text("正式研究报告", encoding="utf-8")
         return {"status": "completed"}
@@ -112,19 +108,20 @@ def test_group_freezes_every_member_before_running_and_preserves_candidates(tmp_
     candidates[0]["candidate_id"] = "changed"
     result = horizons.execute_horizons(root, "all")
     assert holds == {1: 1, 5: 1}
-    assert result["status"] == "pass"
+    assert result["status"] == "succeeded"
     assert frozen["plan"]["model_candidates"][0]["candidate_id"] == original[0]["candidate_id"]
     assert result["members"] == read(root / horizons.GROUP_FILE)["members"]
     for item in result["members"]:
         child = root / ("h" + str(item["horizon_sessions"]))
         assert item["package"] == str(child / "package")
         assert item["result_directory"] == str(child / "results" / ("R" + str(item["horizon_sessions"])))
-        assert item["verification_result"] == str(child / "verification.json")
-        assert item["report"] == str(child / "report.md")
+        assert item["result_id"] == "R" + str(item["horizon_sessions"])
+        assert item["result_store"] == str(child / "results")
+        assert item["report_path"] == str(child / "report.md")
     assert "metrics" not in read(root / horizons.GROUP_FILE)
 
 
-def test_group_resume_only_runs_unfinished_members_then_verifies(tmp_path, stubbed, monkeypatch):
+def test_group_resume_only_runs_unfinished_members_then_reports(tmp_path, stubbed, monkeypatch):
     _, horizons, events, holds, execute = stubbed
     root = tmp_path / "group"
     horizons.prepare_horizons(root, [1, 5], mode="development")
@@ -145,11 +142,11 @@ def test_group_resume_only_runs_unfinished_members_then_verifies(tmp_path, stubb
         horizons.execute_horizons(root, "run")
     events.clear()
     result = horizons.execute_horizons(root, "resume")
-    assert result["status"] == "pass"
-    assert events == [("resume", 5), ("verify", 1), ("verify", 5), ("report", 1), ("report", 5)]
+    assert result["status"] == "succeeded"
+    assert events == [("resume", 5), ("report", 1), ("report", 5)]
     assert holds == {1: 1, 5: 1}
     events.clear()
-    assert horizons.execute_horizons(root, "resume")["status"] == "pass"
+    assert horizons.execute_horizons(root, "resume")["status"] == "succeeded"
     assert events == []
     assert holds == {1: 1, 5: 1}
 
@@ -166,27 +163,18 @@ def test_group_resume_runs_unstarted_member_without_repreparing(tmp_path, stubbe
     assert holds == {1: 1, 5: 1}
 
 
-def test_group_verify_failure_never_returns_pass_or_reports(tmp_path, stubbed, monkeypatch):
+def test_group_report_requires_every_member_to_have_a_finalized_result(tmp_path, stubbed):
     _, horizons, events, _, execute = stubbed
     root = tmp_path / "group"
     horizons.prepare_horizons(root, [1, 5], mode="development")
-    horizons.execute_horizons(root, "run")
-
-    def verify(child, stage, **kwargs):
-        if Path(child).name == "h5" and stage == "verify":
-            save(Path(child) / "verification.json", {"status": "fail"})
-            return {"status": "fail"}
-        return execute(child, stage, **kwargs)
-
-    monkeypatch.setattr(horizons, "_execute_member", verify)
-    with pytest.raises(RuntimeError, match="独立验证未通过"):
-        horizons.execute_horizons(root, "verify")
-    assert all(stage != "report" for stage, _ in events)
-    group = read(root / horizons.GROUP_FILE)
-    assert "status" not in group
-    assert group["members"][1]["verification_result"] == str(root / "h5" / "verification.json")
-    with pytest.raises(RuntimeError, match="未全部通过"):
+    execute(root / "h1", "run")
+    save(root / "h5" / "run-receipt.json", {"status": "failed"})
+    events.clear()
+    with pytest.raises(RuntimeError, match="尚未全部封存Result"):
         horizons.execute_horizons(root, "report")
+    assert events == []
+    assert not (root / "h1/report.md").exists()
+    assert not (root / "h5/report.md").exists()
 
 
 def test_group_rejects_reused_output_and_changed_member(tmp_path, stubbed):
@@ -241,14 +229,14 @@ def test_single_cli_keeps_defaults_and_passes_explicit_window(tmp_path, entry, m
     run.main(["--output", str(tmp_path / "single"), "--stage", "prepare", *series_args])
     assert calls[0][0][2] == "model"
     assert calls[0][1] == {"horizon_sessions": 1, "window_config": None,
-        "feature_suite": None, "resource_state_dir": None, "research_series": series}
+        "feature_suite": None, "resource_state_dir": None, "research_series": series, "lean_home": None}
     run.main(["--output", str(tmp_path / "other"), "--stage", "prepare", "--horizon-sessions", "5",
         "--window-mode", "rolling", "--train-sessions", "32", "--validation-sessions", "12",
         "--test-sessions", "8", "--step-sessions", "4", "--embargo-sessions", "2", *series_args])
     assert calls[1][1] == {"horizon_sessions": 5, "window_config": {
         "expanding": False, "train_sessions": 32, "validation_sessions": 12,
         "test_sessions": 8, "step_sessions": 4, "embargo_sessions": 2},
-        "feature_suite": None, "resource_state_dir": None, "research_series": series}
+        "feature_suite": None, "resource_state_dir": None, "research_series": series, "lean_home": None}
     with pytest.raises(SystemExit):
         run.main(["--output", str(tmp_path / "other"), "--horizon-sessions", "1", "--horizons", "1", "5"])
 
@@ -260,21 +248,9 @@ def test_group_run_also_skips_finalized_members(tmp_path, stubbed):
     execute(root / "h1", "run")
     events.clear()
     result = horizons.execute_horizons(root, "run")
-    assert result["status"] == "result_finalized"
+    assert result["status"] == "succeeded"
     assert events == [("run", 5)]
     assert holds == {1: 1, 5: 1}
-
-
-def test_group_does_not_accept_verification_for_another_result(tmp_path, stubbed):
-    _, horizons, _, _, _ = stubbed
-    root = tmp_path / "group"
-    horizons.prepare_horizons(root, [1, 5], mode="development")
-    horizons.execute_horizons(root, "run")
-    save(root / "h1" / "verification.json", {"status": "pass", "result_reference": {"result_id": "unrelated"}})
-    with pytest.raises(ValueError, match="当前正式Result"):
-        horizons.execute_horizons(root, "verify")
-    with pytest.raises(ValueError, match="当前正式Result"):
-        horizons.execute_horizons(root, "report")
 
 
 def test_group_real_prepare_freezes_shared_source_and_sequence_candidates(tmp_path, entry):
@@ -303,7 +279,7 @@ def test_group_real_prepare_freezes_shared_source_and_sequence_candidates(tmp_pa
     assert not (root / "h5" / "run").exists()
 
 
-@pytest.mark.parametrize("stage", ["lint", "admit", "run", "resume", "verify", "report"])
+@pytest.mark.parametrize("stage", ["lint", "admit", "run", "resume", "report"])
 def test_member_stage_uses_current_python_and_explicit_source_roots(tmp_path, entry, monkeypatch, stage):
     _, horizons = entry
     import research_pipeline
@@ -364,6 +340,6 @@ def test_group_subprocess_failure_keeps_finalized_member_for_resume(tmp_path, st
     assert group["members"][1]["result_directory"] is None
     assert not (root / "h5" / "report.md").exists()
     events.clear()
-    assert horizons.execute_horizons(root, "resume")["status"] == "pass"
-    assert events == [("resume", 5), ("verify", 1), ("verify", 5), ("report", 1), ("report", 5)]
+    assert horizons.execute_horizons(root, "resume")["status"] == "succeeded"
+    assert events == [("resume", 5), ("report", 1), ("report", 5)]
     assert holds == {1: 1, 5: 1}

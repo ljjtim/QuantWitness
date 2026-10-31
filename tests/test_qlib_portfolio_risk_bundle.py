@@ -7,9 +7,11 @@ import sys
 
 import yaml
 import pytest
+sys.path.insert(0, str(Path(__file__).parent))
+from test_lean_runtime_identity import installation as lean_installation
 
 
-def test_risk_target_bundle_compiles_with_registered_cash_ports(tmp_path):
+def test_risk_target_bundle_compiles_with_project_target_ports(tmp_path):
     from research_pipeline.extensions import load_project_operator_declaration, compile_project_operator_bundle, verify_project_operator_bundle
     from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
     root = Path(__file__).resolve().parents[1]
@@ -20,7 +22,8 @@ def test_risk_target_bundle_compiles_with_registered_cash_ports(tmp_path):
     sys.path.insert(0, str(root/"examples/qlib_portfolio"))
     import prepare
     declaration = prepare.declaration("targets", [("selection", "research.model-selection.v2"), ("data", "data.columnar-bundle.v1")],
-        [("targets", "research.portfolio-targets.v1")], [("design", "json"), ("price_request_id", "string")], module="extension", function="targets")
+        [("targets", "research.portfolio-targets.v1")], [("design", "json"), ("price_request_id", "string")],
+        ('research.portfolio-targets.v1',), module="extension", function="targets")
     declaration["operator"]["operator_id"] = "project.qlib_risk.targets"
     declaration["dependency_lock"].update(scipy=version("scipy"), cvxpy=version("cvxpy"), clarabel=version("clarabel"))
     path = tmp_path/"declaration.yaml"
@@ -35,7 +38,7 @@ def test_risk_target_bundle_compiles_with_registered_cash_ports(tmp_path):
     assert manifest.operator_spec.output_ports[0].artifact_type == "research.portfolio-targets.v1"
 
 
-def test_risk_package_binds_complete_design_to_holdout(tmp_path):
+def test_risk_package_binds_complete_design_to_holdout(tmp_path, lean_installation):
     import json
     from research_pipeline.platform import typed_canonical_hash
     root = Path(__file__).resolve().parents[1]
@@ -45,7 +48,7 @@ def test_risk_package_binds_complete_design_to_holdout(tmp_path):
     series = {"series_id": "risk-model", "root": str(tmp_path / "series"),
         "purpose": "风险组合最终评价", "legacy_ledger_roots": []}
     prepared = module.prepare(tmp_path / "study", method="enhanced", estimator="shrink",
-        research_series=series)
+        research_series=series, lean_home=lean_installation)
     package = Path(prepared["package"])
     payload = yaml.safe_load((package / "spec/research.yaml").read_text(encoding="utf-8"))
     nodes = {item["node_id"]: item for item in payload["graph"]["nodes"]}
@@ -82,7 +85,7 @@ def test_risk_cli_preserves_series_only_during_prepare(tmp_path, monkeypatch):
     module.main(["--output", str(tmp_path / "study"), "--research-series-id", "risk-model",
         "--research-series-root", str(tmp_path / "series"), "--research-series-purpose", "风险组合最终评价",
         "--research-series-legacy-root", str(tmp_path / "legacy")])
-    assert [stage for stage, _ in calls] == ["prepare", "lint", "admit", "run", "verify", "report"]
+    assert [stage for stage, _ in calls] == ["prepare", "lint", "admit", "run", "report"]
     assert calls[0][1]["research_series"] == {"series_id": "risk-model", "root": str(tmp_path / "series"),
         "purpose": "风险组合最终评价", "legacy_ledger_roots": [str(tmp_path / "legacy")]}
     assert all("research_series" not in kwargs for _, kwargs in calls[1:])

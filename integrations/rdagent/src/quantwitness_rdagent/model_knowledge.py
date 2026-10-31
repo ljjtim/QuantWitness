@@ -50,7 +50,7 @@ class ModelCodingKnowledge:
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "records").mkdir(exist_ok=True)
         self.input_path = self.root / "input.json"
-        declaration = {"contract_version": "model-coding-knowledge-v1", "task": self.task,
+        declaration = {"contract_version": "model-coding-knowledge-v2", "task": self.task,
                        "source_sessions": [str(source) for source in self.sources],
                        "max_records": max_records, "max_source_chars": max_source_chars,
                        "source_template": source_template}
@@ -67,7 +67,7 @@ class ModelCodingKnowledge:
                 records.sort(key=lambda record: record.get("sequence", 0))
                 successes = [record for record in records if record["success"]]
                 if not successes:
-                    raise ValueError("模型知识来源缺少正式验证通过的修复实现")
+                    raise ValueError("模型知识来源缺少正式执行成功的修复实现")
                 source_declaration = _read(source_root / "input.json")["declaration"]
                 for record in records:
                     if any(record["task"].get(key) != source_declaration["task"].get(key) for key in ("interface", "model_family")):
@@ -81,11 +81,11 @@ class ModelCodingKnowledge:
             raise ValueError("模型知识候选标识无效")
         success = all(evidence.get(key) == status for key, status in (
             ("command_status", "succeeded"), ("execution_status", "succeeded"),
-            ("verification_status", "pass"), ("model_status", "pass")))
+            ))
         if not success and not model_needs_repair(evidence):
             return None
         refs = formal_refs(evidence)
-        if success and set(refs) != {"execution_ref", "result_ref", "verification_ref", "bundle_ref"}:
+        if success and set(refs) != {"execution_ref", "result_ref", "bundle_ref"}:
             raise ValueError("成功模型编码知识必须保存完整正式来源引用")
         record_task = self.task if task is None else _task(task)
         if record_task["interface"] != self.task["interface"]:
@@ -142,7 +142,7 @@ class ModelCodingKnowledge:
 
 
 def validate_generated_model_source(source_session, record):
-    """把来源节点定义与源码绑定到开发 Result 和独立验证。"""
+    """把来源节点定义与源码绑定到开发 Result。"""
     source_session = Path(source_session)
     candidate_id = record["record_id"].rsplit("/", 1)[1]
     persisted = _read(source_session / "model-coding-knowledge" / "records" / (candidate_id + ".json"))

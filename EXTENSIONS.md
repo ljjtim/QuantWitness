@@ -16,3 +16,11 @@ python -m research_pipeline operator build --spec <声明.yaml> --source <源码
 整改基线的快照与 capability containment 属于完整单仓源码维护流程，依赖内部基线和晋级证据，不随公开仓库、sdist 或源码 zip 分发。公开扩展开发使用上面的 `operator validate/build`；公共算子晋级仍须完成独立审查和人工批准。
 
 完整 ABI、输出 writer、state 和 `causal_plan` 约束见 [项目扩展合同](project_extensions/README.md)。
+
+## 指标、结果与开发验收
+
+项目自定义指标在 spec/research.yaml 的可选 metric_definitions 列表中声明，每项使用 MetricDefinition.to_dict() 格式。ResultSpec 选择实际生产节点与正式表，定义中的单位、频率和输出 schema 与之对齐。
+
+普通 Workspace execute 合并准备与准入，再运行、发布 Result 并报告。独立 package lint 用于主动诊断。Result 直接供报告、比较、分析、导出和开发反馈使用，接口见[结果合同](docs/evidence.md)。
+
+算法先用手算、确定性边界和必要的差分对照验收；实际读取和状态转换继续执行可见时间、Label、holdout、资金及交易规则。公式复现使用已确认定义。开发测试记录真实覆盖范围，不把合成案例或命令成功写成金融认证。

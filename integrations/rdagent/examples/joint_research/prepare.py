@@ -19,7 +19,7 @@ def build(output, *, model_env_file=None):
     model_module.build(root, repair_example=False, model_env_file=model_env_file)
     model = json.loads((root / "request.json").read_text(encoding="utf-8"))
     def reflection(observation, model=False):
-        return {"Observations": observation, "Feedback for Hypothesis": "仅采用已验证开发指标", "New Hypothesis": "比较因子窗口与模型非线性",
+        return {"Observations": observation, "Feedback for Hypothesis": "仅采用正式开发指标", "New Hypothesis": "比较因子窗口与模型非线性",
                 "Reasoning": "使用相同冻结开发范围", "Decision" if model else "Replace Best Result": False}
     responses = [reflection("文档因子基线已评价"),
         {"action": "factor", "direction": "momentum", "knowledge_refs": ["synthetic_joint_research:0000"], "reason": "基线反思支持比较较短窗口"},

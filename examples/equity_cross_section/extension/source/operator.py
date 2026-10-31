@@ -64,7 +64,7 @@ def evaluate(
 
 
 def run(context, inputs, output_root):
-    """从已准入 request 读取完整表，提交项目指标与可独立复核的输入快照。"""
+    """从已准入 request 读取完整表，提交项目指标与输入观测。"""
     import pyarrow as pa
     import pyarrow.parquet as pq
 

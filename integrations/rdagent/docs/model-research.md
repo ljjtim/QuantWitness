@@ -6,7 +6,7 @@
 
 首批支持前馈有向无环网络。每轮声明 1 至 8 个节点，各节点宽度为 1 至 64，激活为 identity、relu、tanh 或 gelu。输入 `-1` 表示冻结特征，其他输入引用此前节点；多输入按列拼接，可以生成跳连。末节点输出一个原始收益预测。结构在运行时提出，由确定性编译器生成 `ResearchNetwork` Python 源码。
 
-特征、标签、处理器、开发日期及训练设置在会话开始时冻结。Qlib 适配器只请求 train/valid 训练数据，预测只请求特征。模型、处理器、网络源码、数值权重及学习曲线随正式 Result 封存。独立验证从源码语法树与权重复核连接、维度和配置，并沿用模型样本与分段验证。
+特征、标签、处理器、开发日期及训练设置在会话开始时冻结。Qlib 适配器只请求 train/valid 训练数据，预测只请求特征。模型、处理器、网络源码、数值权重及学习曲线随正式 Result 封存。模型连接、维度和配置在结构编译与训练入口检查，开发期用例覆盖样本和分段行为。
 
 ## 运行与恢复
 
@@ -23,11 +23,11 @@ python -m quantwitness_rdagent model-resume --request /mnt/i/research/model-demo
 
 每轮正式评价在独立子进程委托同一 PackageCampaign，训练结束后释放模型内存；恢复仍使用该轮原 Workspace。
 
-`rounds/` 保存提案、编译尝试、评价和反思；`experiments/` 保存正式 Workspace；`calls/` 保存预约预算和响应。已有响应按原请求复用，结果未知的调用停止等待核对。恢复继续原 execution，不重新建立已成功实验。每轮只向提案和反思提供独立验证通过的 validation 指标，最终 test/holdout 不进入循环。
+`rounds/` 保存提案、编译尝试、评价和反思；`experiments/` 保存正式 Workspace；`calls/` 保存预约预算和响应。已有响应按原请求复用，结果未知的调用停止等待核对。恢复继续原 execution，不重新建立已成功实验。每轮只向提案和反思提供执行成功的正式 validation 指标，最终 test/holdout 不进入循环。
 
 ## 编码经验
 
-`coding_knowledge.source_sessions` 显式选择过去的模型研究会话。经验必须有实际编译诊断或通过验证的正式模型来源；成功源码读取自 Result。修复提示保留来源记录与技术反馈，不包含金融指标。可以在新会话准备时用 `--coding-source /mnt/i/research/previous/session` 引用。
+`coding_knowledge.source_sessions` 显式选择过去的模型研究会话。经验必须有实际编译诊断或执行成功的正式模型来源；成功源码读取自 Result。修复提示保留来源记录与技术反馈，不包含金融指标。可以在新会话准备时用 `--coding-source /mnt/i/research/previous/session` 引用。
 
 ## 范围限制
 
@@ -38,6 +38,6 @@ python -m quantwitness_rdagent model-resume --request /mnt/i/research/model-demo
 
 `model-inspect --request REQUEST.json` 只读查看已有会话，不创建文件、不调用模型或重跑正式评价。`not_started` 表示尚未建立会话，`incomplete` 表示已冻结但尚无终态，`interrupted` 列出未记录完的轮次及已有执行引用、诊断；原执行锁仍存活时返回 `running` 和 `next_action=wait`。已保存 outcome 保留原状态。
 
-`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `model-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入已验证开发指标反馈，test/holdout 不参与研究循环。
+`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `model-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入正式开发指标反馈，test/holdout 不参与研究循环。
 
 未取得确定结果的模型调用预约显示在 `unresolved_model_calls`；`next_action=review_model_calls` 要求核对原调用收据，不自动重复调用或释放已预约预算。

@@ -10,11 +10,11 @@ import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Iterable, Mapping
 
 import yaml
 
@@ -89,7 +89,7 @@ def _safe_relative_path(value: str, field: str) -> str:
 
 
 def _freeze_payload(value: object, field: str = "parameters") -> object:
-    if value is None or type(value) in {bool, int, float, str}:
+    if value is None or type(value) in (bool, int, float, str):
         return value
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_payload(item, f"{field}[]") for item in value)
@@ -104,6 +104,8 @@ def _freeze_payload(value: object, field: str = "parameters") -> object:
 
 
 def _thaw_payload(value: object) -> object:
+    if value is None or type(value) in (bool, int, float, str):
+        return value
     if isinstance(value, Mapping):
         return {str(key): _thaw_payload(item) for key, item in value.items()}
     if isinstance(value, tuple):
@@ -253,8 +255,9 @@ class ProjectOperatorContext:
         if budget and (
             set(budget) != expected_budget
             or any(type(value) is not int for value in budget.values())
-            or any(value <= 0 for key, value in budget.items() if key != "temp_bytes")
+            or any(value <= 0 for key, value in budget.items() if key not in {"temp_bytes", "wall_seconds"})
             or budget.get("temp_bytes", 0) < 0
+            or budget.get("wall_seconds", 0) < 0
         ):
             raise ExtensionError("项目算子有效资源预算无效")
         object.__setattr__(
@@ -411,6 +414,22 @@ class ProjectDirectoryCommit:
         )
 
 
+def _preflight_parameter_names(value):
+    if not isinstance(value, (list, tuple)) or any(not isinstance(name, str) for name in value):
+        raise ExtensionError("参数预检输入必须是参数名列表")
+    return tuple(value)
+
+
+def _validate_preflight_parameters(names, module, operator_spec):
+    if names is None:
+        return
+    names = _preflight_parameter_names(names)
+    if module is None or not names or len(names) != len(set(names)):
+        raise ExtensionError("参数预检投影须绑定预检入口且参数名非空、唯一")
+    if set(names) - {item.name for item in operator_spec.parameters}:
+        raise ExtensionError("参数预检投影引用未声明参数")
+
+
 @dataclass(frozen=True)
 class ProjectOperatorBundleManifest:
     project_id: str
@@ -428,6 +447,7 @@ class ProjectOperatorBundleManifest:
     bundle_hash: str
     parameter_preflight_module: str | None = None
     parameter_preflight_function: str | None = None
+    parameter_preflight_parameters: tuple[str, ...] | None = None
     contract_version: str = PROJECT_OPERATOR_BUNDLE_VERSION
     abi_version: str = PROJECT_OPERATOR_ABI_VERSION
 
@@ -447,6 +467,12 @@ class ProjectOperatorBundleManifest:
             or not _FUNCTION_PATTERN.fullmatch(preflight_values[1])
         ):
             raise ExtensionError("项目算子参数预检描述符无效")
+        _validate_preflight_parameters(
+            self.parameter_preflight_parameters, self.parameter_preflight_module, self.operator_spec
+        )
+        if self.parameter_preflight_parameters is not None:
+            object.__setattr__(self, "parameter_preflight_parameters",
+                               tuple(self.parameter_preflight_parameters))
         hashes = (self.source_tree_hash, self.dependency_lock_hash, self.bundle_hash)
         if any(not _HASH_PATTERN.fullmatch(value) for value in hashes):
             raise ExtensionError("项目 bundle 身份字段无效")
@@ -495,6 +521,8 @@ class ProjectOperatorBundleManifest:
                 "module": self.parameter_preflight_module,
                 "function": self.parameter_preflight_function,
             }
+            if self.parameter_preflight_parameters is not None:
+                payload["parameter_preflight"]["parameters"] = list(self.parameter_preflight_parameters)
         return payload
 
     def to_dict(self) -> dict[str, object]:
@@ -522,7 +550,7 @@ class ProjectOperatorBundleManifest:
         preflight = payload.get("parameter_preflight")
         if preflight is not None and (
             not isinstance(preflight, Mapping)
-            or set(preflight) != {"module", "function"}
+            or set(preflight) not in ({"module", "function"}, {"module", "function", "parameters"})
         ):
             raise ExtensionError("项目 bundle parameter_preflight schema 无效")
         if not isinstance(payload["source_files"], list) or any(not isinstance(item, Mapping) for item in payload["source_files"]):
@@ -549,6 +577,10 @@ class ProjectOperatorBundleManifest:
             parameter_preflight_function=(
                 None if preflight is None else str(preflight["function"])
             ),
+            parameter_preflight_parameters=(
+                None if preflight is None or "parameters" not in preflight
+                else _preflight_parameter_names(preflight["parameters"])
+            ),
             contract_version=str(payload["contract_version"]),
             abi_version=str(payload["abi_version"]),
         )
@@ -566,6 +598,7 @@ class ProjectOperatorDeclaration:
     permissions: ProjectOperatorPermissionProfile
     parameter_preflight_module: str | None = None
     parameter_preflight_function: str | None = None
+    parameter_preflight_parameters: tuple[str, ...] | None = None
     reuse_scope: str = "same_run"
     project_artifact_types: tuple[str, ...] = ()
     contract_version: str = PROJECT_OPERATOR_DECLARATION_VERSION
@@ -596,6 +629,12 @@ class ProjectOperatorDeclaration:
         )
         validate_project_dependency_lock(normalized_lock)
         object.__setattr__(self, "dependency_lock", MappingProxyType(normalized_lock))
+        _validate_preflight_parameters(
+            self.parameter_preflight_parameters, self.parameter_preflight_module, self.operator_spec
+        )
+        if self.parameter_preflight_parameters is not None:
+            object.__setattr__(self, "parameter_preflight_parameters",
+                               tuple(self.parameter_preflight_parameters))
         declared_types = tuple(sorted(set(self.project_artifact_types)))
         if any(not _ID_PATTERN.fullmatch(item) for item in declared_types):
             raise ExtensionError("项目 Artifact 类型标识无效")
@@ -630,6 +669,8 @@ class ProjectOperatorDeclaration:
                 "module": self.parameter_preflight_module,
                 "function": self.parameter_preflight_function,
             }
+            if self.parameter_preflight_parameters is not None:
+                payload["parameter_preflight"]["parameters"] = list(self.parameter_preflight_parameters)
         return payload
 
     @classmethod
@@ -678,7 +719,7 @@ class ProjectOperatorDeclaration:
             raise ExtensionError("项目算子薄声明字段类型无效")
         if parameter_preflight is not None and (
             not isinstance(parameter_preflight, Mapping)
-            or set(parameter_preflight) != {"module", "function"}
+            or set(parameter_preflight) not in ({"module", "function"}, {"module", "function", "parameters"})
         ):
             raise ExtensionError("项目算子薄声明 parameter_preflight schema 无效")
         operator_expected = {
@@ -786,6 +827,10 @@ class ProjectOperatorDeclaration:
                 None
                 if parameter_preflight is None
                 else str(parameter_preflight["function"])
+            ),
+            parameter_preflight_parameters=(
+                None if parameter_preflight is None or "parameters" not in parameter_preflight
+                else _preflight_parameter_names(parameter_preflight["parameters"])
             ),
             reuse_scope=str(payload.get("reuse_scope", "same_run")),
             project_artifact_types=tuple(
@@ -937,11 +982,14 @@ def compile_project_operator_bundle(
     reuse_scope: str = "same_run",
     parameter_preflight_module: str | None = None,
     parameter_preflight_function: str | None = None,
+    parameter_preflight_parameters: tuple[str, ...] | None = None,
 ) -> Path:
     """从显式受信源码根生成内容寻址、不可变的项目算子 bundle。"""
     _safe_id(project_id, "project_id")
     if not _MODULE_PATTERN.fullmatch(entry_module) or not _FUNCTION_PATTERN.fullmatch(entry_function):
         raise ExtensionError("项目算子入口描述符无效")
+    _validate_preflight_parameters(parameter_preflight_parameters,
+        parameter_preflight_module, operator_spec)
     root, entries = _source_entries(source_root)
     source_hash = typed_canonical_hash({"source_files": list(entries)})
     if operator_spec.code_hash != source_hash:
@@ -1011,6 +1059,8 @@ def compile_project_operator_bundle(
             "module": parameter_preflight_module,
             "function": parameter_preflight_function,
         }
+        if parameter_preflight_parameters is not None:
+            payload["parameter_preflight"]["parameters"] = list(parameter_preflight_parameters)
     bundle_hash = typed_canonical_hash(payload)
     manifest = ProjectOperatorBundleManifest(
         project_id=project_id,
@@ -1028,6 +1078,7 @@ def compile_project_operator_bundle(
         bundle_hash=bundle_hash,
         parameter_preflight_module=parameter_preflight_module,
         parameter_preflight_function=parameter_preflight_function,
+        parameter_preflight_parameters=parameter_preflight_parameters,
     )
     output = Path(output_root).resolve() / bundle_hash
     output_parent = output.parent

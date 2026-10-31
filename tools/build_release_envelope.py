@@ -61,7 +61,7 @@ def _load_pass_evidence(
         versions = {
             "gate-a": "research-release-workflow-evidence-v1",
             "gate-i-b": "research-release-workflow-evidence-v1",
-            "gate-c": "research-gate-c-evidence-v2",
+            "gate-c": "research-gate-c-evidence-v3",
             "gate-d": "research-release-gate-test-evidence-v2",
             "gate-f": "research-release-gate-test-evidence-v2",
             "gate-l": "research-release-gate-test-evidence-v2",
@@ -87,10 +87,14 @@ def _load_pass_evidence(
             if (not isinstance(checks, dict) or not required <= checks.keys()
                     or any(not isinstance(item, dict) or item.get("status") != "pass" for item in checks.values())):
                 raise ValueError("Gate 工作流检查缺失或失败")
-        elif (payload.get("reference_count") != 4 or payload.get("independent_oracle_count") != 4
+        elif (payload.get("reference_count") != 4
               or payload.get("dag_family_count", 0) < 3
+              or payload.get("all_results_contract") != "research-result-v4"
+              or payload.get("acceptance_basis") != "result_contract_and_metric_values"
+              or type(payload.get("accepted_metric_count")) is not int
+              or payload["accepted_metric_count"] < 4
               or not payload.get("each_successful_run_has_one_result_bundle")):
-            raise ValueError("Gate C 四研究与独立验证不完整")
+            raise ValueError("Gate C 四研究的 Result 与数值验收不完整")
     return _sha256(path)
 
 

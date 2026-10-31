@@ -131,15 +131,13 @@ class Snapshot:
 
 def formal(setup, monkeypatch):
     payload, fixture, _ = setup
-    payload["source"] = {"kind": "verified_result", "verification_result": "verified.json",
+    payload["source"] = {"kind": "result", "result": "result-directory",
                          "result_store": "result-store", "result_id": "result1",
                          "table_id": "validation_predictions", "design_table_id": "study_design"}
     snapshot = Snapshot(fixture["rows"], fixture["design"])
-    reference = SimpleNamespace(result_id="result1", to_dict=lambda: {"project_id": "p", "run_id": "r", "result_id": "result1"})
-    verification = SimpleNamespace(status="pass", result_reference=reference, verification_hash="verified1")
-    context = SimpleNamespace(snapshot=snapshot, verification=verification,
-                              metrics={"holdout_mse": 888, "winner": "never-forward"})
-    monkeypatch.setattr(campaign_data, "_load_verified", lambda source: context)
+    snapshot.bundle.run = SimpleNamespace(status="succeeded")
+    context = SimpleNamespace(snapshot=snapshot, limitations=("lean_next_completed_close_v1",), metrics={"holdout_mse": 888, "winner": "never-forward"})
+    monkeypatch.setattr(campaign_data, "_load_result", lambda source: context)
     return payload, context
 
 
@@ -148,19 +146,20 @@ def test_formal_input_preserves_only_development_source_references(setup, monkey
     result = campaign_data.load_development(payload)
     assert result["rows"] == [prediction()]
     assert result["provenance"] == {
-        "kind": "verified_result", "result_reference": {"project_id": "p", "run_id": "r", "result_id": "result1"},
-        "result_id": "result1", "verification_hash": "verified1",
+        "kind": "result", "result": "result-directory",
+        "result_id": "result1",
         "table_id": "validation_predictions", "schema_id": "validation.v1",
+        "limitations": ["lean_next_completed_close_v1"],
     }
     assert "never-forward" not in json.dumps(result)
     assert context.snapshot.calls == [("design.v1", ("design_json",)), ("validation.v1", campaign_data.COLUMNS)]
 
 
-@pytest.mark.parametrize("fault", ["unverified", "result_id", "table_id", "design_table_id", "duplicate_table"])
+@pytest.mark.parametrize("fault", ["incomplete", "result_id", "table_id", "design_table_id", "duplicate_table"])
 def test_formal_input_rejects_wrong_bindings(setup, monkeypatch, fault):
     payload, context = formal(setup, monkeypatch)
-    if fault == "unverified":
-        context.verification.status = "fail"
+    if fault == "incomplete":
+        context.snapshot.bundle.run.status = "failed"
     elif fault == "result_id":
         payload["source"]["result_id"] = "other"
     elif fault in {"table_id", "design_table_id"}:

@@ -20,9 +20,9 @@ split 只组织准入样本和角色。fit 在每个 candidate/fold 内依次拟
 
 ## 滚动窗口与多个预测期限
 
-开发切分支持 expanding 和 rolling。前者保持训练起点，随时间增加历史；后者按 `step_sessions` 前移固定名义训练窗。切分日历按开发样本的 `observation_time` 日期裁切，窗口成员也按真实观察时间分组；`observation_session` 保留模型证券日期索引。前一会话收盘因子可以在下一决策会话使用，两种日期不要求相同。独立复核按相同观察时间重建成员，purge 继续使用实际决策时点、标签结束与成熟时间。每个候选在每个 fold 单独拟合处理器与模型。实际训练成员还要经过标签结束时间、成熟时间、embargo 和完整序列资格筛选；名义窗口不保证固定样本数。序列 warmup 可读取窗前已可见的 Feature，不把窗外标签加入拟合。
+开发切分支持 expanding 和 rolling。前者保持训练起点，随时间增加历史；后者按 `step_sessions` 前移固定名义训练窗。切分日历按开发样本的 `observation_time` 日期裁切，窗口成员也按真实观察时间分组；`observation_session` 保留模型证券日期索引。前一会话收盘因子可以在下一决策会话使用，两种日期不要求相同。生产切分按真实观察时间构造成员，purge 继续使用实际决策时点、标签结束与成熟时间。每个候选在每个 fold 单独拟合处理器与模型。实际训练成员还要经过标签结束时间、成熟时间、embargo 和完整序列资格筛选；名义窗口不保证固定样本数。序列 warmup 可读取窗前已可见的 Feature，不把窗外标签加入拟合。
 
-公开 Qlib 示例用 `--window-mode rolling --train-sessions 20` 声明滚动开发，用 `--horizon-sessions 5` 声明单个五会话目标，也可用 `--horizons 1 5` 一次冻结多份研究。开发模式下每个期限独立生成 ResearchPackage、Result 和 VerificationResult，共享输入来源、候选与窗口配置。组清单只记录各成员结果位置，不合并不同期限的 MSE。多期限比较使用开发指标，最终确认选择单一期限；同一研究系列的重叠留出日期不得按期限重复打开。
+公开 Qlib 示例用 `--window-mode rolling --train-sessions 20` 声明滚动开发，用 `--horizon-sessions 5` 声明单个五会话目标，也可用 `--horizons 1 5` 一次冻结多份研究。开发模式下每个期限独立生成 ResearchPackage和Result，共享输入来源、候选与窗口配置。组清单只记录各成员结果位置，不合并不同期限的 MSE。多期限比较使用开发指标，最终确认选择单一期限；同一研究系列的重叠留出日期不得按期限重复打开。
 
 标签为 `close[t+h] / close[t] - 1`，在 t+h 会话收盘结束，下一会话开盘成熟。不同期限按真实成熟时间分别 purge；冻结设计、开发样本及最终预测的期限必须一致。开发模式只封存留出边界前的输入，不开放最终留出。
 
@@ -56,15 +56,15 @@ HTML 报告用请求显式选择表、候选、阶段、fold/horizon 和日期�
 
 ## 模型有效性与交付
 
-包含训练和候选选择的研究需要模型有效性事实，不能使用把标签与搜索声明为不适用的数据行数观察算子。[日频模型预测有效性扩展](../project_extensions/README.md#日频模型预测有效性)采集正式输入，框架独立复核开发区切分、训练范围、validation选择、逐时点test选择、一次性holdout及MSE。事实逐行绑定Result表，模型配置和holdout四阶段账本随Result封存；验证不反序列化模型或重新训练。
+训练、预测和候选选择使用正式六节点合同，不能用数据行数代替预测评价。实际消费者检查切分、训练范围、validation选择、逐时点test与一次性holdout；Result保存配置、指标及四阶段账本，报告直接读取。
 
-纯预测诊断的金融门禁为`not_applicable`。接入日频现金仿真的组合研究声明金融适用，并绑定正式Result中的六表、TCA和独立金融oracle；复核通过后`financial.tradability`为`pass`，不能因存在模型诊断而跳过金融验证。
+纯预测研究交付模型、预测和指标，不能据此声称可交易。组合研究接入正式金融节点，Result保存实际订单、成交、资金、持仓、费用、估值及TCA输出，报告按数据与声明范围解释结论。
 
 最终holdout成功提交后，即使下游节点失败，其访问资格仍已消费。按[严格失败节点复用](runtime.md)恢复时，所有指定节点及上游须在Worker启动前通过原身份与完整性检查；无法复用必须停止，不能回退为再次拟合或打开holdout。
 
 ## 能力范围
 
-能力保持 local_only。已完成固定32证券的真实日频小样本验收：Ridge、LGB、XGB三个模型、三个walk-forward窗口、9组直接Qlib开发区对照，以及10个封存模型的13组预测恢复；对照与恢复最大绝对差均为0。最终holdout为704条预测、一次打开和一次提交，正式Result、独立验证及HTML报告通过。
+能力保持 local_only。已完成固定32证券的真实日频小样本验收：Ridge、LGB、XGB三个模型、三个walk-forward窗口、9组直接Qlib开发区对照，以及10个封存模型的13组预测恢复；对照与恢复最大绝对差均为0。最终holdout为704条预测、一次打开和一次提交，正式Result及HTML报告已生成，开发对照见该历史记录。
 
 该案例为未复权价格变化诊断，不证明全市场预测收益、策略盈利或独立清洁安装。确定性合成测试继续覆盖时间隔离等边界。未知程序错误不能被当作候选淘汰后静默继续。本地验收的行情与结果不随公开源码分发。
 
@@ -83,7 +83,7 @@ LightGBM训练记录保留节点内指标和train/valid曲线，不采集整仓G
 {"candidate_id":"double_ensemble","model":{"class":"DEnsembleModel","module_path":"qlib.contrib.model.double_ensemble","kwargs":{"base_model":"gbm","loss":"mse","num_models":2,"enable_sr":true,"enable_fs":false,"decay":0.9,"bins_sr":10,"epochs":100,"early_stopping_rounds":20}},"processors":{"infer":[],"learn":[{"class":"DropnaLabel","kwargs":{}}]},"fit":{}}
 ```
 
-要求至少两个子模型、有限正数 decay、显式关闭特征选择。轮数和早停放在构造参数，fit 留空。CPU 单线程和根种子由 RP 注入。可声明 sub_weights，数量须匹配子模型，非负且首项为正；模型内部每个加权前缀都必须有正权重。独立验证核对声明、训练范围与封存状态，不反序列化模型。
+要求至少两个子模型、有限正数 decay、显式关闭特征选择。轮数和早停放在构造参数，fit 留空。CPU 单线程和根种子由 RP 注入。可声明 sub_weights，数量须匹配子模型，非负且首项为正；模型内部每个加权前缀都必须有正权重。训练入口检查声明和范围，开发用例核对保存状态与预测恢复。
 
 当前新增验收使用合成数据，覆盖直接 Qlib 对照、保存恢复、未来标签隔离、开发区拟合、validation 预测、逐时点 test 选择和一次性 holdout 重训。特征选择、序列模型及真实数据 Double Ensemble 案例另行验收。
 
@@ -106,15 +106,15 @@ GRU/LSTM/Transformer 的训练期标准化和 Fillna 仅在合格 train 末端�
 
 `evaluate_locked_holdout` 的底层接口可提供 `development_sequence_context` 和 `holdout_sequence_loader`。最终开发模型先完成拟合，账本 opened 后才调用 holdout 数据与窗口加载器。打开后的加载失败会消费访问资格，再次调用不会重训或重新读取。
 
-`evidence.sequence_validity.verify_sequence_window_facts` 从原始 Feature、冻结日历和末端独立重建上下文及窗口，核对数值、来源、时点、成员和排除理由，不调用生产构建器，也不加载模型 pickle。独立模型验证调用此函数复核序列事实；公开示例项目Verifier另从封存行情复算特征、标签、样本资格、切分和预测误差。
+序列构建和模型消费检查原始Feature、日历、观察与可见时间、成员、末端资格和raw标签。开发用例从固定行情手算窗口与排除原因，预测恢复检查已保存模型和处理器。
 
 Runtime已接通split、fit、validation、metrics、selection和holdout的序列工件。切分接口显式提供`sequence_step_len>=2`，在Feature与Label拼接前确定全部末端的完整窗口资格；所有GRU/LSTM/Transformer候选须使用同一窗口长度，混合表格候选沿用筛选后的相同样本。缺失与晚可见末端记录到exclusions，历史Feature保留为预热上下文。工件保存context、targets、members、exclusions、日历及窗口声明，并纳入既有工件身份和节点内存预算。
 
 最终holdout在opened之后重新读取已绑定的Feature/Label，按冻结合格末端加载标签，再构造实际预测窗口；最终开发模型仍先完成训练。开发研究的输入归档截止holdout前，图中没有selection和holdout节点，禁止把最终留出评价用于开发。
 
-Result组件已支持序列权重与窗口文件封存，独立模型验证已接入研究级窗口重建、实际末端与原始Label绑定、模型训练窗口精确子集及GRU/LSTM/Transformer配置核验。开发区和最终留出区的真实模型工件均已验收，删除测试运行目录后可从Result恢复模型预测。
+Result封存序列权重、处理器和窗口文件。训练与预测消费者检查完整窗口、末端、Label可见时间、训练子集及模型配置；开发对照覆盖窗口成员、未来Label扰动和模型恢复。重新预测使用封存模型、处理器与明确输入，不依赖测试运行目录。
 
-公开示例通过 `--sequence-step-len` 生成开发或完整模型研究，ResultSpec包含原始Feature、Label和研究级四张序列表。示例及命令见[Qlib研究起点](../examples/qlib_portfolio/README.md)。Windows已验证GRU最终赢家的正式留出、两次真实进程中断后的恢复和holdout单次消费；Linux已验证当前源码训练、Result离线恢复及1.2.0 wheel安装态模型。Linux正式ResearchPackage全流程仍待最终跨平台验收。LSTM已完成候选准入、真实训练、无标签预测、正式ResearchPackage最终重训和200条holdout预测，Result独立验证pass；已通过model_fit及model_holdout成功后的两次进程中断恢复，10节点复用且holdout单次消费；Linux当前源码与1.2.0 wheel安装态真实LSTM专项各7项通过。
+公开示例通过 `--sequence-step-len` 生成开发或完整模型研究，ResultSpec包含原始Feature、Label和研究级四张序列表。示例及命令见[Qlib研究起点](../examples/qlib_portfolio/README.md)。Windows已验证GRU最终赢家的正式留出、两次真实进程中断后的恢复和holdout单次消费；Linux已验证当前源码训练、Result离线恢复及1.2.0 wheel安装态模型。Linux正式ResearchPackage全流程仍待最终跨平台验收。LSTM已完成候选准入、真实训练、无标签预测、正式ResearchPackage最终重训和200条holdout预测，Result及对应版本验收记录保留；已通过model_fit及model_holdout成功后的两次进程中断恢复，10节点复用且holdout单次消费；Linux当前源码与1.2.0 wheel安装态真实LSTM专项各7项通过。
 
 
 ### Transformer注意力模型
@@ -123,7 +123,7 @@ Result组件已支持序列权重与窗口文件封存，独立模型验证已�
 
 上游使用完整历史窗口内的自注意力，预测末端只读取决策时点已可见的窗口成员；窗口内的位置互相注意不引入决策时点之后的数据。模型的特征投影、位置编码、注意力头、编码器层、前馈层和优化器状态在加载时核对。内存预算包含参数副本、固定位置编码和随窗口长度平方增长的注意力工作区。Transformer训练、早停与预测沿用Qlib，单样本输出保持一维；学习曲线继续记录negative_mse。
 
-Transformer已完成Windows正式ResearchPackage及两次模型成功节点后的中断恢复：最终200条holdout预测，10节点复用，holdout单次消费，独立验证pass。Linux当前源码及1.2.0 wheel安装态同7项真实模型专项分别通过。Linux正式包全流程仍待最终跨平台交付验收。
+Transformer已完成Windows正式ResearchPackage及两次模型成功节点后的中断恢复：最终200条holdout预测，10节点复用，holdout单次消费，对应版本验收通过。Linux当前源码及1.2.0 wheel安装态同7项真实模型专项分别通过。Linux正式包全流程仍待最终跨平台交付验收。
 
 
 ## 输入工作集与资源
@@ -132,13 +132,11 @@ split 与 locked holdout 默认声明 16 GiB。Feature 和 opened 后的 Label �
 
 ## 正式表引用式模型事实
 
-新写的模型事实使用 `model_diagnostics.table_storage=result_tables_v2`。JSON 只保存模式、正式表角色绑定、PIT 声明和必要统计量；正式表、研究设计、模型配置、序列窗口文件及 holdout 账本从已验证 Result 读取，不在 facts 中保存完整副本。开发研究和最终研究使用同一表示，表格、序列和生成模型沿用各自独立验证；金融组合的正式账本及金融 oracle 仍单独核对。
+模型结果保存正式预测、误差、选择、模型文件与必要窗口表，研究设计、配置、输入版本和holdout账本通过正式引用关联。开发与最终研究共用生产合同，不为每轮研究生成额外验证事实副本。金融组合保留正式账本和指标。
 
-引用必须匹配已验证 Result 的表角色、schema 和必需列。模型时间、预测和审计事实保持列式存储，按访问位置核对；表格模型不展开因子矩阵及来源大表。序列验证直接读取 Feature、Label 和上下文列，逐窗核对原始特征值、可见时间、末端资格和 raw 标签。模型训练范围、选模、一次性 holdout、MSE 与数值容差保持原合同，项目 Verifier 继续独立检查原始来源和研究定义。
+序列工件使用 research.model-sequence-context.v2。context为证券会话分配context_index，members保存sample_id、step和context_index；特征、时间与lineage保存在共享context，模型子集保留原编号。Qlib数据集直接按context_index选择历史上下文，只接受该紧凑成员结构。生产构建检查冻结日历、原始Feature/Label与完整窗口，开发用例按手算检查末端资格。
 
-序列研究工件使用 `research.model-sequence-context.v2`。context 为每条证券会话分配唯一的 `context_index:int64`；members 仅保存 `sample_id`、`step:int64` 和 `context_index:int64`。证券、会话、观察/可见时间、特征及 lineage 保存在共享 context。模型训练子集保留原 context_index，不重新编号。Result 中 context、members 的表 schema 使用 v2，targets、exclusions 保持 v1。独立 verifier 从原始 Feature、Label 与冻结日历推导每个窗口，不调用生产构建算法。
-
-封存模型使用 `research.qlib-sequence-model-bundle.v2` 和 `research.qlib-sequence-input.v2`。旧内嵌 facts、`result_tables_v1` 及 v1 序列 Result 仍可读取；v1 封存模型可在原依赖合同下显式恢复预测。新包只写 v2，不迁移旧 Result。源码、证据 schema 与项目 bundle 身份变化后，旧 plan/checkpoint 不跨身份恢复或复用。研究系列、四阶段账本和已消费 holdout 状态保持原规则，不重新分配访问资格。
+序列模型使用research.qlib-sequence-model-bundle.v2和research.qlib-sequence-input.v2，表格模型沿用research.qlib-model-bundle.v1。历史文件保持原样；输入或实现变化后重新准入，不跨身份恢复，不重置已消费的holdout。
 
 ## 最终评价的研究系列
 

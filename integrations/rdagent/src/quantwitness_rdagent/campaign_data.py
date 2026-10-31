@@ -36,11 +36,11 @@ def _positive(value, name):
     return value
 
 
-def _load_verified(source):
-    from research_pipeline.evidence import load_verified_result_context
+def _load_result(source):
+    from research_pipeline.results import load_result_context
 
-    return load_verified_result_context(
-        source["verification_result"], result_store=source["result_store"],
+    return load_result_context(
+        source["result"], result_store=source["result_store"],
         additional_table_ids=("validation_predictions", "study_design"),
     )
 
@@ -48,12 +48,11 @@ def _load_verified(source):
 def _formal_rows(source, budget):
     if source["table_id"] != "validation_predictions" or source["design_table_id"] != "study_design":
         raise ValueError("campaign.only_validation_predictions_and_study_design")
-    context = _load_verified(source)
-    verdict = context.verification
-    if verdict.status != "pass":
-        raise ValueError("campaign.source_verification_not_passed")
+    context = _load_result(source)
+    if context.snapshot.bundle.run.status != "succeeded":
+        raise ValueError("campaign.source_execution_not_succeeded")
     bundle = context.snapshot.bundle
-    if source["result_id"] != bundle.result_id or verdict.result_reference.result_id != bundle.result_id:
+    if source["result_id"] != bundle.result_id:
         raise ValueError("campaign.source_result_mismatch")
     tables = {}
     for name in ("validation_predictions", "study_design"):
@@ -88,9 +87,10 @@ def _formal_rows(source, budget):
             yield from batch.to_pylist()
 
     provenance = {
-        "kind": "verified_result", "result_reference": verdict.result_reference.to_dict(),
-        "result_id": bundle.result_id, "verification_hash": verdict.verification_hash,
+        "kind": "result", "result": source["result"],
+        "result_id": bundle.result_id,
         "table_id": "validation_predictions", "schema_id": prediction_schema,
+        "limitations": list(context.limitations),
     }
     return rows(), design, provenance
 
@@ -109,7 +109,7 @@ def load_development(payload):
     if (not isinstance(folds, list) or not folds or any(not isinstance(item, str) or not item for item in folds)
             or len(set(folds)) != len(folds)):
         raise ValueError("campaign.fold_ids_invalid")
-    if source["kind"] == "verified_result":
+    if source["kind"] == "result":
         iterator, design, provenance = _formal_rows(source, budget)
     elif source["kind"] == "synthetic":
         path = Path(source["path"])

@@ -2,6 +2,8 @@
 
 本文说明尚未达到框架核心晋级条件的项目算子合同。扩展源码目录只允许 Python 文件，以便生成内容寻址的受控 bundle；薄声明放在源码目录旁，不进入源码闭包。
 
+内部策略Worker复用已构建bundle及其依赖复验，回调接收context、event和state，返回交易意图与JSON状态。该回调属于内部执行协议，尚未接入ResearchPackage的公共算子调用；合同和限制见[策略事件协议](../docs/strategy-protocol.md)。
+
 Python 项目算子的公开构建路径为：
 
 ```powershell
@@ -11,7 +13,7 @@ python -m research_pipeline operator build --spec project_extensions/<name>.oper
 
 命令只读取显式声明和显式源码目录，不扫描当前目录，也不自动安装依赖。生成的内容寻址目录再通过 `--extension-bundle` 显式交给 package 准入和 Runtime。
 
-项目 Verifier 使用独立 bundle，不复用 Operator bundle。Verifier 单独声明 verifier ID、版本、源码闭包、依赖锁，以及允许读取的 Result schema 和支持工件类型；项目专属 Metric 定义也随该 bundle 进入当前 Package 组合并冻结到 Result，不进入公共 Metric discovery。Result 未冻结对应身份、授权输入或 bundle 版本不一致时，verify 直接失败。需要支持列数多于有效观察行数的统计矩阵时，Verifier 使用 `project-verifier-output-v2` 从正式 Result 表复算矩阵行数、非零有效行数、列数和秩，公共门禁不采信 Operator 单方面声明。
+项目专属指标通过研究声明的 `metric_definitions` 保存计算口径和生产实现引用，随 Result 保留。公式正确性由生产算法的手算与确定性测试覆盖。E004 构建入口返回生产算子路径和 `metric_definitions`；指标定义分别保存在 `e004_grid_robustness.metrics.yaml` 与 `e004_random_stability.metrics.yaml`。
 
 项目特有的图、固定日期、参数网格、参考组合和验收语义留在 ResearchPackage；项目算法由
 Python Worker bundle 实现。项目算子身份、Artifact 类型和策略只进入当前 Package 的组合
@@ -50,7 +52,9 @@ package lint/admit 会在数据库打开和正式运行前用真实冻结 contex
 
 项目算子默认 `reuse_scope: same_run`。只有正式输出完全由 typed 输入、参数、fixed clock 和 seed 决定，且不依赖 project/run/node/attempt 等易变 ID 时，薄声明才可显式写 `reuse_scope: cross_run`。Runtime 还会同时检查确定性合同和 `artifact_write_scope: output_only`；没有该字段的既有声明保持同 run 恢复语义。
 
-公开分发只保留本目录的扩展合同；使用者自行提供项目源码、声明和独立 Verifier。可执行的合成示例位于独立公开源码仓库的 `examples/`，私人研究项目及其专用构建脚本不随包分发。
+公开分发只保留本目录的扩展合同；使用者自行提供项目源码、声明和指标定义。可执行的合成示例位于独立公开源码仓库的 `examples/`，私人研究项目及其专用构建脚本不随包分发。
+
+本地 CNE5 风险扩展在读取输入前检查 publication、下一交易日可见规则和来源截止时间，只提交风险估计表及指标。
 
 ## 分批输入、输出和状态
 
@@ -148,6 +152,26 @@ sources:
 09:30，时区固定为 `Asia/Shanghai`。项目不能自填更早的时点；原始 `date` 列仍以
 日期交给算子。Feature 仅收到决定时点已可见的窗口内输入；Label 使用未来观测窗口，
 其成熟时间由最后实际观测对应的下一交易日开盘确定。Label 请求不得流入 Feature。
+
+同一 `daily_time` 结构也支持以下已准入日期规则：
+
+| rule | 观测时间 | 可见时间 | 日历要求 |
+| --- | --- | --- | --- |
+| `next_session_open` | D 日 15:00 | 下一实际交易日 09:30 | 含全部输入日及末日的下一交易日 |
+| `session_open` | D 日 09:30 | D 日 09:30 | 开盘日期须在冻结日历中，覆盖请求范围 |
+| `business_effective_date` | D 日 00:00 | D 日 00:00 | 覆盖请求日期范围，业务生效日可为非交易日 |
+
+时间统一按 `Asia/Shanghai` 解释；原始日期列保持不变。`session_open` 必须与 Catalog 的
+开盘可见日期角色一致；`business_effective_date` 只接纳已批准的逐日业务状态记录，不能把
+上市日期当作整条证券参考记录的观测日期，也不能据此提前交付退市等属性。
+`current_source_snapshot` 与 `research_observation` 的来源和结论上限继续保留，不表示存在
+供应商历史发布版本链。日期窗口按来源本地日期核对，不随固定时钟显示时区改变。
+
+新规则的准入调用须提供与请求身份一致的冻结 Catalog。规则、日历和来源身份随计划及
+lineage 保存，继承状态不得改换规则或日历。独立证据入口
+`evidence.project_causal_time.rebuild_daily_source_times` 从封存日期重建时间，
+`verify_daily_source_lineage` 核对实际交付日期的聚合时间事实；调用方须提供对应的实际交付
+日期，不能用自报最早、最晚时间替代原始来源证据。
 
 日频正式输出使用 `features/` 或 `labels/` 表目录，核心生成 `artifact-metadata.json`，
 绑定当前 `ResearchSemantics`、表内容和完整因果计划。每个键批单独保存为 Parquet；

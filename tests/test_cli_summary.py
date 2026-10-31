@@ -23,7 +23,7 @@ def test_run_and_recovery_require_finalized_result(command, workspace):
     args = arguments("workspace", workspace_command=command) if workspace else arguments(command)
     finalized = build_summary(args, status="pass", data={"status": "result_finalized"})
     assert finalized["execution_status"] == "succeeded"
-    assert finalized["verification_status"] is None
+    assert "verification_status" not in finalized
     unfinished = build_summary(args, status="pass", data={"status": "succeeded"})
     assert unfinished["execution_status"] == "finalize_pending"
     assert build_summary(args, status="fail", data=None)["execution_status"] == "failed"
@@ -48,7 +48,7 @@ def test_inspect_distinguishes_runtime_and_finalize(run_status, finalize_status,
     })
     assert summary["command_status"] == "pass"
     assert summary["execution_status"] == expected
-    assert summary["verification_status"] is None
+    assert "verification_status" not in summary
 
 
 def test_inspect_keeps_published_result_and_finalize_error():
@@ -64,21 +64,9 @@ def test_inspect_keeps_published_result_and_finalize_error():
     assert summary["finalize_error"] == error
 
 
-@pytest.mark.parametrize("verdict", ["pass", "fail", None])
-def test_verify_reads_verdict_instead_of_exit_code(capfd, verdict):
-    args = arguments("verify")
-    args.json = True
-    data = {} if verdict is None else {"status": verdict}
-    assert cli_result.emit(args, status="pass", data=data, code=0) == 0
-    payload = json.loads(capfd.readouterr().out)
-    assert payload["status"] == "pass"
-    assert payload["summary"]["verification_status"] == verdict
-    assert payload["summary"]["execution_status"] is None
-
-
 def test_non_execution_command_has_null_execution_status():
     summary = build_summary(arguments("package"), status="pass", data={"status": "pass"})
-    assert summary == {"command_status": "pass", "execution_status": None, "verification_status": None}
+    assert summary == {"command_status": "pass", "execution_status": None}
 
 
 def test_full_json_preserves_envelope_and_original_data(capfd):
@@ -131,20 +119,18 @@ def test_default_text_keeps_paths_issues_actions_and_quotes_command(capfd):
     assert "不可倾倒的明细" not in output
 
 
-def test_workspace_verification_failure_keeps_completed_execution_and_report(capfd):
+def test_workspace_report_failure_keeps_completed_execution(capfd):
     args = arguments("workspace", workspace_command="execute")
     args.summary = True
-    stages = {"lint": "pass", "run": "pass", "verify": "fail", "report": "pass"}
+    stages = {"lint": "pass", "run": "pass", "report": "fail"}
     data = {
         "stages": stages, "execution_id": "e1", "execution_root": "I:/执行/e1",
         "execution_status": "succeeded", "result_id": "r1", "result_directory": "I:/执行/e1/results/r1",
-        "verification_status": "fail", "report_path": "I:/执行/e1/report.md", "failed_stage": "verify",
-        "resource_advice": [{"status": "configuration_insufficient", "message": "建议声明 3 槽"}],
+        "failed_stage": "report",
     }
 
     def fail(_args):
-        error = MainlineError("验证未通过")
-        error.error_code = "workspace_verification_failed"
+        error = MainlineError("报告输出失败")
         error.failure_payload = data
         raise error
 
@@ -153,19 +139,19 @@ def test_workspace_verification_failure_keeps_completed_execution_and_report(cap
     summary = payload["summary"]
     assert summary["command_status"] == "fail"
     assert summary["execution_status"] == "succeeded"
-    assert summary["verification_status"] == "fail"
-    for key in ("report_path", "result_directory", "failed_stage", "resource_advice", "stages"):
+    assert "verification_status" not in summary
+    for key in ("result_directory", "failed_stage", "stages"):
         assert summary[key] == data[key]
 
 
 def test_workspace_lint_failure_does_not_mark_unexecuted_stages_success():
     summary = build_summary(arguments("workspace", workspace_command="execute"), status="fail", data={
-        "stages": {"lint": "fail", "run": "not_run", "verify": "not_run"},
-        "failed_stage": "lint", "execution_status": None, "verification_status": None,
+        "stages": {"lint": "fail", "run": "not_run"},
+        "failed_stage": "lint", "execution_status": None,
         "issues": [{"message": "缺少来源"}],
     })
     assert summary["execution_status"] is None
-    assert summary["verification_status"] is None
+    assert "verification_status" not in summary
     assert summary["issues"] == [{"message": "缺少来源"}]
 
 
@@ -251,14 +237,14 @@ def test_run_success_requires_result_finalized_even_with_runtime_fields():
 def test_resource_advice_text_identifies_budget_parameter(capfd):
     data = {
         "resource_advice": [{
-            "purpose": "verifier", "status": "configuration_insufficient",
-            "parameter": "--verification-process-slots", "message": "建议声明 3 槽",
+            "purpose": "worker", "status": "configuration_insufficient",
+            "parameter": "--resource-process-slots", "message": "建议声明 3 槽",
         }],
         "exceeded": {"process_slots": {"actual": 4, "limit": 2}},
     }
-    cli_result.emit(arguments("verify"), status="fail", data=data, code=1, error_code="resource_exceeded")
+    cli_result.emit(arguments("run"), status="fail", data=data, code=1, error_code="resource_exceeded")
     output = capfd.readouterr().out
-    assert "--verification-process-slots" in output
+    assert "--resource-process-slots" in output
     assert "actual=4, limit=2, 建议=4" in output
     assert "建议声明 3 槽" in output
 

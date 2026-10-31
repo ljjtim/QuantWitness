@@ -1,18 +1,21 @@
-"""联合研究只向上游组件提供已验证开发事实。"""
+"""联合研究只向上游组件提供正式开发事实。"""
 import math
 
 from .factor_research import DAI_FACTOR_CONTRACT, factor_contract
 
 
 def validate_joint_feedback(records):
-    fields = {"record_id", "kind", "candidate_id", "hypothesis", "reason", "expression", "definition", "status", "metrics", "reflection"}
+    fields = {"record_id", "kind", "candidate_id", "hypothesis", "reason", "expression", "definition", "status", "metrics", "reflection", "limitations"}
     if not isinstance(records, list):
         raise ValueError("联合知识必须为开发记录列表")
     for row in records:
         if not isinstance(row, dict) or set(row) - fields or row.get("status") != "evaluated":
-            raise ValueError("联合知识只接受已验证开发记录")
+            raise ValueError("联合知识只接受正式开发记录")
         if row.get("kind") not in {"factor", "model"} or not isinstance(row.get("record_id"), str) or not row["record_id"]:
             raise ValueError("联合知识缺少分支或引用")
+        limitations = row.get("limitations", [])
+        if not isinstance(limitations, list) or any(not isinstance(item, str) or not item for item in limitations):
+            raise ValueError("联合研究限制必须是非空文字列表")
         metric = row.get("metrics")
         if (not isinstance(metric, dict) or set(metric) != {"value", "rows"}
                 or type(metric["value"]) not in (int, float) or not math.isfinite(metric["value"])
@@ -21,14 +24,13 @@ def validate_joint_feedback(records):
     return records
 
 
-def development_population(model):
+def development_population(design, tables):
     """共同资格由正式样本、标签时点和validation成员决定。"""
-    if model.get("mode") != "walk_forward_development_v1":
+    if design.get("mode") != "development":
         raise ValueError("联合评价仅接受正式开发样本")
-    tables = model["tables"]
     if set(tables) & {"test_predictions", "holdout_predictions", "holdout_receipt"}:
         raise ValueError("联合评价不得读取最终留出事实")
-    contract = factor_contract(model.get("design", {}))
+    contract = factor_contract(design)
     prefixes = ("dai_following__",) if contract == DAI_FACTOR_CONTRACT else ("historical_return__", "volatility__")
     samples = []
     for row in tables["samples"]:

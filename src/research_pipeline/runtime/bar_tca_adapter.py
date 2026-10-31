@@ -143,10 +143,7 @@ def execute_simulation_result_bar_tca(
         source_simulation_hash=simulation_result.result_hash,
         source_ledger_hash=source_ledger_hash,
     )
-    manifest = write_bar_tca_artifact(
-        result, Path(output_root) / "simulation/tca", policy=policy,
-        orders=tuple(formal_orders), formal_fills=formal_fill_tuple,
-    )
+    manifest = write_bar_tca_artifact(result, Path(output_root) / "simulation/tca")
     return result, manifest
 
 

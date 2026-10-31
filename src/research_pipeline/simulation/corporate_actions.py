@@ -111,6 +111,9 @@ def compile_cn_stock_corporate_action_rows(
         cash_per_ten = _nonnegative_decimal(row.get("cash_per_ten"), "cash_per_ten")
         stock_per_ten = _nonnegative_decimal(row.get("stock_dividend_per_ten"), "stock_dividend_per_ten")
         transfer_per_ten = _nonnegative_decimal(row.get("transfer_per_ten"), "transfer_per_ten")
+        if "本次转增不向原股东分配" in str(row.get("note") or ""):
+            # 重整转增给其他受让方，不形成原持仓的股份权益。
+            transfer_per_ten = Decimal(0)
         if cash_per_ten == stock_per_ten == transfer_per_ten == 0:
             continue
         code = str(row.get("code", "")).strip()

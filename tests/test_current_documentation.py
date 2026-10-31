@@ -72,12 +72,38 @@ def test_documentation_audit_rejects_old_command(tmp_path: Path) -> None:
     assert any(item["kind"] == "forbidden_text" for item in result["errors"])
 
 
+def test_documentation_audit_preserves_linked_historical_records(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (tmp_path / "README.md").write_text("# 当前入口\n", encoding="utf-8")
+    for name in REQUIRED_DOCS:
+        (docs / name).write_text("# 当前文档\n", encoding="utf-8")
+    historical_docs = {"previous_acceptance.md", "previous_performance.md"}
+    for name in historical_docs:
+        (docs / name).write_text(
+            "# 历史记录\npython -m research_pipeline verify --result-id old\n",
+            encoding="utf-8",
+        )
+    (docs / "index.md").write_text(
+        "\n".join(f"[{name}]({name})" for name in sorted(REQUIRED_DOCS - {"index.md"}))
+        + "\n## 历史记录\n"
+        + "\n".join(f"[{name}]({name})" for name in sorted(historical_docs)),
+        encoding="utf-8",
+    )
+    result = audit_documentation(tmp_path)
+    assert result["status"] == "pass", result["errors"]
+    assert not REQUIRED_DOCS & historical_docs
+    assert "verifier-input-projection.md" not in result["current_docs"]
+
+
 @pytest.mark.parametrize(
     "command",
     (
         "python -m research_pipeline catalog dataset search --query daily --format json",
         "python -m research_pipeline verify --result-id old --result-store results "
         "--output verification.json --json",
+        "python -m research_pipeline verify --result work/result "
+        "--output work/verification.json --json",
     ),
 )
 def test_documentation_audit_rejects_retired_argument_shapes(
@@ -112,7 +138,8 @@ def test_documented_top_level_commands_belong_to_current_cli() -> None:
     }
 
     assert commands <= set(FINAL_COMMANDS)
-    assert {"package", "run", "verify", "report"} <= commands
+    assert {"package", "run", "report"} <= commands
+    assert "verify" not in commands
 
 
 def test_getting_started_single_line_commands_parse_with_current_cli() -> None:
@@ -183,17 +210,21 @@ def test_public_catalog_consumers_require_explicit_lock(
 
 def test_public_guides_use_current_research_pipeline_workflow() -> None:
     current_flow = (
-        "package init",
-        "package lint",
-        "package admit",
-        "run",
-        "verify",
-        "report",
+        "研究声明",
+        "准备与准入",
+        "列式输入",
+        "可恢复 DAG",
+        "Result",
+        "报告",
     )
     retired_fragments = (
         "`package validate` → `plan`",
         "可信证据封存",
         "`catalog`、`package`、`plan`、`run`",
+        "VerificationResult",
+        "--verification-result",
+        "--verification-process-slots",
+        "--verifier-bundle",
     )
 
     for name in (
@@ -207,12 +238,22 @@ def test_public_guides_use_current_research_pipeline_workflow() -> None:
             assert "(docs/framework-contracts.md)" in content
         if name == "docs/framework-contracts.md":
             flow_match = re.search(
-                r"```text\n研究问题与口径冻结(?P<flow>.*?)```",
+                r"^研究声明\s*→(?P<flow>[^\n]+)",
                 content,
-                flags=re.DOTALL,
+                flags=re.MULTILINE,
             )
             assert flow_match is not None
-            positions = [flow_match.group("flow").index(stage) for stage in current_flow]
+            positions = [flow_match.group(0).index(stage) for stage in current_flow]
             assert positions == sorted(positions)
         assert "--source-visibility PROFILE=PATH" not in content
         assert all(fragment not in content for fragment in retired_fragments)
+
+
+def test_direct_result_report_arguments_parse() -> None:
+    arguments = build_parser().parse_args([
+        "report", "--result", "work/results/example", "--result-store", "work/results",
+        "--output", "work/report.md", "--format", "markdown", "--json",
+    ])
+    assert arguments.command == "report"
+    assert arguments.result == "work/results/example"
+    assert arguments.result_store == "work/results"

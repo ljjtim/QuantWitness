@@ -8,7 +8,7 @@ from .contracts import write_json
 from .factor_research import DAI_FACTOR_CONTRACT, canonical_expression, factor_contract, feature_expression_slot, validate_factor_research
 from .package_campaign import _check_development_package, project_development_metric
 
-VERSION = "rd-research-knowledge-v1"
+VERSION = "rd-research-knowledge-v2"
 _METRIC_FIELDS = ("metric_id", "unit", "frequency", "direction", "annualization_policy", "measurement_semantics")
 _DOMAIN_FIELDS = ("calendar_id", "snapshot_scope", "price_basis")
 _REFLECTION_FIELDS = ("observations", "hypothesis_evaluation", "new_hypothesis", "reason", "decision")
@@ -63,8 +63,10 @@ def _package_design(package):
     return design
 
 
-def _metric_description(verifier, objective, design):
-    definitions = [item for item in verifier.metric_definitions if item.metric_ref == design["metric_ref"]
+def _metric_description(package, objective, design):
+    from research_pipeline.platform.metric_contracts import MetricDefinition
+    definitions = [MetricDefinition.from_dict(item) for item in package.spec_payload.get("metric_definitions", ())]
+    definitions = [item for item in definitions if item.metric_ref == design["metric_ref"]
                    and item.result_schema_id == objective["schema_id"]]
     if len(definitions) != 1:
         raise ValueError("知识来源没有唯一正式指标定义")
@@ -75,9 +77,9 @@ def _metric_description(verifier, objective, design):
     return result
 
 
-def _formal_record(root, candidate, record, template, base_design, verifier):
+def _formal_record(root, candidate, record, template, base_design):
     """仅正式 Result 的设计表和已绑定变体包决定金融上下文。"""
-    from research_pipeline.evidence import load_verified_result_context
+    from research_pipeline.results import load_result_context
     from research_pipeline.packages import load_research_package
     from research_pipeline.results import ResultStore
 
@@ -90,21 +92,17 @@ def _formal_record(root, candidate, record, template, base_design, verifier):
     if design != expected:
         raise ValueError("轮次表达式或研究范围与正式变体包不符")
     execution = Path(_read(experiment / "candidates" / candidate / "execution-ref.json")["execution_root"])
-    result = {"execution_ref": str(execution), "verification_ref": str(execution / "verification/result.json"),
+    result = {"execution_ref": str(execution), "execution_status": record["metrics"]["execution_status"],
               "result_ref": record["metrics"]["result_ref"]}
-    context = load_verified_result_context(result["verification_ref"], result_store=execution / "results",
+    context = load_result_context(result["result_ref"], result_store=execution / "results",
         additional_table_ids=(template["objective"]["table_id"], "study_design"))
     bundle = context.snapshot.bundle
-    if context.verification.status != "pass" or bundle.package_hash != package.package_hash:
+    if bundle.run.status != "succeeded" or bundle.package_hash != package.package_hash:
         raise ValueError("知识 Result 未通过验证或研究包身份不符")
-    if dict(bundle.verification.verifier_identity) != verifier.identity():
-        raise ValueError("知识 Result 与指标 Verifier 身份不符")
     if Path(result["result_ref"]).resolve() != ResultStore(execution / "results", create=False).result_directory(bundle).resolve():
-        raise ValueError("轮次 Result 路径与独立验证引用不符")
+        raise ValueError("轮次 Result 路径与正式结果引用不符")
     if record["metrics"].get("result_id") != bundle.result_id:
-        raise ValueError("轮次 Result 身份与独立验证引用不符")
-    if Path(record["metrics"]["verification_ref"]).resolve() != Path(result["verification_ref"]).resolve():
-        raise ValueError("轮次 VerificationResult 路径不符")
+        raise ValueError("轮次 Result 身份与正式结果引用不符")
     tables = [table for table in bundle.tables if table.table_id == "study_design"]
     if len(tables) != 1:
         raise ValueError("Result 缺少唯一设计表")
@@ -118,11 +116,11 @@ def _formal_record(root, candidate, record, template, base_design, verifier):
     _check_result_tables(bundle.tables)
     metrics = project_development_metric(result, template)
     return {"metrics": {key: metrics[key] for key in ("value", "rows")},
-        "claim_level": context.verification.claim_level, "design_scope": _scope(design, template["development"]),
-        "metric_description": _metric_description(verifier, template["objective"], design),
+        "claim_level": context.claim_level, "limitations": list(context.limitations), "design_scope": _scope(design, template["development"]),
+        "metric_description": _metric_description(package, template["objective"], design),
         "source": {"result_id": bundle.result_id, "package_hash": bundle.package_hash,
-                   "result_ref": result["result_ref"], "verification_ref": result["verification_ref"],
-                   "execution_ref": str(execution), "verifier_identity": verifier.identity()}}
+                   "result_ref": result["result_ref"],
+                   "execution_ref": str(execution)}}
 
 
 def _check_result_tables(tables):
@@ -156,7 +154,6 @@ def _merge_records(inherited, current):
 
 def _build_index(session_root):
     from research_pipeline.packages import load_research_package
-    from research_pipeline.extensions.verifier_bundle import verify_project_verifier_bundle
 
     root = Path(session_root).resolve()
     payload = validate_factor_research(_read(root / "request.json"))
@@ -170,8 +167,7 @@ def _build_index(session_root):
     _check_development_package(package, template["development"])
     design = _package_design(package)
     design_scope = _scope(design, template["development"])
-    verifier = verify_project_verifier_bundle(template["source"]["verifier_bundle"])
-    metric_description = _metric_description(verifier, template["objective"], design)
+    metric_description = _metric_description(package, template["objective"], design)
     records, best = [], None
     paths = sorted((root / "rounds").glob("*/record.json"))
     if not paths:
@@ -193,7 +189,7 @@ def _build_index(session_root):
         entry = {"record_id": payload["campaign_id"] + "/" + candidate,
             "candidate_id": candidate, "parent_id": record.get("parent_id"), "kind": "negative",
             "status": "technical_failure", "claim_level": "technical_status", "expression": None,
-            "hypothesis": record.get("hypothesis", ""), "reason": record.get("reason", "正式执行未获得可用于研究的验证结果"),
+            "hypothesis": record.get("hypothesis", ""), "reason": record.get("reason", "正式执行未获得可用于研究的正式Result"),
             "reflection": {}, "development_scope": template["development"], "as_of": template["development"]["as_of"],
             "objective": template["objective"], "metric_description": metric_description, "design_scope": design_scope,
             "usable_for_proposal": True, "session_root": str(root),
@@ -205,7 +201,7 @@ def _build_index(session_root):
                 if status == "evaluated":
                     raise
         if status == "evaluated":
-            formal = _formal_record(root, candidate, record, template, design, verifier)
+            formal = _formal_record(root, candidate, record, template, design)
             entry.update({key: value for key, value in formal.items() if key != "source"})
             entry["source"].update(formal["source"])
             entry["record_id"] += "/" + formal["source"]["result_id"]

@@ -1,13 +1,15 @@
-"""研究包固定目录、严格 YAML 读取与原子初始化。"""
+"""研究包固定目录、严格声明读取与原子初始化。"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import cached_property
 from types import MappingProxyType
 from importlib.resources import files
 from pathlib import Path
 import shutil
+import json
 
 import yaml
 
@@ -20,11 +22,16 @@ PACKAGE_FILES = ("package.yaml", "sources/sources.yaml", "localization.yaml", "s
 
 @dataclass(frozen=True)
 class PackageDocuments:
-    """一次包处理的 YAML 事实，仅供读取；不授予加载或准入资格。"""
+    """一次包处理的声明事实，仅供读取；不授予加载或准入资格。"""
 
     root: Path
     _payloads: Mapping[str, dict[str, object]]
     _errors: Mapping[str, str]
+
+    @cached_property
+    def minute_scope_inputs(self):
+        spec = self._payloads.get("spec/research.yaml", {})
+        return _load_minute_scopes(self.root, spec)
 
 
 def read_package_documents(root: str | Path) -> PackageDocuments:
@@ -57,6 +64,8 @@ def load_research_package(root: str | Path, *, documents: PackageDocuments | Non
     )
     metric_contract = _load_metric_contract(package["metric_contract"])
     claim_contract = _load_claim_contract(package["claim_contract"])
+    scope_inputs = (documents.minute_scope_inputs if documents is not None
+                    else _load_minute_scopes(directory, spec_payload))
     return ResearchPackage.build(
         package_slug=package["package_slug"],
         display_name=package["display_name"],
@@ -67,7 +76,19 @@ def load_research_package(root: str | Path, *, documents: PackageDocuments | Non
         metric_contract=metric_contract,
         claim_contract=claim_contract,
         spec_payload=spec_payload,
+        minute_scope_inputs=scope_inputs,
     )
+
+
+def _load_minute_scopes(directory, spec):
+    from .minute_scope_admission import load_graph_minute_scopes
+
+    graph = spec.get("graph", {})
+    parameters = (node.get("parameters", {}) for node in graph.get("nodes", ())) if isinstance(graph, Mapping) else ()
+    try:
+        return MappingProxyType(load_graph_minute_scopes(directory, parameters))
+    except (ValueError, OSError) as exc:
+        raise ResearchPackageError(f"分钟列式输入无效: {exc}") from exc
 
 
 def initialize_research_package(destination: str | Path) -> Path:
@@ -119,7 +140,11 @@ def _load_yaml(root: Path, relative_path: str, *, documents: PackageDocuments | 
     path = (root / relative_path).resolve()
     try:
         path.relative_to(root)
-        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = yaml.load(text, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
     except (ValueError, OSError, yaml.YAMLError) as exc:
         raise ResearchPackageError(f"无法读取 {relative_path}") from exc
     if not isinstance(payload, dict):
@@ -132,8 +157,9 @@ def _validate_declarative_layout(root: Path) -> None:
     for path in root.rglob("*"):
         if path.is_symlink():
             raise ResearchPackageError("声明式 ResearchPackage 不允许符号链接或 junction")
-        if path.is_file() and path.relative_to(root).as_posix() not in allowed:
-            raise ResearchPackageError("声明式 ResearchPackage 只允许四个声明文件和 README")
+        relative = path.relative_to(root)
+        if path.is_file() and relative.as_posix() not in allowed and relative.parts[0] != "minute-scopes":
+            raise ResearchPackageError("声明式 ResearchPackage 只允许四个声明文件、README 和 minute-scopes 输入")
 
 
 def _typed_list(value: object, field: str) -> list[object]:

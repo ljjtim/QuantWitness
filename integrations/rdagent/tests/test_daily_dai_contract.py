@@ -4,6 +4,9 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from importlib.util import find_spec
+
+native = pytest.mark.skipif(find_spec("rdagent") is None, reason="需要固定RD-Agent源码及Linux场景依赖")
 
 from quantwitness_rdagent.contracts import write_json
 from quantwitness_rdagent.factor_research import (
@@ -17,7 +20,7 @@ from quantwitness_rdagent.joint_feedback import development_population
 def daily_record():
     return {"record_id": "daily:0000", "kind": "factor", "candidate_id": "factor_0000",
             "status": "evaluated", "expression": "$dai", "hypothesis": "已确认日级值",
-            "reason": "基线独立验证", "metrics": {"value": 0.5, "rows": 1}}
+            "reason": "正式基线评价", "metrics": {"value": 0.5, "rows": 1}}
 
 
 def daily_session(tmp_path):
@@ -112,7 +115,7 @@ def test_daily_factor_and_model_bind_the_same_slot(tmp_path, monkeypatch):
 
 
 def daily_population():
-    return {"mode": "walk_forward_development_v1", "design": {"factor_contract": DAI_FACTOR_CONTRACT},
+    return {"design": {"mode": "development", "factor_contract": DAI_FACTOR_CONTRACT},
         "tables": {"samples": [{"sample_id": "s1", "target": 0.1, "dai_following__w25": 0.0,
             "label_start_time": "d", "label_end_time": "d1", "label_available_time": "d2"}],
         "validation_predictions": [{"fold_id": "f1", "sample_id": "s1", "actual": 0.1,
@@ -121,26 +124,27 @@ def daily_population():
 
 def test_daily_zero_is_valid_and_missing_or_changed_maturity_is_not_common():
     model = daily_population()
-    baseline = development_population(model)
+    baseline = development_population(model["design"], model["tables"])
     missing = deepcopy(model)
     missing["tables"]["samples"][0]["dai_following__w25"] = None
     with pytest.raises(ValueError, match="完整值"):
-        development_population(missing)
+        development_population(missing["design"], missing["tables"])
     changed = deepcopy(model)
     changed["tables"]["validation_predictions"][0]["label_available_time"] = "future"
-    assert development_population(changed) != baseline
+    assert development_population(changed["design"], changed["tables"]) != baseline
     holdout = deepcopy(model)
     holdout["tables"]["holdout_predictions"] = []
     with pytest.raises(ValueError, match="留出"):
-        development_population(holdout)
+        development_population(holdout["design"], holdout["tables"])
     wrong_slot = deepcopy(model)
     wrong_slot["tables"]["samples"][0].pop("dai_following__w25")
     wrong_slot["tables"]["samples"][0]["historical_return__w5"] = 0.0
     with pytest.raises(ValueError, match="完整值"):
-        development_population(wrong_slot)
+        development_population(wrong_slot["design"], wrong_slot["tables"])
 
 
 @pytest.mark.parametrize("direction", ["lag", "mean"])
+@native
 def test_daily_direction_is_scoped_and_uses_verified_refs(direction):
     from quantwitness_rdagent.joint_research import select_joint_direction
     from quantwitness_rdagent.direction_selection import select_direction
@@ -158,6 +162,7 @@ def test_daily_direction_is_scoped_and_uses_verified_refs(direction):
         select_joint_direction(price_context, complete)
 
 
+@native
 def test_daily_native_factor_and_model_prompts_keep_contract_and_parent():
     from quantwitness_rdagent.native_research import propose_factor
     from quantwitness_rdagent.native_model_research import propose_model
@@ -197,7 +202,7 @@ def test_daily_model_selects_best_factor_and_proposal_resume_reuses(tmp_path, mo
     for index, expression, loss in [(0, "$dai", 0.5), (1, "Ref($dai, 2)", 0.2)]:
         row = daily_record()
         row.update(round=index, record_id=f"daily:{index:04d}", candidate_id=f"factor_{index:04d}", expression=expression)
-        row["metrics"] = {"value": loss, "rows": 1, "verification_status": "pass"}
+        row["metrics"] = {"value": loss, "rows": 1, "execution_status": "succeeded"}
         write_json(tmp_path / "rounds" / f"{index:04d}" / "record.json", row)
     calls = []
     session.branches = {"factor": SimpleNamespace(metric_description={}), "model": SimpleNamespace(
@@ -261,6 +266,7 @@ def test_fixed_schedule_is_explicit_and_validated(monkeypatch):
 
 
 @pytest.mark.parametrize("scheduled,returned,direction", [("factor", "model", "generated_model"), ("model", "factor", "lag")])
+@native
 def test_scheduled_direction_rejects_another_branch_without_rewriting(scheduled, returned, direction):
     from quantwitness_rdagent.joint_research import select_joint_direction
     response = {"action": returned, "direction": direction, "knowledge_refs": ["daily:0000"], "reason": "开发依据"}
@@ -273,6 +279,7 @@ def test_scheduled_direction_rejects_another_branch_without_rewriting(scheduled,
     assert response["action"] == returned
 
 
+@native
 def test_fixed_schedule_resume_and_directions_share_original_budget(tmp_path):
     from quantwitness_rdagent.factor_research import _freeze
     from quantwitness_rdagent.joint_research import JointResearch
@@ -290,14 +297,14 @@ def test_fixed_schedule_resume_and_directions_share_original_budget(tmp_path):
         "candidate_id": "factor_0001", "expression": "Ref($dai, 2)"}),
         "model": SimpleNamespace(propose=lambda index: proposed.append(index) or {"candidate_id": "model_0002", "definition": {"nodes": []}})}
     baseline = daily_record()
-    baseline["metrics"]["verification_status"] = "pass"
+    baseline["metrics"]["execution_status"] = "succeeded"
     write_json(tmp_path / "rounds/0000/record.json", baseline)
     _freeze(tmp_path / "request.json", session.payload)
     factor = session.propose(1)
     assert factor["kind"] == "factor" and factor["direction_choice"]["direction"] == "lag"
     assert session.propose(1) == factor and proposed == [1]
     factor_record = {**baseline, **factor, "record_id": "daily:0001", "status": "evaluated",
-                     "metrics": {"value": 0.2, "rows": 1, "verification_status": "pass"}}
+                     "metrics": {"value": 0.2, "rows": 1, "execution_status": "succeeded"}}
     write_json(tmp_path / "rounds/0001/record.json", factor_record)
     model = session.propose(2)
     assert model["kind"] == "model" and model["factor_record_id"] == "daily:0001"

@@ -68,9 +68,7 @@ def test_prompt_contains_only_formula_stub_and_safe_diagnostics(tmp_path):
     request = FrozenRequest.from_dict(live_payload(tmp_path))
     initial = build_prompt(request)
     assert STUB in json.loads(initial.split("\n", 1)[1])["source"]
-    evidence = {"execution_status": "failed", "formula_status": "fail", "formula_coverage": {"raw_rows": 99119},
-                "diagnostics": [{"stage": "build", "error_type": "SyntaxError", "message": "I:/secret 600000 price=13.27"},
-                                "formula.monthly_mismatch entity=600000 value=13.27"], "allowed_metrics": {"ic": 0.98}}
+    evidence = {'execution_status': 'failed', 'diagnostics': [{'stage': 'build', 'error_type': 'SyntaxError', 'message': 'I:/secret 600000 price=13.27'}, 'formula.monthly_mismatch entity=600000 value=13.27'], 'allowed_metrics': {'ic': 0.98}}
     repaired = build_prompt(request, SOURCE, evidence)
     assert "formula.monthly_mismatch" in repaired and "SyntaxError" in repaired
     assert SOURCE in json.loads(repaired.split("\n", 1)[1])["source"]

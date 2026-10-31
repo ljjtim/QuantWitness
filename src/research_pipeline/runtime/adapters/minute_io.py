@@ -2,16 +2,35 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 import shutil
 from typing import Callable, Iterable, Iterator, Mapping
 from research_pipeline.platform import canonical_json, typed_canonical_hash
-from research_pipeline.data_plane import MinuteScanBudget, PartitionedDatasetResolver, PartitionedDatasetRef, build_minute_resample_plan, build_minute_scan_plan, execute_minute_resample, inspect_parquet_partition
-from research_pipeline.domain import load_session_policy_bundle
+from research_pipeline.data_plane import MinuteResampleBudget, MinuteScanBudget, PartitionedDatasetResolver, PartitionedDatasetRef, build_minute_resample_plan, build_minute_scan_plan, execute_minute_resample, inspect_parquet_partition
+from research_pipeline.domain import SessionPolicyBundle, load_session_policy_bundle
 from research_pipeline.research.minute_operators import MINUTE_OPERATOR_ARTIFACT_VERSION
 from ..operator_runtime import OperatorRuntimeContext, RuntimeCompletionMetadata, RuntimeNodeOutputs, RuntimeNodeValue
-from .common import _environment, _input_external_root, _json_ready, _local_date, _parameters
+from .common import _environment, _input_external_root, _json_ready, _parameters
+
+
+def _minute_scope_from_payload(payload, context):
+    reference = payload.get("minute_scope")
+    if reference is None:
+        return None
+    source = _environment(context).minute_scope_inputs.get(reference["name"])
+    if source is None or source.reference != reference:
+        raise ValueError("分钟输入引用与冻结来源不一致")
+    return source
+
+
+def _session_bundle_from_payload(payload, context):
+    source = _minute_scope_from_payload(payload, context)
+    bundle = load_session_policy_bundle() if source is None else source.calendar
+    expected = payload.get("session_policy_bundle_hash")
+    if expected is not None and expected != bundle.bundle_hash:
+        raise ValueError("分钟日历载荷与冻结身份不一致")
+    return bundle
 
 
 def _minute_root(context: OperatorRuntimeContext) -> Path:
@@ -162,16 +181,17 @@ def _external_parquet_rows(
             yield from _record_batch_rows(batch)
 
 
-def _operator_bar_partitions(
+def _operator_bar_batches(
     context: OperatorRuntimeContext,
     payload: Mapping[str, object],
     *,
     port: str = "bars",
+    session_bundle: SessionPolicyBundle | None = None,
 ) -> tuple[
     PartitionedDatasetRef,
-    Iterator[tuple[object, Iterator[dict[str, object]]]],
+    Iterator[tuple[object, Iterator[object]]],
 ]:
-    """逐分区提供规范分钟行；调用者必须在进入下一分区前消费当前迭代器。"""
+    """逐分区提供规范分钟列式批次，保留原来源与时间口径。"""
 
     snapshot_hash = str(payload["source_snapshot_hash"])
     raw_dataset = payload.get("partitioned_dataset")
@@ -191,23 +211,24 @@ def _operator_bar_partitions(
     if not normalized:
         request_id = str(payload.get("request_id", ""))
         scan_plan = _minute_scan_plan_from_environment(context, request_id)
-        bundle = load_session_policy_bundle()
+        bundle = session_bundle if session_bundle is not None else _session_bundle_from_payload(payload, context)
         raw_plan = build_minute_resample_plan(
             scan_plan,
             interval_minutes=int(payload.get("interval_minutes", 0)),
             session_bundle=bundle,
             instruments=_session_instruments(scan_plan, bundle),
+            budget=MinuteResampleBudget(output_batch_rows=65_536),
         )
 
     def partition_streams() -> Iterator[
-        tuple[object, Iterator[dict[str, object]]]
+        tuple[object, Iterator[object]]
     ]:
         for partition in dataset.partitions:
             source = resolver.resolve_partition(dataset, partition.partition_key)
 
-            def normalized_rows(
+            def normalized_batches(
                 *, source=source, partition=partition
-            ) -> Iterator[dict[str, object]]:
+            ) -> Iterator[object]:
                 source_batches = source.iter_batches(
                     columns=dataset.allowed_columns,
                     batch_size=65_536,
@@ -224,48 +245,79 @@ def _operator_bar_partitions(
                     batches = execute_minute_resample(
                         _RawPartitionBatches(),
                         plan=raw_plan,
+                        columns=("code", "dt", "bar_start", "trading_date", "session_id", "interval_minutes",
+                                 "open", "high", "low", "close", "volume", "money", "avg", "open_interest",
+                                 "completed", "bar_status"),
                     )
                 for batch in batches:
-                    for row in _record_batch_rows(batch):
-                        completed = row.get("completed") is True
-                        normalized_row = {
-                            "instrument": str(row["code"]),
-                            "bar_start": _aware(row["bar_start"]),
-                            "bar_end": _aware(row["dt"]),
-                            "available_time": _aware(row["dt"]),
-                            "trading_date": _local_date(
-                                row["trading_date"], "trading_date"
-                            ),
-                            "session_id": str(row["session_id"]),
-                            "interval_minutes": int(row["interval_minutes"]),
-                            "open": row["open"],
-                            "high": row["high"],
-                            "low": row["low"],
-                            "close": row["close"],
-                            "volume": row["volume"],
-                            "money": row.get("money"),
-                            "avg": row["avg"],
-                            "open_interest": row.get("open_interest"),
-                            "completed": completed,
-                            "quality_status": (
-                                "pass" if completed else str(row["bar_status"])
-                            ),
-                            "source_snapshot_hash": snapshot_hash,
-                            "source_partition_id": partition.partition_key,
-                        }
-                        for field in (
-                            "factor",
-                            "adjustment_ratio",
-                            "adjustment_mode",
-                            "factor_snapshot_hash",
-                        ):
-                            if field in row:
-                                normalized_row[field] = row[field]
-                        yield normalized_row
+                    yield _normalized_bar_batch(batch, snapshot_hash, partition.partition_key)
 
-            yield partition, normalized_rows()
+            yield partition, normalized_batches()
 
     return dataset, partition_streams()
+
+
+def _normalized_bar_batch(batch, snapshot_hash, partition_key):
+    """在列式边界统一分钟字段；仅交付时才转换为Python行。"""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    def column(name, fallback=None):
+        index = batch.schema.get_field_index(name)
+        return batch.column(index) if index >= 0 else pa.nulls(batch.num_rows, type=fallback)
+
+    def local_time(name):
+        values = column(name)
+        values = pc.cast(values, pa.timestamp("us", tz=values.type.tz), safe=False)
+        if values.type.tz is None:
+            import pandas as pd
+            encoded = pc.dictionary_encode(values)
+            localized = pa.Array.from_pandas(
+                pd.DatetimeIndex(encoded.dictionary.to_numpy(zero_copy_only=False)).tz_localize("Asia/Shanghai"),
+                type=pa.timestamp("us", tz="Asia/Shanghai"))
+            values = pc.take(localized, encoded.indices)
+        return values
+
+    def constant(value):
+        return pa.repeat(pa.scalar(value), batch.num_rows)
+
+    completed = pc.fill_null(column("completed"), False)
+    end = local_time("dt")
+    arrays = {
+        "instrument": pc.cast(column("code"), pa.string()),
+        "bar_start": local_time("bar_start"),
+        "bar_end": end,
+        "available_time": end,
+        "trading_date": pc.cast(column("trading_date"), pa.date32()),
+        "session_id": pc.cast(column("session_id"), pa.string()),
+        "interval_minutes": pc.cast(column("interval_minutes"), pa.int64()),
+        **{name: column(name) for name in ("open", "high", "low", "close", "volume")},
+        "money": column("money", pa.float64()),
+        "avg": column("avg"),
+        "open_interest": column("open_interest", pa.float64()),
+        "completed": completed,
+        "quality_status": pc.if_else(completed, "pass", pc.cast(column("bar_status"), pa.string())),
+        "source_snapshot_hash": constant(snapshot_hash),
+        "source_partition_id": constant(partition_key),
+    }
+    for name in ("factor", "adjustment_ratio", "adjustment_mode", "factor_snapshot_hash"):
+        if name in batch.schema.names:
+            arrays[name] = column(name)
+    return pa.RecordBatch.from_arrays(list(arrays.values()), names=list(arrays))
+
+
+def _operator_bar_partitions(context, payload, *, port="bars"):
+    """按有界批次提供规范行，调用者逐分区消费。"""
+    dataset, partitions = _operator_bar_batches(context, payload, port=port)
+
+    def streams():
+        for partition, batches in partitions:
+            def rows(batches=batches):
+                for batch in batches:
+                    for offset in range(0, batch.num_rows, 4096):
+                        yield from batch.slice(offset, 4096).to_pylist()
+            yield partition, rows()
+    return dataset, streams()
 
 
 def _minute_artifact_partitions(
@@ -329,7 +381,12 @@ def _minute_timestamp_type(pa):
     return pa.timestamp("us", tz="Asia/Shanghai")
 
 
+_MINUTE_STORAGE_SCALAR_TYPES = frozenset((str, int, float, bool, date, datetime, type(None)))
+
+
 def _minute_storage_value(value: object) -> object:
+    if type(value) in _MINUTE_STORAGE_SCALAR_TYPES:
+        return value
     if isinstance(value, Mapping):
         return {str(key): _minute_storage_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -444,7 +501,7 @@ def _write_minute_row_partition(
         nonlocal writer, row_count
         if not buffered:
             return
-        table = pa.Table.from_pylist([dict(item) for item in buffered], schema=schema)
+        table = pa.Table.from_pylist(buffered, schema=schema)
         if writer is None:
             writer = pq.ParquetWriter(target, schema)
         writer.write_table(table)
@@ -584,6 +641,7 @@ def _commit_partitioned_minute_rows(
 
 
 _MINUTE_ADJUSTMENT_CONTEXT_KEYS = (
+    "adjustment_snapshots",
     "financial_corporate_actions",
     "adjustment_snapshot_identity_hash",
     "adjustment_candidates",

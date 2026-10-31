@@ -1,4 +1,4 @@
-"""从已验证 Result 生成有界的 Qlib 模型研究报告。"""
+"""从正式 Result 生成有界的 Qlib 模型研究报告。"""
 
 from __future__ import annotations
 
@@ -26,6 +26,9 @@ def load_report_request(path: str | Path) -> dict:
 def validate_report_request(value: object) -> dict:
     if not isinstance(value, Mapping):
         raise ValueError("Qlib 报告请求必须为对象")
+    from .lean_report import LEAN_REPORT_VERSION, validate_lean_report_request
+    if value.get("contract_version") == LEAN_REPORT_VERSION:
+        return validate_lean_report_request(value)
     from .portfolio_report import PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION, validate_portfolio_request
 
     if value.get("contract_version") in {PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION}:
@@ -96,7 +99,7 @@ def read_prediction_frame(context, request: Mapping):
     from datetime import date
 
     if context.snapshot.bundle.result_id != request["result_id"]:
-        raise ValueError("报告请求 result_id 与 VerificationResult 关联结果不同")
+        raise ValueError("报告请求 result_id 与所读 Result 不同")
     tables = [table for table in context.snapshot.bundle.tables if table.table_id == request["table_id"]]
     if len(tables) != 1:
         raise ValueError("报告 table_id 不存在或不唯一")
@@ -228,13 +231,16 @@ def _model_figures(frame, method):
     return figures, diagnostics, notes
 
 
-def render_qlib_report(context, request: Mapping, *, verification_summary: str) -> str:
-    """验证结论与 Qlib 图形并列展示，图形成功不改变验证状态。"""
+def render_qlib_report(context, request: Mapping, *, result_summary: str) -> str:
+    """从正式 Result 展示模型指标和图形。"""
     request = validate_report_request(request)
+    from .lean_report import LEAN_REPORT_VERSION, render_lean_report
+    if request["contract_version"] == LEAN_REPORT_VERSION:
+        return render_lean_report(context, request, result_summary=result_summary)
     from .portfolio_report import PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION, render_portfolio_report
 
     if request["contract_version"] in {PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION}:
-        return render_portfolio_report(context, request, verification_summary=verification_summary)
+        return render_portfolio_report(context, request, result_summary=result_summary)
     frame = read_prediction_frame(context, request)
     figures, diagnostics, notes = _model_figures(frame, request["method"])
     from plotly.io import to_html
@@ -247,10 +253,10 @@ def render_qlib_report(context, request: Mapping, *, verification_summary: str) 
     return (
         '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Qlib 研究报告</title>'
         '<style>body{font-family:Arial,"Microsoft YaHei",sans-serif;margin:2rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style></head><body>'
-        '<h1>Qlib 模型研究报告</h1><h2>来源与验证范围</h2>'
-        + '<p>图形生成成功不代表独立重训或公式复现验证通过。</p><pre>' + html.escape(verification_summary) + '</pre>'
-        + pre({"result_id": context.snapshot.bundle.result_id, "verification_hash": context.verification.verification_hash,
-               "verification_status": context.verification.status})
+        '<h1>Qlib 模型研究报告</h1><h2>来源与执行范围</h2>'
+        + '<p>图表按正式计算结果生成，结论级别沿用研究声明。</p><pre>' + html.escape(result_summary) + '</pre>'
+        + pre({"result_id": context.snapshot.bundle.result_id, "claim_level": context.claim_level,
+               "execution_status": context.snapshot.bundle.run.status})
         + '<h2>方法与样本</h2><p>标签采用原始收益；分组按截面分数排序，每组 floor(n/N)，余数不进入组。分组曲线为算术累计收益，非资金净值。</p>'
         + pre(request) + pre(diagnostics) + ''.join('<p>' + html.escape(note) + '</p>' for note in notes)
         + ''.join(sections) + '</body></html>\n'

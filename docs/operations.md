@@ -1,6 +1,6 @@
 # 运行维护与问题排查
 
-这页面向已经开始运行研究的人：环境哪里有问题，研究执行到哪一步，怎样继续，以及哪些输出可以清理。保留正式结果及其验证材料，再处理缓存和临时目录。
+这页面向已经开始运行研究的人：环境哪里有问题，研究执行到哪一步，怎样继续，以及哪些输出可以清理。保留正式结果及其输入与恢复材料，再处理缓存和临时目录。
 
 ## 参数与行为说明
 
@@ -40,15 +40,15 @@ python -m research_pipeline gc --root <工件根> --ttl-seconds 86400 --apply --
 
 第一条只生成计划，列出候选文件数、逻辑字节和保护原因。`--apply` 将候选移入 `quarantine/`，不删除隔离载荷，不代表磁盘空间已经释放。
 
-当前命令扫描工件根下的 `staging/`、`cache/` 及 external 暂存目录。external 暂存必须具备生产者停止、Runtime owner 停止和 attempt 终态证据；未知归属和活动对象保留。成功节点的已交接载荷按 [产物生命周期](artifact-lifecycle.md) 逐文件释放，失败恢复材料和正式输出保留。GC 不扫描、不移动 ResultStore、完成态 run-root 或历史项目轮次，也不会自动建立这些目录之间的引用关系。真实研究归档必须另行保留 ResultStore 中的 Result 本体和对应 VerificationResult；验收摘要不能替代它们。完成态 run-root 只有在 `report`、`export-result` 已证明不再依赖它，并经过独立清理规划和授权后才可处理。
+当前命令扫描工件根下的 `staging/`、`cache/` 及 external 暂存目录。external 暂存必须具备生产者停止、Runtime owner 停止和 attempt 终态证据；未知归属和活动对象保留。成功节点的已交接载荷按 [产物生命周期](artifact-lifecycle.md) 逐文件释放，失败恢复材料和正式输出保留。GC 不扫描、不移动 ResultStore、完成态 run-root 或历史项目轮次，也不会自动建立这些目录之间的引用关系。真实研究归档必须另行保留 Result 本体及其引用的持久输入；验收摘要不能替代它们。完成态 run-root 只有在 `report`、`export-result` 已证明不再依赖它，并经过独立清理规划和授权后才可处理。
 
 仍被故障排查、人工记录或其他工具直接引用的 run-root 继续保留。历史 legacy junction 只作为独立清理计划中的明确对象记录；当前 `gc` 不处理它，本流程也不为它提供兼容或迁移入口。
 
 ## Workspace 与 Dashboard
 
-Workspace 分配不可复用 execution 目录，并把运行委托给同一个 run 服务。Dashboard 清单先复验 VerificationResult 与 Result 身份，再只列 `status=pass` 的结果；混合清单跳过失败项，全失败时拒绝生成可信清单，并移除上一次导出的旧清单。单结果 Viewer 和手写 Workspace 清单也执行同一门禁，不能把 Runtime succeeded、文件存在或自然语言报告当成通过。
+Workspace 为每次新研究分配 execution；显式 execution-id 接续原运行。普通 execute 完成准备、准入、run 与 report，独立 lint 用于主动诊断。
 
-Workspace 记录中的 `runtime_run_id`、`run_id` 都必须与 VerificationResult 的运行身份一致；两者同时存在时也必须一致，Dashboard 不按文件存在与否跳过身份核对。
+Dashboard 直接读取 Result。工作区清单为 research-dashboard-workspace-v4，条目包含 entry_id、label、result、result_store。run_id/runtime_run_id 与 Result 身份必须一致；缺失、损坏或错绑结果不能进入清单。没有可用结果时移除上一次导出的派生清单。报告与 Dashboard 不连接研究数据库，不重跑交易或提高声明结论级别。
 
 ## 数据库
 
@@ -57,9 +57,9 @@ research_pipeline 的数据库访问只读。采集、修复、建表、因子�
 ## 故障处理
 
 - 保留失败 run、事件和结构化错误码，先找根因。
-- 不编辑 checkpoint、Result、VerificationResult 或 plan 来“修通过”。
+- 不编辑 checkpoint、Result 或 plan 来“修通过”。
 - 输出目录冲突时使用新目录，不覆盖已提交工件。
-- 资源不足时提高显式额度或缩小研究范围，不静默改 seed、样本或算法。`verify` 的金融复核可用 `--verification-memory-bytes`、`--verification-temp-bytes` 和 `--verification-scratch-root` 单独配置；额度不足时整次失败，不会跳过 canonical/TCA 表或发布部分通过结果。
+- 资源不足时显式调整额度或研究范围，不静默改 seed、样本或算法。已发布 Result 的报告失败只重试报告，不重新消费 holdout。
 - Catalog/PIT 阻断时返回数据准入阶段，不能在 Runtime 绕过。
 
 ## 检查原则

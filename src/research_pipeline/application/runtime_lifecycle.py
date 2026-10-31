@@ -131,7 +131,7 @@ def _inspect_not_started_run(root: Path) -> dict[str, object]:
         "next_command": next_command,
         "next_command_argv": list(next_command.argv),
         "required_inputs": (
-            _required_inputs(action, next_command)
+            _required_inputs(action)
         ),
     }
 
@@ -314,7 +314,7 @@ def _inspect_started_run(
         "next_command": next_command,
         "next_command_argv": list(next_command.argv),
         "required_inputs": (
-            _required_inputs(action, next_command)
+            _required_inputs(action)
         ),
     }
 
@@ -331,7 +331,7 @@ def _recommend_action(
 ) -> tuple[str, str, str]:
     finalize_status = finalize.get("status")
     if run_status == "succeeded" and finalize_status == "succeeded":
-        return _verify_action(
+        return _report_action(
             root=root,
             finalize=finalize,
             result_store=result_store,
@@ -342,11 +342,11 @@ def _recommend_action(
         and finalize_status == "failed"
         and finalize.get("result_published") is True
     ):
-        return _verify_action(
+        return _report_action(
             root=root,
             finalize=finalize,
             result_store=result_store,
-            reason="Result 已原子发布；保留 finalize 后续错误并进入独立 verify",
+            reason="Result 已原子发布；保留 finalize 后续错误并生成报告",
         )
     if identity_issue is not None or any(
         node.get("status") == "succeeded"
@@ -465,7 +465,7 @@ def _rerun_action(*, root: Path, node_id: str) -> tuple[str, str, str]:
     )
 
 
-def _verify_action(
+def _report_action(
     *,
     root: Path,
     finalize: Mapping[str, object],
@@ -479,30 +479,17 @@ def _verify_action(
     except IndexError as exc:
         raise RuntimeIntegrityError("Result 路径无法推导 ResultStore") from exc
     store = result_store or str(inferred_store)
-    verification_output = _available_output_path(
-        root / "verification-result.json", suffix_with_counter=True
+    report_output = _available_output_path(
+        root / "report.md", suffix_with_counter=True
     )
     command_parts = [
-        "python", "-m", "research_pipeline", "verify",
+        "python", "-m", "research_pipeline", "report",
         "--result", result_directory, "--result-store", store,
-        "--output", str(verification_output),
+        "--output", str(report_output),
     ]
-    legacy_bundle = _legacy_verifier_bundle(
-        root=root,
-        result_directory=result_directory,
-        result_store=store,
-    )
-    if legacy_bundle is False:
-        return (
-            "verify",
-            f"{reason}；历史 Result 仍需操作者提供冻结身份一致的 Verifier bundle",
-            _command("python", "-m", "research_pipeline", "verify", "--help"),
-        )
-    if isinstance(legacy_bundle, Path):
-        command_parts.extend(("--verifier-bundle", str(legacy_bundle)))
     command_parts.append("--json")
     return (
-        "verify",
+        "report",
         reason,
         _command(*command_parts),
     )
@@ -519,50 +506,9 @@ def _readmit_action(reason: str) -> tuple[str, str, str]:
     )
 
 
-def _legacy_verifier_bundle(
-    *,
-    root: Path,
-    result_directory: str,
-    result_store: str,
-) -> Path | bool | None:
-    """返回历史 Result 的精确 Plan Verifier；False 表示确实需要外部选择。"""
-
-    from research_pipeline.results import ResultStore
-
-    if not Path(result_store).is_dir() or not Path(result_directory).is_dir():
-        return None
-    bundle = ResultStore(result_store, create=False).inspect_directory(
-        result_directory
-    )
-    verification = bundle.verification
-    if verification.verifier_identity is None:
-        return None
-    if verification.verifier_bundle_path is not None:
-        return None
-    invocation_path = root / "operator-dag-invocation.json"
-    try:
-        invocation = json.loads(invocation_path.read_text(encoding="utf-8"))
-        plan = invocation.get("plan") if isinstance(invocation, Mapping) else None
-        if not isinstance(plan, str) or not plan:
-            return False
-        from .research_plan_store import resolve_plan_verifier_bundle
-
-        return resolve_plan_verifier_bundle(
-            plan,
-            verification.verifier_identity,
-        ) or False
-    except Exception:
-        return False
-
-
-def _required_inputs(
-    action: str,
-    next_command: _SuggestedCommand,
-) -> list[str]:
+def _required_inputs(action: str) -> list[str]:
     if action == "readmit-new-run":
         return ["package_changes", "admission_inputs"]
-    if action == "verify" and next_command.argv[-1:] == ("--help",):
-        return ["verifier_bundle"]
     return []
 
 

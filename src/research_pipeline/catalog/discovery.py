@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import glob
@@ -1010,9 +1011,25 @@ class DuckDBSourceInspector:
         self.path = Path(path)
         self.source_profile = source_profile
         self.environment = environment
+        self._session_connection = None
+
+    def __enter__(self):
+        self._session_connection = _duckdb().connect(str(self.path), read_only=True)
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        connection = self._session_connection
+        self._session_connection = None
+        return connection.__exit__(exc_type, exc_value, traceback)
+
+    def _connection_context(self):
+        # 同次准入只复用只读连接；每个请求仍重新观察实际结构和范围统计。
+        if self._session_connection is not None:
+            return nullcontext(self._session_connection)
+        return _duckdb().connect(str(self.path), read_only=True)
 
     def observe_current_schema(self, object_name: str) -> PhysicalInventory:
-        with _duckdb().connect(str(self.path), read_only=True) as connection:
+        with self._connection_context() as connection:
             rows = connection.execute(
                 """SELECT column_name, data_type, is_nullable, column_index
                    FROM duckdb_columns()
@@ -1056,7 +1073,7 @@ class DuckDBSourceInspector:
     ) -> ObjectExecutionEvidence:
         """读取对象定义与有限统计；JSON 展开不会通过执行 VIEW 来猜倍率。"""
 
-        with _duckdb().connect(str(self.path), read_only=True) as connection:
+        with self._connection_context() as connection:
             rows = connection.execute(
                 """SELECT table_name, 'table' AS object_kind, NULL AS definition
                    FROM duckdb_tables() WHERE schema_name = 'main'

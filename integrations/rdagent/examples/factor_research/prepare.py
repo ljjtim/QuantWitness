@@ -48,10 +48,7 @@ def prepare_base(output):
         "session_root": str(root / "baseline-session"),
         "source": {"kind": "research_package", "path": bundle["package"],
             "source_archive_root": str(archive), "input_snapshot_manifest": bundle["input_snapshot_manifest"],
-            "catalog_lock": bundle["catalog_lock"], "verifier_bundle": bundle["verifier"],
-            "extension_bundles": bundle["extensions"], "runtime_options": {"workers": 1},
-            "verification_process_slots": 3 if sys.platform == "win32" else 2,
-            "verification_memory_bytes": 4 * 1024 ** 3},
+            "catalog_lock": bundle["catalog_lock"], "extension_bundles": bundle["extensions"], "runtime_options": {"workers": 1}},
         "development": {"start": facts["design"]["research_sessions"][0],
             "end": facts["design"]["calendar_sessions"][78], "as_of": bundle["fixed_clock"]},
         "objective": {"table_id": "metrics", "schema_id": "project.qlib_demo.metrics.v1",
@@ -73,7 +70,7 @@ def knowledge_responses(records, reflect):
     from quantwitness_rdagent.factor_research import canonical_expression, expression_direction
     eligible = [row for row in records if row.get("usable_for_proposal") is True and "metrics" in row]
     if not eligible:
-        raise ValueError("教学知识例需要至少一条已验证开发指标记录")
+        raise ValueError("教学知识例需要至少一条正式开发指标记录")
     refs = [eligible[-1]["record_id"]]
     studied = {canonical_expression(row["expression"]) for row in records if row.get("expression")}
     choices = [f"$close / {operator}($close, {window}) - 1"
@@ -102,7 +99,7 @@ def build(output, *, model_env_file=None, knowledge_index=None, knowledge_output
     root = Path(output).resolve()
     responses = []
     def reflect(observation, next_idea):
-        return {"Observations": observation, "Feedback for Hypothesis": "仅评价本轮已验证开发指标",
+        return {"Observations": observation, "Feedback for Hypothesis": "仅评价本轮正式开发指标",
                 "New Hypothesis": next_idea, "Reasoning": "比较相同开发范围，负结果同样保留", "Replace Best Result": False}
     fixed = [reflect("已完成教学基线", "检验较短动量"),
         {"hypothesis": "短期动量对开发样本的预测可能不同", "reason": "根据基线反思检验更短历史"},

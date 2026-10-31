@@ -123,10 +123,30 @@ def diagnose_research_package(root: str | Path, *, documents: PackageDocuments |
     return sorted(issues, key=lambda issue: (issue["file"], issue["field"], issue["code"], issue["message"]))
 
 
-def validate_lint_declarations(root: str | Path, *, documents: PackageDocuments | None = None) -> None:
-    """聚合失败只用于修改声明，不授予加载、准入或运行资格。"""
-    issues = diagnose_research_package(root, documents=documents)
-    if issues:
+def validate_lint_declarations(root: str | Path, *, documents: PackageDocuments | None = None) -> tuple:
+    """成功声明只解析一次；失败仍按原字段收集完整诊断。"""
+    from .compiler import compile_package_queries
+    from .constants import OPERATOR_GRAPH_BUILDER_ID
+    from .store import load_research_package, read_package_documents
+    from research_pipeline.platform.operator_contracts import OperatorGraphRecipe
+    from research_pipeline.research.semantics import ResearchSemantics
+
+    documents = documents if documents is not None else read_package_documents(root)
+    try:
+        package = load_research_package(root, documents=documents)
+        queries = compile_package_queries(package)
+        recipe, semantics = None, None
+        if package.builder_id == OPERATOR_GRAPH_BUILDER_ID:
+            if "graph" in package.spec_payload:
+                recipe = OperatorGraphRecipe.from_dict(package.spec_payload["graph"])
+            raw_semantics = package.spec_payload.get("research_semantics")
+            if raw_semantics is not None:
+                semantics = ResearchSemantics.from_dict(raw_semantics)
+        return package, queries, recipe, semantics
+    except (MainlineError, TypeError, KeyError):
+        issues = diagnose_research_package(root, documents=documents)
+        if not issues:
+            raise
         error = ResearchPackageError("研究包声明存在缺口：" + "；".join(issue["message"] for issue in issues))
         error.failure_payload = {
             "issues": issues,
@@ -136,7 +156,7 @@ def validate_lint_declarations(root: str | Path, *, documents: PackageDocuments 
                 "compilation": {"status": "pending", "reason": "声明缺口修正后才能严格加载和编译。"},
             },
         }
-        raise error
+        raise error from None
 
 
 def build_lint_report(

@@ -1,0 +1,52 @@
+contract_version: public-lean-quickstart-expectation-v1
+instrument_id: 599999.XSHG
+initial_cash_cny: '10000.00'
+fees:
+  commission_ppm: 300
+  minimum_commission_cny: '0.05'
+  rounding: ceil_to_fen
+  sell_tax_ppm: 0
+  transfer_fee_ppm: 0
+frequencies:
+  1d:
+    fills:
+    - submitted_at: '2024-01-09T09:30:00+08:00'
+      at: '2024-01-09T09:30:00+08:00'
+      quantity: 100
+      price: '10.5'
+      fee: '0.32'
+      cash: '8949.68'
+    - submitted_at: '2024-01-10T09:30:00+08:00'
+      at: '2024-01-10T09:30:00+08:00'
+      quantity: -100
+      price: '11'
+      fee: '0.33'
+      cash: '10049.35'
+    daily_cash:
+    - '10000.00'
+    - '8949.68'
+    - '10049.35'
+    - '10049.35'
+    fee_total: '0.65'
+    final_equity: '10049.35'
+  1m:
+    fills:
+    - submitted_at: '2024-01-08T09:31:00+08:00'
+      at: '2024-01-08T09:32:00+08:00'
+      quantity: 100
+      price: '10'
+      fee: '0.30'
+      cash: '8999.70'
+    - submitted_at: '2024-01-09T09:31:00+08:00'
+      at: '2024-01-09T09:32:00+08:00'
+      quantity: -100
+      price: '10.5'
+      fee: '0.32'
+      cash: '10049.38'
+    daily_cash:
+    - '8999.70'
+    - '10049.38'
+    - '10049.38'
+    - '10049.38'
+    fee_total: '0.62'
+    final_equity: '10049.38'

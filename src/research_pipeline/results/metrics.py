@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import math
 from numbers import Real
 
@@ -68,15 +69,7 @@ def metrics_from_snapshot(snapshot: ResultSnapshot) -> tuple[ResultMetric, ...]:
     """消费操作内已验证快照，不再次打开 Result 文件。"""
 
     bundle = snapshot.bundle
-    identity = bundle.verification.verifier_identity
-    project_definitions = (
-        () if identity is None else tuple(
-            MetricDefinition.from_dict(item)
-            for item in identity["metric_definitions"]
-        )
-    )
-    project_metric_refs = {item.metric_ref for item in project_definitions}
-    registry = compose_metric_registry(project_definitions)
+    registry = compose_metric_registry(metric_definitions_from_snapshot(snapshot))
     rows_by_ref: dict[str, list[ResultMetric]] = {
         proof.metric_ref: [] for proof in bundle.metric_proofs
     }
@@ -96,11 +89,8 @@ def metrics_from_snapshot(snapshot: ResultSnapshot) -> tuple[ResultMetric, ...]:
                 if proof is None:
                     continue
                 definition = registry.require(proof.metric_ref)
-                if (
-                    proof.metric_ref in project_metric_refs
-                    and definition.definition_digest != proof.definition_digest
-                ):
-                    raise ResultContractError("正式指标定义与 Result 可达性证明不一致")
+                if definition.definition_digest != proof.definition_digest:
+                    raise ResultContractError("Result 指标定义与正式生产声明不一致")
                 value = row.get("value")
                 sample_size = row.get("sample_size")
                 text_fields = {
@@ -123,9 +113,7 @@ def metrics_from_snapshot(snapshot: ResultSnapshot) -> tuple[ResultMetric, ...]:
                         f"正式指标行字段无效: {proof.metric_ref}"
                     )
                 if text_fields["unit"] != definition.unit:
-                    raise ResultContractError(
-                        f"正式指标单位与定义不一致: {proof.metric_ref}"
-                    )
+                    raise ResultContractError(f"正式指标单位与定义不一致: {proof.metric_ref}")
                 try:
                     sample_start = datetime.fromisoformat(text_fields["sample_start"])
                     sample_end = datetime.fromisoformat(text_fields["sample_end"])
@@ -161,4 +149,26 @@ def metrics_from_snapshot(snapshot: ResultSnapshot) -> tuple[ResultMetric, ...]:
     return tuple(rows_by_ref[ref][0] for ref in sorted(rows_by_ref))
 
 
-__all__ = ["ResultMetric", "load_result_metrics", "metrics_from_snapshot"]
+def metric_definitions_from_snapshot(snapshot):
+    """从 Result 冻结的项目定义和 LEAN 表定义读取指标合同。"""
+    definitions = list(snapshot.bundle.metric_definitions)
+    from research_pipeline.platform.lean_contract import LEAN_METRICS_SCHEMA_ID
+    if any(table.schema_id == LEAN_METRICS_SCHEMA_ID for table in snapshot.bundle.tables):
+        seen = set()
+        for batch in snapshot.iter_table_batches(LEAN_METRICS_SCHEMA_ID, columns=("metric_ref", "definition_json"), batch_size=1024):
+            for row in batch.to_pylist():
+                definition = MetricDefinition.from_dict(json.loads(row["definition_json"]))
+                if (definition.metric_ref != row["metric_ref"] or definition.metric_ref in seen
+                        or not definition.metric_id.startswith("project.lean.")
+                        or definition.result_schema_id != LEAN_METRICS_SCHEMA_ID):
+                    raise ResultContractError("LEAN正式指标冻结定义不一致或重复")
+                seen.add(definition.metric_ref)
+                existing = next((item for item in definitions if item.metric_ref == definition.metric_ref), None)
+                if existing is None:
+                    definitions.append(definition)
+                elif existing != definition:
+                    raise ResultContractError("表内指标定义与 Result 声明不一致")
+    return tuple(definitions)
+
+
+__all__ = ["ResultMetric", "load_result_metrics", "metrics_from_snapshot", "metric_definitions_from_snapshot"]

@@ -1,4 +1,4 @@
-"""正式研究包执行：共用Workspace分配、恢复、独立验证与报告。"""
+"""正式研究包执行：共用Workspace分配、恢复、结果与报告。"""
 import contextlib
 import json
 import os
@@ -14,8 +14,7 @@ class PackageExecutionInterrupted(RuntimeError):
     """保留已有运行位置，由Runtime诊断决定后续恢复动作。"""
 
 
-_BINDING_FIELDS = ("catalog_lock", "extension_bundles", "runtime_options",
-                   "verification_process_slots", "verification_memory_bytes")
+_BINDING_FIELDS = ("catalog_lock", "extension_bundles", "runtime_options")
 _PROCESS_ENV = frozenset({
     "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "HOME", "USERPROFILE",
     "HOMEDRIVE", "HOMEPATH", "TEMP", "TMP", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
@@ -71,8 +70,7 @@ def _process_interruption(arguments, message):
     feedback = json.loads(diagnostic.read_text(encoding="utf-8")) if diagnostic.exists() else None
     if feedback is None or feedback.get("execution_ref") != execution:
         stage = "run" if execution and (Path(execution) / "run/operator-dag-invocation.json").exists() else "prepare"
-        feedback = {"command_status": "failed", "execution_status": "not_run", "verification_status": "not_run",
-                    "execution_ref": execution, "result_ref": None, "verification_ref": None, "failed_stage": stage,
+        feedback = {"command_status": "failed", "execution_status": "not_run", "execution_ref": execution, "result_ref": None, "failed_stage": stage,
                     "diagnostics": [{"stage": stage, "error_code": "package_execution_process_interrupted", "message": message}]}
     error = PackageExecutionInterrupted(message)
     error.package_execution_feedback = feedback
@@ -80,29 +78,29 @@ def _process_interruption(arguments, message):
 
 
 def execute_package(*, root, workspace_id, allocation_label, base_package,
-                    source_archive_root, input_snapshot_manifest, verifier_bundle, binding):
+                    source_archive_root, input_snapshot_manifest, binding):
     """在独立轻量进程内运行正式 Workspace，并返回既有评价反馈。"""
     return _isolated_operation("execute", locals())
 
 
 def adopt_package_execution(*, execution_id, root, workspace_id, allocation_label, base_package,
-                            source_archive_root, input_snapshot_manifest, verifier_bundle, binding):
-    """显式采用同候选已完成且通过独立验证的替代 Workspace execution。"""
+                            source_archive_root, input_snapshot_manifest, binding):
+    """显式采用同候选已完成的替代 Workspace execution。"""
     return _isolated_operation("adopt", locals())
 
 
 def _execute_package(*, root, workspace_id, allocation_label, base_package,
-                    source_archive_root, input_snapshot_manifest, verifier_bundle, binding):
+                    source_archive_root, input_snapshot_manifest, binding):
     from research_pipeline.workspace import initialize_workspace
     from research_pipeline.application.workspace_flow import (
-        WorkspaceVerificationFailedError, execute_workspace, workspace_arguments,
+        execute_workspace, workspace_arguments,
         normalize_runtime_options,
     )
     from .worker import find_or_allocate, failure_diagnostics
 
     root = Path(root)
     feedback = dict(command_status="failed", execution_status="not_run",
-                    verification_status="not_run", result_ref=None, verification_ref=None)
+                    result_ref=None, )
     stage = "prepare"
     try:
         workspace = root / "workspace"
@@ -123,45 +121,29 @@ def _execute_package(*, root, workspace_id, allocation_label, base_package,
         args = workspace_arguments(
             workspace=str(workspace), label=allocation_label,
             catalog_lock=binding["catalog_lock"], source_archive_root=source_archive_root,
-            input_snapshot_manifest=input_snapshot_manifest, verifier_bundle=verifier_bundle,
+            input_snapshot_manifest=input_snapshot_manifest,
             extension_bundle=binding["extension_bundles"],
-            verification_memory_bytes=binding.get("verification_memory_bytes"),
-            verification_process_slots=binding.get("verification_process_slots", 3),
             **normalize_runtime_options(binding["runtime_options"]),
         )
-        try:
-            outcome = execute_workspace(args, allocation_handler=allocation_handler)
-        except WorkspaceVerificationFailedError as exc:
-            from research_pipeline.evidence import load_verified_result_context
-            outcome = exc.failure_payload
-            verified = load_verified_result_context(
-                outcome["verification_result"], result_store=outcome["result_store"])
-            findings = [item for item in verified.verification.limitations
-                        if not str(item).startswith("simulation_claim_ceiling:")]
-            if (not findings or any(not str(item).startswith("formula.") for item in findings)
-                    or verified.verification.integrity_status != "pass"
-                    or verified.verification.reproducibility_status != "pass"
-                    or any(gate.status not in {"pass", "not_applicable"}
-                           for gate in verified.verification.gate_records)):
-                raise
-            # 公式否定结论交给候选修复，其他验证失败仍保留原 execution 等待处理。
+        outcome = execute_workspace(args, allocation_handler=allocation_handler)
+        from research_pipeline.results import load_result_context
+        context = load_result_context(outcome["result_directory"], result_store=outcome["result_store"])
+        if outcome["status"] != "succeeded" or outcome["execution_status"] != "succeeded" or context.snapshot.bundle.run.status != "succeeded":
+            raise ValueError("正式研究执行尚未完成")
         feedback.update(command_status="succeeded", execution_status=outcome["execution_status"],
-            verification_status=outcome["verification_status"], result_ref=outcome["result_directory"],
-            verification_ref=outcome["verification_result"], claim_level=outcome["claim_level"])
-        from research_pipeline.evidence import load_verified_result_context
-        verified = load_verified_result_context(outcome["verification_result"], result_store=outcome["result_store"])
-        feedback["diagnostics"] = list(verified.verification.limitations)
+            result_ref=outcome["result_directory"], result_id=outcome["result_id"],
+            result_store=outcome["result_store"], claim_level=context.claim_level,
+            diagnostics=list(context.limitations))
         return feedback
     except Exception as exc:
         outcome = getattr(exc, "failure_payload", {}) or {}
         stage = outcome.get("failed_stage", stage)
-        for source, target in (("execution_status", "execution_status"), ("verification_status", "verification_status"),
-                ("result_directory", "result_ref"), ("verification_result", "verification_ref"), ("execution_root", "execution_ref")):
+        for source, target in (("execution_status", "execution_status"), ("result_directory", "result_ref"), ("execution_root", "execution_ref")):
             if outcome.get(source) is not None:
                 feedback[target] = outcome[source]
         diagnostic = {**feedback, "failed_stage": stage,
             "diagnostics": failure_diagnostics(exc, stage=stage, execution=feedback.get("execution_ref"))}
-        if stage in {"admit", "run", "verify", "report"}:
+        if stage in {"admit", "run", "report"}:
             interruption = PackageExecutionInterrupted("正式执行尚未完成，请按Runtime诊断恢复同一execution")
             interruption.package_execution_feedback = diagnostic
             write_json(root / "execution-diagnostic.json", diagnostic)
@@ -170,7 +152,7 @@ def _execute_package(*, root, workspace_id, allocation_label, base_package,
         raise
 
 _ARGUMENT_FIELDS = ("root", "workspace_id", "allocation_label", "base_package",
-                    "source_archive_root", "input_snapshot_manifest", "verifier_bundle", "binding")
+                    "source_archive_root", "input_snapshot_manifest", "binding")
 
 
 def _adoption_inputs(arguments):
@@ -187,7 +169,7 @@ def _validate_execution(arguments, execution_id):
     from research_pipeline.packages import load_research_package
     from research_pipeline.application.research_plan_store import load_operator_graph_research_plan
     from research_pipeline.data_plane.archived_inputs import load_archived_input_manifest
-    from research_pipeline.extensions import verify_project_operator_bundle, verify_project_verifier_bundle
+    from research_pipeline.extensions import verify_project_operator_bundle
     from research_pipeline.application import research_package
     from research_pipeline.application.workspace_flow import workspace_arguments
 
@@ -212,7 +194,7 @@ def _validate_execution(arguments, execution_id):
     lint = arguments.get("lint") or research_package._execute(workspace_arguments(
         command="package", package_command="lint", package=str(config.package_root),
         catalog_lock=binding["catalog_lock"], source_archive_root=arguments["source_archive_root"],
-        verifier_bundle=arguments["verifier_bundle"], extension_bundle=binding["extension_bundles"],
+        extension_bundle=binding["extension_bundles"],
     ))
     catalog_hash = lint["checks"]["fields"]["catalog_hash"]
     if any(query.catalog_hash != catalog_hash for query in queries.values()):
@@ -220,9 +202,6 @@ def _validate_execution(arguments, execution_id):
     bundle_hashes = sorted(verify_project_operator_bundle(path).bundle_hash for path in binding["extension_bundles"])
     if bundle_hashes != sorted(manifest.get("project_admission", {}).get("bundle_hashes", [])):
         raise ValueError("替代 execution 的算子 bundle 与候选不一致")
-    verifier = verify_project_verifier_bundle(arguments["verifier_bundle"])
-    if verifier.bundle_hash != manifest.get("verifier_admission", {}).get("bundle_hash"):
-        raise ValueError("替代 execution 的 Verifier bundle 与候选不一致")
     invocation = json.loads((execution / "run/operator-dag-invocation.json").read_text(encoding="utf-8"))
     paths = {"plan": execution / "plan/admitted", "run_root": execution / "run",
              "artifact_root": execution / "artifacts",
@@ -250,7 +229,7 @@ def _validate_adopted_execution(adoption, arguments):
 
 def _adopt_package_execution(*, execution_id, **arguments):
     from research_pipeline.application.research_plan_store import load_operator_graph_research_plan
-    from research_pipeline.evidence import load_verified_result_context
+    from research_pipeline.results import load_result_context
     from research_pipeline.results import ResultStore
 
     root = Path(arguments["root"])
@@ -282,9 +261,9 @@ def _adopt_package_execution(*, execution_id, **arguments):
     store = ResultStore(execution / "results", create=False)
     reference = json.loads((execution / "run/result-ref.json").read_text(encoding="utf-8"))
     bundle = store.load_by_identity(project_id=reference["project_id"], run_id=reference["run_id"], result_id=reference["result_id"])
-    context = load_verified_result_context(execution / "verification/result.json", result_store=execution / "results")
-    if context.verification.status != "pass" or context.snapshot.bundle.result_id != bundle.result_id:
-        raise ValueError("替代 execution 尚未通过同一 Result 的独立验证")
+    context = load_result_context(store.result_directory(bundle), result_store=execution / "results")
+    if context.snapshot.bundle.run.status != "succeeded" or context.snapshot.bundle.result_id != bundle.result_id:
+        raise ValueError("替代 execution 尚未完成同一 Result")
     if bundle.package_hash != manifest["package_hash"] or bundle.plan_hash != manifest["package_plan_hash"]:
         raise ValueError("替代 execution 的 Result 与正式 Plan 不一致")
     retained = root / "execution-history" / previous["execution_id"]
@@ -296,7 +275,7 @@ def _adopt_package_execution(*, execution_id, **arguments):
             shutil.copyfile(source, target)
     adoption = {"execution_id": execution_id, "previous_execution_id": previous["execution_id"],
                 "inputs": _adoption_inputs(arguments), "plan_manifest_hash": manifest["manifest_hash"],
-                "result_id": bundle.result_id, "verification_ref": str(execution / "verification/result.json")}
+                "result_id": bundle.result_id}
     write_json(root / "execution-adoption.json", adoption)
     write_json(root / "execution-ref.json", {"execution_id": execution_id, "execution_root": str(execution)})
     return adoption
@@ -322,9 +301,8 @@ def _process_main():
                 reference = root / "execution-ref.json"
                 execution = json.loads(reference.read_text(encoding="utf-8")).get("execution_root") if reference.exists() else None
                 exc.package_execution_feedback = {"command_status": "failed", "execution_status": "not_run",
-                    "verification_status": "not_run", "execution_ref": execution, "failed_stage": "run",
-                    "result_ref": None, "verification_ref": None,
-                    "diagnostics": [{"stage": "run", "error_code": "package_execution_owner_live",
+                    "execution_ref": execution, "failed_stage": "run",
+                    "result_ref": None, "diagnostics": [{"stage": "run", "error_code": "package_execution_owner_live",
                                      "message": str(exc), "recommended_action": "wait"}]}
         response = {"failure": {"error_type": type(exc).__name__, "message": str(exc),
                     "interrupted": isinstance(exc, PackageExecutionInterrupted),

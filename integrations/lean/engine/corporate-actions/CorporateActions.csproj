@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup><ItemGroup><Compile Include="CorporateActionEvent.cs"/><Compile Include="CorporateActionProcessor.cs"/><Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath><Private>true</Private></Reference>
+<Reference Include="QuantConnect.Logging"><HintPath>$(LeanBin)/QuantConnect.Logging.dll</HintPath><Private>true</Private></Reference>
+<Reference Include="QuantConnect.Configuration"><HintPath>$(LeanBin)/QuantConnect.Configuration.dll</HintPath><Private>true</Private></Reference>
+<Reference Include="NodaTime"><HintPath>$(LeanBin)/NodaTime.dll</HintPath><Private>true</Private></Reference>
+<Reference Include="Python.Runtime"><HintPath>$(LeanBin)/Python.Runtime.dll</HintPath><Private>true</Private></Reference>
+<Reference Include="Newtonsoft.Json"><HintPath>$(LeanBin)/Newtonsoft.Json.dll</HintPath><Private>true</Private></Reference>
+<Reference Include="QuantConnect.Compression"><HintPath>$(LeanBin)/QuantConnect.Compression.dll</HintPath><Private>true</Private></Reference></ItemGroup></Project>

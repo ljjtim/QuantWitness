@@ -24,8 +24,8 @@ class FrozenRequest:
     @classmethod
     def from_dict(cls, payload):
         fields = {"request_id", "mode", "base_package", "source_archive_root", "input_snapshot_manifest",
-                  "editable_source_root", "reference_bundle", "development_scope", "runtime_binding", "budget"}
-        optional = {"code_generation", "confirmed_formula", "formula_evaluation", "coding_knowledge"}
+                  "editable_source_root", "development_scope", "runtime_binding", "budget"}
+        optional = {"code_generation", "confirmed_formula", "coding_knowledge"}
         if not isinstance(payload, dict) or not fields <= set(payload) or set(payload) - fields - optional:
             raise ValueError("冻结请求字段必须完整且无额外字段")
         if payload["mode"] != "formula_reproduction":
@@ -55,12 +55,6 @@ class FrozenRequest:
             if "source_session" in knowledge and (not isinstance(knowledge["source_session"], str)
                     or not knowledge["source_session"].strip()):
                 raise ValueError("编码知识来源会话路径无效")
-        evaluation = payload.get("formula_evaluation")
-        if "formula_evaluation" in payload:
-            if (not isinstance(evaluation, dict)
-                    or set(evaluation) != {"verifier_id", "verifier_version", "coverage_schema_id"}
-                    or any(not isinstance(value, str) or not value.strip() for value in evaluation.values())):
-                raise ValueError("formula_evaluation必须绑定验证器身份和覆盖表schema")
         live = "code_generation" in payload
         budget = payload["budget"]
         base_budget = {"outer_loops": 1, "coder_attempts": 3, "parallel": 1}
@@ -149,7 +143,7 @@ class FrozenRequest:
                 if not original_path.is_absolute():
                     original_path = manifest_path.parent / original_path
                 selected["original_plans/" + request_id] = original_path.read_text(encoding="utf-8")
-        for index, value in enumerate([self.payload["reference_bundle"], *binding["extension_bundles"]]):
+        for index, value in enumerate(binding["extension_bundles"]):
             root = self._local_path(value)
             for relative in ("manifest.json", "COMMITTED"):
                 selected[f"bundles/{index}/{relative}"] = (root / relative).read_text(encoding="utf-8")
@@ -160,7 +154,7 @@ class FrozenRequest:
         manifest_path = self._local_path(self.payload["input_snapshot_manifest"])
         archive = json.loads(manifest_path.read_text(encoding="utf-8"))
         source_roots = [self._local_path(self.payload[key]).resolve() for key in
-                        ("base_package", "source_archive_root", "editable_source_root", "reference_bundle")]
+                        ("base_package", "source_archive_root", "editable_source_root")]
         for entry in archive.get("requests", {}).values():
             root = self._local_path(entry["root"])
             source_roots.append((root if root.is_absolute() else manifest_path.parent / root).resolve())

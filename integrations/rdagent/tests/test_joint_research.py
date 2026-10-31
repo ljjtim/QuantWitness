@@ -4,6 +4,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from importlib.util import find_spec
+
+native = pytest.mark.skipif(find_spec("rdagent") is None, reason="需要固定RD-Agent源码及Linux场景依赖")
 
 from quantwitness_rdagent.factor_research import ResearchBudgetExhausted, ResearchCalls
 from quantwitness_rdagent.joint_feedback import validate_joint_feedback
@@ -46,6 +49,7 @@ def test_joint_feedback_rejects_unverified_or_future_fields(change):
         validate_joint_feedback([row])
 
 
+@native
 def test_direction_uses_upstream_and_real_refs():
     from quantwitness_rdagent.joint_research import select_joint_direction
     calls = []
@@ -61,6 +65,7 @@ def test_direction_uses_upstream_and_real_refs():
         select_joint_direction({"knowledge": [record()], "max_output_tokens": 512}, invalid)
 
 
+@native
 def test_model_prompt_consumes_factor_knowledge():
     from quantwitness_rdagent.native_model_research import propose_model
     replies = iter([json.dumps({"hypothesis": "非线性", "reason": "消费因子开发反馈"}), json.dumps({"definition": {"nodes": [{"inputs": [-1], "width": 1, "activation": "identity"}]}})])
@@ -80,7 +85,7 @@ def test_failed_evaluation_consumes_budget_and_resume_reuses(tmp_path):
     class FailedBranch:
         def evaluate(self, index, proposal):
             calls.append(index)
-            return {**proposal, "status": "failed", "reason": "verification_failed"}
+            return {**proposal, "status": "failed", "reason": "execution_failed"}
     session = object.__new__(JointResearch)
     session.root = tmp_path
     session.payload = {"budget": {"evaluations": 1}}
@@ -97,26 +102,26 @@ def test_failed_evaluation_consumes_budget_and_resume_reuses(tmp_path):
 def test_population_requires_common_validation_and_complete_factor():
     from copy import deepcopy
     from quantwitness_rdagent.joint_feedback import development_population
-    model = {"mode": "walk_forward_development_v1", "tables": {
+    model = {"design": {"mode": "development"}, "tables": {
         "samples": [{"sample_id": "s1", "target": 0.2, "label_start_time": "t1", "label_end_time": "t2", "label_available_time": "t3", "historical_return__w5": 0.1, "volatility__w5": 0.2}],
         "validation_predictions": [{"fold_id": "f1", "sample_id": "s1", "actual": 0.2, "label_end_time": "t2", "label_available_time": "t3", "candidate_id": "a"}]}}
-    baseline = development_population(model)
+    baseline = development_population(model["design"], model["tables"])
     candidate = deepcopy(model)
     candidate["tables"]["validation_predictions"].append({**candidate["tables"]["validation_predictions"][0], "candidate_id": "b"})
-    assert development_population(candidate) == baseline
+    assert development_population(candidate["design"], candidate["tables"]) == baseline
     candidate["tables"]["samples"][0]["historical_return__w5"] = None
     with pytest.raises(ValueError, match="完整值"):
-        development_population(candidate)
+        development_population(candidate["design"], candidate["tables"])
     candidate = deepcopy(model)
     candidate["tables"]["validation_predictions"][0]["actual"] = 0.3
-    assert development_population(candidate) != baseline
+    assert development_population(candidate["design"], candidate["tables"]) != baseline
 
 
 def test_failed_model_metric_is_recorded_with_reserved_budget(tmp_path):
     from quantwitness_rdagent.joint_research import JointResearch
     class FailedModel:
         def evaluate(self, index, proposal):
-            raise ValueError("未通过独立验证")
+            raise ValueError("正式执行未完成")
     session = object.__new__(JointResearch)
     session.root = tmp_path
     session.payload = {"budget": {"evaluations": 1}}
@@ -133,7 +138,7 @@ def test_failed_record_stays_in_branch_history_without_financial_feedback(tmp_pa
     session.payload = {"campaign_id": "joint", "budget": {"rounds": 5}}
     branch = SimpleNamespace(root=tmp_path / "branches/factor")
     session.branches = {"factor": branch}
-    value = {"kind": "factor", "round": 1, "candidate_id": "factor_0001", "status": "failed", "reason": "verification_failed", "expression": "$close / Ref($close, 3) - 1"}
+    value = {"kind": "factor", "round": 1, "candidate_id": "factor_0001", "status": "failed", "reason": "execution_failed", "expression": "$close / Ref($close, 3) - 1"}
     session.record(1, value)
     assert json.loads((branch.root / "rounds/0001/record.json").read_text(encoding="utf-8")) == value
     assert session.knowledge_view() == []

@@ -38,4 +38,3 @@ graph:
         history_sessions: ['2024-01-02', '2024-01-03', '2024-01-04']
         outcome_session: '2024-01-05'
       strategies: []
-    - {node_id: validity, operator_id: research.validity.data-observation, operator_version: 1.0.0, inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}], parameters: {}, strategies: []}

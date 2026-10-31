@@ -55,58 +55,45 @@ def validate_portfolio_request(value: Mapping) -> dict:
     return request
 
 
-def _read_daily_context(snapshot, manifest, *, memory_bytes: int):
-    """只读取 Result 内同一仿真工件封存的日频账户事实。"""
+def _read_report_data(snapshot, manifest, *, memory_bytes: int):
+    """按需读取同一仿真工件的最小报告投影。"""
     from research_pipeline.results import ResultStore
 
-    source_path = "simulation/daily-context.json"
+    source_path = "simulation/portfolio-report.json"
     supports = [item for item in snapshot.bundle.support_files if item.source_path == source_path]
     if not supports:
+        if getattr(manifest, "artifact_type", None) == "research.daily-simulation.v1":
+            raise ValueError("组合报告缺少正式日频报告数据")
         return None, 0
     if len(supports) != 1 or supports[0].artifact_key != manifest.artifact_key:
-        raise ValueError("组合报告日频上下文与七表仿真工件不一致")
+        raise ValueError("组合报告数据与七表仿真工件不一致")
     support = supports[0]
     raw = snapshot.support_bytes.get(source_path, snapshot.support_bytes.get(support.relative_path))
     if raw is None:
-        # 消费者快照按需加载支持文件；导出 Result 保留相同 namespace。
         sealed = ResultStore(snapshot.directory.parents[2], create=False).open_snapshot(
             snapshot.directory, support_paths=(source_path,), verify_all_files=False,
         )
         if sealed.bundle != snapshot.bundle:
-            raise ValueError("组合报告日频上下文的 Result 身份不一致")
+            raise ValueError("组合报告数据的 Result 身份不一致")
         raw = sealed.support_bytes[source_path]
     if len(raw) * 8 > memory_bytes:
-        raise ValueError("组合报告账户上下文超出 memory_bytes")
-    daily_context = json.loads(raw)
-    account = daily_context.get("account_context")
-    if account is not None and (
-        daily_context.get("contract_version") not in {
-            "research-daily-cash-financial-context-v1", "research-daily-cash-financial-context-v2",
-            "research-daily-cash-financial-context-v3", "research-daily-cash-financial-context-v4",
-        }
-        or not isinstance(account, Mapping)
-        or account.get("contract_version") != "research-spot-account-context-v1"
+        raise ValueError("组合报告账户数据超出 memory_bytes")
+    data = json.loads(raw)
+    if (
+        not isinstance(data, Mapping)
+        or set(data) != {"contract_version", "portfolio_id", "currency", "cash_scale",
+                         "opening_nav_units", "account", "cashflows", "credit"}
+        or data["contract_version"] != "research-daily-cash-report-v1"
+        or data["currency"] != "CNY" or data["cash_scale"] != 2
+        or type(data["opening_nav_units"]) is not int or data["opening_nav_units"] < 0
     ):
-        raise ValueError("组合报告账户上下文合同无效")
-    cashflows = daily_context.get("external_cashflow_context")
-    if cashflows is not None and (
-        daily_context.get("contract_version") not in {"research-daily-cash-financial-context-v3", "research-daily-cash-financial-context-v4"}
-        or not isinstance(cashflows, Mapping)
-        or cashflows.get("contract_version") != "research-external-cashflow-context-v1"
-    ):
-        raise ValueError("组合报告资金流上下文合同无效")
-    credit = daily_context.get("credit_context")
-    if credit is not None and (
-        daily_context.get("contract_version") != "research-daily-cash-financial-context-v4"
-        or not isinstance(credit, Mapping)
-        or credit.get("contract_version") != "research-credit-account-context-v1"
-        or account is None
-    ):
-        raise ValueError("组合报告信用账户上下文合同无效")
-    return daily_context, len(raw)
+        raise ValueError("组合报告账户数据合同无效")
+    if data["credit"] is not None and data["account"] is None:
+        raise ValueError("组合报告信用估值缺少账户数据")
+    return data, len(raw)
 
 
-def _account_display(account, sessions, *, allow_zero=False):
+def _account_display(account, sessions, *, opening_nav_units, allow_zero=False):
     """按封存会话对齐负债和权益，核定与扣款分别汇总。"""
     import pandas as pd
 
@@ -115,35 +102,32 @@ def _account_display(account, sessions, *, allow_zero=False):
         raise ValueError("组合报告缺少账户会话快照")
     for item in snapshots:
         if any(type(item[key]) is not int or item[key] < 0 for key in (
-            "opening_nav_units", "liabilities_units", "pending_successor_units",
+            "liabilities_units", "pending_successor_units",
         )):
             raise ValueError("组合报告账户快照金额无效")
     daily = pd.DataFrame(snapshots).loc[:, [
-        "session", "valuation_time", "opening_nav_units", "liabilities_units", "pending_successor_units",
+        "session", "valuation_time", "liabilities_units", "pending_successor_units",
     ]]
+    daily["opening_nav_units"] = opening_nav_units
     daily["session"] = daily["session"].map(date.fromisoformat)
     if daily["session"].duplicated().any() or set(daily["session"]) != sessions:
         raise ValueError("组合报告账户快照与估值会话不一致")
     if daily["opening_nav_units"].nunique() != 1 or daily["opening_nav_units"].iloc[0] < 0 or (not allow_zero and daily["opening_nav_units"].iloc[0] == 0):
         raise ValueError("组合报告账户期初 NAV 必须唯一且为正")
     rows = []
-    for event in account["financial_events"]:
-        if event["kind"] not in {"tax_assessed", "tax_collected"}:
-            continue
+    for event in account["tax_events"]:
         session = date.fromisoformat(event["session"])
         if session not in sessions:
             raise ValueError("组合报告账户税款事件超出估值会话")
-        payload = dict(event["payload"])
-        assessed = event["kind"] == "tax_assessed"
-        amount = payload["tax_units" if assessed else "cash_units"]
-        if type(amount) is not int or amount < 0:
-            raise ValueError("组合报告账户税款金额无效")
+        amount = event["amount_units"]
+        if type(amount) is not int or amount < 0 or event["kind"] not in {"tax_assessed", "tax_collected"}:
+            raise ValueError("组合报告账户税款金额或动作无效")
         rows.append({
             "session": session, "effective_time": event["effective_time"],
             "event_id": event["event_id"], "kind": event["kind"],
-            "tax_action": "核定" if assessed else "扣收", "amount_cny": amount / 100,
-            "assessment_id": payload["assessment_id"],
-            "collection_id": payload.get("collection_id"), "transfer_id": payload.get("transfer_id"),
+            "tax_action": "核定" if event["kind"] == "tax_assessed" else "扣收",
+            "amount_cny": amount / 100, "assessment_id": event["assessment_id"],
+            "collection_id": event["collection_id"], "transfer_id": event["transfer_id"],
         })
     taxes = pd.DataFrame(rows, columns=[
         "session", "effective_time", "event_id", "kind", "tax_action", "amount_cny",
@@ -162,7 +146,7 @@ def read_portfolio_frames(context, request: Mapping) -> dict:
     if request["contract_version"] == SHARED_FUTURES_REPORT_VERSION:
         return _read_shared_futures_frames(context, request)
     if context.snapshot.bundle.result_id != request["result_id"]:
-        raise ValueError("报告请求 result_id 与 VerificationResult 关联结果不同")
+        raise ValueError("报告请求 result_id 与所读 Result 不同")
     manifests = {item.table_id: item for item in context.snapshot.bundle.tables}
     selected = {}
     for role, table_id in request["tables"].items():
@@ -205,24 +189,22 @@ def read_portfolio_frames(context, request: Mapping) -> dict:
         if "currency" in frame and (frame["currency"].isna().any() or set(frame["currency"]) - {"CNY"}):
             raise ValueError("日频现金组合报告只支持 CNY 金额，单位为分")
         frames[role] = frame
-    daily_context, context_bytes = _read_daily_context(
+    report_data, report_bytes = _read_report_data(
         context.snapshot, selected["valuations"], memory_bytes=budget["memory_bytes"],
     )
-    if daily_context is not None:
-        account = daily_context.get("account_context")
-        cashflows = daily_context.get("external_cashflow_context")
+    if report_data is not None:
+        if report_data["portfolio_id"] != request["portfolio_id"]:
+            raise ValueError("组合报告账户数据与组合身份不一致")
+        account, cashflows, credit = (report_data[name] for name in ("account", "cashflows", "credit"))
         if account is not None:
-            rows += len(account["snapshots"]) + len(account["financial_events"])
-            frames["account_context"] = account
+            rows += len(account["snapshots"]) + len(account["tax_events"])
         if cashflows is not None:
-            rows += len(cashflows["plans"]) + len(cashflows["events"]) + len(cashflows["flow_valuations"]) + len(cashflows["return_series"])
-            frames["external_cashflow_context"] = cashflows
-        credit = daily_context.get("credit_context")
+            rows += len(cashflows["events"]) + len(cashflows["return_series"])
         if credit is not None:
-            rows += len(credit["snapshots"]) + len(credit["events"]) + len(credit["valuations"])
-            frames["credit_context"] = credit
-        if rows > budget["max_rows"] or (used + context_bytes) * 8 + pandas_bytes * 3 > budget["memory_bytes"]:
-            raise ValueError("组合报告账户事实超出 max_rows/memory_bytes；不会自动抽样")
+            rows += len(credit["snapshots"]) + len(credit["events"])
+        if rows > budget["max_rows"] or (used + report_bytes) * 8 + pandas_bytes * 3 > budget["memory_bytes"]:
+            raise ValueError("组合报告账户数据超出 max_rows/memory_bytes；不会自动抽样")
+        frames["report_data"] = report_data
     return frames
 
 
@@ -240,25 +222,30 @@ def portfolio_display_data(frames: Mapping) -> dict:
     if cash["opening_cash_units"].nunique() != 1 or cash["opening_cash_units"].isna().any():
         raise ValueError("组合报告初始资金必须唯一")
     initial = int(cash["opening_cash_units"].iloc[0])
-    account = frames.get("account_context")
-    cashflows = frames.get("external_cashflow_context")
-    credit = frames.get("credit_context")
+    report_data = frames.get("report_data")
+    account, cashflows, credit = ((None, None, None) if report_data is None else
+                                tuple(report_data[name] for name in ("account", "cashflows", "credit")))
     if account is None and "valuation_model" in nav and nav["valuation_model"].eq(
         "cash_plus_positions_and_account_rights_v1"
     ).any():
-        raise ValueError("组合报告账户估值模型缺少封存的 account_context，不能使用现金起点")
+        raise ValueError("组合报告账户估值模型缺少正式账户报告数据，不能使用现金起点")
     if credit is None and "valuation_model" in nav and nav["valuation_model"].eq(
         "cash_plus_positions_and_credit_liabilities_v1"
     ).any():
-        raise ValueError("组合报告信用估值缺少 credit_context")
+        raise ValueError("组合报告信用估值缺少正式信用报告数据")
     if initial < 0 or (account is None and cashflows is None and initial == 0) or nav["nav_units"].isna().any():
         raise ValueError("组合报告初始资金或估值无效")
     daily = nav.merge(cash.drop(columns=["portfolio_id", "currency"]), on="session", validate="one_to_one")
     daily = daily.sort_values("session", kind="stable").reset_index(drop=True)
-    opening_nav, taxes = initial, None
+    opening_nav = initial if report_data is None else report_data["opening_nav_units"]
+    taxes = None
+    if account is None and credit is None and opening_nav != initial:
+        raise ValueError("组合报告资金流期初净资产与正式初始现金不一致")
+    if credit is not None and cashflows is None and (opening_nav <= 0 or daily["nav_units"].le(0).any()):
+        raise ValueError("组合报告非正信用净资产必须有封存的收益适用状态")
     running_max = daily["nav_units"].cummax()
     if account is not None:
-        account_daily, taxes = _account_display(account, set(daily["session"]), allow_zero=cashflows is not None)
+        account_daily, taxes = _account_display(account, set(daily["session"]), opening_nav_units=opening_nav, allow_zero=cashflows is not None)
         daily = daily.merge(account_daily, on="session", validate="one_to_one")
         opening_nav = int(daily["opening_nav_units"].iloc[0])
         # 账户收益与正式 metrics 共用声明起点，首日亏损也计入回撤。
@@ -269,20 +256,15 @@ def portfolio_display_data(frames: Mapping) -> dict:
             raise ValueError("组合报告信用账户缺少期初账户")
         credit_details = _credit_display(credit, daily)
         daily = daily.merge(credit_details, on="session", validate="one_to_one")
-        opening_nav = credit["opening_nav_units"]
         if type(opening_nav) is not int or opening_nav < 0:
             raise ValueError("组合报告信用期初净资产无效")
         running_max = daily["nav_units"].cummax().clip(lower=opening_nav)
         daily["liabilities_cny"] += daily["credit_principal_cny"] + daily["credit_interest_cny"]
-    if credit is not None and cashflows is None and (opening_nav <= 0 or daily["nav_units"].le(0).any()):
-        raise ValueError("组合报告非正信用净资产必须有封存的收益适用状态")
     flow_details = None
     if cashflows is None:
         daily["net_value"] = daily["nav_units"] / opening_nav
         daily["drawdown"] = daily["nav_units"] / running_max - 1.0
     else:
-        if cashflows["opening_nav_units"] != opening_nav:
-            raise ValueError("组合报告资金流与账户期初净资产不一致")
         daily, flow_details = _cashflow_display(cashflows, daily)
     daily["nav_cny"] = daily["nav_units"] / 100
     daily["cash_cny"] = daily["total_cash_units"] / 100
@@ -332,14 +314,14 @@ def _credit_events_display(context, sessions):
         session = date.fromisoformat(event["session"])
         if session not in sessions:
             raise ValueError("组合报告信用事件超出估值会话")
-        payload = dict(event["payload"])
-        accrued = sum(item["interest_units"] for item in payload.get("accruals", ()))
-        allocations = payload.get("allocations", ())
-        rows.append({"session": session, "effective_time": event["effective_time"],
-            "event_kind": event["kind"], "interest_accrued_cny": accrued / 100,
-            "principal_paid_cny": sum(item["principal_paid_units"] for item in allocations) / 100,
-            "interest_paid_cny": sum(item["interest_paid_units"] for item in allocations) / 100,
-            "facts": json.dumps(payload, ensure_ascii=False, sort_keys=True)})
+        rows.append({
+            "session": session, "effective_time": event["effective_time"],
+            "event_kind": event["event_kind"],
+            "interest_accrued_cny": event["interest_accrued_units"] / 100,
+            "principal_paid_cny": event["principal_paid_units"] / 100,
+            "interest_paid_cny": event["interest_paid_units"] / 100,
+            "facts": json.dumps(event, ensure_ascii=False, sort_keys=True),
+        })
     return pd.DataFrame(rows, columns=["session", "effective_time", "event_kind", "interest_accrued_cny",
         "principal_paid_cny", "interest_paid_cny", "facts"])
 
@@ -367,7 +349,7 @@ def _credit_display(context, daily):
 
 
 def _cashflow_display(context, daily):
-    """展示独立验证所绑定的收益序列，不根据资产规模另算收益。"""
+    """展示正式 Result 中的收益序列。"""
     import pandas as pd
 
     series = pd.DataFrame(context["return_series"])
@@ -387,13 +369,11 @@ def _cashflow_display(context, daily):
         daily[field + "_cny"] = series[field + "_units"] / 100
     daily["return_status"] = series["return_status"]
     rows = []
-    plans = {plan["event_id"]: plan for plan in context["plans"]}
-    for flow in context["flow_valuations"]:
-        plan = plans[flow["event_id"]]
-        rows.append({"event_id": flow["event_id"], "requested_at": plan["requested_at"],
-                     "effective_at": flow["effective_at"], "direction": plan["direction"],
+    for flow in context["events"]:
+        rows.append({"event_id": flow["event_id"], "requested_at": flow["requested_at"],
+                     "effective_at": flow["effective_at"], "direction": flow["direction"],
                      "status": flow["status"], "reason": flow["reason"],
-                     "amount_cny": plan["amount_units"] / 100,
+                     "amount_cny": flow["amount_units"] / 100,
                      "signed_flow_cny": flow["signed_flow_units"] / 100,
                      "nav_before_cny": flow["nav_before_units"] / 100,
                      "nav_after_cny": flow["nav_after_units"] / 100})
@@ -445,13 +425,13 @@ def _figures(data):
     return charts
 
 
-def render_portfolio_report(context, request: Mapping, *, verification_summary: str) -> str:
+def render_portfolio_report(context, request: Mapping, *, result_summary: str) -> str:
     from plotly.io import to_html
 
     request = validate_portfolio_request(request)
     data = portfolio_display_data(read_portfolio_frames(context, request))
     if request["contract_version"] == SHARED_FUTURES_REPORT_VERSION:
-        return _render_shared_futures_report(context, request, data, verification_summary)
+        return _render_shared_futures_report(context, request, data, result_summary)
     figures = _figures(data)
     sections = [to_html(figure, full_html=False, include_plotlyjs=index == 0) for index, figure in enumerate(figures)]
 
@@ -494,8 +474,8 @@ def render_portfolio_report(context, request: Mapping, *, verification_summary: 
             "assessment_id": "核定 ID", "collection_id": "扣收 ID", "transfer_id": "转让 ID", "event_id": "事件 ID",
         })
     provenance = {"result_id": context.snapshot.bundle.result_id,
-                  "verification_hash": context.verification.verification_hash,
-                  "verification_status": context.verification.status,
+                  "claim_level": context.claim_level,
+                  "execution_status": context.snapshot.bundle.run.status,
                   "portfolio_id": request["portfolio_id"], "initial_cash_cny": data["initial_cash_cny"],
                   "row_counts": data["row_counts"], "request": request}
     if data["account_taxes"] is not None:
@@ -535,13 +515,13 @@ def render_portfolio_report(context, request: Mapping, *, verification_summary: 
         '<title>Qlib 组合研究报告</title><style>body{font-family:"Microsoft YaHei",Arial,sans-serif;margin:2rem;color:#162334}'
         'pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:1rem}.table{overflow-x:auto}'
         'table{border-collapse:collapse;font-size:14px}th,td{padding:.5rem;border:1px solid #d9e0e7;text-align:right}th{background:#edf2f7}</style></head><body>'
-        '<h1>Qlib 组合研究报告</h1><h2>来源与验证范围</h2><pre>' + html.escape(verification_summary) + '</pre>'
+        '<h1>Qlib 组合研究报告</h1><h2>来源与执行范围</h2><pre>' + html.escape(result_summary) + '</pre>'
         + pre(provenance)
         + '<h2>图表口径</h2><p>' + chart_convention + '</p>'
         + convention
         + '<p>金额由分换算为人民币元；成交价按 execution_price_units / 10^price_scale 换算。收益和回撤的小数指标乘 100 后为百分数；成交金额为双边实际金额，不等同于换手率。</p>'
         + metrics + ''.join(sections) + daily + account_section + fills + orders + costs + holdings
-        + '<h2>已知限制</h2><p>验证状态来自所引用的 VerificationResult，图形生成不扩大其范围，也不代表投资有效。报告展示日频现金组合的账本事实；不提供未封存的基准、超额收益或假设成本曲线。</p>'
+        + '<h2>已知限制</h2><p>报告展示正式 Result 中的日频现金组合账本、成本假设和研究范围；投资有效性需要结合研究设计和样本外表现判断。</p>'
         + '</body></html>\n'
     )
 
@@ -549,7 +529,7 @@ def render_portfolio_report(context, request: Mapping, *, verification_summary: 
 def _read_shared_futures_frames(context, request):
     """完整读取同一工件的九表与上下文，保留方向桶及过程风险。"""
     if context.snapshot.bundle.result_id != request["result_id"]:
-        raise ValueError("共享期货报告 result_id 与验证结果不一致")
+        raise ValueError("共享期货报告 result_id 与所读 Result 不一致")
     manifests = {item.table_id: item for item in context.snapshot.bundle.tables}
     frames, selected, rows, used = {}, [], 0, 0
     budget = request["budget"]
@@ -576,14 +556,13 @@ def _read_shared_futures_frames(context, request):
     if len(payload) != 1 or not isinstance(payload.iloc[0]["payload"], str):
         raise ValueError("共享期货报告上下文必须为一行 JSON payload")
     sealed = json.loads(payload.iloc[0]["payload"])
-    if sealed.get("version") != "research-shared-futures-context-v1" or not isinstance(sealed.get("spec"), Mapping):
+    if sealed.get("version") != "research-shared-futures-report-v1":
         raise ValueError("共享期货报告上下文版本无效")
-    spec = sealed["spec"]
-    if spec["portfolio_id"] != request["portfolio_id"] or spec["currency"] != "CNY" or spec["cash_scale"] != 100:
+    if sealed["portfolio_id"] != request["portfolio_id"] or sealed["currency"] != "CNY" or sealed["cash_scale"] != 100:
         raise ValueError("共享期货报告账户或金额单位不一致")
     for role, frame in frames.items():
         for column in ("portfolio_id", "account_id", "currency"):
-            if frame[column].isna().any() or set(frame[column]) - {spec[column]}:
+            if frame[column].isna().any() or set(frame[column]) - {sealed[column]}:
                 raise ValueError(f"共享期货报告 {role} 账户绑定错误")
     frames["shared_futures_context"] = sealed
     return frames
@@ -605,8 +584,8 @@ def _shared_futures_display_data(frames):
         raise ValueError("共享期货报告估值模型无效")
     if not cash["equity_units"].eq(cash["cash_units"] + cash["unrealized_pnl_units"]).all() or not cash["available_units"].eq(cash["equity_units"] - cash["margin_units"] - cash["frozen_units"]).all():
         raise ValueError("共享期货报告 C/U/E/M/F/A 不守恒")
-    spec = frames["shared_futures_context"]["spec"]
-    initial = spec["initial_cash_units"]
+    report_context = frames["shared_futures_context"]
+    initial = report_context["initial_cash_units"]
     cash["net_value"] = cash["equity_units"] / initial
     cash["drawdown"] = cash["equity_units"] / cash["equity_units"].cummax().clip(lower=initial) - 1
     for column in ("cash", "unrealized_pnl", "equity", "margin", "frozen", "available"):
@@ -627,12 +606,12 @@ def _shared_futures_display_data(frames):
     return {"shared_futures": True, "daily": cash, "fills": fills, "costs": costs,
             "latest_positions": latest, "positions": positions, "orders": frames["orders"],
             "risks": frames["risks"], "rolls": frames["rolls"], "reservations": frames["reservations"],
-            "initial_cash_cny": initial / 100, "account_id": spec["account_id"],
+            "initial_cash_cny": initial / 100, "account_id": report_context["account_id"],
             "order_status": frames["orders"].groupby("status", dropna=False).size(),
             "row_counts": {name: len(frames[name]) for name in SHARED_FUTURES_COLUMNS}}
 
 
-def _render_shared_futures_report(context, request, data, verification_summary):
+def _render_shared_futures_report(context, request, data, result_summary):
     import plotly.graph_objects as go
     from plotly.io import to_html
 
@@ -656,13 +635,13 @@ def _render_shared_futures_report(context, request, data, verification_summary):
                 table("交易费用", data["costs"]), table("冻结及释放", data["reservations"]),
                 table("风险减仓", data["risks"]), table("换月额度", data["rolls"])]
     provenance = {"result_id": context.snapshot.bundle.result_id,
-                  "verification_hash": context.verification.verification_hash,
-                  "verification_status": context.verification.status,
+                  "claim_level": context.claim_level,
+                  "execution_status": context.snapshot.bundle.run.status,
                   "portfolio_id": request["portfolio_id"], "account_id": data["account_id"],
                   "row_counts": data["row_counts"], "request": request}
     return ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>共享期货账户报告</title>'
             '<style>body{font-family:"Microsoft YaHei",sans-serif;margin:24px}table{border-collapse:collapse}td,th{padding:6px;border:1px solid #ddd}</style>'
-            '<h1>共享期货账户报告</h1><p>' + html.escape(verification_summary) + '</p>'
+            '<h1>共享期货账户报告</h1><p>' + html.escape(result_summary) + '</p>'
             '<p>净值使用正式账户权益 E 与初始资金之比；E=C+U，A=E−M−F。费用已计入权益。多空持仓及今昨仓分别记账，保证金和订单冻结单独展示。</p>'
             + ''.join(plots) + ''.join(sections) + '<h2>结果来源</h2><pre>'
             + html.escape(json.dumps(provenance, ensure_ascii=False, indent=2)) + '</pre></html>')

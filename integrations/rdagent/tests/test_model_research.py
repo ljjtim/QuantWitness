@@ -76,7 +76,7 @@ def test_model_execution_recovers_completed_child_without_restarting(tmp_path, m
     def execute(argv, **kwargs):
         from types import SimpleNamespace
         calls.append(argv)
-        write_json(Path(payload['session_root']) / 'model-execution-metrics.json', {'value': 0.1, 'verification_status': 'pass'})
+        write_json(Path(payload['session_root']) / 'model-execution-metrics.json', {'value': 0.1})
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(model_execution.subprocess, 'run', execute)
     first = model_execution.evaluate_model_package(payload)
@@ -94,3 +94,15 @@ def test_model_execution_failure_keeps_request_without_financial_result(tmp_path
         model_execution.evaluate_model_package({'session_root': str(tmp_path / 'experiment')})
     assert (tmp_path / 'experiment/model-execution-request.json').exists()
     assert not (tmp_path / 'experiment/model-execution-metrics.json').exists()
+
+
+def test_model_history_keeps_execution_limitations_outside_metrics(tmp_path):
+    value = session(tmp_path)
+    write_json(tmp_path / "rounds/0000/record.json", {
+        "candidate_id": "model_0000", "status": "evaluated", "definition": BASELINE,
+        "hypothesis": "固定开发研究", "reason": "正式结果",
+        "metrics": {"value": 0.5, "rows": 1, "limitations": ["lean_next_completed_close_v1"]},
+    })
+    context = value.context()
+    assert context["history"][0]["metrics"] == {"value": 0.5, "rows": 1}
+    assert context["history"][0]["limitations"] == ["lean_next_completed_close_v1"]

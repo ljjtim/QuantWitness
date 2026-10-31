@@ -34,4 +34,3 @@ graph:
       inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}]
       parameters: {data_request_id: synthetic_futures_curve, decision_at: '2024-01-05T09:00:00+08:00', minimum_days_to_expiry: 20, minimum_volume: 1000}
       strategies: []
-    - {node_id: validity, operator_id: research.validity.data-observation, operator_version: 1.0.0, inputs: [{input_port: data, source_node_id: data_plane, source_output_port: data}], parameters: {}, strategies: []}

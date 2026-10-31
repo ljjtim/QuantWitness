@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 
-from release_allowlist import copy_paths, public_source_paths
+from release_allowlist import PUBLIC_TEST_FIXTURE_FILES, copy_paths, public_source_paths
 
 
 _FORBIDDEN_PATH_PARTS = {
@@ -62,7 +62,8 @@ def _validate_path(relative: str) -> None:
         path.is_absolute()
         or ".." in path.parts
         or any(part.lower() in _FORBIDDEN_PATH_PARTS for part in path.parts)
-        or lowered.endswith(_FORBIDDEN_SUFFIXES)
+        or (lowered.endswith(_FORBIDDEN_SUFFIXES)
+            and not (relative in PUBLIC_TEST_FIXTURE_FILES and lowered.endswith(".parquet")))
     ):
         raise ValueError(f"公开源码清单包含禁止路径: {relative}")
 

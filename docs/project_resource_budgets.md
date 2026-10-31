@@ -1,10 +1,10 @@
 # 为研究分配内存、时间和进程
 
-你可以给计算和独立验证设置资源上限，避免一次实验拖垮整台机器。预算决定允许用多少资源，不改变研究的数据时点和金融含义。下面解释默认额度、进程计数及超限后的行为。
+你可以给研究计算设置资源上限，避免一次实验拖垮整台机器。预算决定允许用多少资源，不改变研究的数据时点和金融含义。下面解释默认额度、进程计数及超限后的行为。
 
 ## 参数与行为说明
 
-内建节点的低内存默认档为 1 GiB（1,073,741,824 字节），用于 Catalog 准入、日频数据观察有效性、分钟复权快照、分钟观察和两项分钟观察有效性。其他物化、模型与仿真的 2／4／8 GiB 预算保留；日频模型 split 与 locked holdout 声明 16 GiB。该默认值来自 OperatorDefinition 的资源声明，编译进入节点计划；它不覆盖项目显式声明的较小额度，也不自动提高运行总容量。CPU、临时磁盘、进程槽与超限拒绝规则各自保持。预算声明变化要求重新准入，旧冻结计划不静默改写。
+内建节点的低内存默认档为 1 GiB（1,073,741,824 字节），用于当前已登记的低内存节点，如 Catalog 准入、分钟复权快照和分钟观察。其他物化、模型与仿真的 2／4／8 GiB 预算保留；日频模型 split 与 locked holdout 声明 16 GiB。该默认值来自 OperatorDefinition 的资源声明，编译进入节点计划；它不覆盖项目显式声明的较小额度，也不自动提高运行总容量。CPU、临时磁盘、进程槽与超限拒绝规则各自保持。预算声明变化要求重新准入，旧冻结计划不静默改写。
 
 ## 日频模型长表加载
 
@@ -14,7 +14,7 @@ Feature 和 opened 后的 Label 每批最多 8,192 行，完整记录先按原 t
 
 投影预检按模型所需列的 Parquet footer 估计常驻矩阵下界，完整校验批的 Arrow→pandas 转换另计入同一工作集。完整输入不同时合并，投影批合并时仍计输入和输出同时存活的空间。
 
-2026-10-12 的真实 Feature 8,192 行小批包含每行 59 个来源分区标识。完整与投影 DataFrame 分别占 4,407,424 与 3,227,776 字节；按同字段周频 13,590,400 行外推，投影常驻约 4.99 GiB，合并时输入与输出约 9.97 GiB。16 GiB 为该工作集及样本组装留出空间。这个外推不是完整周频进程峰值，正式运行与独立验证继续按实测验收。
+2026-10-12 的真实 Feature 8,192 行小批包含每行 59 个来源分区标识。完整与投影 DataFrame 分别占 4,407,424 与 3,227,776 字节；按同字段周频 13,590,400 行外推，投影常驻约 4.99 GiB，合并时输入与输出约 9.97 GiB。16 GiB 为该工作集及样本组装留出空间。这个外推不是完整周频进程峰值，正式运行继续按实测验收。
 
 同批三次编码测量的耗时中位数从 2.892 秒降至 0.972 秒，约 2.97 倍。标量来源列表按一个字节段编码，不缓存可变对象或消费一次性迭代器；原编码字节、摘要和非法输入拒绝保持一致。小批编码速度不代表整个研究流程的加速倍数。
 
@@ -24,30 +24,16 @@ Windows Python 3.10 的环境身份采集可能通过 `cmd.exe /c ver` 查询系
 
 项目 Worker 的内存或临时空间超额保持 `project_worker_resource_exceeded` 错误码，CLI JSON 的 `data.exceeded` 按 `memory_bytes`、`temp_bytes` 返回各超额维度的 `actual` 与 `limit`，单位为字节；同时超额时保留两项。资源测量状态和进程清理状态继续独立返回。
 
-`ResourceBudget` 与进程测量、清理工具由 platform 提供，Runtime 和独立验证共用；原 Runtime 的预算导入入口保持可用。独立项目 Verifier 使用 `ResourceBudget` 的内存、CPU、临时磁盘和墙钟额度，进程槽默认 2，包含父进程和 Worker。`verify_result` 接受 `project_verifier_budget` 和 `project_verifier_process_slots`；未传预算时继承 `financial_oracle_budget` 的内存与磁盘值，默认 1 GiB 内存、8 GiB 临时空间、1 CPU、300 秒。`execute_project_verifier` 直接接收 `budget`、`process_slots` 和 `scratch_root`。
+## 运行容量与启动开销
 
-`verify --verification-process-slots N` 显式设置独立 Verifier 的进程槽，最少为 2；省略时仍为 2。Windows 虚拟环境的 Python 启动器可能增加一个进程层级，可按实际进程树声明 3 个槽。预算仍覆盖 Supervisor 和 Worker 后代，不忽略启动器，不修改项目算子的预算。
+ResourceBudget 与进程测量、清理工具由 platform 提供。Runtime 按冻结节点预算和运行总容量申请资源。普通 Workspace execute 在准备与准入时汇总实际节点声明，提示项目 Worker 的已知启动开销；进程内核心节点不套用 Worker 槽位建议。建议不自动加额度。
 
-`workspace execute` 在运行前按 lint 返回的真实实现作用域，提示项目 Worker 与独立 Verifier 的已知启动开销；进程内 core 节点不套用 Worker 槽位建议。建议保留声明值、来源与对应参数，不提高额度。运行失败摘要另行展示实际超限的 actual/limit；没有实测值或测量失败时不推算峰值。
+项目 Worker 与 LEAN 宿主的父进程及后代计入同一预算；Windows 虚拟环境启动器同样计数。实际超限返回 actual、limit、测量状态和清理状态。进程退出后仍完成末端资源核对，清理不完整不得发布成功。
 
-准备阶段按授权列声明估算 Parquet 与支持工件的复制体积，超过临时配额或实际磁盘剩余空间即拒绝。未声明列的表完整复制，采用 1 MiB 块；声明列的表按 8,192 行投影到独立文件，并约束实际写入字节。两条路径均检查资源，正式 Result 的完整性核对继续覆盖原始完整文件，详见[Verifier 输入列投影](verifier-input-projection.md)。执行阶段监督父进程与当前 Worker 树的 RSS、进程数、临时空间和时间，Worker 退出后的末端检查仍包含已经观测到的存活后代；清理等待后代退出，未完成清理不得成功。资源测量不可用、复制失败、Worker 失败、超时或资源超额均抛出稳定错误码，成功结果发布不会继续。
-
-| 失败 | 错误码 |
-| --- | --- |
-| 内存超额 | project_verifier_memory_exceeded |
-| 临时空间超额 | project_verifier_temp_exceeded |
-| 复制前实际磁盘不足 | project_verifier_disk_space_exceeded |
-| 复制失败 | project_verifier_copy_failed |
-| 进程槽超额 | project_verifier_process_slots_exceeded |
-| 超时 | project_verifier_timeout |
-| 测量不可用 | project_verifier_measurement_unavailable |
-| Worker 非零退出 | project_verifier_worker_failed |
-| 清理不完整 | project_verifier_cleanup_failed |
-
-E004 Verifier 两遍投影扫描候选 Parquet，每批最多 8,192 行，只保留发现区与评价区数值矩阵、重复键位图和选中候选序列。HAC 沿用各候选在封存表中的原始行序，发现区矩阵按日期排序；BY、DSR、PBO、SPA 的公式与固定随机种子保持不变。待著而救 Verifier 对成员表进行一次分批投影扫描，在隔离输入目录内按日期暂存投影列，再逐截面重算并删除已读取的暂存文件。混合日期行组与乱序分片均不重复扫描源表，截面内沿用原始行序，成员变化只保留相邻日期映射；标签审计按批读取所需两列。项目算法留在项目源码中。
+运行容量使用 --resource-memory-bytes、--resource-cpu-slots、--resource-scratch-bytes；共享池额外声明总进程槽。--workers 不增加总预算。run --no-node-timeout 仅取消主 DAG 节点累计时长上限，资源租约等待和单次策略回调限时继续生效。
 
 ## 已知边界
 
-资源治理采用进程采样，项目 Worker 与 Verifier 的监督循环间隔为 20 毫秒，节点外层采样默认间隔为 50 毫秒，不是操作系统硬限额。未被采样捕获的极短峰值无法作为完整峰值证据。Verifier 输入仍复制至隔离临时目录，必须预留完整授权文件空间；列投影降低计算内存而不减少原始复制量。待著而救还需为成员投影列的日期分片预留临时空间，该空间与输入复制共同计入 Verifier 临时预算。
+资源治理依赖进程采样，不能把未观察到的短时峰值宣称为操作系统硬上限。节点声明、输入体积和实测进程峰值分别记录；没有可靠规模事实时保持 unknown。
 
-源码变更产生新的 bundle 身份；既有 Result 使用封存的原始 bundle，不改写历史研究或历史 VerificationResult。
+本页保留的 2026-10-12 小批行数、内存和编码测量只说明当时工作集，不代表当前完整流程耗时。长任务使用保持不变的安装环境，源码变更后重新准入，历史 Result 与 holdout 消费记录保持原样。
