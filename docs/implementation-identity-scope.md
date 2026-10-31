@@ -22,7 +22,6 @@
 - `runtime/adapters/model.py` 的六个入口调用同一个 `runtime/walk_forward_model_execution.py`；拟合、预测和留出评价还要保留候选模型可能选择的 Qlib、序列模型及生成模型实现。
 - `runtime/adapters/minute_io.py` 同时承载分钟扫描、重采样、分区和行情交接 helper；使用它的适配器保留 `_MINUTE_IO_DEPENDENCIES`。
 - `runtime/adapters/common.py` 使用 `merge_research_data_bundles`、`CorporateAction.from_dict()` 和研究语义对象；其文件摘要与显式共享依赖进入适配器身份。
-- `runtime/adapters/validity.py` 同时包含 Catalog admission 与数据观察入口，后者调用 `operator_graph_evidence.py`。共享文件中的其他入口变化也会改变该族的整文件身份。
 
 这些文件会放大部分局部编辑的影响范围，但不能仅凭某个节点当前没有选择某条分支就移除该分支的源码身份。继续缩小范围需要按执行职责拆分共享源码文件，并同时审阅导出、实际调用和公共定义；仅缩短身份清单不能完成这项工作。
 
@@ -30,7 +29,7 @@
 
 已有 `BuildManifest`、v2 dependency distribution lock、`AuditEnvironmentManifest` 及不可变的实现引用可记录构建和依赖身份。当前 CLI 的 `_build_runtime_audit_environment()` 从算子 manifest、`execution_service.py` 和 `resource_governor.py` 构建运行摘要，并记录 NumPy、pandas、PyArrow、DuckDB 的已安装分发身份；该路径不等同于直接加载发行时的 `BuildManifest`。正式运行通过已构建 manifest 保存算子引用，节点开始执行前重新计算 Runtime adapter 源码身份，变化时拒绝继续执行。现有发布路径提供 wheel、sdist、构建清单和依赖锁，参见[安装与发布](release.md)和[运行与恢复](runtime.md)。
 
-长任务可使用独立安装且运行期间保持不变的 wheel 环境，研究、恢复和独立验证使用相同构建与依赖锁。该做法复用现有发行路径；共享源码目录中的可编辑安装不能视为物理冻结环境。
+长任务可使用独立安装且运行期间保持不变的 wheel 环境，研究与恢复使用相同构建与依赖锁。该做法复用现有发行路径；共享源码目录中的可编辑安装不能视为物理冻结环境。
 
 ## 框架测试与项目接线
 
@@ -42,5 +41,5 @@
 
 ## 已知边界
 
-- 显式清单不自动推导完整传递导入图。分钟有效性入口通过实现级依赖单独绑定 `evidence.minute_validity`；该模块变化只改变此入口的局部适配器身份，相邻分钟统计入口保持原清单。新增实际执行依赖时仍须在对应入口登记并审阅。
+- 显式清单不自动推导完整传递导入图。新增实际执行依赖时在对应入口登记并审阅；没有生产消费者的依赖不保留在运行身份中。
 - 身份记录和 manifest 缓存没有自动复制、隔离核心执行源码，也没有禁止协作者修改运行中的可编辑安装。当前执行前漂移检查会拒绝变化，不能保证共享开发目录中的长任务持续执行。

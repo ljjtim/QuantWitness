@@ -89,7 +89,8 @@ def test_live_prompt_and_completed_call_reuse(tmp_path, monkeypatch):
     proposal = session.propose(1, "fixture.env")
     assert session.propose(1, "fixture.env") == proposal
     assert len(calls) == 1
-    assert set(calls[0]) == {"question", "objective", "candidates", "baseline_id", "history"}
+    assert set(calls[0]) == {"question", "objective", "candidates", "baseline_id", "history", "limitations"}
+    assert calls[0]["limitations"] == []
     assert "actual" not in json.dumps(calls) and "result_id" not in json.dumps(calls)
     step(session, 1, proposal)
     assert campaign._read(session.root / "model-calls/0001.json")["reserved_output_tokens"] == 100

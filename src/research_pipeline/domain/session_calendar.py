@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from functools import cached_property
+import hashlib
 from importlib.resources import files
 import json
 from pathlib import Path
 import re
-from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from research_pipeline.platform.asset_taxonomy import (
@@ -17,7 +20,9 @@ from research_pipeline.platform.asset_taxonomy import (
     require_canonical_asset_class,
     require_instrument_type,
 )
-from research_pipeline.platform.canonical import typed_canonical_hash
+from research_pipeline.platform.canonical import (
+    canonical_json, typed_canonical_bytes, typed_canonical_hash,
+)
 from research_pipeline.platform.minute_reference import (
     require_published_minute_capability_binding,
 )
@@ -28,6 +33,8 @@ from .time import CN_MARKET_TIMEZONE, TimeContractError, require_aware_datetime
 
 SESSION_POLICY_BUNDLE_VERSION = "minute-session-policy-bundle-v1"
 SESSION_POLICY_VERSION = "minute-session-policy-v1"
+PROJECT_SESSION_BUNDLE_VERSION = "minute-project-session-bundle-v2"
+PROJECT_SESSION_POLICY_VERSION = "minute-project-session-policy-v2"
 SESSION_SEGMENT_TEMPLATE_VERSION = "minute-session-segment-template-v1"
 SESSION_INSTRUMENT_VERSION = "minute-session-instrument-v1"
 SESSION_CAPABILITY_CONSUMER = "domain.minute.session_calendar"
@@ -36,6 +43,11 @@ CURRENT_SESSION_POLICY_BUNDLE_HASH = (
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ZONE = ZoneInfo(CN_MARKET_TIMEZONE)
+
+# 规范片段由现有 codec 生成，包身份仍覆盖完整正文。
+_NULL_IDENTITY_BYTES = typed_canonical_bytes(None)
+_CANONICAL_VALUE_PREFIX = _NULL_IDENTITY_BYTES[:-len(b'{"type":"null"}') - 1]
+_NULL_IDENTITY_VALUE = _NULL_IDENTITY_BYTES[len(_CANONICAL_VALUE_PREFIX):-1]
 
 
 class SessionCalendarError(TimeContractError):
@@ -265,10 +277,17 @@ class SessionPolicyRevision:
     previous_policy_hash: str | None
     claim_ceiling: str = "research_observation"
     contract_version: str = SESSION_POLICY_VERSION
+    available_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        if self.contract_version != SESSION_POLICY_VERSION:
+        if self.contract_version not in {SESSION_POLICY_VERSION, PROJECT_SESSION_POLICY_VERSION}:
             raise SessionCalendarError("session policy version 不受支持")
+        if self.contract_version == PROJECT_SESSION_POLICY_VERSION:
+            require_aware_datetime(self.available_at, "session available_at")
+            if self.instrument.asset_class not in {"cn_stock", "cn_etf"}:
+                raise SessionCalendarError("项目日历当前仅支持股票与ETF")
+        elif self.available_at is not None:
+            raise SessionCalendarError("已发布v1日历不接受新增可见时间字段")
         if not self.policy_id.strip() or self.revision < 1:
             raise SessionCalendarError("session policy id/revision 无效")
         if self.effective_from > self.effective_to:
@@ -318,12 +337,13 @@ class SessionPolicyRevision:
         if self.claim_ceiling != "research_observation":
             raise SessionCalendarError("参考 session claim_ceiling 只能是 research_observation")
 
-    @property
+    @cached_property
     def policy_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
     def to_dict(self) -> dict[str, object]:
         return {
+            **({"available_at": self.available_at.isoformat()} if self.available_at is not None else {}),
             "policy_id": self.policy_id,
             "revision": self.revision,
             "instrument": self.instrument.to_dict(),
@@ -358,6 +378,8 @@ class SessionPolicyRevision:
             "claim_ceiling",
             "contract_version",
         }
+        if payload.get("contract_version") == PROJECT_SESSION_POLICY_VERSION:
+            expected.add("available_at")
         _exact(payload, expected, "SessionPolicyRevision")
         return cls(
             _text(payload["policy_id"], "policy_id"),
@@ -375,6 +397,7 @@ class SessionPolicyRevision:
             _optional_hash(payload["previous_policy_hash"], "previous_policy_hash"),
             _text(payload["claim_ceiling"], "claim_ceiling"),
             _text(payload["contract_version"], "contract_version"),
+            None if "available_at" not in payload else _session_instant(datetime.fromisoformat(payload["available_at"]), "available_at"),
         )
 
     def build_session(self, trading_date: date, *, scope_binding_hash: str) -> TradingSession:
@@ -404,7 +427,7 @@ class SessionPolicyBundle:
     contract_version: str = SESSION_POLICY_BUNDLE_VERSION
 
     def __post_init__(self) -> None:
-        if self.contract_version != SESSION_POLICY_BUNDLE_VERSION:
+        if self.contract_version not in {SESSION_POLICY_BUNDLE_VERSION, PROJECT_SESSION_BUNDLE_VERSION}:
             raise SessionCalendarError("session policy bundle version 不受支持")
         if not self.bundle_id.strip() or _SHA256.fullmatch(self.inventory_evidence_hash) is None:
             raise SessionCalendarError("session policy bundle 身份或证据摘要无效")
@@ -449,6 +472,21 @@ class SessionPolicyBundle:
             previous = by_key.get((item.policy_id, item.revision - 1, item.instrument.instrument_id))
             if previous is None or item.previous_policy_hash != previous.policy_hash:
                 raise SessionCalendarError("session policy revision chain 不闭合")
+        if self.contract_version == PROJECT_SESSION_BUNDLE_VERSION:
+            metadata = {}
+            for item in ordered:
+                if item.contract_version != PROJECT_SESSION_POLICY_VERSION:
+                    raise SessionCalendarError("项目日历必须逐版本声明可见时间")
+                if metadata.setdefault(item.instrument.instrument_id, item.instrument) != item.instrument:
+                    raise SessionCalendarError("项目日历证券身份冲突")
+                if not any(key not in {"minute.capability.inventory.v1", "minute.capability.manifest.v1"}
+                           for key, _ in item.evidence_hashes):
+                    raise SessionCalendarError("项目日历缺少独立来源证据")
+            if self.bundle_hash != self._identity_hash():
+                raise SessionCalendarError("session policy bundle hash 不一致")
+            return
+        if any(item.contract_version != SESSION_POLICY_VERSION for item in ordered):
+            raise SessionCalendarError("已发布v1日历只能包含v1政策")
         by_instrument = {
             item.instrument.instrument_id: item for item in manifest.coverages
         }
@@ -468,8 +506,40 @@ class SessionPolicyBundle:
                 != tuple(day for day, _ in observation.bars_per_trading_date)
             ):
                 raise SessionCalendarError("session policy 与平台分钟能力覆盖不一致")
-        if self.bundle_hash != typed_canonical_hash(self.identity_payload()):
+        if self.bundle_hash != self._identity_hash():
             raise SessionCalendarError("session policy bundle hash 不一致")
+
+    def _identity_hash(self) -> str:
+        encoded = typed_canonical_bytes({
+            "bundle_id": self.bundle_id,
+            "capability_binding": dict(self.capability_binding),
+            "inventory_evidence_hash": self.inventory_evidence_hash,
+            "policies": None,
+            "contract_version": self.contract_version,
+        })
+        before, after = encoded.split(b'"policies":' + _NULL_IDENTITY_VALUE, 1)
+        digest = hashlib.sha256()
+        digest.update(before + b'"policies":{"type":"list","value":[')
+        templates = {}
+        for position, policy in enumerate(self.policies):
+            if position:
+                digest.update(b",")
+            payload = policy.to_dict()
+            instrument = payload.pop("instrument")
+            # JSON 正文保留类型、时区文本与列表顺序；仅在本次校验内复用。
+            key = canonical_json(payload)
+            parts = templates.get(key)
+            if parts is None:
+                payload["instrument"] = None
+                template = typed_canonical_bytes(payload)[len(_CANONICAL_VALUE_PREFIX):-1]
+                head, tail = template.split(b'"instrument":' + _NULL_IDENTITY_VALUE, 1)
+                parts = (head + b'"instrument":', tail)
+                templates[key] = parts
+            digest.update(parts[0])
+            digest.update(typed_canonical_bytes(instrument)[len(_CANONICAL_VALUE_PREFIX):-1])
+            digest.update(parts[1])
+        digest.update(b"]}" + after)
+        return digest.hexdigest()
 
     @property
     def capability_binding_hash(self) -> str:
@@ -555,17 +625,21 @@ class SessionPolicyBundle:
 class SessionCalendarResolver:
     def __init__(self, bundle: SessionPolicyBundle) -> None:
         self.bundle = bundle
+        self._segments_by_date = {}
+        self._policies_by_instrument = {}
+        for policy in bundle.policies:
+            self._policies_by_instrument.setdefault(policy.instrument.instrument_id, []).append(policy)
 
     def resolve_trading_date(
         self,
         instrument: SessionInstrumentMetadata,
         trading_date: object,
         *,
-        policy_revision: int,
+        policy_revision: int | None,
     ) -> TradingSession:
         current = _strict_trading_date(trading_date, "trading_date")
         policies = self._instrument_policies(instrument, policy_revision)
-        matches = tuple(item for item in policies if current in item.trading_dates)
+        matches = self._visible_policies(policies, current, None) if policy_revision is None else tuple(item for item in policies if current in item.trading_dates)
         if len(matches) != 1:
             raise SessionCalendarError("session policy 缺失或冲突，不允许自然日兜底")
         return matches[0].build_session(
@@ -578,18 +652,19 @@ class SessionCalendarResolver:
         instrument: SessionInstrumentMetadata,
         instant: datetime,
         *,
-        policy_revision: int,
+        policy_revision: int | None,
     ) -> TradingSession:
         current = _session_instant(instant, "instant")
         matches: list[TradingSession] = []
         for policy in self._instrument_policies(instrument, policy_revision):
-            for trading_date in policy.trading_dates:
+            for trading_date in self._candidate_dates(policy, current):
                 session = policy.build_session(
                     trading_date,
                     scope_binding_hash=self.bundle.capability_binding_hash,
                 )
                 if any(item.contains_instant(current) for item in session.segments):
-                    matches.append(session)
+                    if policy_revision is not None or policy in self._visible_policies(self._instrument_policies(instrument, None), trading_date, current):
+                        matches.append(session)
         if len(matches) != 1:
             raise SessionCalendarError("instant 没有唯一 session，禁止使用 dt.date() 兜底")
         return matches[0]
@@ -599,38 +674,83 @@ class SessionCalendarResolver:
         instrument: SessionInstrumentMetadata,
         bar_end: datetime,
         *,
-        policy_revision: int,
+        policy_revision: int | None,
     ) -> TradingSession:
+        policy, trading_date, _ = self.resolve_completed_bar_segments(
+            instrument, bar_end, policy_revision=policy_revision,
+        )
+        return policy.build_session(
+            trading_date, scope_binding_hash=self.bundle.capability_binding_hash,
+        )
+
+    def resolve_completed_bar_segments(
+        self,
+        instrument: SessionInstrumentMetadata,
+        bar_end: datetime,
+        *,
+        policy_revision: int | None,
+    ) -> tuple[SessionPolicyRevision, date, tuple[SessionSegment, ...]]:
+        """按 completed bar 选择历史政策和时段，不构造完整会话身份。"""
         current = _session_instant(bar_end, "bar_end")
-        matches: list[TradingSession] = []
-        for policy in self._instrument_policies(instrument, policy_revision):
-            for trading_date in policy.trading_dates:
-                session = policy.build_session(
-                    trading_date,
-                    scope_binding_hash=self.bundle.capability_binding_hash,
-                )
-                if any(
-                    item.contains_completed_bar_end(current)
-                    for item in session.segments
-                ):
-                    matches.append(session)
+        policies = self._instrument_policies(instrument, policy_revision)
+        matches = []
+        for policy in policies:
+            for trading_date in self._candidate_dates(policy, current):
+                segments = self._segments_for_date(policy, trading_date)
+                if any(item.contains_completed_bar_end(current) for item in segments):
+                    if policy_revision is not None or policy in self._visible_policies(policies, trading_date, current):
+                        matches.append((policy, trading_date, segments))
         if len(matches) != 1:
             raise SessionCalendarError(
                 "bar_end 没有唯一可聚合 session，禁止使用 dt.date() 兜底"
             )
         return matches[0]
 
+    @staticmethod
+    def _candidate_dates(policy, current):
+        # 由显式时段偏移反推候选交易日，夜盘仍归属政策声明的交易日。
+        first = current.date() - timedelta(days=max(item.end_day_offset for item in policy.segments))
+        last = current.date() - timedelta(days=min(item.start_day_offset for item in policy.segments))
+        dates = policy.trading_dates
+        return dates[bisect_left(dates, first):bisect_right(dates, last)]
+
+    def _segments_for_date(self, policy, trading_date):
+        """同一日期和时段定义共用不可变时段，政策可见性仍逐证券选择。"""
+        key = (trading_date, policy.segments)
+        segments = self._segments_by_date.get(key)
+        if segments is None:
+            segments = tuple(segment.build(trading_date) for segment in policy.segments)
+            self._segments_by_date[key] = segments
+        return segments
+
+    def _visible_policies(self, policies, trading_date, at):
+        candidates = []
+        for policy in policies:
+            if not policy.effective_from <= trading_date <= policy.effective_to:
+                continue
+            opening = min(segment.starts_at for segment in self._segments_for_date(policy, trading_date))
+            visible_at = opening if at is None else min(at, opening)
+            if policy.available_at is not None and policy.available_at <= visible_at:
+                candidates.append(policy)
+        if not candidates:
+            raise SessionCalendarError(f"session可见版本缺失: {policies[0].instrument.instrument_id} {trading_date}")
+        families = {item.policy_id for item in candidates}
+        if len(families) != 1:
+            raise SessionCalendarError("session政策族冲突")
+        selected = max(candidates, key=lambda item: item.revision)
+        return (selected,) if trading_date in selected.trading_dates else ()
+
     def _instrument_policies(
         self,
         instrument: SessionInstrumentMetadata,
-        revision: int,
+        revision: int | None,
     ) -> tuple[SessionPolicyRevision, ...]:
-        if type(revision) is not int or revision < 1:
+        if revision is not None and (type(revision) is not int or revision < 1):
             raise SessionCalendarError("policy_revision 必须是正整数")
         matches = tuple(
             item
-            for item in self.bundle.policies
-            if item.instrument == instrument and item.revision == revision
+            for item in self._policies_by_instrument.get(instrument.instrument_id, ())
+            if item.instrument == instrument and (revision is None or item.revision == revision)
         )
         if not matches:
             raise SessionCalendarError("instrument classification 没有 session policy")
@@ -722,8 +842,8 @@ def _hash(value: object, field: str) -> str:
     return text
 
 
-def _list(value: object, field: str) -> list[object]:
-    if not isinstance(value, list) or not value:
+def _list(value: object, field: str) -> list[object] | tuple[object, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
         raise SessionCalendarError(f"{field} 必须是非空列表")
     return value
 

@@ -144,7 +144,6 @@ def test_minimum_supported_python_installs_test_extras_and_runs_smoke(minimum_in
     for name in (
         "test_runtime_checkpoint.py",
         "test_simulation_semantics.py",
-        "validity_facts_support.py",
     ):
         shutil.copyfile(ROOT / "tests" / name, smoke / name)
     for _, python, _, environment, directory in installs:

@@ -16,6 +16,26 @@ PROTOCOL_VERSION = "research-release-workflow-protocol-v1"
 EVIDENCE_VERSION = "research-release-workflow-evidence-v1"
 RECEIPT_VERSION = "research-release-workflow-receipt-v1"
 PROJECTS = ("equity_cross_section", "etf_time_series", "event_study", "futures_term_structure")
+# 公开合成输入的手算基准；独立于本次 Result 的实际输出。
+EXPECTED_METRICS = {
+    "equity_cross_section": {
+        "metric_ref": "project.quantwitness.equity_cross_section.spread@1.0.0",
+        "value": (12.3 / 12.0 - 1) - (8.8 / 9.0 - 1),
+        "unit": "decimal_return", "sample_size": 4,
+    },
+    "etf_time_series": {
+        "metric_ref": "project.quantwitness.etf_time_series.signal_return@1.0.0",
+        "value": 0.05 / 2, "unit": "decimal_return", "sample_size": 2,
+    },
+    "event_study": {
+        "metric_ref": "project.quantwitness.event_study.mean_window_return@1.0.0",
+        "value": (0.05 - 0.01) / 2, "unit": "decimal_return", "sample_size": 2,
+    },
+    "futures_term_structure": {
+        "metric_ref": "project.quantwitness.futures_term_structure.annualized_slope@1.0.0",
+        "value": 0.03 * 365 / 29, "unit": "annualized_decimal_slope", "sample_size": 2,
+    },
+}
 CHECKPOINTS = {
     "admission": "platform.catalog.admission",
     "data_plane": "data_plane",
@@ -128,22 +148,15 @@ def validate_installation(payload: dict, project: Path) -> dict:
     return payload
 
 
-def require_verification(path: Path) -> dict:
-    payload = read_json(path)
-    require(payload.get("status") == "pass" and payload.get("validity_status") == "pass",
-            f"独立 VerificationResult 未通过: {path}")
-    return {"verification_result": str(path), "status": payload["status"],
-            "validity_status": payload["validity_status"], "verification_hash": payload.get("verification_hash")}
-
-
 def require_workflow(payload: dict) -> dict:
     data = payload["data"]
-    require(data.get("execution_status") == "succeeded" and data.get("verification_status") == "pass",
-            "workspace execute 没有完成运行与独立验证")
+    require(data.get("execution_status") == "succeeded",
+            "workspace execute 没有成功发布 Result")
     require(all(data.get("stages", {}).get(name) == "pass"
-                for name in ("lint", "prepare", "allocate", "admit", "run", "verify", "report")),
+                for name in ("prepare", "allocate", "admit", "run", "report")),
             "workspace execute 有未完成阶段")
-    require_verification(Path(data["verification_result"]))
+    result = read_json(Path(data["result_directory"]) / "result.json")
+    require(result.get("result_id") == data["result_id"], "工作流与 Result 身份不一致")
     require(Path(data["report_path"]).is_file(), "workspace 报告文件缺失")
     directory = Path(data["result_directory"])
     require({path.name for path in directory.parent.iterdir() if path.is_dir()} == {directory.name},
@@ -181,11 +194,10 @@ def discover(commands: Commands, output: Path) -> dict:
     return {"capabilities": capabilities, "operator": described, "draft": str(draft), "diagnostics": first}
 
 
-def workspace_flow(project: dict, environment: dict, workspace: Path, slots: int) -> list:
+def workspace_flow(project: dict, environment: dict, workspace: Path) -> list:
     return ["workspace", "execute", "--workspace", workspace,
             "--catalog-lock", environment["catalog_lock"], "--data-db", environment["database"],
-            "--extension-bundle", project["operator_bundle"], "--verifier-bundle", project["verifier_bundle"],
-            "--verification-process-slots", str(slots), "--json"]
+            "--extension-bundle", project["operator_bundle"], "--json"]
 
 
 
@@ -198,13 +210,13 @@ def require_reused_checkpoints(runtime: dict, checkpoint: str) -> list[str]:
     return reused
 
 def recover(commands: Commands, project: dict, environment: dict, baseline: dict,
-            output: Path, slots: int) -> dict:
+            output: Path) -> dict:
     recovered = {}
     workspace = Path(baseline["workspace"])
     for checkpoint, node_id in CHECKPOINTS.items():
         receipt = output / f"interruption-{checkpoint}.json"
         commands.worker(f"interrupt-{checkpoint}", "interrupt", node_id, receipt,
-                        *workspace_flow(project, environment, workspace, slots), expected=95, parse=False)
+                        *workspace_flow(project, environment, workspace), expected=95, parse=False)
         interrupted = read_json(receipt)
         require(interrupted.get("node_id") == node_id and interrupted.get("phase") == "committed_before_event",
                 f"{checkpoint} 未在已提交 checkpoint 上中断")
@@ -220,23 +232,21 @@ def recover(commands: Commands, project: dict, environment: dict, baseline: dict
         reused = require_reused_checkpoints(runtime, checkpoint)
         result = resumed["data"]["result_directory"]
         store = execution / "results"
-        verification = execution / "verification" / "result.json"
-        commands.cli(f"verify-{checkpoint}", ["verify", "--result", result, "--result-store", store,
-                     "--verifier-bundle", project["verifier_bundle"], "--output", verification,
-                     "--verification-process-slots", str(slots), "--verification-scratch-root", commands.scratch, "--json"])
-        verified = require_verification(verification)
+        manifest = read_json(Path(result) / "result.json")
+        require(manifest.get("result_id") == resumed["data"]["result_id"], "恢复与 Result 身份不一致")
         report = execution / "report.md"
-        commands.cli(f"report-{checkpoint}", ["report", "--verification-result", verification,
+        commands.cli(f"report-{checkpoint}", ["report", "--result", result,
                      "--result-store", store, "--output", report, "--json"])
+        require(report.is_file(), "恢复后的 Result 报告文件缺失")
         comparison = commands.worker(f"compare-{checkpoint}", "compare", baseline["result_directory"], result)
         recovered[checkpoint] = {"node_id": node_id, "interruption": interrupted,
-            "result_directory": result, "result_store": str(store), **verified,
+            "result_directory": result, "result_store": str(store), "result_id": manifest["result_id"],
             "report": str(report), "tables": comparison["tables"],
             "runtime_record": str(run_root / "operator-dag-run.json"), "reused_nodes": reused}
     return recovered
 
 
-def tamper(commands: Commands, baseline: dict, project: dict, output: Path, slots: int) -> dict:
+def tamper(commands: Commands, baseline: dict, output: Path) -> dict:
     store = Path(baseline["result_store"])
     copied = output / "tampered-results"
     shutil.copytree(store, copied)
@@ -249,20 +259,18 @@ def tamper(commands: Commands, baseline: dict, project: dict, output: Path, slot
         require(first, "Result 表为空，无法执行篡改负例")
         handle.seek(0)
         handle.write(bytes([first[0] ^ 1]))
-    verification = output / "tampered-verification.json"
-    rejected = commands.cli("tamper-verify", ["verify", "--result", result, "--result-store", copied,
-                 "--verifier-bundle", project["verifier_bundle"], "--output", verification,
-                 "--verification-process-slots", str(slots), "--json"], expected=1)
+    report = output / "tampered-report.md"
+    rejected = commands.cli("tamper-report", ["report", "--result", result, "--result-store", copied,
+                 "--output", report, "--json"], expected=1)
     require(rejected.get("status") == "fail" and rejected.get("error_code") == "result_contract_invalid",
-            "Result 篡改没有被完整性验证明确拒绝")
-    require(not verification.exists() or read_json(verification).get("status") != "pass",
-            "篡改 Result 获得了通过回执")
+            "Result 篡改没有被报告消费者明确拒绝")
+    require(not report.exists(), "篡改 Result 生成了报告")
     return {"result_directory": str(result), "modified_table": table["table_id"],
             "error_code": rejected["error_code"], "message": rejected.get("message")}
 
 
 def run_workflows(*, python: Path, project: Path, output: Path, release_candidate_id: str,
-                  build_manifest: Path, verification_process_slots: int = 3, timeout: float = 300) -> dict:
+                  build_manifest: Path, timeout: float = 300) -> dict:
     project, output, python = project.resolve(), output.resolve(), python.resolve()
     require(not output.exists(), "--output 必须是新目录")
     source_root = next((p for p in (project, *project.parents) if (p / ".git").exists()), project)
@@ -270,7 +278,7 @@ def run_workflows(*, python: Path, project: Path, output: Path, release_candidat
     require(all((project / path).is_file() for path in
                 ("pyproject.toml", "examples/build_bundles.py", "examples/prepare_synthetic_environment.py")),
             "--project 必须指向包含公开示例的完整源码项目")
-    require(verification_process_slots > 0 and timeout > 0, "进程槽与命令超时必须大于零")
+    require(timeout > 0, "命令超时必须大于零")
     output.mkdir(parents=True)
     commands = Commands(python, output, timeout)
     checks = {}
@@ -321,16 +329,15 @@ def run_workflows(*, python: Path, project: Path, output: Path, release_candidat
             workspace = output / "workspaces" / name
             commands.cli(f"init-{name}", ["workspace", "init", workspace, "--from-package", item["package"], "--json"])
             data = check(f"workflow:{name}", lambda: require_workflow(commands.cli(
-                f"execute-{name}", workspace_flow(item, environment, workspace, verification_process_slots))))
+                f"execute-{name}", workspace_flow(item, environment, workspace))))
             plan_path = Path(data["plan_directory"]) / "operator-graph-plan.json"
             plan = read_json(plan_path)
             entry = {"name": name, "scope": "synthetic", "workspace": str(workspace),
                      "package": str(workspace / "package"), "plan": str(plan_path),
                      "result_id": data["result_id"], "graph_id": plan["recipe"]["graph_id"],
                      "result_directory": data["result_directory"], "result_store": data["result_store"],
-                     "verification_result": data["verification_result"], "report": data["report_path"],
-                     "operator_bundle": item["operator_bundle"], "verifier_bundle": item["verifier_bundle"],
-                     "verifier_source": str(project / "examples" / name / "verifier/source/check.py"),
+                     "report": data["report_path"],
+                     "operator_bundle": item["operator_bundle"],
                      "data_range": [{"request_id": request["request_id"],
                                      "dataset_id": request["query"]["dataset_id"],
                                      "time_range": request["query"]["time_range"]}
@@ -340,9 +347,9 @@ def run_workflows(*, python: Path, project: Path, output: Path, release_candidat
             receipt["projects"].append(entry)
         equity = receipt["projects"][0]
         recovery = check("checkpoint_recovery", lambda: recover(commands, bundles["projects"][0], environment,
-                          equity, output, verification_process_slots))
+                          equity, output))
         receipt["recovery"] = recovery
-        check("result_tamper_rejected", lambda: tamper(commands, equity, bundles["projects"][0], output, verification_process_slots))
+        check("result_tamper_rejected", lambda: tamper(commands, equity, output))
         require(check("candidate_binding_after", binding) == checks["candidate_binding"]["details"], "验收期间候选身份改变")
     except Exception as exc:
         error = str(exc)
@@ -403,10 +410,10 @@ def gate_c_input(projects: list[dict]) -> dict:
         require(result["result_id"] == item["result_id"], "工作流与 Result 身份不一致")
         references.append({
             "reference": item["name"], "dag_family": families[item["name"]],
-            **{key: item[key] for key in ("package", "plan", "result_directory", "result_store", "verification_result")},
+            **{key: item[key] for key in ("package", "plan", "result_directory", "result_store")},
             "expected_graph_id": item["graph_id"], "expected_result_id": item["result_id"],
+            "expected_metrics": [dict(EXPECTED_METRICS[item["name"]])],
             "study_request_ids": [request["request_id"] for request in item["data_range"]],
-            "oracle_script": item["verifier_source"],
             "database_evidence": {
                 "data_scope": "synthetic", "database_path": evidence["database"],
                 "result_id": item["result_id"], "read_only": True, "database_unchanged": True,
@@ -493,7 +500,6 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True, help="源码仓库外尚不存在的输出目录")
     parser.add_argument("--release-candidate-id", required=True)
     parser.add_argument("--build-manifest", type=Path, required=True)
-    parser.add_argument("--verification-process-slots", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=300, help="每个命令的超时秒数")
     args = parser.parse_args()
     receipt = run_workflows(**vars(args))

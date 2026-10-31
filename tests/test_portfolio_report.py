@@ -1,5 +1,6 @@
 """组合报告只用内存正式表与临时 HTML，验证展示口径和消费边界。"""
 from datetime import date
+import json
 from types import SimpleNamespace
 
 import pyarrow as pa
@@ -62,8 +63,25 @@ def context():
             self.projected[role] = columns
             yield from tables[role].select(columns).to_batches(max_chunksize=batch_size)
 
-    return SimpleNamespace(snapshot=Snapshot(), tables=tables,
-                           verification=SimpleNamespace(verification_hash="verification.portfolio", status="fail"))
+    ctx = SimpleNamespace(snapshot=Snapshot(), tables=tables, claim_level="research_observation")
+    ctx.snapshot.bundle.run = SimpleNamespace(status="succeeded")
+    attach_report_data(ctx, {
+        "contract_version": "research-daily-cash-report-v1",
+        "portfolio_id": "default", "currency": "CNY", "cash_scale": 2,
+        "opening_nav_units": 10000, "account": None, "cashflows": None, "credit": None,
+    })
+    return ctx
+
+
+REPORT_DATA_PATH = "simulation/portfolio-report.json"
+
+
+def attach_report_data(ctx, data):
+    ctx.snapshot.bundle.support_files = [SimpleNamespace(
+        artifact_key="simulation-artifact", source_path=REPORT_DATA_PATH,
+        relative_path="support/simulation-artifact/" + REPORT_DATA_PATH,
+    )]
+    ctx.snapshot.support_bytes = {REPORT_DATA_PATH: json.dumps(data).encode()}
 
 
 def test_sorted_cash_net_value_drawdown_origin_and_fill_units():
@@ -87,7 +105,7 @@ def test_sorted_cash_net_value_drawdown_origin_and_fill_units():
     assert list(charts[1].data[0].y) == pytest.approx([0, 0, -0.1])
 
 
-def test_offline_html_keeps_failed_verification_and_trade_fields(tmp_path, monkeypatch):
+def test_offline_html_keeps_execution_summary_and_trade_fields(tmp_path, monkeypatch):
     pytest.importorskip("plotly")
     import duckdb
 
@@ -96,16 +114,16 @@ def test_offline_html_keeps_failed_verification_and_trade_fields(tmp_path, monke
 
     monkeypatch.setattr(duckdb, "connect", forbidden)
     output = tmp_path / "portfolio.html"
-    write_qlib_report(output, context=context(), request=request(), markdown="独立验证状态：fail")
+    write_qlib_report(output, context=context(), request=request(), markdown="执行成功；研究观察")
     text = output.read_text(encoding="utf-8")
-    for field in ("独立验证状态：fail", "verification.portfolio", "result.portfolio", "成交费用（元）",
+    for field in ("执行成功；研究观察", "result.portfolio", "成交费用（元）",
                   "首个收盘会话为 0", "不再次从净值扣减", "portfolio.max_drawdown@1.0.0", "decimal_return"):
         assert field in text
     assert text.count("plotly.js v") == 1
     assert "<script src=" not in text
     assert text.count('class="plotly-graph-div"') == 6
     with pytest.raises(FileExistsError):
-        write_qlib_report(output, context=context(), request=request(), markdown="独立验证状态：fail")
+        write_qlib_report(output, context=context(), request=request(), markdown="执行成功；研究观察")
 
 
 def test_complete_table_request_and_shared_read_budget():

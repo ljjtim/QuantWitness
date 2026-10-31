@@ -2,7 +2,7 @@
 
 不必为每个简单因子手写一套循环。例如 `$close/Ref($close,5)-1` 表示相对五个会话前的收盘价变化。框架复用 Qlib 算子，同时约束回看窗口、缺失值和允许使用的字段。
 
-表达式能计算，不等于已经证明它有效；预测评价和独立验证仍需要单独声明。
+表达式能计算，不等于已经证明它有效；预测评价与算法测试仍需按研究目标安排。
 
 ## 参数与行为说明
 
@@ -57,7 +57,7 @@ features = evaluate_expressions(frame, expressions, fields=["close"],
                                 min_periods="qlib", sessions=approved_sessions)
 ```
 
-`baseline_expressions` 直接读取 Qlib `Alpha158DL/Alpha360DL.get_feature_config()`，不创建其数据加载器。可读取全部原生定义或显式选择特征名；不静默删除不支持的表达式，不附带默认标签、证券池或处理器。完整定义需要 open、high、low、close、vwap、volume。要保持原生基线窗口口径，应选择 `min_periods="qlib"`；使用 `full` 是显式的研究变体。独立验证能力以具体项目声明为准，通用表达式求值不等于全部 Alpha 特征已经有独立研究验收。
+`baseline_expressions` 直接读取 Qlib `Alpha158DL/Alpha360DL.get_feature_config()`，不创建其数据加载器。可读取全部原生定义或显式选择特征名；不静默删除不支持的表达式，不附带默认标签、证券池或处理器。完整定义需要 open、high、low、close、vwap、volume。要保持原生基线窗口口径，应选择 `min_periods="qlib"`；使用 `full` 是显式的研究变体。算法验收以实际支持的公式和用例为准，表达式求值不等于全部 Alpha 特征已有真实研究结论。
 
 ## 模型处理器
 
@@ -67,4 +67,4 @@ features = evaluate_expressions(frame, expressions, fields=["close"],
 - `CSZScoreNorm` 仅允许 `infer feature`，支持 `method="zscore"` 或 `"robust"`，在每个会话的可见截面内处理。
 - `RobustZScoreNorm`、Fillna、DropnaLabel 与 learn 标签 CSRankNorm 保持原合同。
 
-处理器没有改变最终 holdout、标签成熟、候选选择和独立验证规则。固定量价和选定Alpha子集的声明、独立手算与正式入口见[量价与选定Alpha基线](qlib-factor-baselines.md)。完整训练与预测说明见 [Qlib 模型研究](walk_forward_model.md)。
+处理器没有改变最终 holdout、标签成熟、候选选择和生产读取规则。固定量价和选定Alpha子集的声明、独立手算与正式入口见[量价与选定Alpha基线](qlib-factor-baselines.md)。完整训练与预测说明见 [Qlib 模型研究](walk_forward_model.md)。

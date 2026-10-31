@@ -1,4 +1,4 @@
-"""从合成或自有封存ETF输入生成模型研究包和独立Verifier。"""
+"""从合成或自有封存ETF输入生成模型研究包和生产指标定义。"""
 from copy import deepcopy
 from datetime import datetime
 import argparse
@@ -16,7 +16,7 @@ from research_pipeline.research import (ResearchSemantics, ResearchTimeWindow, F
     LabelArtifact, EstimandSpec, HypothesisSpec)
 from research_pipeline.research.validation import build_search_manifest
 from research_pipeline.research.validation.holdout_series import normalize_series_declaration
-from research_pipeline.extensions import load_project_operator_declaration, compile_project_operator_bundle, compile_project_verifier_bundle
+from research_pipeline.extensions import load_project_operator_declaration, compile_project_operator_bundle
 from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
 from inputs import prepare_inputs, PRICE_FIELDS
 import synthetic
@@ -125,7 +125,7 @@ def research_series_from_arguments(args, parser):
         parser.error(str(error))
 
 
-def prepare(root, mode="model", input_config=None, feature_expressions=None, sequence_step_len=None, model_candidates=None, horizon_sessions=1, window_config=None, feature_suite=None, research_series: Mapping | None = None):
+def prepare(root, mode="model", input_config=None, feature_expressions=None, sequence_step_len=None, model_candidates=None, horizon_sessions=1, window_config=None, feature_suite=None, research_series: Mapping | None = None, lean_home=None):
     root = Path(root).resolve()
     if mode not in {"model", "development", "portfolio"}:
         raise ValueError("不支持的公开起点")
@@ -177,7 +177,7 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
     else:
         calendar = synthetic.sessions()
         _, requests, archive = prepare_inputs(root, end_session=calendar[78] if mode == "development" else None,
-            include_factor_fields=suite is not None)
+            include_factor_fields=suite is not None, portfolio=mode == 'portfolio')
         days, entities = [day.isoformat() for day in calendar], list(synthetic.instruments())
         fields, catalog_lock = PRICE_FIELDS, str(root / "catalog")
     for request in requests:
@@ -207,9 +207,13 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
         design["factor_fields"] = {role: role_fields[role] for role in suite["fields"]}
         design["feature_columns"] = sorted(f"{name}__w{spec['window_sessions']}" for name, spec in suite["features"].items())
     if feature_expressions is not None:
-        from verifier.check import validate_feature_expressions
+        from extension.operator import validate_feature_expressions
         design["feature_expressions"] = validate_feature_expressions(feature_expressions)
     design["finance"] = own["finance"] if own else {"initial_cash_cny": 100000., "price_scale": 3}
+    if mode == 'portfolio':
+        from lean_config import prepare_execution
+        design['fixed_clock'] = clock
+        design['lean_execution'] = prepare_execution(root, design, own=own, lean_home=lean_home)
     candidates = [candidate(0.1), candidate(1.0)]
     if sequence_step_len is not None:
         candidates = [candidate(0.1), gru_candidate(sequence_step_len)]
@@ -356,52 +360,45 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
         for name in ("context", "targets", "members", "exclusions"):
             table("sequence_" + name, "model_split", "splits", "research.model-split-manifest.v2",
                   "project.qlib_demo.sequence_" + name + (".v2" if name in {"context", "members"} else ".v1"))
-    table("metrics","validity","metrics","project.qlib_demo.prediction-metrics.v1",role="primary")
+    table("metrics","summary","result",summary_type,role="primary")
     table("models","summary","result",summary_type,"research.qlib-model-inventory.v1")
-    validity_ports=[("data","data_plane","data","data.columnar-bundle.v1"),
-        ("summary","summary","result",summary_type)]
     if mode == "development":
         tables = [item for item in tables if item["source_node_id"] not in {"model_selection", "model_holdout"}]
-        validity_ports.append(("predictions","model_predict","predictions","research.model-validation-predictions.v2"))
-    else:
-        validity_ports.append(("holdout","model_holdout","holdout","research.model-locked-holdout.v2"))
-    nodes.append(node("validity","project.qlib_demo.validity",[(a,b,c) for a,b,c,_ in validity_ports],
-        {"data_request_ids":["daily_feature","daily_label"],"table_bindings":{item["table_id"]:item["schema_id"] for item in tables},"metric_ref":metric_ref},"1.0.0"))
-    declarations.append(("validity",declaration("validity",[(a,d) for a,_,_,d in validity_ports],[("validity","research.validity-facts.v1"),("metrics","project.qlib_demo.prediction-metrics.v1")],
-        [("data_request_ids","string_list"),("table_bindings","json"),("metric_ref","string")],(summary_type,"project.qlib_demo.prediction-metrics.v1"),module="validity")))
     if mode == "portfolio":
         from portfolio_plan import extend_portfolio
         extend_portfolio(nodes, declarations, tables, design, node, declaration)
-    save(package/"spec/research.yaml",{"contract_version":"research-operator-graph-package-v2","research_id":research_id,"as_of":cutoff if mode == "development" else days[-1],"root_seed":SEED,"fixed_clock":clock,
-        "requests":requests,"research_semantics":semantics.to_dict(),"result":{"contract_version":"research-result-spec-v1","tables":tables},
-        "graph":{"contract_version":"research-operator-graph-recipe-v1","graph_id":research_id,"nodes":nodes}})
     built=[]
     builtin=build_mainline_operator_registry()
     for name, payload in declarations:
         path=root/"declarations"/(name+".yaml")
         save(path,payload)
-        decl=load_project_operator_declaration(path,source_root=HERE/"extension")
-        built.append(str(compile_project_operator_bundle(source_root=HERE/"extension",output_root=root/"bundles"/name,project_id=decl.project_id,
+        source_root = HERE/'extension'
+        if name == 'lean_portfolio':
+            source_root = root/'lean-strategy-source'
+            source_root.mkdir()
+            shutil.copyfile(HERE/'extension/lean_strategy.py', source_root/'lean_strategy.py')
+        decl=load_project_operator_declaration(path,source_root=source_root)
+        bundle_path = compile_project_operator_bundle(source_root=source_root,output_root=root/"bundles"/name,project_id=decl.project_id,
             operator_spec=decl.operator_spec,entry_module=decl.entry_module,entry_function=decl.entry_function,dependency_lock=decl.dependency_lock,
-            project_artifact_types=decl.project_artifact_types,permissions=decl.permissions,registered_operator_specs=builtin.operator_specs)))
-    metric=MetricDefinition.build(metric_id=metric_ref.split("@")[0],version="1.0.0",input_artifact_type="project.qlib_demo.prediction-metrics.v1",
+            project_artifact_types=decl.project_artifact_types,permissions=decl.permissions,registered_operator_specs=builtin.operator_specs)
+        built.append(str(bundle_path))
+        if name == 'lean_portfolio':
+            from research_pipeline.extensions.project_bundle import verify_project_operator_bundle
+            strategy_node = next(item for item in nodes if item['node_id'] == 'portfolio_simulation')
+            strategy_node['parameters']['strategy_declaration']['bundle_id'] = verify_project_operator_bundle(bundle_path).bundle_hash
+    metric=MetricDefinition.build(metric_id=metric_ref.split("@")[0],version="1.0.0",input_artifact_type=summary_type,
         result_schema_id="project.qlib_demo.metrics.v1",output_schema={"value":"float64"},unit="squared_decimal_price_change",frequency="daily",
         annualization_policy="none",risk_free_rate_policy="not_applicable",null_policy="forbid",direction="lower_is_better",
-        implementation_ref="public.qlib.independent_mse",implementation_digest=hashlib.sha256((HERE/"verifier/check.py").read_bytes()).hexdigest(),
+        implementation_ref="project.qlib_demo.operator.prediction_metric",implementation_digest=hashlib.sha256((HERE/"extension/operator.py").read_bytes()).hexdigest(),
         measurement_semantics={"quantity":"prediction_error","numerator":"sum_squared_prediction_error","denominator":"validation_prediction_count" if mode == "development" else "holdout_count","observation_timing":"after_label_available","aggregation":"mean"})
     definitions = (metric,)
     if mode == "portfolio":
         from portfolio_plan import metric_definitions
-        definitions += metric_definitions(HERE/"verifier/portfolio.py")
-    verifier_source = root / "verifier-source"
-    verifier_source.mkdir()
-    for source in (HERE / "verifier").glob("*.py"):
-        shutil.copyfile(source, verifier_source / source.name)
-    shutil.copyfile(HERE / "extension/factor_baseline_oracle.py", verifier_source / "factor_baseline_oracle.py")
-    verifier=compile_project_verifier_bundle(source_root=verifier_source,output_root=root/"verifier-bundles",project_id="qlib-public",
-        verifier_id="public-qlib-independent",verifier_version="1.0.0",entry_module="check",entry_function="verify",
-        authorized_schema_ids=tuple(item["schema_id"] for item in tables),metric_definitions=definitions,dependency_lock={"pyarrow":"21.0.0"})
-    result={"package":str(package),"extensions":built,"verifier":str(verifier),"catalog_lock":catalog_lock,"input_snapshot_manifest":str(archive),"mode":mode,"fixed_clock":clock}
+        definitions += metric_definitions()
+    save(package/"spec/research.yaml",{"contract_version":"research-operator-graph-package-v2","research_id":research_id,"as_of":cutoff if mode == "development" else days[-1],"root_seed":SEED,"fixed_clock":clock,
+        "metric_definitions":[item.to_dict() for item in definitions],"requests":requests,"research_semantics":semantics.to_dict(),"result":{"contract_version":"research-result-spec-v1","tables":tables},
+        "graph":{"contract_version":"research-operator-graph-recipe-v1","graph_id":research_id,"nodes":nodes}})
+    result={"package":str(package),"extensions":built,"catalog_lock":catalog_lock,"input_snapshot_manifest":str(archive),"mode":mode,"fixed_clock":clock}
     (root/"bundle-paths.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
     return result
 
@@ -411,9 +408,10 @@ if __name__ == "__main__":
     parser.add_argument("--output",required=True)
     parser.add_argument("--mode",choices=("development","model","portfolio"),default="model")
     parser.add_argument("--input-config")
+    parser.add_argument("--lean-home", help="portfolio模式使用的完整LEAN安装目录")
     parser.add_argument("--sequence-step-len",type=int)
     parser.add_argument("--factor-suite", choices=("volume_price_v1", "alpha158_selected_v1", "alpha360_selected_v1"))
     add_research_series_arguments(parser)
     args=parser.parse_args()
     research_series = research_series_from_arguments(args, parser)
-    print(json.dumps(prepare(args.output,args.mode,args.input_config,sequence_step_len=args.sequence_step_len,feature_suite=args.factor_suite,research_series=research_series),ensure_ascii=False,indent=2))
+    print(json.dumps(prepare(args.output,args.mode,args.input_config,sequence_step_len=args.sequence_step_len,feature_suite=args.factor_suite,research_series=research_series,lean_home=args.lean_home),ensure_ascii=False,indent=2))

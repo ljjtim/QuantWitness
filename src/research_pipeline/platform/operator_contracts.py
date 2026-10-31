@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from functools import cached_property
 import re
 from types import MappingProxyType
 
@@ -125,24 +126,58 @@ def _require_exact(payload: Mapping[str, object], expected: set[str], field: str
         )
 
 
-def _freeze_json(value: object, field: str) -> object:
+def _freeze_json(
+    value: object, field: str, *, request_ids: set[str] | None = None,
+    _key_request_flags: dict[str, bool] | None = None,
+) -> object:
+    if value is None or type(value) in (bool, int, float, str):
+        return value
+    # 同次冻结只复用字段分类；所有容器仍逐项复制，隔离外部可变输入。
+    if _key_request_flags is None:
+        _key_request_flags = {}
     if isinstance(value, Mapping):
-        if any(not isinstance(key, str) for key in value):
-            raise OperatorContractError(f"{field} 的 mapping key 必须是字符串")
-        for key in value:
-            if key.lower() in _FORBIDDEN_EXECUTABLE_KEYS:
-                raise OperatorContractError(f"{field}.{key} 不允许可执行内容或路径")
-        return MappingProxyType(
-            {key: _freeze_json(item, f"{field}.{key}") for key, item in value.items()}
-        )
+        frozen = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise OperatorContractError(f"{field} 的 mapping key 必须是字符串")
+            is_request = _key_request_flags.get(key)
+            if is_request is None:
+                if key.lower() in _FORBIDDEN_EXECUTABLE_KEYS:
+                    raise OperatorContractError(f"{field}.{key} 不允许可执行内容或路径")
+                is_request = (
+                    key in ("request_id", "request_ids")
+                    or key.endswith(("_request_id", "_request_ids"))
+                )
+                if len(_key_request_flags) < 128:
+                    _key_request_flags[key] = is_request
+            if request_ids is not None and is_request:
+                values = item if isinstance(item, (list, tuple)) else (item,)
+                request_ids.update(item for item in values if isinstance(item, str) and item)
+            frozen[key] = (
+                item if item is None or type(item) in (bool, int, float, str)
+                else _freeze_json(
+                    item, f"{field}.{key}", request_ids=request_ids,
+                    _key_request_flags=_key_request_flags,
+                )
+            )
+        return MappingProxyType(frozen)
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_json(item, f"{field}[]") for item in value)
+        return tuple(
+            item if item is None or type(item) in (bool, int, float, str)
+            else _freeze_json(
+                item, f"{field}[]", request_ids=request_ids,
+                _key_request_flags=_key_request_flags,
+            )
+            for item in value
+        )
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     raise OperatorContractError(f"{field} 不支持类型: {type(value).__name__}")
 
 
 def _plain_json(value: object) -> object:
+    if value is None or type(value) in (bool, int, float, str):
+        return value
     if isinstance(value, Mapping):
         return {key: _plain_json(item) for key, item in value.items()}
     if isinstance(value, tuple):
@@ -554,7 +589,15 @@ class StrategySelection:
     def __post_init__(self) -> None:
         _require_id(self.strategy_id, "strategy_selection.strategy_id")
         _require_id(self.strategy_version, "strategy_selection.strategy_version")
-        object.__setattr__(self, "parameters", _freeze_json(self.parameters, "strategy.parameters"))
+        request_ids: set[str] = set()
+        object.__setattr__(self, "parameters", _freeze_json(
+            self.parameters, "strategy.parameters", request_ids=request_ids,
+        ))
+        object.__setattr__(self, "_declared_request_ids", tuple(sorted(request_ids)))
+
+    @property
+    def declared_request_ids(self) -> tuple[str, ...]:
+        return self._declared_request_ids
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -622,13 +665,41 @@ class OperatorNodeRecipe:
         _require_id(self.node_id, "operator_node.node_id")
         _require_id(self.operator_id, "operator_node.operator_id")
         _require_id(self.operator_version, "operator_node.operator_version")
+        object.__setattr__(self, "inputs", tuple(self.inputs))
+        object.__setattr__(self, "strategies", tuple(self.strategies))
         input_ports = tuple(item.input_port for item in self.inputs)
         if input_ports != tuple(sorted(input_ports)) or len(input_ports) != len(set(input_ports)):
             raise OperatorContractError("operator_node.inputs 必须按 input_port 唯一排序")
-        object.__setattr__(self, "parameters", _freeze_json(self.parameters, "operator.parameters"))
+        request_ids = {request_id for strategy in self.strategies
+                       for request_id in strategy.declared_request_ids}
+        object.__setattr__(self, "parameters", _freeze_json(
+            self.parameters, "operator.parameters", request_ids=request_ids,
+        ))
+        object.__setattr__(self, "_declared_request_ids", tuple(sorted(request_ids)))
         roles = tuple(item.role.value for item in self.strategies)
         if roles != tuple(sorted(roles)) or len(roles) != len(set(roles)):
             raise OperatorContractError("operator_node.strategies 必须按 role 唯一排序")
+
+    @property
+    def declared_request_ids(self) -> tuple[str, ...]:
+        """参数冻结时收集所有嵌套请求，身份构建不再遍历大载荷。"""
+        return self._declared_request_ids
+
+    @cached_property
+    def content_hash(self) -> str:
+        """不可变节点内容只编码一次，图身份直接引用节点。"""
+        return typed_canonical_hash({
+            "node_id": self.node_id,
+            "operator_id": self.operator_id,
+            "operator_version": self.operator_version,
+            "inputs": [item.to_dict() for item in self.inputs],
+            "parameters": self.parameters,
+            "strategies": [item.to_dict() for item in self.strategies],
+        })
+
+    def validate_parameters(self, specs: tuple[ParameterSpec, ...]) -> dict[str, object]:
+        # 节点构造已经冻结并检查全部嵌套载荷；此处只执行算子参数schema。
+        return _validate_frozen_parameters(self.parameters, specs, f"node.{self.node_id}.parameters")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -667,14 +738,24 @@ class OperatorGraphRecipe:
     contract_version: str = OPERATOR_GRAPH_RECIPE_VERSION
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "nodes", tuple(self.nodes))
+        if self.recipe_hash != self._validated_hash():
+            raise OperatorContractError("operator graph recipe hash 不一致")
+
+    def _validated_hash(self) -> str:
         _require_id(self.graph_id, "operator_graph.graph_id")
         node_ids = tuple(item.node_id for item in self.nodes)
         if not node_ids or node_ids != tuple(sorted(node_ids)) or len(node_ids) != len(set(node_ids)):
             raise OperatorContractError("operator_graph.nodes 必须非空并按 node_id 唯一排序")
         if self.contract_version != OPERATOR_GRAPH_RECIPE_VERSION:
             raise OperatorContractError("operator graph recipe version 不受支持")
-        if self.recipe_hash != typed_canonical_hash(self.payload()):
-            raise OperatorContractError("operator graph recipe hash 不一致")
+        return typed_canonical_hash({
+            "identity_projection": "immutable-node-content-v1",
+            "graph_id": self.graph_id,
+            "nodes": [{"node_id": node.node_id, "content_hash": node.content_hash}
+                      for node in self.nodes],
+            "contract_version": self.contract_version,
+        })
 
     def payload(self) -> dict[str, object]:
         return {
@@ -689,12 +770,13 @@ class OperatorGraphRecipe:
     @classmethod
     def build(cls, *, graph_id: str, nodes: tuple[OperatorNodeRecipe, ...]) -> "OperatorGraphRecipe":
         ordered = tuple(sorted(nodes, key=lambda item: item.node_id))
-        payload = {
-            "graph_id": graph_id,
-            "nodes": [item.to_dict() for item in ordered],
-            "contract_version": OPERATOR_GRAPH_RECIPE_VERSION,
-        }
-        return cls(graph_id, ordered, typed_canonical_hash(payload))
+        # 与直接构造共用完整校验，仅计算一次规范内容身份。
+        result = object.__new__(cls)
+        object.__setattr__(result, "graph_id", graph_id)
+        object.__setattr__(result, "nodes", ordered)
+        object.__setattr__(result, "contract_version", OPERATOR_GRAPH_RECIPE_VERSION)
+        object.__setattr__(result, "recipe_hash", result._validated_hash())
+        return result
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "OperatorGraphRecipe":
@@ -751,6 +833,14 @@ def validate_parameters(
 ) -> dict[str, object]:
     """按唯一参数 schema 校验声明，拒绝未知字段和自由执行载荷。"""
     frozen = _freeze_json(values, field)
+    return _validate_frozen_parameters(frozen, specs, field)
+
+
+def _validate_frozen_parameters(
+    frozen: Mapping[str, object],
+    specs: tuple[ParameterSpec, ...],
+    field: str,
+) -> dict[str, object]:
     if not isinstance(frozen, Mapping):
         raise OperatorContractError(f"{field} 必须是映射")
     by_name = {item.name: item for item in specs}

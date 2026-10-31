@@ -130,10 +130,7 @@ def qlib_sequence_dataset(
             raise ModelMainlineError("处理后的序列特征必须保持上下文索引和特征顺序")
         values = transformed_features.copy()
     members = windows.members.loc[windows.members["sample_id"].isin(selected)]
-    if "context_index" in members:
-        used = windows.context.loc[windows.context.context_index.isin(members.context_index)]
-    else:
-        used = members
+    used = windows.context.loc[windows.context.context_index.isin(members.context_index)]
     keys = pd.MultiIndex.from_frame(used[["observation_session", "entity_id"]].drop_duplicates())
     values = values.reindex(keys).sort_index()
     if not np.isfinite(values.to_numpy(dtype=float)).all():

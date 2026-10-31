@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Mapping
+from typing import Mapping, Protocol
+
 
 from research_pipeline.data_plane.admission import (
     AdmittedQueryPlan,
@@ -22,6 +23,14 @@ from research_pipeline.platform.project_causal_contract import (
 from research_pipeline.platform.causal_time import causal_time_key_columns
 
 from .models import ResearchPackageError
+
+
+class CausalCatalog(Protocol):
+    """因果准入只消费已冻结目录的日期政策投影。"""
+
+    catalog_hash: str
+    datasets: Mapping[str, Mapping]
+    policies: Mapping[str, Mapping]
 
 
 _CAUSAL_TYPES = {
@@ -115,7 +124,8 @@ def validate_project_causal_recipe(
                 end = parse_aware_datetime(item["window_end"], "window_end")
                 if decision > fixed_clock or end > fixed_clock:
                     raise ResearchPackageError("项目 causal_plan 决策或观测窗口晚于固定时钟")
-                _validate_query_window(query, start, end, fixed_clock=fixed_clock)
+                _validate_query_window(query, start, end, fixed_clock=fixed_clock,
+                                       date_timezone=source.get("daily_time", {}).get("timezone"))
                 scope = query.time_range
                 if isinstance(scope, InstantRangeV2):
                     first_month = scope.start_at.strftime("%Y-%m")
@@ -133,15 +143,19 @@ def validate_project_causal_recipe(
 
 
 def _validate_query_window(
-    query: QueryIR, start: datetime, end: datetime, *, fixed_clock: datetime
+    query: QueryIR, start: datetime, end: datetime, *, fixed_clock: datetime,
+    date_timezone: str | None = None,
 ) -> None:
+    from zoneinfo import ZoneInfo
+
+    local_timezone = ZoneInfo(date_timezone) if date_timezone is not None else fixed_clock.tzinfo
     scope = query.time_range
     if isinstance(scope, InstantRangeV2):
         if start < scope.start_at or end > scope.end_at:
             raise ResearchPackageError("项目 causal_plan 窗口超出 QueryIR 时间范围")
     elif (
-        start.astimezone(fixed_clock.tzinfo).date() < scope.start
-        or end.astimezone(fixed_clock.tzinfo).date() > scope.end
+        start.astimezone(local_timezone).date() < scope.start
+        or end.astimezone(local_timezone).date() > scope.end
     ):
         raise ResearchPackageError("项目 causal_plan 窗口超出 QueryIR 日期范围")
 
@@ -149,6 +163,8 @@ def _validate_query_window(
 def validate_project_causal_admitted_sources(
     recipe: OperatorGraphRecipe,
     admitted_plans: Mapping[str, AdmittedQueryPlan],
+    *,
+    catalog: CausalCatalog | None = None,
 ) -> None:
     """只有已准入的时间角色能够授权正式因果输入。"""
     for node in recipe.nodes:
@@ -164,7 +180,7 @@ def validate_project_causal_admitted_sources(
             if temporal.requires_consumer_binding or temporal.revision_selector is not None or temporal.effective_interval_selector is not None:
                 raise ResearchPackageError("项目因果输入尚不支持需逐决策快照选择的数据请求")
             if source.get("daily_time") is not None:
-                _validate_daily_source(source, admitted)
+                _validate_daily_source(source, admitted, catalog=catalog)
                 continue
             if admitted.daily_availability_rule is not None or admitted.session_close_binding is not None:
                 raise ResearchPackageError("项目因果输入缺少日频或 session-close 核心可见时间列")
@@ -185,22 +201,63 @@ def validate_project_causal_admitted_sources(
                 raise ResearchPackageError("项目因果输入时间列必须是已准入 timestamp")
 
 
-def _validate_daily_source(source: Mapping, admitted: AdmittedQueryPlan) -> None:
+def _validate_daily_source(source: Mapping, admitted: AdmittedQueryPlan, *, catalog: CausalCatalog | None = None) -> None:
     from research_pipeline.domain.time import TradingSessionCalendar
 
     daily = source["daily_time"]
     temporal = admitted.temporal_selection
-    if (admitted.daily_availability_policy_ref != "available.daily.v1"
-            or admitted.daily_availability_rule != daily["rule"]
-            or admitted.session_close_binding is not None
-            or temporal.visibility_filter is not None
+    if (admitted.session_close_binding is not None
             or temporal.source_timezone not in (None, daily["timezone"])):
         raise ResearchPackageError("日频 causal 时间规则与 Catalog 准入事实不一致")
     if source["observation_column"] != admitted.event_time_field or source["available_column"] != admitted.event_time_field:
         raise ResearchPackageError("日频 causal 日期列角色与 Catalog 准入事实不一致")
     if not str(dict(admitted.field_types).get(admitted.event_time_field, "")).lower().startswith("date"):
         raise ResearchPackageError("日频 causal 来源必须是已准入 date 列")
+    if daily["rule"] == "next_session_open":
+        if (admitted.daily_availability_policy_ref != "available.daily.v1"
+                or admitted.daily_availability_rule != daily["rule"]
+                or temporal.visibility_filter is not None):
+            raise ResearchPackageError("日频 causal 时间规则与 Catalog 准入事实不一致")
+    else:
+        _validate_catalog_date_rule(admitted, daily, catalog)
     calendar = TradingSessionCalendar.build(daily["sessions"])
     scope = admitted.query.time_range
-    if isinstance(scope, InstantRangeV2) or calendar.sessions[0] > scope.start or calendar.sessions[-1] <= scope.end:
-        raise ResearchPackageError("日频冻结交易日历必须覆盖请求及结束后的下一交易日")
+    needs_next = daily["rule"] == "next_session_open"
+    if (isinstance(scope, InstantRangeV2) or calendar.sessions[0] > scope.start
+            or (calendar.sessions[-1] <= scope.end if needs_next else calendar.sessions[-1] < scope.end)):
+        raise ResearchPackageError("日频冻结交易日历必须覆盖请求" + ("及结束后的下一交易日" if needs_next else "日期范围"))
+
+
+def _validate_catalog_date_rule(admitted: AdmittedQueryPlan, daily: Mapping, catalog: CausalCatalog | None) -> None:
+    from research_pipeline.platform import typed_canonical_hash
+
+    if catalog is None or catalog.catalog_hash != admitted.catalog_hash:
+        raise ResearchPackageError("日期 causal 规则必须提供与准入请求一致的冻结 Catalog")
+    dataset = catalog.datasets.get(admitted.query.dataset_id)
+    if (dataset is None or dataset["dataset_version"] != admitted.query.dataset_version
+            or dataset["event_time_field"] != admitted.event_time_field):
+        raise ResearchPackageError("日期 causal 来源与 Catalog 数据集版本或日期角色不一致")
+    policy = catalog.policies.get(dataset["available_time_policy"])
+    if (policy is None or policy.get("status") != "approved"
+            or policy.get("policy_type") != "availability"
+            or typed_canonical_hash(dict(policy)) != admitted.availability_policy_hash):
+        raise ResearchPackageError("日期 causal 规则缺少 Catalog 已准入可见性政策")
+    rules = policy.get("rules", {})
+    temporal = admitted.temporal_selection
+    visibility = temporal.visibility_filter
+    if (rules.get("available_after") != daily["rule"]
+            or rules.get("timezone", "Asia/Shanghai") != daily["timezone"]
+            or admitted.daily_availability_policy_ref is not None
+            or admitted.daily_availability_rule is not None
+            or rules.get("claim_ceiling", "tradable_simulation") != admitted.input_claim_ceiling):
+        raise ResearchPackageError("日期 causal 时间规则与 Catalog 准入事实不一致")
+    # 上市日等实体属性不表示整条参考记录的观测日，不能据此提前交付记录。
+    if dataset["frequency"] != "daily" or admitted.event_time_field not in dataset["primary_key"]:
+        raise ResearchPackageError("业务日期必须是逐日记录的日期键；上市日期不能充当整条记录的观测日期")
+    if visibility is not None and (visibility.available_time_field != admitted.event_time_field
+                                   or not visibility.inclusive or visibility.additional_time_fields):
+        raise ResearchPackageError("日期 causal 可见列或日期边界与 Catalog 准入事实不一致")
+    if daily["rule"] == "session_open" and (
+        rules.get("available_time_field") != admitted.event_time_field or visibility is None
+    ):
+        raise ResearchPackageError("session_open 必须绑定 Catalog 已准入的同日开盘可见日期")

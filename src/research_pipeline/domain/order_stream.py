@@ -35,6 +35,7 @@ class ExplicitOrderCommand:
     order_type: str | None = None
     time_in_force: str | None = None
     limit_price: Price | None = None
+    protection_price: Price | None = None
     reference_price: Price | None = None
     reference_price_available_at: datetime | None = None
     funds_policy: str | None = None
@@ -74,7 +75,7 @@ class ExplicitOrderCommand:
         if self.action == "cancel":
             if any(getattr(self, name) is not None for name in (
                 "side", "quantity", "position_effect", "order_type", "time_in_force",
-                "limit_price", "reference_price", "reference_price_available_at", "funds_policy",
+                "limit_price", "protection_price", "reference_price", "reference_price_available_at", "funds_policy",
             )) or self.slippage_bps != 0 or self.slippage_ticks != 0:
                 raise DomainContractError("cancel 交易字段必须为 None，滑点必须为零")
             return
@@ -101,6 +102,10 @@ class ExplicitOrderCommand:
             raise DomainContractError("market 不能声明 limit_price")
         if self.order_type == "limit":
             self._require_price(self.limit_price, "limit_price")
+        if self.protection_price is not None:
+            if self.order_type != "market":
+                raise DomainContractError("protection_price 仅用于市价委托")
+            self._require_price(self.protection_price, "protection_price")
         self._require_price(self.reference_price, "reference_price")
         require_aware_datetime(self.reference_price_available_at, "reference_price_available_at")
         if self.reference_price_available_at > self.decision_time:
@@ -122,15 +127,20 @@ class ExplicitOrderCommand:
                      "reference_price_available_at"):
             value = getattr(self, name)
             payload[name] = None if value is None else value.isoformat()
-        for name in ("limit_price", "reference_price"):
+        for name in ("limit_price", "reference_price", "protection_price"):
             value = getattr(self, name)
             payload[name] = None if value is None else value.to_dict()
+        if self.protection_price is None:
+            payload.pop("protection_price")
         payload["slippage_bps"] = float(self.slippage_bps)
         return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> ExplicitOrderCommand:
-        _exact_keys(payload, {field.name for field in fields(cls)}, "ExplicitOrderCommand")
+        expected = {field.name for field in fields(cls)}
+        if isinstance(payload, Mapping) and "protection_price" not in payload:
+            payload = dict(payload, protection_price=None)
+        _exact_keys(payload, expected, "ExplicitOrderCommand")
         values = dict(payload)
         _exact_keys(payload["instrument"], {field.name for field in fields(InstrumentKey)}, "instrument")
         values["instrument"] = InstrumentKey.from_dict(payload["instrument"])
@@ -154,7 +164,7 @@ class ExplicitOrderCommand:
             raise DomainContractError("trading_date 必须是 ISO 日期字符串") from exc
         if values["trading_date"].isoformat() != value:
             raise DomainContractError("trading_date 必须是 YYYY-MM-DD")
-        for name in ("limit_price", "reference_price"):
+        for name in ("limit_price", "reference_price", "protection_price"):
             value = payload[name]
             if value is not None:
                 _exact_keys(value, {"units", "scale", "currency"}, name)

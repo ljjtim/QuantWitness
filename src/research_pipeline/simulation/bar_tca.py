@@ -34,10 +34,8 @@ from .orders import SimulationContractError
 BAR_TCA_POLICY_VERSION = "research-bar-tca-policy-v2"
 BAR_TCA_RESULT_VERSION = "research-bar-tca-attribution-result-v2"
 BAR_TCA_ARTIFACT_VERSION = "research-bar-tca-attribution-artifact-v2"
-BAR_TCA_ORACLE_INPUT_VERSION = "research-bar-tca-attribution-oracle-input-v2"
 BAR_TCA_STREAM_RESULT_VERSION = "research-bar-tca-attribution-result-v3"
 BAR_TCA_STREAM_ARTIFACT_VERSION = "research-bar-tca-attribution-artifact-v3"
-BAR_TCA_TABLE_REFERENCE_VERSION = "research-bar-tca-table-references-v1"
 _IMPACT_MODELS = {"fixed_bps_v1", "sqrt_participation_v1"}
 _CLAIM_CEILINGS = {"analysis_only", "sealed"}
 _ORDER_STATUSES = {"filled", "partially_filled", "rejected"}
@@ -609,7 +607,7 @@ def _bar_tca_arrow_schemas() -> Mapping[str, pa.Schema]:
 
 
 class BarTcaArtifactWriter:
-    """按交易日写 TCA 四表，oracle 只保存正式表引用。"""
+    """按交易日写 TCA 四表及其提交清单。"""
 
     def __init__(
         self,
@@ -618,7 +616,6 @@ class BarTcaArtifactWriter:
         policy: BarTcaPolicy,
         source_simulation_hash: str,
         source_ledger_hash: str,
-        table_references: Mapping[str, Mapping[str, object]],
     ) -> None:
         self.root = Path(output_root)
         if self.root.exists():
@@ -638,16 +635,6 @@ class BarTcaArtifactWriter:
         self._row_counts = {name: 0 for name in self._schemas}
         self._files: dict[str, str] = {}
         self._closed = False
-        required_references = {
-            "formal_orders", "formal_fills", "decision_benchmarks",
-            "execution_observations",
-        }
-        if set(table_references) != required_references:
-            raise SimulationContractError("Bar TCA 表引用集合不闭合")
-        self._table_references = {
-            str(name): dict(reference)
-            for name, reference in sorted(table_references.items())
-        }
         for name, schema in self._schemas.items():
             (self._staging / name).mkdir()
             digest = hashlib.sha256()
@@ -706,17 +693,6 @@ class BarTcaArtifactWriter:
             "source_ledger_hash": self.accumulator.source_ledger_hash,
             "table_hashes": table_hashes,
         })
-        oracle = {
-            "contract_version": BAR_TCA_TABLE_REFERENCE_VERSION,
-            "policy": self.policy.to_dict(),
-            "table_references": self._table_references,
-            "partitioning": "session",
-            "source_simulation_hash": self.accumulator.source_simulation_hash,
-            "source_ledger_hash": self.accumulator.source_ledger_hash,
-        }
-        oracle_path = self._staging / "oracle-input.json"
-        oracle_path.write_text(canonical_json(oracle), encoding="utf-8")
-        self._files["oracle-input.json"] = _sha256(oracle_path)
         body = {
             "contract_version": BAR_TCA_STREAM_ARTIFACT_VERSION,
             "result_hash": result_hash,
@@ -1021,10 +997,6 @@ def bar_tca_policy_from_parameters(
 def write_bar_tca_artifact(
     result: BarTcaResult,
     output_root: str | Path,
-    *,
-    policy: BarTcaPolicy | None = None,
-    orders: Sequence[BarTcaOrder] | None = None,
-    formal_fills: Sequence[BarTcaFormalFill] | None = None,
 ) -> dict[str, object]:
     root = Path(output_root)
     if root.exists():
@@ -1052,20 +1024,6 @@ def write_bar_tca_artifact(
             pq.write_table(table, path)
             files[f"{name}/part-00000.parquet"] = _sha256(path)
             schemas[name] = typed_canonical_hash(str(table.schema))
-        if policy is not None or orders is not None or formal_fills is not None:
-            if policy is None or orders is None or formal_fills is None:
-                raise SimulationContractError("Bar TCA oracle 输入必须同时提供 policy/orders/formal_fills")
-            oracle = {
-                "contract_version": BAR_TCA_ORACLE_INPUT_VERSION,
-                "policy": policy.to_dict(),
-                "orders": [item.to_dict() for item in orders],
-                "formal_fills": [item.to_dict() for item in formal_fills],
-                "source_simulation_hash": result.source_simulation_hash,
-                "source_ledger_hash": result.source_ledger_hash,
-            }
-            oracle_path = staging / "oracle-input.json"
-            oracle_path.write_text(canonical_json(oracle), encoding="utf-8")
-            files["oracle-input.json"] = _sha256(oracle_path)
         manifest = {
             "contract_version": BAR_TCA_ARTIFACT_VERSION,
             "result_hash": result.result_hash,
@@ -1127,12 +1085,10 @@ def _sha256(path: Path) -> str:
 
 __all__ = [
     "BAR_TCA_ARTIFACT_VERSION",
-    "BAR_TCA_ORACLE_INPUT_VERSION",
     "BAR_TCA_POLICY_VERSION",
     "BAR_TCA_RESULT_VERSION",
     "BAR_TCA_STREAM_ARTIFACT_VERSION",
     "BAR_TCA_STREAM_RESULT_VERSION",
-    "BAR_TCA_TABLE_REFERENCE_VERSION",
     "BarTcaArtifactSummary",
     "BarTcaArtifactWriter",
     "BarTcaFill",

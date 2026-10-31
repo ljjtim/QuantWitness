@@ -59,9 +59,10 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             outputs=(("bars", "data.minute-bars.v1"),),
             parameters=(
                 _choice_parameter(
-                    "interval_minutes", ParameterType.INTEGER, (1, 5, 15, 30, 60, 120)
+                    "interval_minutes", ParameterType.INTEGER, (1,)
                 ),
                 _parameter("session_policy_ref", ParameterType.STRING),
+                ParameterSpec("minute_scope", ParameterType.JSON, required=False),
                 _parameter("quality_policy_refs", ParameterType.STRING_LIST),
                 _choice_parameter("adjustment_mode", ParameterType.STRING, ("none",)),
                 _choice_parameter(
@@ -91,7 +92,9 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             parameters=(
                 _parameter("factor_request_id", ParameterType.STRING),
                 _parameter("corporate_action_request_id", ParameterType.STRING),
-                _parameter("instrument_id", ParameterType.STRING),
+                ParameterSpec("instrument_id", ParameterType.STRING, required=False),
+                ParameterSpec("instrument_ids", ParameterType.JSON, required=False),
+                ParameterSpec("initial_listing_evidence_by_instrument", ParameterType.JSON, required=False),
                 _choice_parameter(
                     "asset_class", ParameterType.STRING, ("cn_stock", "cn_etf")
                 ),
@@ -102,12 +105,12 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
                 ParameterSpec("initial_listing_evidence", ParameterType.JSON, required=False),
             ),
             resource_profile={
-                "memory_bytes": _GIB,
+                "memory_bytes": 2 * _GIB,
                 "cpu_slots": 1,
                 "temp_bytes": 512 * _MIB,
                 "wall_seconds": 600,
             },
-            code_fingerprint="minute-adjustment-snapshot-pit-v1",
+            code_fingerprint="minute-adjustment-snapshot-pit-v2",
             capability="data.adjustment-factor-snapshot.v1",
             module_name="research_pipeline.data_plane.minute_adjustment",
             symbol_name="build_adjustment_factor_snapshot",
@@ -163,55 +166,6 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             cache_compatibility_mode="byte_exact",
         ),
         _definition(
-            "research.validity.minute-observation",
-            "research.validity.minute-observation.v1",
-            inputs=(
-                ("minute_1m", "data.minute-bars.1m.v1"),
-                ("decision_minute_1m", "data.minute-bars.1m.v1"),
-                ("observation", "research.minute-observation.v1"),
-            ),
-            outputs=(("validity", "research.validity-facts.v1"),),
-            parameters=(_parameter("request_id", ParameterType.STRING),),
-            resource_profile={
-                "memory_bytes": _GIB,
-                "cpu_slots": 1,
-                "temp_bytes": 256 * _MIB,
-                "wall_seconds": 300,
-            },
-            code_fingerprint="minute-observation-validity-facts-v1",
-            capability="research.validity-facts.v1",
-            module_name="research_pipeline.runtime.adapters.minute_data",
-            symbol_name="execute_research_validity_minute_observation_v1",
-            implementation_scope="core",
-            partition_keys=("request_id",),
-            cache_compatibility_mode="byte_exact",
-        ),
-        _definition(
-            "research.validity.adjusted-minute-observation",
-            "research.validity.adjusted-minute-observation.v1",
-            inputs=(
-                ("data", "data.columnar-bundle.v1"),
-                ("minute_1m", "data.minute-bars.1m.v1"),
-                ("decision_minute_1m", "data.minute-bars.1m.v1"),
-                ("observation", "research.minute-observation.v1"),
-            ),
-            outputs=(("validity", "research.validity-facts.v1"),),
-            parameters=(_parameter("request_id", ParameterType.STRING),),
-            resource_profile={
-                "memory_bytes": _GIB,
-                "cpu_slots": 1,
-                "temp_bytes": 256 * _MIB,
-                "wall_seconds": 300,
-            },
-            code_fingerprint="adjusted-minute-observation-validity-facts-v1",
-            capability="research.validity-facts.v1",
-            module_name="research_pipeline.runtime.adapters.minute_data",
-            symbol_name="execute_research_validity_adjusted_minute_observation_v1",
-            implementation_scope="core",
-            partition_keys=("request_id",),
-            cache_compatibility_mode="byte_exact",
-        ),
-        _definition(
             "research.features.intraday",
             "research.features.intraday.v1",
             inputs=(("bars", "data.minute-bars.v1"),),
@@ -231,7 +185,7 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
                     "asset_class", ParameterType.STRING, CANONICAL_ASSET_CLASSES
                 ),
                 _choice_parameter(
-                    "interval_minutes", ParameterType.INTEGER, (1, 5, 15, 30, 60, 120)
+                    "interval_minutes", ParameterType.INTEGER, (1,)
                 ),
                 _parameter("availability_policy_ref", ParameterType.STRING),
             ),
@@ -270,7 +224,7 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
                     "asset_class", ParameterType.STRING, CANONICAL_ASSET_CLASSES
                 ),
                 _choice_parameter(
-                    "interval_minutes", ParameterType.INTEGER, (1, 5, 15, 30, 60, 120)
+                    "interval_minutes", ParameterType.INTEGER, (1,)
                 ),
                 _parameter("availability_policy_ref", ParameterType.STRING),
             ),
@@ -345,63 +299,10 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             cache_compatibility_mode="numerical",
         ),
         _definition(
-            "finance.simulation.intraday",
-            "finance.simulation.intraday.v3",
-            operator_version="3.0.0",
-            inputs=(
-                ("bars", "data.minute-bars.v1"),
-                ("targets", "research.minute-targets.v1"),
-            ),
-            outputs=(("simulation", "research.minute-simulation.v1"),),
-            parameters=(
-                ParameterSpec("execution_mode", ParameterType.STRING, required=False,
-                              allowed_values=("target", "explicit_orders")),
-                ParameterSpec("order_commands", ParameterType.STRING, required=False),
-                _choice_parameter(
-                    "execution_model",
-                    ParameterType.STRING,
-                    ("next_bar_participation_v1",),
-                ),
-                _parameter("participation_ppm", ParameterType.INTEGER),
-                _choice_parameter(
-                    "claim_ceiling", ParameterType.STRING, ("bar_level_research_only",)
-                ),
-                _parameter("rule_bundle_hash", ParameterType.STRING),
-                ParameterSpec("rule_bundle", ParameterType.JSON, required=False),
-                _parameter("initial_cash_units", ParameterType.INTEGER),
-                *_bar_tca_parameters(claim_ceilings=("analysis_only",)),
-            ),
-            resource_profile={
-                "memory_bytes": 4 * _GIB,
-                "cpu_slots": 4,
-                "temp_bytes": 16 * _GIB,
-                "wall_seconds": 14_400,
-            },
-            code_fingerprint="intraday-target-canonical-result-tca-v3",
-            capability="research.minute-simulation.v1",
-            module_name="research_pipeline.simulation.minute_execution",
-            symbol_name="run_minute_event_simulation",
-            implementation_scope="core",
-            dependency_modules=(
-                "research_pipeline.domain.order_stream",
-                "research_pipeline.simulation.explicit_orders",
-                "research_pipeline.domain.minute_rule_snapshots",
-                "research_pipeline.simulation.cash_market",
-                "research_pipeline.simulation.ledger",
-                "research_pipeline.simulation.margin",
-                "research_pipeline.simulation.result_contract",
-                "research_pipeline.simulation.bar_tca",
-                "research_pipeline.runtime.bar_tca_adapter",
-            ),
-            partition_keys=("account_id",),
-            cache_compatibility_mode="numerical",
-        ),
-        _definition(
             "research.statistics.minute",
             "research.statistics.minute.v1",
             inputs=(
                 ("labels", "research.minute-labels.v1"),
-                ("simulation", "research.minute-simulation.v1"),
             ),
             outputs=(("statistics", "research.minute-statistics.v1"),),
             parameters=(
@@ -442,32 +343,5 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             partition_keys=("candidate_id",),
             seeded=True,
             cache_compatibility_mode="numerical",
-        ),
-        _definition(
-            "research.validity.minute",
-            "research.validity.minute.v1",
-            inputs=(
-                ("data", "data.columnar-bundle.v1"),
-                ("minute_1m", "data.minute-bars.1m.v1"),
-                ("decision_minute_1m", "data.minute-bars.1m.v1"),
-                ("simulation", "research.minute-simulation.v1"),
-                ("statistics", "research.minute-statistics.v1"),
-            ),
-            outputs=(("validity", "research.validity-facts.v1"),),
-            parameters=(),
-            resource_profile={
-                "memory_bytes": 2 * _GIB,
-                "cpu_slots": 2,
-                "temp_bytes": 4 * _GIB,
-                "wall_seconds": 3_600,
-            },
-            code_fingerprint="minute-validity-runtime-facts-v2",
-            capability="research.validity-facts.v1",
-            module_name="research_pipeline.runtime.operator_graph_evidence",
-            symbol_name="build_minute_intraday_validity_facts",
-            implementation_scope="core",
-            dependency_modules=(
-                "research_pipeline.runtime.validity_facts_common",
-            ),
         ),
     )

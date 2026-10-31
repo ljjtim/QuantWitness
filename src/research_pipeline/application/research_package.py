@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from .command_suggestion import command_suggestion
-from .report_output import prepare_qlib_request, report_table_ids, write_qlib_report, write_verification_report
+from .report_output import prepare_qlib_request, report_table_ids, write_qlib_report, write_result_report
 
 
 def _execute(args, *, documents=None) -> dict[str, object]:
@@ -81,9 +81,9 @@ def _execute(args, *, documents=None) -> dict[str, object]:
         }
         if args.package_command == "compare":
             roles.update({
-                "left_verification_result_input": args.left_verification_result,
+                "left_result_input": args.left_result,
                 "left_result_store_input": args.left_result_store,
-                "right_verification_result_input": args.right_verification_result,
+                "right_result_input": args.right_result,
                 "right_result_store_input": args.right_result_store,
             })
             if args.right_package:
@@ -92,7 +92,7 @@ def _execute(args, *, documents=None) -> dict[str, object]:
                 roles["right_source_archive_input"] = args.right_source_archive_root
         else:
             roles.update({
-                "verification_result_input": args.verification_result,
+                "result_input": args.result,
                 "result_store_input": args.result_store,
             })
         if args.package_command == "export-result":
@@ -101,6 +101,7 @@ def _execute(args, *, documents=None) -> dict[str, object]:
             roles["report_output"] = args.output
         if getattr(args, "source_archive_root", None):
             roles["source_archive_input"] = args.source_archive_root
+        roles = {role: path for role, path in roles.items() if path is not None}
         PathRolePolicy().validate(
             roles,
             read_only_roles=tuple(role for role in roles if role.endswith("_input")),
@@ -113,9 +114,9 @@ def _execute(args, *, documents=None) -> dict[str, object]:
     if args.package_command == "lint":
         from research_pipeline.packages.lint import validate_lint_declarations
 
-        validate_lint_declarations(args.package, documents=documents)
-
-    package = load_research_package(args.package, documents=documents)
+        package, queries, recipe, semantics = validate_lint_declarations(args.package, documents=documents)
+    else:
+        package = load_research_package(args.package, documents=documents)
     source_verification = verify_package_source_provenance(
         package,
         getattr(args, "source_archive_root", None),
@@ -123,7 +124,9 @@ def _execute(args, *, documents=None) -> dict[str, object]:
     if args.package_command == "lint":
         from research_pipeline.packages.lint import build_lint_report
 
-        plan, registry = _compile_lint(package, args)
+        plan, registry = _compile_lint(
+            package, args, query_result=queries, recipe=recipe, research_semantics=semantics,
+        )
         report = build_lint_report(
             package,
             plan,
@@ -133,11 +136,11 @@ def _execute(args, *, documents=None) -> dict[str, object]:
         )
         return report
     plan = _compile_trusted_context(package, args)
-    from research_pipeline.evidence import (
-        build_verification_report,
-        load_verified_result_context,
-        render_verification_report,
-        export_verified_result,
+    from research_pipeline.results import (
+        build_result_report,
+        load_result_context,
+        render_result_report,
+        export_result,
     )
     base = {
         "package_id": package.package_id,
@@ -156,12 +159,12 @@ def _execute(args, *, documents=None) -> dict[str, object]:
             getattr(args, "right_source_archive_root", None) or getattr(args, "source_archive_root", None),
         )
         right_plan = plan if not args.right_package else _compile_trusted_context(right_package, args)
-        left = load_verified_result_context(
-            args.left_verification_result,
+        left = load_result_context(
+            args.left_result,
             result_store=args.left_result_store,
         )
-        right = load_verified_result_context(
-            args.right_verification_result,
+        right = load_result_context(
+            args.right_result,
             result_store=args.right_result_store,
         )
         from research_pipeline.packages.delivery import (
@@ -179,24 +182,24 @@ def _execute(args, *, documents=None) -> dict[str, object]:
         return {**base, "comparison": asdict(comparison)}
     if args.package_command == "report":
         request = prepare_qlib_request(args)
-        context = load_verified_result_context(
-            args.verification_result,
+        context = load_result_context(
+            args.result,
             result_store=args.result_store,
             additional_table_ids=report_table_ids(request),
         )
         _validate_package_result(package, plan, context)
-        markdown = f"# {package.display_name}\n\n{render_verification_report(context)}"
+        markdown = f"# {package.display_name}\n\n{render_result_report(context)}"
         if args.output is not None:
             if request is not None:
                 output = write_qlib_report(args.output, context=context, request=request, markdown=markdown)
             else:
-                output = write_verification_report(
+                output = write_result_report(
                     args.output,
                     output_format=args.format,
                     markdown=markdown,
                     report={
                         "package": base,
-                        "verification": asdict(build_verification_report(context)),
+                        "result": build_result_report(context).to_dict(),
                     },
                 )
             return {
@@ -204,25 +207,22 @@ def _execute(args, *, documents=None) -> dict[str, object]:
                 "output": str(output),
                 "format": args.format,
                 "result_id": context.snapshot.bundle.result_id,
-                "verification_hash": context.verification.verification_hash,
-                "verification_status": context.verification.status,
-                "validity_status": context.verification.validity_status,
-                "claim_level": context.verification.claim_level,
+                "claim_level": context.claim_level,
             }
         return {
             **base,
             "report": markdown,
         }
-    context = load_verified_result_context(
-        args.verification_result,
+    context = load_result_context(
+        args.result,
         result_store=args.result_store,
     )
     _validate_package_result(package, plan, context)
-    output = export_verified_result(context, args.output)
+    output = export_result(context, args.output)
     return {**base, "output": str(output)}
 
 
-def _compile_lint(package, args):
+def _compile_lint(package, args, *, query_result=None, recipe=None, research_semantics=None):
     from research_pipeline.extensions import build_admitted_operator_registry
     from research_pipeline.packages import (
         OPERATOR_GRAPH_BUILDER_ID,
@@ -238,21 +238,16 @@ def _compile_lint(package, args):
             getattr(args, "extension_bundle", ()),
             builtin_registry=build_mainline_operator_registry(),
         )
-    verifier = None
-    if getattr(args, "verifier_bundle", None):
-        from research_pipeline.extensions import admit_project_verifier_bundle
+    if query_result is not None and package.builder_id == OPERATOR_GRAPH_BUILDER_ID:
+        from research_pipeline.packages.operator_graph import compile_operator_graph_package
 
-        verifier = admit_project_verifier_bundle(
-            args.verifier_bundle,
-            expected_project_id=(
-                getattr(admission, "project_id", None)
-                or package.spec_payload["research_id"]
-            ),
-        )
+        return compile_operator_graph_package(
+            package, query_result=query_result, admission=admission,
+            recipe=recipe, research_semantics=research_semantics,
+        ), admission
     return compile_research_package(
         package,
         admission=admission,
-        verifier_admission=verifier,
     ), admission
 
 
@@ -316,10 +311,10 @@ def _declared_resource_summary(plan, registry) -> dict[str, object]:
 def _validate_package_result(package, plan, context) -> None:
     bundle = context.snapshot.bundle
     if bundle.package_hash != package.package_hash or bundle.plan_hash != plan.plan_hash:
-        raise ValueError("VerificationResult 不属于当前 ResearchPackage/plan")
-    claim = context.verification.claim_level
+        raise ValueError("Result 不属于当前 ResearchPackage/plan")
+    claim = context.claim_level
     if claim not in package.claim_contract.allowed_claim_levels:
-        raise ValueError("VerificationResult claim 超过 ResearchPackage 允许范围")
+        raise ValueError("Result claim 超过 ResearchPackage 允许范围")
 
 
 __all__ = ["_execute"]

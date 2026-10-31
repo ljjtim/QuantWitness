@@ -1,10 +1,10 @@
-"""已验证 Result 的通用时间序列分析命令。"""
+"""Result 的通用时间序列分析命令。"""
 
 from __future__ import annotations
 
 from research_pipeline.data_plane import PathRolePolicy
 from research_pipeline.evidence import (
-    analyze_verified_result,
+    analyze_result,
     compare_analysis_results,
     load_analysis_request,
     load_analysis_result,
@@ -22,22 +22,20 @@ def execute(args) -> int:
 
 def _execute(args) -> dict[str, object]:
     if args.analysis_command == "run":
+        roles = {
+            "result_input": args.result,
+            "analysis_request_input": args.request,
+            "analysis_result_output": args.output,
+        }
+        if args.result_store is not None:
+            roles["result_store_input"] = args.result_store
         PathRolePolicy().validate(
-            {
-                "verification_input": args.verification_result,
-                "result_store_input": args.result_store,
-                "analysis_request_input": args.request,
-                "analysis_result_output": args.output,
-            },
-            read_only_roles=(
-                "verification_input",
-                "result_store_input",
-                "analysis_request_input",
-            ),
+            roles,
+            read_only_roles=tuple(role for role in roles if role.endswith("_input")),
         )
         request = load_analysis_request(args.request)
-        result = analyze_verified_result(
-            args.verification_result,
+        result = analyze_result(
+            args.result,
             result_store=args.result_store,
             request=request,
             memory_bytes=args.analysis_memory_bytes,
@@ -51,7 +49,6 @@ def _execute(args) -> dict[str, object]:
             "actual_start": result.actual_start,
             "actual_end": result.actual_end,
             "claim_level": result.source.claim_level,
-            "claim_ceiling": result.source.claim_ceiling,
             "next_action": (
                 "可使用 analysis compare 对两份或多份同口径 AnalysisResult 排名。"
             ),

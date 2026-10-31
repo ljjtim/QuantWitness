@@ -28,7 +28,9 @@ python3.12 -m venv "$WORK/sdist-env"
 "$WORK/sdist-env/bin/python" -I tools/verify_rdagent_install.py --project . --output "$WORK/sdist-acceptance"
 ```
 
-每次输出目录必须不存在。工具确认两个业务包从当前虚拟环境导入，执行 `pip check`、两个公共 CLI 帮助、规格确认和 `request-build`，再使用安装包内的 worker 完成合成 Parquet 输入的 `lint/admit/run/verify/report`。第一候选公式故意偏移，预期独立验证失败；第二候选预期通过。2400 条分钟、10 个证券日的结果与 VerificationResult 路径保存在 `acceptance.json`。确认署名为 `synthetic-test-fixture`，不代表对真实研究材料的人工审阅。
+每次输出目录必须不存在。工具确认两个业务包从当前虚拟环境导入，执行 `pip check`、两个公共 CLI 帮助、规格确认和 `request-build`，再使用安装包内的 worker 完成合成 Parquet 输入的 `admit/run/report`。第一候选预期触发 `NameError`，命令与执行状态均为 `failed`，保留候选算子诊断且没有 Result 引用；第二候选完成正式执行并发布 Result。安装工具读取正式 `bars`、`coverage`、`daily` 表，按固定教学公式手算日值、三日值及预热状态，核对2400条分钟和10个证券日。Result 路径与安装检查记录保存在 `acceptance.json`。确认署名为 `synthetic-test-fixture`，不代表对真实研究材料的人工审阅。
+
+公式手算属于安装与开发验收。正式研究直接交付 Result，报告和开发反馈读取该结果；算法正确性由项目手算、确定性案例及必要差分测试检查。
 
 公式安装验收不安装上游 RD-Agent，不执行其 Loop，也不调用模型。继续验证实际研究调度时，在同一 wheel 环境按[集成入口](../README.md)准备固定上游源码，再执行：
 
@@ -66,14 +68,17 @@ $Wheel = (Get-ChildItem "$Work/core-dist/*.whl").FullName
 工具在仓库外的输出目录运行，检查安装来源和 `pip check`，在合成样本上分别训练 Qlib LinearModel、LGBModel、XGBModel，并封存每个模型的 RobustZScoreNorm 与 Fillna 处理器。模型迁移到另一目录后，由独立进程使用不含标签的输入恢复预测，要求与原预测逐项完全一致。结果与依赖版本写入 `ml-acceptance/acceptance.json`。此验收只证明安装、训练和模型恢复，不产生正式 ResearchPackage Result，也不声明投资绩效；全程不访问数据库或模型 API。
 
 本地发行验收已覆盖 Linux Python 3.12 和 Windows Python 3.10。CI 的 `ml-distribution` 作业覆盖 Ubuntu 和 Windows 的 Python 3.12 wheel 安装。远端执行状态以具体 CI 记录为准；其他 Python 版本、平台和 sdist 的 ML 训练覆盖不能由这项验收推定。
+
+上述模型安装工具无需LEAN。公开Qlib示例的`development`和`model`模式同样无需LEAN；`portfolio`及风险组合需要显式完整安装，当前安装入口支持Windows x64和PowerShell 7。组合命令须传入`--lean-home`，或在自有数据的`lean_execution.lean_home`中声明安装目录，操作见[Qlib组合示例](../../../examples/qlib_portfolio/README.md)与[LEAN安装说明](../../lean/README.md)。
+
 ## 可认领贡献
 
 | 任务 | 修改范围 | 验收方式 |
 | --- | --- | --- |
-| 增加一个可手算的新公式示例 | `examples/<新案例>`、文档与公开文件清单 | 正确公式通过独立验证；至少一个数值错误和一个可见时间错误失败；不依赖私有数据 |
+| 增加一个可手算的新公式示例 | `examples/<新案例>`、文档与公开文件清单 | 公式手算、缺失窗口及完成bar案例通过；真实技术失败不产生成功反馈；不依赖私有数据 |
 | 改善安装报错与排障说明 | 本页、集成 README、安装验收工具 | 在空环境复现具体失败，文档命令能修复；保留真实错误和日志位置 |
 | 补充公开请求构建边界回归 | `tests/test_request_builder.py` | 构造确认材料与目标来源不一致的输入，断言在建立研究 session 前拒绝 |
-| 增加跨平台安装覆盖 | CI 和安装验收工具 | 新平台从 wheel 与 sdist 分别导入安装包并产生独立验证结果 |
+| 增加跨平台安装覆盖 | CI 和安装验收工具 | 新平台从 wheel 与 sdist 分别导入安装包并产生正式Result |
 
 开始贡献时在 issue 或 PR 里说明研究问题、拟修改范围和可运行验收命令。保持改动集中；无需为一个示例修改核心金融合同。提交源码、测试和文档，运行目录留在仓库外。更完整的项目边界和 PR 要求见[贡献指南](../../../CONTRIBUTING.md)。
 
@@ -81,4 +86,4 @@ $Wheel = (Get-ChildItem "$Work/core-dist/*.whl").FullName
 
 CI 中的 `rdagent-distribution` 作业执行 wheel/sdist 自动化安装验收，以及公开请求、公式审阅与开发预测研究的边界回归。工作流文件存在不代表远端已经运行；实际结果以对应 CI 运行记录为准。自动化验收也不代替首次接触框架的真人独立使用记录。
 
-安装与研究输出包括虚拟环境、发行文件、合成输入、bundle、Result、VerificationResult、报告及命令日志，均保留在 `WORK` 下。需要清理时先保存要复核的收据和研究结果。
+安装与研究输出包括虚拟环境、发行文件、合成输入、bundle、Result、报告及命令日志，均保留在 `WORK` 下。需要清理时先保存要复核的收据和研究结果。

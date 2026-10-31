@@ -28,10 +28,6 @@ from research_pipeline.domain.simulation_result import (
 )
 
 from .orders import SimulationContractError
-from .futures_financial_context import (
-    FUTURES_CONTEXT_DECLARATION, FuturesFinancialContext,
-    FUTURES_CONTEXT_VERSIONS, read_futures_financial_context, write_futures_financial_context,
-)
 from .order_lifecycle import (
     ORDER_LIFECYCLE_DECLARATION, ORDER_LIFECYCLE_SCHEMA, lifecycle_table, read_order_lifecycle,
     write_order_lifecycle, write_order_lifecycle_session,
@@ -143,7 +139,6 @@ class SimulationResultContract:
     source_simulation_hash: str
     contract_version: str = SIMULATION_RESULT_CONTRACT_VERSION
     order_lifecycle: tuple[dict[str, object], ...] | None = None
-    futures_context: FuturesFinancialContext | None = None
     account_valuation_adjustments: Mapping[str, int] | None = None
 
     def __post_init__(self) -> None:
@@ -159,15 +154,6 @@ class SimulationResultContract:
             if self.semantics.contract_version != SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION:
                 raise SimulationContractError("订单生命周期必须绑定新仿真语义合同")
             lifecycle_table(self.order_lifecycle)
-        if (self.semantics.asset_class == "cn_future" and self.semantics.frequency == "daily"
-                and self.semantics.contract_version == SIMULATION_RESULT_LIFECYCLE_SEMANTICS_VERSION
-                and self.futures_context is None):
-            raise SimulationContractError("新日频期货结果缺少金融上下文")
-        if self.futures_context is not None and (
-            self.semantics.asset_class != "cn_future" or self.semantics.frequency != "daily"
-            or self.futures_context.source_simulation_hash != self.source_simulation_hash
-        ):
-            raise SimulationContractError("日频期货金融上下文与仿真来源不一致")
         verify_simulation_result_contract(self)
 
     @property
@@ -190,8 +176,6 @@ class SimulationResultContract:
         }
         if self.order_lifecycle is not None:
             body["order_lifecycle_contract"] = dict(ORDER_LIFECYCLE_DECLARATION)
-        if self.futures_context is not None:
-            body["futures_context_contract"] = self.futures_context.declaration
         if self.account_valuation_adjustments is not None:
             body["account_valuation_adjustments"] = dict(self.account_valuation_adjustments)
         return typed_canonical_hash(body)
@@ -215,8 +199,6 @@ class SimulationResultContract:
         }
         if self.order_lifecycle is not None:
             body["order_lifecycle_contract"] = dict(ORDER_LIFECYCLE_DECLARATION)
-        if self.futures_context is not None:
-            body["futures_context_contract"] = self.futures_context.declaration
         if self.account_valuation_adjustments is not None:
             body["account_valuation_adjustments"] = dict(self.account_valuation_adjustments)
         return {**body, "manifest_hash": typed_canonical_hash(body)}
@@ -228,7 +210,6 @@ def build_simulation_result_contract(
     semantics: SimulationResultSemantics,
     source_simulation_hash: str,
     order_lifecycle: tuple[dict[str, object], ...] | None = None,
-    futures_context: FuturesFinancialContext | None = None,
     account_valuation_adjustments: Mapping[str, int] | None = None,
 ) -> SimulationResultContract:
     """复制规范表并冻结列顺序，调用方不能在验证后原地改写事实。"""
@@ -241,7 +222,6 @@ def build_simulation_result_contract(
     return SimulationResultContract(
         normalized, semantics, source_simulation_hash,
         order_lifecycle=(None if order_lifecycle is None else tuple(dict(row) for row in order_lifecycle)),
-        futures_context=futures_context,
         account_valuation_adjustments=account_valuation_adjustments,
     )
 
@@ -497,9 +477,7 @@ def project_futures_daily_result(
     """把逐日盯市期货结果投影到公共合同，不改变成交或结算事实。"""
 
     lifecycle = getattr(result, "order_lifecycle", None)
-    futures_context = None if lifecycle is None else FuturesFinancialContext.from_result(result)
-    source_simulation_hash = (str(result.result_hash) if futures_context is None
-                              else futures_context.source_simulation_hash)
+    source_simulation_hash = str(result.result_hash)
     intents = result.intents
     fills = result.fills
     settlements = result.settlements
@@ -755,7 +733,6 @@ def project_futures_daily_result(
         semantics=semantics,
         source_simulation_hash=source_simulation_hash,
         order_lifecycle=(None if lifecycle is None else tuple(lifecycle.reindex(columns=ORDER_LIFECYCLE_SCHEMA.names).to_dict(orient="records"))),
-        futures_context=futures_context,
     )
 
 
@@ -792,26 +769,11 @@ def verify_simulation_result_contract(result: SimulationResultContract) -> None:
 def write_simulation_result_contract(
     result: SimulationResultContract,
     output_root: str | Path,
-    *,
-    daily_etf_context: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """原子写入六张规范表；manifest 绑定 schema、语义和逐表内容。"""
 
     root = Path(output_root).resolve()
     manifest = result.manifest
-    context = None
-    if daily_etf_context is not None:
-        from .daily_financial_context import build_daily_etf_financial_context
-
-        if result.semantics.asset_class not in {"cn_etf", "cn_stock"} or result.semantics.frequency != "daily":
-            raise SimulationContractError("日频 ETF 金融上下文只能随对应六表发布")
-        context = build_daily_etf_financial_context(
-            **daily_etf_context, simulation_result_hash=manifest["result_hash"],
-        )
-        if context["source_simulation_hash"] != result.source_simulation_hash:
-            raise SimulationContractError("日频 ETF 金融上下文与六表来源仿真不一致")
-        if (root.parent / "daily-context.json").exists():
-            raise FileExistsError("日频 ETF 金融上下文已存在")
     staging = root.parent / f".{root.name}.staging-{uuid.uuid4().hex}"
     if root.exists():
         raise FileExistsError(f"仿真结果合同已存在: {root}")
@@ -826,10 +788,6 @@ def write_simulation_result_contract(
             )
         if result.order_lifecycle is not None:
             write_order_lifecycle(root.parent, result.order_lifecycle)
-        if result.futures_context is not None:
-            write_futures_financial_context(
-                root.parent, result.futures_context, simulation_result_hash=manifest["result_hash"],
-            )
         (staging / "manifest.json").write_text(canonical_json(manifest), encoding="utf-8")
         (staging / "COMMITTED").write_text(str(manifest["manifest_hash"]), encoding="ascii")
         os.replace(staging, root)
@@ -845,11 +803,6 @@ def write_simulation_result_contract(
             raise SimulationContractError(
                 f"{name} 写入后的 schema 或行数不闭合"
             )
-    if context is not None:
-        with (root.parent / "daily-context.json").open("x", encoding="utf-8") as stream:
-            stream.write(canonical_json(context))
-    # 输入 ResultContract 已在构造时完成金融校验；消费或 resume 时再做
-    # 独立全表复核，避免写入阶段同时保留原 DataFrame 和读回副本。
     return manifest
 
 
@@ -1027,18 +980,8 @@ def verify_simulation_result_artifact(
             raise SimulationContractError("新仿真合同缺少订单生命周期分区")
     elif "order_lifecycle_contract" in manifest:
         raise SimulationContractError("订单生命周期必须绑定新仿真语义合同")
-    futures_paths = ()
-    if "futures_context_contract" in manifest:
-        declaration = manifest["futures_context_contract"]
-        version = declaration.get("contract_version")
-        if version not in FUTURES_CONTEXT_VERSIONS or declaration != {
-            **FUTURES_CONTEXT_DECLARATION, "contract_version": version,
-        }:
-            raise SimulationContractError("日频期货金融上下文声明无效")
-        pattern = "*/session=*/data.parquet" if version == FUTURES_CONTEXT_VERSIONS[0] else "*/part-*.parquet"
-        futures_paths = tuple((root.parent / "futures-context-tables").glob(pattern))
     uncompressed_bytes = 0
-    for lifecycle_path in (*lifecycle_paths, *futures_paths):
+    for lifecycle_path in lifecycle_paths:
         metadata = pq.read_metadata(lifecycle_path)
         for index in range(metadata.num_row_groups):
             group = metadata.row_group(index)
@@ -1087,8 +1030,6 @@ def verify_simulation_result_artifact(
             None if "order_lifecycle_contract" not in manifest
             else read_order_lifecycle(root.parent)
         ),
-        futures_context=(None if "futures_context_contract" not in manifest
-                         else read_futures_financial_context(root.parent)),
         account_valuation_adjustments=manifest.get("account_valuation_adjustments"),
     )
     if result.manifest != manifest:

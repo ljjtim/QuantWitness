@@ -39,11 +39,11 @@ def test_forbidden_import_and_token_fail(tmp_path):
     assert {item["code"] for item in result["issues"]} == {"forbidden_import", "forbidden_token"}
 
 
-def test_core_cannot_import_top_level_project_verifier(tmp_path: Path) -> None:
+def test_core_cannot_import_top_level_project_algorithm(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     (source / "bad.py").write_text(
-        "from project_extensions.study.verifier import verify\n",
+        "from project_extensions.study.algorithm import run\n",
         encoding="utf-8",
     )
     policy = tmp_path / "policy.json"
@@ -117,75 +117,19 @@ def test_generic_capability_cannot_route_by_project_stage(
     }
 
 
-def test_verification_result_cannot_interpret_unregistered_schema_or_path(
+
+
+
+
+def test_result_delivery_uses_explicit_table_projection(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source"
-    target = source / "research_pipeline/evidence/verification_result.py"
+    target = source / "research_pipeline/results/delivery.py"
     target.parent.mkdir(parents=True)
     target.write_text(
-        'def verify(snapshot):\n'
-        '    schema_id = "research.generic-project-output.v1"\n'
-        '    if schema_id in snapshot.schemas:\n'
-        '        return snapshot.read("project/output")\n',
-        encoding="utf-8",
-    )
-    policy = tmp_path / "policy.json"
-    policy.write_text(json.dumps({
-        "contract_version": "research-framework-boundary-v2",
-        "scan_paths": ["."],
-    }), encoding="utf-8")
-
-    observed = audit_framework_boundary(
-        tmp_path, source_root=source, policy_path=policy,
-    )
-    assert {item["code"] for item in observed["issues"]} == {
-        "unregistered_result_semantic_literal",
-    }
-
-
-def test_financial_oracle_cannot_interpret_unregistered_schema_or_path(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source"
-    target = source / "research_pipeline/evidence/result_financial_oracle.py"
-    target.parent.mkdir(parents=True)
-    target.write_text(
-        'def verify(bundle):\n'
-        '    if any(\n'
-        '        table.schema_id == "research.generic-special-result.v1"\n'
-        '        for table in bundle.tables\n'
-        '    ):\n'
-        '        return "project/output"\n',
-        encoding="utf-8",
-    )
-    policy = tmp_path / "policy.json"
-    policy.write_text(json.dumps({
-        "contract_version": "research-framework-boundary-v2",
-        "scan_paths": ["."],
-    }), encoding="utf-8")
-
-    observed = audit_framework_boundary(
-        tmp_path, source_root=source, policy_path=policy,
-    )
-    assert {item["code"] for item in observed["issues"]} == {
-        "unregistered_result_semantic_literal",
-    }
-
-
-def test_financial_oracle_contract_projection_has_no_fixed_result_semantics(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "source"
-    target = source / "research_pipeline/evidence/result_financial_oracle.py"
-    target.parent.mkdir(parents=True)
-    target.write_text(
-        'def verify(bundle, *, semantic_contract):\n'
-        '    return verify_tables(\n'
-        '        bundle,\n'
-        '        schema_roles=semantic_contract.schema_roles,\n'
-        '        support_paths=semantic_contract.required_support_paths,\n'
-        '    )\n',
+        'def read_selected(snapshot, *, table_ids):\n'
+        '    return {table_id: snapshot.read_table(table_id) for table_id in table_ids}\n',
         encoding="utf-8",
     )
     policy = tmp_path / "policy.json"
@@ -200,19 +144,15 @@ def test_financial_oracle_contract_projection_has_no_fixed_result_semantics(
     assert observed["status"] == "pass"
 
 
-def test_registered_result_semantic_handler_owns_fixed_schema_and_path(
+def test_result_table_contract_owns_schema_and_path(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "source"
-    target = source / "research_pipeline/evidence/verification_result.py"
+    target = source / "research_pipeline/results/contracts.py"
     target.parent.mkdir(parents=True)
     target.write_text(
-        'HANDLER = _ResultSemanticHandler(\n'
-        '    "generic",\n'
-        '    ("research.generic-project-output.v1",),\n'
-        '    (("research.generic-project-output.v1", "project/output"),),\n'
-        '    verifier_identity="result-semantic:generic:verifier.generic.v1",\n'
-        ')\n',
+        'TABLE = {"table_id": "output", "schema_id": "research.output.v1",\n'
+        '         "path_prefix": "output"}\n',
         encoding="utf-8",
     )
     policy = tmp_path / "policy.json"
@@ -277,12 +217,12 @@ def test_valid_exemption_is_reported(tmp_path):
         (
             'definition = _definition(\n'
             '    module_name="research_pipeline.runtime.generic",\n'
-            '    dependency_modules=("project_extensions.study.verifier",),\n'
+            '    dependency_modules=("project_extensions.study.algorithm",),\n'
             ')\n',
             "project_module_in_public_implementation",
         ),
         (
-            'def verify(payload, validation_mode):\n'
+            'def evaluate(payload, validation_mode):\n'
             '    if validation_mode == "locked_holdout_v1":\n'
             '        return payload["project_stage"], payload["reason_code"]\n',
             "mode_bound_project_stage_reason",

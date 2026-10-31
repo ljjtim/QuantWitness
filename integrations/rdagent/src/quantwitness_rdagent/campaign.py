@@ -133,7 +133,7 @@ class Campaign:
         self.payload = self.validate_payload(payload)
         self.root = Path(self.payload["session_root"])
         source = self.payload["source"]
-        for key in ("path", "result_store", "verification_result"):
+        for key in ("path", "result_store", "result"):
             if source.get(key):
                 original = Path(source[key]).resolve()
                 output = self.root.resolve()
@@ -204,6 +204,7 @@ class Campaign:
     def prompt(self):
         history = self.history()
         facts = {"question": "比较预声明模型及向零收缩预测的开发区误差", "objective": "per_fold_mean_squared_error_then_equal_mean",
+                 "limitations": list(self.data["provenance"].get("limitations", ())),
                  "candidates": self.payload["candidates"], "baseline_id": self.payload["baseline_id"],
                  "history": [{k: r[k] for k in ("round", "candidate_id", "parent_id", "status", "metrics", "improvement") if k in r} for r in history]}
         return json.dumps(facts, ensure_ascii=False, allow_nan=False)

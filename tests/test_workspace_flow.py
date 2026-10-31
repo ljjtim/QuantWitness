@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -46,10 +47,9 @@ def test_workspace_copy_rejects_existing_target_and_invalid_source(tmp_path):
     assert not target.exists()
 
 
-def _install_services(monkeypatch, *, fail=None, verdict="pass", finalized=True):
+def _install_services(monkeypatch, *, fail=None, finalized=True):
     calls = []
     arguments = {}
-    monkeypatch.setattr(workspace_flow, "_show_verification_resources", lambda outcome, args: None)
 
     def capture(stage, args):
         calls.append(stage)
@@ -60,11 +60,21 @@ def _install_services(monkeypatch, *, fail=None, verdict="pass", finalized=True)
     def package(args, *, documents=None):
         stage = args.package_command
         capture(stage, args)
-        if stage == "lint":
-            return {"checks": {"resources": {"nodes": []}}, "status": "linted"}
         return {"output": args.output, "execution_ready": True}
 
-    def run(args):
+    def prepare(args, *, documents=None, package=None):
+        capture("admit", args)
+        if fail == "admit":
+            raise ValueError("测试阶段失败：admit")
+        output = Path(args.output)
+        prepared = SimpleNamespace(
+            directory=output, manifest={}, admitted={}, dag=SimpleNamespace(),
+            recipe=SimpleNamespace(nodes=()), registry=SimpleNamespace(),
+            minute_scope_inputs={},
+        )
+        return {"output": str(output), "execution_ready": True}, prepared
+
+    def run(args, *, prepared_plan=None):
         capture("run", args)
         return {
             "status": "result_finalized" if finalized else "succeeded",
@@ -75,13 +85,17 @@ def _install_services(monkeypatch, *, fail=None, verdict="pass", finalized=True)
 
     def evidence(args):
         capture(args.command, args)
-        if args.command == "verify":
-            return {"status": verdict, "output": args.output, "claim_level": "local_only"}
         return {"output": args.output}
 
     monkeypatch.setattr(workspace_flow.research_package, "_execute", package)
+    monkeypatch.setattr(workspace_flow.research_plan, "prepare_package", prepare)
+    monkeypatch.setattr(
+        workspace_flow.research_package,
+        "_declared_resource_summary",
+        lambda plan, registry: {"nodes": [], "summary": {}},
+    )
     monkeypatch.setattr(workspace_flow.research_run, "_execute", run)
-    monkeypatch.setattr(workspace_flow.evidence_lifecycle, "_execute", evidence)
+    monkeypatch.setattr(workspace_flow.result_delivery, "_execute", evidence)
     return calls, arguments
 
 
@@ -91,8 +105,7 @@ def _command(tmp_path):
     return [
         "workspace", "execute", "--workspace", str(workspace),
         "--catalog-lock", str(tmp_path / "catalog"), "--data-db", str(tmp_path / "readonly.duckdb"),
-        "--extension-bundle", "operator-bundle", "--verifier-bundle", "verifier-bundle",
-        "--verification-process-slots", "3", "--json",
+        "--extension-bundle", "operator-bundle", "--json",
     ]
 
 
@@ -102,54 +115,37 @@ def test_workspace_execute_delegates_same_inputs_and_result(monkeypatch, tmp_pat
     assert main(argv) == 0
     payload = json.loads(capsys.readouterr().out)
     data = payload["data"]
-    assert calls == ["lint", "admit", "run", "verify", "report"]
+    assert calls == ["admit", "run", "report"]
     assert all(status == "pass" for status in data["stages"].values())
-    assert data["verification_status"] == "pass"
+    assert data["status"] == "succeeded"
+    assert not any("verif" in key for key in data)
     assert data["execution_status"] == "succeeded"
     assert args["run"]["clock"] == "2024-01-09T00:00:00+08:00"
     assert args["run"]["root_seed"] == 1701
     assert args["run"]["plan"] == args["admit"]["output"]
-    assert args["lint"]["extension_bundle"] == args["admit"]["extension_bundle"] == ["operator-bundle"]
-    assert args["verify"]["result"] == data["result_directory"]
-    assert args["verify"]["verification_process_slots"] == 3
-    assert args["report"]["verification_result"] == data["verification_result"]
+    assert args["admit"]["extension_bundle"] == ["operator-bundle"]
+    assert args["report"]["result"] == data["result_directory"]
     assert args["report"]["result_store"] == data["result_store"]
-    assert Path(args["verify"]["verification_scratch_root"]).is_relative_to(Path(data["execution_root"]))
+    assert not (Path(data["execution_root"]) / "verification").exists()
     assert not (tmp_path / "readonly.duckdb").exists()
     first_execution = data["execution_id"]
     assert main(argv) == 0
     assert json.loads(capsys.readouterr().out)["data"]["execution_id"] != first_execution
 
 
-@pytest.mark.parametrize("stage", ["lint", "admit", "run", "verify", "report"])
+@pytest.mark.parametrize("stage", ["admit", "run", "report"])
 def test_workspace_failure_stops_later_services(monkeypatch, tmp_path, capsys, stage):
     calls, args = _install_services(monkeypatch, fail=stage)
     assert main(_command(tmp_path)) == 1
     payload = json.loads(capsys.readouterr().out)
     data = payload["data"]
-    sequence = ["lint", "admit", "run", "verify", "report"]
+    sequence = ["admit", "run", "report"]
     assert calls == sequence[:sequence.index(stage) + 1]
     assert data["failed_stage"] == stage
     assert data["stages"][stage] == "fail"
-    if stage in {"verify", "report"}:
+    if stage == "report":
         assert data["result_id"] == "a" * 64
         assert data["execution_status"] == "succeeded"
-    if stage == "lint":
-        assert not (tmp_path / "workspace" / ".research" / "executions").exists()
-
-
-def test_workspace_failed_verdict_reports_without_claiming_success(monkeypatch, tmp_path, capsys):
-    calls, _ = _install_services(monkeypatch, verdict="fail")
-    assert main(_command(tmp_path)) == 1
-    payload = json.loads(capsys.readouterr().out)
-    assert calls[-1] == "report"
-    assert payload["error_code"] == "workspace_verification_failed"
-    data = payload["data"]
-    assert data["execution_status"] == "succeeded"
-    assert data["verification_status"] == "fail"
-    assert data["failed_stage"] == "verify"
-    assert data["stages"]["report"] == "pass"
-    assert data["report_path"].endswith("report.md")
 
 
 def test_workspace_requires_finalized_result(monkeypatch, tmp_path, capsys):
@@ -157,8 +153,8 @@ def test_workspace_requires_finalized_result(monkeypatch, tmp_path, capsys):
     assert main(_command(tmp_path)) == 1
     data = json.loads(capsys.readouterr().out)["data"]
     assert calls[-1] == "run"
-    assert data["verification_status"] is None
-    assert data["stages"]["verify"] == "not_run"
+    assert "verification_status" not in data
+    assert data["stages"]["report"] == "not_run"
 
 
 @pytest.mark.parametrize("override", [["--clock", "2025-01-01T00:00:00+08:00"], ["--root-seed", "2"]])
@@ -166,7 +162,7 @@ def test_workspace_rejects_clock_or_seed_changes_before_allocation(monkeypatch, 
     calls, _ = _install_services(monkeypatch)
     assert main(_command(tmp_path) + override) == 1
     data = json.loads(capsys.readouterr().out)["data"]
-    assert calls == ["lint"]
+    assert calls == []
     assert data["failed_stage"] == "prepare"
     assert data["stages"]["allocate"] == "not_run"
     assert not (tmp_path / "workspace" / ".research" / "executions").exists()
@@ -185,7 +181,7 @@ def test_resource_advice_only_counts_project_processes(monkeypatch):
         {"node_id": "core", "implementation_scope": "core", "resource_profile": {"process_slots": 1}},
         {"node_id": "project", "implementation_scope": "project", "resource_profile": {"process_slots": 1}},
     ]}}}
-    args = SimpleNamespace(verifier_bundle=None, verification_process_slots=2)
+    args = SimpleNamespace()
     advice = workspace_flow._resource_advice(lint, args)
     assert len(advice) == 1
     assert advice[0]["node_id"] == "project"
@@ -202,7 +198,7 @@ def test_workspace_cannot_be_created_inside_source(tmp_path):
     assert before == {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
 
 
-@pytest.mark.parametrize("stage", ["verify", "report"])
+@pytest.mark.parametrize("stage", ["report"])
 def test_workspace_failure_suggests_result_bound_followup(monkeypatch, tmp_path, capsys, stage):
     from research_pipeline.cli.parser import build_parser
 
@@ -212,11 +208,5 @@ def test_workspace_failure_suggests_result_bound_followup(monkeypatch, tmp_path,
     followup = build_parser().parse_args(data["next_command_argv"][3:])
     assert followup.command == stage
     assert followup.result_store == data["result_store"]
-    if stage == "verify":
-        assert followup.result == data["result_directory"]
-        assert followup.verifier_bundle == "verifier-bundle"
-        assert followup.verification_process_slots == 3
-        assert Path(followup.verification_scratch_root).is_dir()
-    else:
-        assert followup.verification_result == data["verification_result"]
-        assert followup.output is None
+    assert followup.result == data["result_directory"]
+    assert followup.output is None

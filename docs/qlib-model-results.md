@@ -17,8 +17,8 @@ ResultSpec 选中 `research.qlib-model-inventory.v1` 模型索引表时，Result
 
 ## 模型证据与序列窗口
 
-模型 facts 新写 `model_diagnostics.table_storage=result_tables_v2`，只引用正式表。设计从 study_design 读取，配置和四阶段账本从 ResultSupportFile 读取；序列窗口从正式表及已封存 Parquet 读取，JSON 不复制这些内容。
+模型引用式 facts 只接受 `model_diagnostics.table_storage=result_tables_v2`，只引用正式表。设计从 study_design 读取，配置和四阶段账本从 ResultSupportFile 读取；序列窗口从正式表及已封存 Parquet 读取，JSON 不复制这些内容。
 
-序列 bundle 和输入使用 `research.qlib-sequence-model-bundle.v2`、`research.qlib-sequence-input.v2`。共享 context 以 `context_index:int64` 定位证券会话，members 只保存 `sample_id/step/context_index`；模型子集保留研究级编号。独立验证逐窗核对原始特征、时点、成员、末端资格及 raw 标签，模型对象与权重仍不参与验证计算。
+序列 bundle 和输入使用 `research.qlib-sequence-model-bundle.v2`、`research.qlib-sequence-input.v2`。共享 context 以 `context_index:int64` 定位证券会话，members 只保存 `sample_id/step/context_index`；模型子集保留研究级编号。生产窗口构建检查原始特征、时点、成员、末端资格及 raw 标签，开发用例覆盖缺失与边界。
 
-历史 v1 Result 和封存模型保持可读。旧模型显式预测使用原处理器、模型与权重；旧 plan/checkpoint 不跨新实现身份恢复，不自动迁移或重置 holdout。完整合同见[模型研究](walk_forward_model.md#正式表引用式模型事实)。
+`result_tables_v1` 不再进入当前模型输入与消费，不自动转换。历史 Result 和封存模型文件保持原样；新研究重新准入并生成当前格式，原有 holdout 消费记录继续有效。完整合同见[模型研究](walk_forward_model.md#正式表引用式模型事实)。

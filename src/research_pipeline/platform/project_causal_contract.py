@@ -303,8 +303,8 @@ def _parse_daily_time(raw: object) -> Mapping:
     from datetime import date
 
     data = _fields(raw, {"rule", "timezone", "calendar_id", "calendar_source", "sessions"}, "daily_time")
-    if data["rule"] != "next_session_open" or data["timezone"] != "Asia/Shanghai":
-        raise CausalTimeContractError("日频因果来源只支持中国股票 next_session_open")
+    if data["rule"] not in {"next_session_open", "session_open", "business_effective_date"} or data["timezone"] != "Asia/Shanghai":
+        raise CausalTimeContractError("日期因果来源只支持中国股票已准入的开盘或业务生效规则")
     _names([data["calendar_id"]], "calendar_id")
     _names([data["calendar_source"]], "calendar_source")
     sessions = _names(data["sessions"], "sessions")
@@ -312,6 +312,6 @@ def _parse_daily_time(raw: object) -> Mapping:
         dates = tuple(date.fromisoformat(value) for value in sessions)
     except ValueError as exc:
         raise CausalTimeContractError("日频交易日历必须是 ISO 日期") from exc
-    if sessions != tuple(value.isoformat() for value in dates) or dates != tuple(sorted(set(dates))) or len(dates) < 2:
-        raise CausalTimeContractError("日频交易日历必须规范、严格递增且包含后续交易日")
+    if sessions != tuple(value.isoformat() for value in dates) or dates != tuple(sorted(set(dates))) or (data["rule"] == "next_session_open" and len(dates) < 2):
+        raise CausalTimeContractError("日频交易日历必须规范、严格递增；next_session_open 须包含后续交易日")
     return {**data, "sessions": sessions}

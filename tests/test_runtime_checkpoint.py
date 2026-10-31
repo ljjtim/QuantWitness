@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -40,8 +41,14 @@ def _commit(store: CheckpointStore, *, attempt_id: str, content: bytes = b"resul
         expectation=_expectation(),
         attempt_id=attempt_id,
         content=content,
-        output_name="result",
-        output_type="runtime.fixture.v1",
+        outputs={
+            "result": ArtifactRef(
+                "result",
+                "runtime.fixture.v1",
+                _expectation().node_execution_id,
+                hashlib.sha256(content).hexdigest(),
+            ),
+        },
         audit_environment_digest="e" * 64,
         execution_identity_digest="f" * 64,
         root_seed=7,
@@ -57,6 +64,33 @@ def test_checkpoint_commit_verify_and_idempotency(tmp_path) -> None:
     assert first.output.content_hash == second.output.content_hash
     assert first.contract_version == CHECKPOINT_MANIFEST_VERSION
     assert store.verify(_expectation()).node_execution_id == "a" * 64
+
+
+def test_checkpoint_restore_preserves_multiple_output_ports(tmp_path) -> None:
+    store = CheckpointStore(tmp_path / "run")
+    outputs = {
+        port: ArtifactRef(
+            port,
+            "runtime.fixture.v1",
+            _expectation().node_execution_id,
+            hashlib.sha256(port.encode("utf-8")).hexdigest(),
+        )
+        for port in ("left", "right")
+    }
+    store.commit_bytes(
+        expectation=_expectation(),
+        attempt_id="attempt-1",
+        content=b"multiple outputs",
+        outputs=outputs,
+        audit_environment_digest="e" * 64,
+        execution_identity_digest="f" * 64,
+        root_seed=7,
+        fixed_clock="2026-07-13T00:00:00+00:00",
+    )
+    restored = CheckpointStore(tmp_path / "run", create=False).verify(_expectation())
+    assert dict(restored.outputs) == outputs
+    with pytest.raises(RuntimeIntegrityError, match="多输出"):
+        _ = restored.output
 
 
 def test_checkpoint_rejects_tamper_missing_marker_and_conflict(tmp_path) -> None:
@@ -117,8 +151,14 @@ def test_partial_staging_is_never_reused_and_can_be_recomputed(tmp_path) -> None
             expectation=_expectation(),
             attempt_id="attempt-partial",
             content=b"partial",
-            output_name="result",
-            output_type="runtime.fixture.v1",
+            outputs={
+                "result": ArtifactRef(
+                    "result",
+                    "runtime.fixture.v1",
+                    _expectation().node_execution_id,
+                    hashlib.sha256(b"partial").hexdigest(),
+                ),
+            },
             audit_environment_digest="e" * 64,
             execution_identity_digest="f" * 64,
             root_seed=7,

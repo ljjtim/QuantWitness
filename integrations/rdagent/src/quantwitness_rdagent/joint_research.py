@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 import re
 
-from .contracts import write_json
 from .factor_research import FactorResearch, ResearchBudgetExhausted, ResearchCalls, _freeze, _read, expression_direction, validate_factor_research, DAI_FACTOR_CONTRACT, DAI_EXPRESSION_CONTRACT, canonical_expression, factor_contract, factor_directions, feature_expression_slot
 from .model_research import ModelResearch, validate_model_research
 from .joint_feedback import validate_joint_feedback
@@ -40,7 +39,7 @@ def validate_joint_research(payload):
 
 
 def select_joint_direction(context, complete):
-    """使用固定上游动作模板，在已验证开发事实中选择分支。"""
+    """使用固定上游动作模板，在正式开发事实中选择分支。"""
     from .native_backend import research_backend
     from .direction_selection import validate_references
     from rdagent.oai.llm_utils import APIBackend
@@ -55,7 +54,7 @@ def select_joint_direction(context, complete):
         allowed = {choice for choice in allowed if choice[0] in {scheduled, "stop"}}
     records = validate_joint_feedback(context["knowledge"])
     if not records:
-        return {"action": "stop", "direction": "stop", "knowledge_refs": [], "reason": "no_verified_development"}
+        return {"action": "stop", "direction": "stop", "knowledge_refs": [], "reason": "no_completed_development"}
     user = T("scenarios.qlib.prompts:action_gen.user").r(
         hypothesis_and_feedback=json.dumps(context, ensure_ascii=False),
         last_hypothesis_and_feedback=json.dumps(records[-1:], ensure_ascii=False))
@@ -123,7 +122,7 @@ class JointResearch:
         self.active_direction = None
         from research_pipeline.data_plane import PathRolePolicy
         source = self.payload["factor_request"]["package_template"]["source"]
-        paths = {key: source[key] for key in ("path", "catalog_lock", "verifier_bundle", "input_snapshot_manifest", "source_archive_root")}
+        paths = {key: source[key] for key in ("path", "catalog_lock", "input_snapshot_manifest", "source_archive_root")}
         paths.update({"extension_" + str(i): value for i, value in enumerate(source["extension_bundles"])})
         paths.update({"confirmation_" + key: value for key, value in self.payload["factor_request"]["confirmed_spec"].items() if key != "kind"})
         paths["model_definition"] = self.payload["model_request"]["confirmed_spec"]
@@ -161,10 +160,11 @@ class JointResearch:
         for row in self.history():
             if row["status"] != "evaluated":
                 continue
-            if row["metrics"].get("verification_status") != "pass":
-                raise ValueError("联合反馈缺少通过的独立验证")
+            if row["metrics"].get("execution_status") != "succeeded":
+                raise ValueError("联合反馈缺少成功的正式执行")
             item = {key: row[key] for key in fields if key in row}
             item["metrics"] = {key: row["metrics"][key] for key in ("value", "rows")}
+            item["limitations"] = list(row["metrics"].get("limitations", ()))
             records.append(item)
         return validate_joint_feedback(records)
 
@@ -217,14 +217,24 @@ class JointResearch:
         return result
 
     def _check_population(self, index, result):
-        from research_pipeline.evidence import load_verified_result_context
+        from research_pipeline.results import load_result_context
         from .joint_feedback import development_population
-        reference = self.branches[result["kind"]].root / "experiments" / result["candidate_id"] / "candidates" / result["candidate_id"] / "execution-ref.json"
-        execution = Path(_read(reference)["execution_root"])
-        context = load_verified_result_context(result["metrics"]["verification_ref"], result_store=execution / "results")
+        context = load_result_context(result["metrics"]["result_ref"],
+            additional_table_ids=("study_design", "samples", "validation_predictions"))
         bundle = context.snapshot.bundle
-        facts = json.loads(context.snapshot.support_bytes[bundle.verification.validity_source_path])
-        population = development_population(facts["model_diagnostics"])
+        if bundle.run.status != "succeeded":
+            raise ValueError("联合评价要求正式执行成功")
+        tables = {}
+        for table_id in ("study_design", "samples", "validation_predictions"):
+            table = next(item for item in bundle.tables if item.table_id == table_id)
+            tables[table_id] = [row for batch in context.snapshot.iter_table_batches(table.schema_id, batch_size=1024)
+                                for row in batch.to_pylist()]
+        if len(tables["study_design"]) != 1:
+            raise ValueError("联合评价要求唯一研究设计")
+        design = json.loads(tables.pop("study_design")[0]["design_json"])
+        if design.get("mode") != "development":
+            raise ValueError("联合评价只接受开发研究")
+        population = development_population(design, tables)
         path = self.root / "development-population.json"
         if index == 0:
             _freeze(path, population)
@@ -249,7 +259,7 @@ class JointResearch:
             try:
                 result = self.branches[proposal["kind"]].evaluate(index, proposal)
             except ValueError:
-                result = {**proposal, "status": "failed", "reason": "formal_verification_or_metric_failed"}
+                result = {**proposal, "status": "failed", "reason": "formal_execution_or_metric_failed"}
             if result["status"] == "evaluated":
                 try:
                     self._check_population(index, result)

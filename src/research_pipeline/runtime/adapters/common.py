@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 import json
 from pathlib import Path
@@ -34,7 +34,7 @@ class ResearchRunEnvironment:
     workers: int
     resource_timeout_seconds: float | None
     strategy_spec_hashes: Mapping[str, str]
-    operator_graph_strategy_hash: str
+    minute_scope_inputs: Mapping[str, object] = field(default_factory=dict)
 
 
 def _environment(context: OperatorRuntimeContext) -> ResearchRunEnvironment:

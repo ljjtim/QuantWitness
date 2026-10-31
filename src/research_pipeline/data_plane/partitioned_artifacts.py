@@ -338,8 +338,8 @@ class VerifiedDatasetPartition:
             logical_start = source_local_naive(self.reference.logical_start)
             logical_end = source_local_naive(self.reference.logical_end)
         expression = (
-            (timestamp >= logical_start)
-            & (timestamp < logical_end)
+            (timestamp >= pa.scalar(logical_start, type=timestamp_type))
+            & (timestamp < pa.scalar(logical_end, type=timestamp_type))
         )
         if self.instruments:
             expression &= instrument.isin(list(self.instruments))

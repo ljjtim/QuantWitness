@@ -83,7 +83,7 @@ def validate_generated_source(source):
 
 def _technical_feedback(evidence):
     """只发送状态和错误类别；完整错误正文可能含行情值、路径或标签。"""
-    result = {key: evidence[key] for key in ("command_status", "execution_status", "verification_status", "formula_status")
+    result = {key: evidence[key] for key in ("command_status", "execution_status")
               if evidence.get(key) in {"succeeded", "failed", "pass", "fail", "not_run"}}
     codes = set()
     for item in evidence.get("diagnostics", []):
@@ -112,7 +112,7 @@ def build_prompt(request, previous_source=None, evidence=None, coding_knowledge=
     return ("请只返回可直接保存为compute.py的完整Python源码，不加Markdown代码围栏。"
             "只实现声明的daily_value和rolling_value接口；保持缺失位置与固定交易窗口，禁止未来信息。"
             "只允许math、statistics、__future__导入以及公式函数和纯计算helper。"
-            "不得访问文件、网络、数据库或独立Verifier，禁止动态exec/eval和反射；不优化收益。"
+            "不得访问文件、网络或数据库，禁止动态exec/eval和反射；不优化收益。"
             "修复时依据接口、公式与技术诊断。\n"
             + json.dumps(payload, ensure_ascii=False))
 

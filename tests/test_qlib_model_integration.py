@@ -259,10 +259,9 @@ def test_real_prediction_result_generates_qlib_html(tmp_path):
     """正式预测表经 Result 封存后驱动报告，不使用手工替代预测表。"""
     from research_pipeline.results import ResultAssembler, ResultSpec, ResultTableSpec
     from research_pipeline.runtime.external_artifact import ExternalArtifactStore
-    from research_pipeline.evidence.verification_result import verify_result
+    from research_pipeline.results import load_result_context
     from research_pipeline.evidence.qlib_report import render_qlib_report
-    from test_result_bundle import (_runtime_fixture,_spec,_proof,_data_reference,HASH_A,HASH_B,HASH_C,HASH_D,
-        VALIDITY_FACTS_PRODUCER_HASH,policy_id_for_claim)
+    from test_result_bundle import (_runtime_fixture,_spec,_proof,_data_reference,HASH_A,HASH_B,HASH_C,HASH_D)
     from test_qlib_report import _request
     samples,_=synthetic_samples()
     producer=tmp_path/"producer"
@@ -280,20 +279,20 @@ def test_real_prediction_result_generates_qlib_html(tmp_path):
         "research.model-validation-predictions.v2","research.qlib-predictions.v2","validation_predictions")))
     bundle,directory,_=ResultAssembler(result_root).finalize(run_root=run_root,project_id="research_package_test",package_hash=HASH_B,
         plan_hash=HASH_C,result_spec=spec,catalog_hashes={"prices":HASH_D},data_references={"prices":_data_reference()},
-        metric_proofs=(_proof(),),implementation_manifest_hash=HASH_A,verification_policy_id=policy_id_for_claim("research_observation"),
-        validity_producer_hash=VALIDITY_FACTS_PRODUCER_HASH)
-    context=verify_result(directory,result_store=result_root)
+        metric_proofs=(_proof(),),implementation_manifest_hash=HASH_A,claim_level="research_observation",
+        formal_input_request_ids=("prices",),input_claim_ceilings={"prices":"research_observation"})
+    context=load_result_context(directory,result_store=result_root,additional_table_ids=("model_predictions",))
     predictions=_read(producer/"predict","validation_predictions")
     first=predictions.iloc[0]
     request=_request()
     request.update(result_id=bundle.result_id,table_id="model_predictions")
     request["selection"].update(candidate_id=first.candidate_id,fold_id=first.fold_id)
     request["window"]={"start":"2024-01-01","end":"2024-06-01"}
-    html=render_qlib_report(context,request,verification_summary="合成模型接口验证；不代表真实策略结论")
+    html=render_qlib_report(context,request,result_summary="合成模型预测及封存结果")
     assert "Qlib 模型研究报告" in html and "plotly" in html.lower()
     assert bundle.result_id in html
     assert '"rows": 90' in __import__("html").unescape(html)
-    assert str(context.verification.status) in html
+    assert context.snapshot.bundle.run.status == "succeeded"
 
 
 @pytest.mark.parametrize("name", ["LinearModel", "LGBModel", "XGBModel"])
@@ -397,21 +396,16 @@ def test_double_ensemble_matches_upstream_and_seals_submodels(tmp_path):
     assert config["ensemble_state"]["num_models"] == 2 and config["training_curve"] == []
     model = Serializable.load(tmp_path / row["model_path"])
     assert len(model.ensemble) == 2 and model.params["num_threads"] == 1
-    from research_pipeline.evidence.model_validity import _fit_configs
-    cid = spec["candidate_id"]
-    sealed = dict(row, fold_id="fold", candidate_id=cid, status="fitted")
-    evidence = {"design": {"candidate_parameters_json": json.dumps({cid: spec}),
-        "candidate_ids": [cid], "validation_sessions": 9, "root_seed": 7,
-        "holdout_start": "2024-12-31T00:00:00+00:00"},
-        "tables": {"models": [sealed], "fit_audit": [{"fold_id": "fold", "candidate_id": cid,
-            "fit_scope_ref": "train-only"}]}, "model_configs": {row["config_path"]: config}}
-    sample_map = {value["sample_id"]: value for value in pd.concat([train, valid]).to_dict("records")}
-    folds = {"fold": {"train": set(train.sample_id), "validation": set(valid.sample_id)}}
-    _fit_configs(evidence, sample_map, folds)
+    assert config["train_ids"] == train.sample_id.tolist()
+    assert config["valid_ids"] == valid.sample_id.tolist()
+    assert config["ensemble_state"]["sub_features"] == [list(config["feature_columns"])] * 2
+    np.testing.assert_array_equal(config["ensemble_state"]["sub_weights"], model.sub_weights)
+    original_weight = config["ensemble_state"]["sub_weights"][1]
     config["ensemble_state"]["sub_weights"][1] = 99
-    with pytest.raises(ValueError, match="子模型状态"):
-        _fit_configs(evidence, sample_map, folds)
-    config["ensemble_state"]["sub_weights"][1] = 1
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(QlibModelError, match="状态"):
+        predict_bundle(tmp_path, row, test)
+    config["ensemble_state"]["sub_weights"][1] = original_weight
     config["ensemble_state"]["sub_features"][1].reverse()
     config_path.write_text(json.dumps(config), encoding="utf-8")
     with pytest.raises(QlibModelError, match="状态"):

@@ -116,7 +116,7 @@ def evaluate(request, candidate_id):
     archived = load_archived_input_manifest(request.payload["input_snapshot_manifest"])
     sources = {f"archive_{key}_input": entry["root"] for key, entry in archived["requests"].items()}
     sources.update({f"{key}_input": request.payload[key] for key in
-                    ("base_package", "source_archive_root", "editable_source_root", "reference_bundle")})
+                    ("base_package", "source_archive_root", "editable_source_root")})
     PathRolePolicy().validate({"rd_session_output": binding["windows_session_root"], **sources},
                               read_only_roles=tuple(sources))
     frozen_path = Path(binding["windows_session_root"]) / "frozen-inputs.json"
@@ -127,8 +127,7 @@ def evaluate(request, candidate_id):
     if candidate["candidate_id"] != candidate_id:
         raise ValueError("候选引用不一致")
     feedback = dict(bundle_ref=None, execution_ref=None, command_status="failed", execution_status="not_run",
-                    verification_status="not_run", formula_status="not_run", formula_coverage={},
-                    claim_level="research_observation", diagnostics=[], result_ref=None, verification_ref=None)
+                    claim_level="research_observation", diagnostics=[], result_ref=None, )
     stage = "build"
     try:
         if "code_generation" in request.payload:
@@ -152,16 +151,7 @@ def evaluate(request, candidate_id):
             allocation_label=candidate["allocation_label"], base_package=request.payload["base_package"],
             source_archive_root=request.payload["source_archive_root"],
             input_snapshot_manifest=request.payload["input_snapshot_manifest"],
-            verifier_bundle=request.payload["reference_bundle"],
             binding={**binding, "extension_bundles": [*binding["extension_bundles"], built["bundle_path"]]}))
-        stage = "verify"
-        from research_pipeline.evidence import load_verified_result_context
-        from research_pipeline.results import ResultStore
-        from .feedback import project_formula_feedback
-        store = Path(feedback["execution_ref"]) / "results"
-        verified = load_verified_result_context(feedback["verification_ref"], result_store=store)
-        feedback.update(project_formula_feedback(verified, ResultStore(store),
-                                                request.payload.get("formula_evaluation")))
         feedback["command_status"] = "succeeded"
     except Exception as exc:
         execution_failure = getattr(exc, "package_execution_feedback", {})

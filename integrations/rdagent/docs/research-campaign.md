@@ -2,11 +2,11 @@
 
 `campaign-run`让RD-Agent根据已完成的开发区评价提出下一假设，在冻结候选与预算内继续研究。支持正式ResearchPackage参数研究和已有预测校准。校准类型为已封存模型预测的向零收缩：`adjusted_prediction = shrinkage * prediction`，其中系数在0至1之间。标签不变，每个fold先计算均方误差，再对fold等权平均。候选必须有相同的样本键、证券、日期和标签。
 
-这是开发区的校准分析。原预测来自已验证Result；新参数的开发误差记录在研究过程收据，不是新ResearchPackage Result，也不继承原模型的holdout成绩。校准在声明研究时点形成，不能把事后选出的系数用于宣称过去的实时预测能力。
+这是开发区的校准分析。原预测来自正式Result；新参数的开发误差记录在研究过程收据，不是新ResearchPackage Result，也不继承原模型的holdout成绩。校准在声明研究时点形成，不能把事后选出的系数用于宣称过去的实时预测能力。
 
 ## 预测校准入口
 
-[两轮合成示例](../examples/prediction_campaign/README.md)无需数据库或模型账户。正式来源模式还需在RD环境安装QuantWitness核心包，以复核Result及VerificationResult。
+[两轮合成示例](../examples/prediction_campaign/README.md)无需数据库或模型账户。正式来源模式还需在RD环境安装QuantWitness核心包，以读取Result。
 
 ```bash
 python -m quantwitness_rdagent campaign-run --request "$CAMPAIGN_REQUEST"
@@ -21,8 +21,8 @@ python -m quantwitness_rdagent campaign-resume --request "$CAMPAIGN_REQUEST"
   "campaign_id": "prediction_calibration",
   "session_root": "/research/calibration-session",
   "source": {
-    "kind": "verified_result",
-    "verification_result": "/research/verification.json",
+    "kind": "result",
+    "result": "/research/results/project/run/result",
     "result_store": "/research/results",
     "result_id": "替换为正式Result标识",
     "table_id": "validation_predictions",
@@ -47,7 +47,7 @@ python -m quantwitness_rdagent campaign-resume --request "$CAMPAIGN_REQUEST"
 
 正式来源固定消费`validation_predictions`和包含单行`design_json`的`study_design`。预测字段沿用Qlib主链，必须有candidate_id、fold_id、sample_id、entity_id、observation_session、prediction、actual、feature_available_time、decision_time、label_start_time、label_end_time、label_available_time、stage、horizon_sessions、score_semantics。实际stage全部为validation，score_semantics必须为raw_return_prediction。日期与fold由请求筛选；行数和内存预算不足时直接拒绝，不静默抽样。
 
-标签可见时间不得晚于as_of；as_of必须早于封存研究设计的holdout_start。特征可见时间、决策、标签起止与可见时间必须按序。来源Result和VerificationResult须绑定且验证通过。正式完整性检查可能读取其他证明材料，但提案、评价和选优只消费开发预测；最终指标、test/holdout表、原最终选模和模型文件不进入提案提示。
+标签可见时间不得晚于as_of；as_of必须早于封存研究设计的holdout_start。特征可见时间、决策、标签起止与可见时间必须按序。来源 Result 的执行摘要必须为 succeeded。提案、评价和选优只消费开发预测；最终指标、test/holdout表、原最终选模和模型文件不进入提案提示。
 
 ## 假设与反馈
 
@@ -85,21 +85,20 @@ outcome包含来源引用、每轮状态、父候选、开发误差、选择和�
 
 ## 执行新的研究包
 
-`research_kind=package` 使用同一组 `campaign-run/resume/inspect` 命令。每个候选覆盖基包中明确允许的参数，通过现有包变体工具生成完整 ResearchPackage，再调用 Workspace 完成准入、执行、独立验证和报告。固定策略用于零费用复现；live提案仍使用显式 `.env` 与跨轮预约预算。
+`research_kind=package` 使用同一组 `campaign-run/resume/inspect` 命令。每个候选覆盖基包中明确允许的参数，通过现有包变体工具生成完整 ResearchPackage，再调用 Workspace 完成准入、执行和报告。固定策略用于零费用复现；live提案仍使用显式 `.env` 与跨轮预约预算。
 
-来源声明包含基包、归档清单、Catalog Lock、扩展和独立Verifier。目标声明表ID、schema、数值列、日期列、可见时点列、等值筛选、聚合方式和优化方向。先确认独立验证为pass，再投影获准指标；提案器不会收到整份报告、数据行或异常堆栈。
+来源声明包含基包、归档清单、Catalog Lock、扩展。自定义指标来自 `spec/research.yaml.metric_definitions`，每项使用 `MetricDefinition.to_dict()` 格式。目标声明表ID、schema、数值列、日期列、可见时点列、等值筛选、聚合方式和优化方向。执行成功后从 Result 正式表投影获准指标；提案器不会收到整份报告、数据行或异常堆栈。
 
-`source.verification_memory_bytes`可选声明独立验证内存上限，单位为字节，必须为正整数；提供时传给正式`verify --verification-memory-bytes`，省略时沿用CLI默认值。它与指标读取的`budget.memory_bytes`、执行节点资源分别管理，并随请求冻结，恢复时不能更改。
 
 每轮的正式结果引用保存于过程收据，`new_formal_result=true` 表示产生了新的正式结果。选定结果仍是开发研究，不自动成为最终样本外结论。开发循环拒绝最终test/holdout计算，输入和评价不得越过开发截止；最终研究应在候选冻结后单独执行。
 
-[两轮研究包示例](../examples/package_campaign/README.md)在相同的六个证券日上比较两日和三日公式窗口。两轮分别计算、分别独立验证，窗口差异确实进入公式。研究指标是教学集中度均值，不用于宣称投资优劣。
+[两轮研究包示例](../examples/package_campaign/README.md)在相同的六个证券日上比较两日和三日公式窗口。两轮分别计算并保存正式 Result，窗口差异确实进入公式。研究指标是教学集中度均值，不用于宣称投资优劣。
 
-恢复沿用候选原execution；已有Result继续缺失的验证或报告，已经完成的评价不重复运行。冻结基包、变体、输入声明或预算变化时拒绝恢复，新的研究应使用新的会话目录。
+恢复沿用候选原execution；已有Result补齐缺失的报告，已经完成的评价不重复运行。冻结基包、变体、输入声明或预算变化时拒绝恢复，新的研究应使用新的会话目录。
 
 ## 整体边界
 
-参数研究要求基包、数据口径和独立Verifier已经准备完成。它支持在有限、可审阅范围内探索，不代表任意论文都能无人确认地转换为研究；固定公式复现仍以确认过的定义为准，不因开发指标更好而改写论文公式。
+参数研究要求基包、数据口径已经准备完成。它支持在有限、可审阅范围内探索，不代表任意论文都能无人确认地转换为研究；固定公式复现仍以确认过的定义为准，不因开发指标更好而改写论文公式。
 
 Qlib开发起点见[模型参数研究](../examples/package_campaign/README.md#qlib模型参数研究)。它每轮重新训练一个预声明模型，并封存处理器、模型和validation结果。允许2.0.0版split、fit、predict、fold-metrics，split显式采用development；最终selection/holdout节点不进入循环。
 
@@ -108,6 +107,6 @@ Qlib开发起点见[模型参数研究](../examples/package_campaign/README.md#q
 
 `campaign-inspect --request REQUEST.json` 只读查看已有会话，不创建文件、不调用模型或重跑正式评价。`not_started` 表示尚未建立会话，`incomplete` 表示已冻结但尚无终态，`interrupted` 列出未记录完的轮次及已有执行引用、诊断；原执行锁仍存活时返回 `running` 和 `next_action=wait`。已保存 outcome 保留原状态。
 
-`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `campaign-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入已验证开发指标反馈，test/holdout 不参与研究循环。
+`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `campaign-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入正式开发指标反馈，test/holdout 不参与研究循环。
 
 未取得确定结果的模型调用预约显示在 `unresolved_model_calls`；`next_action=review_model_calls` 要求核对原调用收据，不自动重复调用或释放已预约预算。

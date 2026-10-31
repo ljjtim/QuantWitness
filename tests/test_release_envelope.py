@@ -29,6 +29,36 @@ from research_pipeline.platform import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("change", [
+    {},
+    {"contract_version": "research-gate-c-evidence-v2"},
+    {"accepted_metric_count": 0},
+    {"accepted_metric_count": True},
+    {"all_results_contract": "research-result-v3"},
+    {"acceptance_basis": "independent_oracle"},
+])
+def test_release_envelope_requires_gate_c_result_numeric_acceptance(tmp_path, change):
+    namespace = runpy.run_path(str(ROOT / "tools/build_release_envelope.py"))
+    payload = {
+        "contract_version": "research-gate-c-evidence-v3", "gate_id": "gate-c", "status": "pass",
+        "evidence_scope": "release_candidate", "release_candidate_id": "candidate",
+        "build_manifest_hash": "a" * 64, "reference_count": 4, "dag_family_count": 4,
+        "all_results_contract": "research-result-v4",
+        "acceptance_basis": "result_contract_and_metric_values", "accepted_metric_count": 4,
+        "each_successful_run_has_one_result_bundle": True,
+        **change,
+    }
+    path = tmp_path / "gate-c.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    arguments = {"release_candidate_id": "candidate", "build_manifest_hash": "a" * 64,
+                 "gate_id": "gate-c"}
+    if change:
+        with pytest.raises(ValueError, match="版本不受支持|数值验收不完整"):
+            namespace["_load_pass_evidence"](path, **arguments)
+    else:
+        assert len(namespace["_load_pass_evidence"](path, **arguments)) == 64
+
+
 def _manifest(*, dirty: bool = False, wheel: str = "4" * 64) -> BuildManifest:
     return BuildManifest.build(
         source_commit="a" * 40,
@@ -250,8 +280,10 @@ def test_build_release_envelope_tool_writes_closed_offline_bundle(tmp_path: Path
                       "selectors": protocol["gates"][gate_id]["selectors"],
                       "protocol_hash": hashlib.sha256((ROOT / "release/gate-test-protocol.json").read_bytes()).hexdigest()}
         elif gate_id == "gate-c":
-            version = "research-gate-c-evidence-v2"
-            detail = {"reference_count": 4, "independent_oracle_count": 4,
+            version = "research-gate-c-evidence-v3"
+            detail = {"reference_count": 4, "accepted_metric_count": 4,
+                      "all_results_contract": "research-result-v4",
+                      "acceptance_basis": "result_contract_and_metric_values",
                       "dag_family_count": 4, "each_successful_run_has_one_result_bundle": True}
         else:
             version = "research-release-workflow-evidence-v1"

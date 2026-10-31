@@ -33,8 +33,11 @@ def _context(value, reflection=False):
     if not reflection and "current" in data:
         raise ValueError("模型提案不能夹带当前结果")
     for row in records:
-        if not isinstance(row, dict) or set(row) - {"candidate_id", "hypothesis", "reason", "definition", "status", "metrics", "reflection"}:
+        if not isinstance(row, dict) or set(row) - {"candidate_id", "hypothesis", "reason", "definition", "status", "metrics", "reflection", "limitations"}:
             raise ValueError("模型研究记录字段不受支持")
+        limitations = row.get("limitations", [])
+        if not isinstance(limitations, list) or any(not isinstance(item, str) or not item for item in limitations):
+            raise ValueError("模型研究限制必须是非空文字列表")
         if row.get("status") == "evaluated":
             metric = row.get("metrics")
             if (not isinstance(metric, dict) or set(metric) != {"value", "rows"}
@@ -70,7 +73,7 @@ def _components():
             return "正式开发区的生成式前馈模型研究"
 
         def get_runtime_environment(self):
-            return "Qlib 0.9.7 / Torch 2.5.1 CPU；正式Workspace与独立验证"
+            return "Qlib 0.9.7 / Torch 2.5.1 CPU；正式Workspace执行"
 
         def get_scenario_all_desc(self, **kwargs):
             facts = {k: self.context[k] for k in ("confirmed_spec", "development", "objective")}

@@ -11,7 +11,7 @@ def request_payload(tmp_path):
     material_root = tmp_path.parent / (tmp_path.name + "-inputs")
     material_root.mkdir(parents=True, exist_ok=True)
     for relative in ("package/package.yaml", "package/localization.yaml", "package/sources/sources.yaml",
-                     "package/spec/research.yaml", "source/adapter.py", "verifier/manifest.json", "verifier/COMMITTED",
+                     "package/spec/research.yaml", "source/adapter.py",
                      "operator.yaml", "inputs.json", "catalog/CURRENT", "catalog/version/catalog.lock.json",
                      "catalog/version/catalog.source-manifest.json", "catalog/version/catalog.audit.json",
                      "catalog/version/catalog.schema.json"):
@@ -20,15 +20,7 @@ def request_payload(tmp_path):
         if not path.exists():
             path.write_text("{}", encoding="utf-8")
     (material_root / "catalog/CURRENT").write_text("version\n", encoding="utf-8")
-    return {
-        "request_id": "formula-test", "mode": "formula_reproduction",
-        "base_package": str(material_root / "package"), "source_archive_root": "archive", "input_snapshot_manifest": str(material_root / "inputs.json"),
-        "editable_source_root": str(material_root / "source"), "reference_bundle": str(material_root / "verifier"), "development_scope": {"role": "development", "start": "2020-01-01", "end": "2020-01-31"},
-        "budget": {"outer_loops": 1, "coder_attempts": 3, "parallel": 1, "live_llm_calls": 0},
-        "runtime_binding": {"windows_python": "I:/env/python.exe", "windows_repo": "I:/repo", "linux_repo": "/mnt/i/repo",
-            "windows_session_root": str(tmp_path), "linux_session_root": str(tmp_path), "operator_spec": str(material_root / "operator.yaml"),
-            "catalog_lock": str(material_root / "catalog"), "extension_bundles": [], "fixed_responses": ["bad", "good"], "runtime_options": {}},
-    }
+    return {'request_id': 'formula-test', 'mode': 'formula_reproduction', 'base_package': str(material_root / 'package'), 'source_archive_root': 'archive', 'input_snapshot_manifest': str(material_root / 'inputs.json'), 'editable_source_root': str(material_root / 'source'), 'development_scope': {'role': 'development', 'start': '2020-01-01', 'end': '2020-01-31'}, 'budget': {'outer_loops': 1, 'coder_attempts': 3, 'parallel': 1, 'live_llm_calls': 0}, 'runtime_binding': {'windows_python': 'I:/env/python.exe', 'windows_repo': 'I:/repo', 'linux_repo': '/mnt/i/repo', 'windows_session_root': str(tmp_path), 'linux_session_root': str(tmp_path), 'operator_spec': str(material_root / 'operator.yaml'), 'catalog_lock': str(material_root / 'catalog'), 'extension_bundles': [], 'fixed_responses': ['bad', 'good'], 'runtime_options': {}}}
 
 
 def test_frozen_request_and_persistent_attempt_budget(tmp_path):
@@ -105,12 +97,12 @@ def test_nonzero_worker_never_reuses_previous_pass_feedback(tmp_path, monkeypatc
     bridge = RPExecutionBridge(request)
     cid = bridge.candidate("def compute(): pass")
     receipt = request.session_root / "candidates" / cid / "feedback.json"
-    write_json(receipt, {"command_status": "succeeded", "formula_status": "pass"})
+    write_json(receipt, {'command_status': 'succeeded'})
     monkeypatch.setattr("quantwitness_rdagent.execution.subprocess.run", lambda *args, **kwargs:
                         SimpleNamespace(returncode=1, stderr="中断发生在新反馈写出前"))
     with pytest.raises(RuntimeError, match="执行桥中断"):
         bridge.evaluate(cid)
-    assert json.loads(receipt.read_text(encoding="utf-8"))["formula_status"] == "pass"
+    assert json.loads(receipt.read_text(encoding="utf-8"))["command_status"] == "succeeded"
 
 
 def test_archive_overlap_is_rejected_before_session_write(tmp_path):
@@ -175,8 +167,6 @@ def test_external_original_plan_body_frozen_before_worker(tmp_path, monkeypatch,
 @pytest.mark.parametrize('field,value', [
     ('confirmed_formula', {'formula': 'x'}),
     ('confirmed_formula', {'formula': '', 'interface': 'daily_value(rows), rolling_value(rows)'}),
-    ('formula_evaluation', {'verifier_id': 'v', 'verifier_version': '1.0.0'}),
-    ('formula_evaluation', {'verifier_id': 'v', 'verifier_version': '1.0.0', 'coverage_schema_id': ''}),
 ])
 def test_new_formula_binding_requires_complete_declaration(tmp_path, field, value):
     payload = request_payload(tmp_path / 'session')
@@ -185,14 +175,12 @@ def test_new_formula_binding_requires_complete_declaration(tmp_path, field, valu
         FrozenRequest.from_dict(payload)
 
 
-@pytest.mark.parametrize('field', ['confirmed_formula', 'formula_evaluation'])
+@pytest.mark.parametrize('field', ['confirmed_formula'])
 def test_formula_binding_is_frozen_across_resume(tmp_path, field):
     payload = request_payload(tmp_path / 'session')
     payload['confirmed_formula'] = {'formula': '日内成交量集中度', 'interface': 'daily_value(rows), rolling_value(rows)'}
-    payload['formula_evaluation'] = {'verifier_id': 'volume-check', 'verifier_version': '1.0.0',
-                                   'coverage_schema_id': 'project.volume.coverage.v1'}
     FrozenRequest.from_dict(payload).freeze()
-    key = 'formula' if field == 'confirmed_formula' else 'verifier_id'
+    key = 'formula'
     payload[field][key] = 'changed'
     with pytest.raises(ValueError, match='冻结'):
         FrozenRequest.from_dict(payload).freeze()

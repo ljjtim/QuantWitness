@@ -1,5 +1,4 @@
-"""生成网络真实拟合、独立源码复核和文件恢复。"""
-from copy import deepcopy
+"""生成网络真实拟合、生产源码封存和文件恢复。"""
 import json
 import shutil
 
@@ -7,7 +6,6 @@ import numpy as np
 import pytest
 
 from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle, normalize_candidates
-from research_pipeline.evidence.generated_model_validity import verify_source_and_weights
 from test_qlib_model_integration import synthetic_samples, candidate
 
 
@@ -54,18 +52,37 @@ def test_generated_real_fit_prediction_and_relocation(generated_bundle, tmp_path
     assert np.isfinite(first).all() and len(first) == 100
 
 
-def test_generated_sealed_source_weights_independent_verification(generated_bundle):
+def test_generated_seals_production_source_and_weights(generated_bundle):
+    from qlib.utils.serial import Serializable
+    from research_pipeline.research.modeling.generated_definition import compile_source
     root, row, _ = generated_bundle
-    config = json.loads((root/row['config_path']).read_text(encoding='utf-8'))
-    source = (root/config['generated']['source_path']).read_text(encoding='utf-8')
-    weights = (root/config['generated']['weights_path']).read_bytes()
-    verify_source_and_weights(config, source, weights)
-    with pytest.raises(ValueError):
-        verify_source_and_weights(config, source.replace('nn.Tanh()', 'nn.ReLU()'), weights)
-    changed = deepcopy(config)
-    changed['generated']['weight_shapes']['layer_0.bias'] = [30]
-    with pytest.raises(ValueError):
-        verify_source_and_weights(changed, source, weights)
+    config = json.loads((root / row['config_path']).read_text(encoding='utf-8'))
+    source = (root / config['generated']['source_path']).read_text(encoding='utf-8')
+    definition = config['candidate']['model']['kwargs']['definition']
+    assert source == compile_source(definition, len(config['feature_columns']))
+    model = Serializable.load(root / row['model_path'])
+    assert model.source == source
+    assert model.definition == definition
+    with np.load(root / config['generated']['weights_path'], allow_pickle=False) as weights:
+        assert set(weights.files) == set(model.weights)
+        assert {name: list(weights[name].shape) for name in weights.files} == config['generated']['weight_shapes']
+        for name in weights.files:
+            np.testing.assert_array_equal(weights[name], model.weights[name])
+
+
+def test_generated_restore_rejects_changed_sealed_weights(generated_bundle, tmp_path):
+    root, row, samples = generated_bundle
+    moved = tmp_path / 'changed-weights'
+    shutil.copytree(root, moved)
+    config = json.loads((moved / row['config_path']).read_text(encoding='utf-8'))
+    path = moved / config['generated']['weights_path']
+    with np.load(path, allow_pickle=False) as stored:
+        weights = {name: stored[name].copy() for name in stored.files}
+    name = next(iter(weights))
+    weights[name].flat[0] += 0.1
+    np.savez(path, **weights)
+    with pytest.raises(ValueError, match='权重'):
+        predict_bundle(moved, row, samples.iloc[500:501])
 
 
 def test_generated_restore_rejects_modified_source(generated_bundle, tmp_path):

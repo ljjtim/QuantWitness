@@ -7,7 +7,7 @@ import re
 _TECHNICAL_ERRORS = {"SyntaxError", "IndentationError", "TabError", "NameError", "UnboundLocalError",
                      "TypeError", "AttributeError", "KeyError", "IndexError", "ZeroDivisionError",
                      "OverflowError", "ValueError"}
-_FORMAL_REFS = ("execution_ref", "result_ref", "verification_ref", "bundle_ref")
+_FORMAL_REFS = ("execution_ref", "result_ref", "bundle_ref")
 
 
 def technical_profile(source, objective=""):
@@ -90,7 +90,7 @@ def matching_reason(source_task, target_task, source, target_source=""):
 def technical_feedback(evidence):
     """只保留状态与明确技术错误，不发送诊断正文或实测值。"""
     statuses = {"succeeded", "failed", "pass", "fail", "not_run"}
-    result = {key: evidence[key] for key in ("command_status", "execution_status", "verification_status", "formula_status", "model_status")
+    result = {key: evidence[key] for key in ("command_status", "execution_status")
               if isinstance(evidence.get(key), str) and evidence[key] in statuses}
     codes = set()
     for item in evidence.get("diagnostics", []):
@@ -112,7 +112,7 @@ def technical_feedback(evidence):
 
 def stored_technical_feedback(feedback):
     statuses = {"succeeded", "failed", "pass", "fail", "not_run"}
-    result = {key: feedback[key] for key in ("command_status", "execution_status", "verification_status", "formula_status", "model_status")
+    result = {key: feedback[key] for key in ("command_status", "execution_status")
               if isinstance(feedback.get(key), str) and feedback[key] in statuses}
     result["diagnostic_codes"] = [code for code in feedback.get("diagnostic_codes", []) if isinstance(code, str) and (
         re.fullmatch(r"(?:formula|code|model)\.[a-z_]+", code)
@@ -125,7 +125,7 @@ def model_needs_repair(evidence):
     """执行资源或研究链失败不能成为模型代码的修复经验。"""
     for item in evidence.get("diagnostics", []):
         if isinstance(item, dict):
-            if item.get("stage") in {"report", "verify", "lint", "admit", "build", "inspect"}:
+            if item.get("stage") in {"report", "lint", "admit", "build", "inspect"}:
                 return False
             code = str(item.get("error_code", ""))
             if (item.get("recommended_action") in {"wait", "readmit"}

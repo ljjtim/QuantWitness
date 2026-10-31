@@ -27,7 +27,6 @@ parent.__path__ = [str(ROOT / "candidate")]
 sys.modules[parent.__name__] = parent
 compute = load("volume_example_candidate.compute", ROOT / "candidate/compute.py")
 adapter = load("volume_example_candidate.adapter", ROOT / "candidate/adapter.py")
-verifier = load("volume_example_reference", ROOT / "verifier/check.py")
 
 
 def test_daily_and_three_session_contract():
@@ -67,19 +66,24 @@ class Output:
         return port
 
 
-def test_independent_verifier_rejects_formula_and_time_changes(monkeypatch):
+def test_adapter_preserves_formula_window_and_completed_bar_time():
     days = prepare.calendar_rows()
     context = SimpleNamespace(parameters={"calendar_json": json.dumps(days), "entities_json": json.dumps(prepare.ENTITIES), "decision_time": prepare.CLOCK})
     bars, output = Bars(days), Output()
     adapter.run(context, [bars], output)
     assert bars.complete
-    assert verifier.verify_tables(output.tables) == []
-    output.tables["daily"][2]["rolling_value"] += 0.01
-    assert any(item.startswith("formula.rolling_value_mismatch") for item in verifier.verify_tables(output.tables))
-    output = Output()
-    adapter.run(context, [Bars(days)], output)
-    output.tables["daily"][0]["available_at"] = "2025-01-06T09:31:00+08:00"
-    assert any(item.startswith("formula.available_at_mismatch") for item in verifier.verify_tables(output.tables))
+    for entity in prepare.ENTITIES:
+        history = []
+        for day in days:
+            rows = [row for row in bars.rows if row["code"] == entity and row["dt"] in day["expected_bars"]]
+            volumes = [row["volume"] for row in rows]
+            expected = sum(value ** 2 for value in volumes) / sum(volumes) ** 2
+            history.append(expected)
+            row = next(item for item in output.tables["daily"] if item["entity"] == entity and item["session"] == day["session"])
+            assert row["value"] == pytest.approx(expected)
+            assert row["available_at"] == day["expected_bars"][-1]
+            if len(history) >= 3:
+                assert row["rolling_value"] == pytest.approx(sum(history[-3:]) / 3)
     context.parameters["decision_time"] = "2025-01-10T14:59:00+08:00"
     with pytest.raises(ValueError, match="已完成"):
         adapter.preflight(context)
@@ -110,7 +114,6 @@ def test_prepare_is_database_free_and_pending_review(tmp_path, monkeypatch):
     from quantwitness_rdagent.contracts import FrozenRequest
     request = FrozenRequest.load(root / "request-template.json")
     assert request.payload["budget"]["live_llm_calls"] == 0
-    assert request.payload["formula_evaluation"]["verifier_id"] == "volume-concentration-formula-check"
     from quantwitness_rdagent.formula_spec import review_spec
     review = review_spec(root / "draft.json", root / "materials.json")
     assert "待人工确认" in review
@@ -120,18 +123,3 @@ def test_prepare_is_database_free_and_pending_review(tmp_path, monkeypatch):
         validate_generated_source(response)
     with pytest.raises(FileExistsError):
         prepare.build(root, RP_ROOT, sys.executable, "/mnt/i/source", "/mnt/i/output")
-
-
-def test_verifier_output_findings_are_unique_and_sorted(tmp_path, monkeypatch):
-    """多个公式差异仍须形成可由正式verify消费的失败输出。"""
-    import pyarrow.parquet as pq
-    files = []
-    for name, schema in verifier.SCHEMAS.items():
-        file = tmp_path / (name + '.parquet')
-        pq.write_table(pa.table({'placeholder': [1]}), file)
-        files.append({'schema_id': schema, 'files': [file.name]})
-    (tmp_path / 'manifest.json').write_text(json.dumps({'tables': files}), encoding='utf-8')
-    monkeypatch.setattr(verifier, 'verify_tables', lambda _: ['formula.z', 'formula.a', 'formula.z'])
-    outcome = verifier.verify({'result_id': 'synthetic-result'}, tmp_path)
-    assert outcome['status'] == 'fail'
-    assert outcome['findings'] == ['formula.a', 'formula.z']

@@ -48,7 +48,8 @@ def _context(table):
             self.projected = columns
             yield from table.select(columns).to_batches(max_chunksize=batch_size)
 
-    return SimpleNamespace(snapshot=Snapshot(), verification=SimpleNamespace(verification_hash="verification.fixture", status="fail"))
+    Snapshot.bundle.run = SimpleNamespace(status="succeeded")
+    return SimpleNamespace(snapshot=Snapshot(), claim_level="research_observation")
 
 
 def test_projection_selection_and_original_label():
@@ -105,11 +106,11 @@ def test_qlib_figures_match_direct_call_and_html_is_self_contained(tmp_path):
     for actual, expected in zip(figures[2].data, direct[0].data):
         np.testing.assert_allclose(np.asarray(actual.y), np.asarray(expected.y), equal_nan=True)
     output = tmp_path / "report.html"
-    write_qlib_report(output, context=context, request=request, markdown="验证状态：fail；范围：测试")
+    write_qlib_report(output, context=context, request=request, markdown="执行成功；范围：测试")
     text = output.read_text(encoding="utf-8")
     assert text.count("plotly.js v") == 1
     assert "<script src=" not in text
-    assert "verification.fixture" in text and "验证状态：fail" in text
+    assert "research_observation" in text and "执行成功" in text
     assert "非资金净值" in text
     original = output.read_bytes()
     with pytest.raises(FileExistsError):
@@ -134,39 +135,9 @@ def test_html_request_parameters_and_parser():
     from research_pipeline.cli.parser import build_parser
 
     for prefix in (["report"], ["package", "report", "--package", "fixture"]):
-        args = build_parser().parse_args([*prefix, "--verification-result", "verification", "--result-store", "store", "--format", "html"])
+        args = build_parser().parse_args([*prefix, "--result", "result", "--result-store", "store", "--format", "html"])
         with pytest.raises(ValueError, match="--output.*--request"):
             prepare_qlib_request(args)
-
-
-def test_report_command_verifies_requested_table_and_preserves_failure(tmp_path, monkeypatch):
-    import json
-    from research_pipeline.application import evidence_lifecycle
-    from research_pipeline.cli.parser import build_parser
-
-    request_path = tmp_path / "request.json"
-    request_path.write_text(json.dumps(_request()), encoding="utf-8")
-    context = _context(_table())
-    context.verification.validity_status = "invalid"
-    context.verification.claim_level = "none"
-    observed = {}
-
-    def load(path, *, result_store, additional_table_ids):
-        observed["tables"] = additional_table_ids
-        return context
-
-    monkeypatch.setattr(evidence_lifecycle, "load_verified_result_context", load)
-    monkeypatch.setattr(evidence_lifecycle, "render_verification_report", lambda context: "验证失败")
-    monkeypatch.setattr(evidence_lifecycle, "write_qlib_report", lambda output, **kwargs: output)
-    args = build_parser().parse_args([
-        "report", "--verification-result", str(tmp_path / "verification.json"),
-        "--result-store", str(tmp_path / "store"), "--format", "html",
-        "--request", str(request_path), "--output", str(tmp_path / "report.html"),
-    ])
-    result = evidence_lifecycle._execute(args)
-    assert observed["tables"] == ("predictions",)
-    assert result["verification_status"] == "fail"
-    assert result["validity_status"] == "invalid"
 
 
 def test_rolling_folds_merge_unique_dates_and_reject_overlap():
@@ -187,19 +158,21 @@ def test_rolling_folds_merge_unique_dates_and_reject_overlap():
 
 
 def test_real_model_prediction_result_to_report(tmp_path):
-    """真实 Qlib 训练与预测，经 Result 封存和验证后生成报告；全程无数据库。"""
+    """真实 Qlib 训练与预测，经 Result 封存后直接生成报告；全程无数据库。"""
+    pytest.importorskip("qlib")
+    pytest.importorskip("plotly")
     import json
     import pyarrow.parquet as pq
     from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle
     from research_pipeline.runtime.walk_forward_model_execution import _prediction_frame
     from research_pipeline.runtime.external_artifact import ExternalArtifactStore
     from research_pipeline.results import ResultAssembler, ResultSpec, ResultTableSpec
-    from research_pipeline.evidence import verify_result, load_verified_result_context
+    from research_pipeline.results import load_result_context
     from research_pipeline.platform import canonical_json
     from test_qlib_model_integration import synthetic_samples, candidate
     from test_result_bundle import (
-        HASH_A, HASH_B, HASH_C, HASH_D, VALIDITY_FACTS_PRODUCER_HASH,
-        _data_reference, _proof, _runtime_fixture, _spec, policy_id_for_claim,
+        HASH_A, HASH_B, HASH_C, HASH_D,
+        _data_reference, _proof, _runtime_fixture, _spec,
     )
 
     samples, _ = synthetic_samples()
@@ -234,21 +207,20 @@ def test_real_model_prediction_result_to_report(tmp_path):
         plan_hash=HASH_C, result_spec=result_spec, catalog_hashes={"prices": HASH_D},
         data_references={"prices": _data_reference()}, metric_proofs=(_proof(),),
         implementation_manifest_hash=HASH_A,
-        verification_policy_id=policy_id_for_claim("research_observation"),
-        validity_producer_hash=VALIDITY_FACTS_PRODUCER_HASH,
+        claim_level="research_observation",
+        formal_input_request_ids=("prices",),
+        input_claim_ceilings={"prices": "research_observation"},
     )
-    verification_path = tmp_path / "verification.json"
-    verified = verify_result(directory, result_store=result_root, output=verification_path)
-    context = load_verified_result_context(verification_path, result_store=result_root,
-                                          additional_table_ids=("predictions",))
+    context = load_result_context(directory, result_store=result_root,
+                                  additional_table_ids=("predictions",))
     request = _request()
     request.update(result_id=bundle.result_id)
     request["selection"].update(candidate_id=spec["candidate_id"], stage="test")
     request["window"] = {"start": str(infer.observation_session.min()), "end": str(infer.observation_session.max())}
     output = tmp_path / "model-result-report.html"
-    write_qlib_report(output, context=context, request=request, markdown=f"验证状态：{verified.verification.status}")
+    write_qlib_report(output, context=context, request=request, markdown="执行成功")
     document = output.read_text(encoding="utf-8")
     assert bundle.result_id in document
-    assert verified.verification.verification_hash in document
+    assert "research_observation" in document
     assert "plotly.js v" in document
     assert not list(tmp_path.rglob("*.db")) and not list(tmp_path.rglob("*.sqlite"))

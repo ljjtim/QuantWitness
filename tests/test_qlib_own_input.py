@@ -5,17 +5,20 @@ import json
 from pathlib import Path
 
 import pytest
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from test_lean_runtime_identity import installation as lean_installation
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio"
 
 
 @pytest.fixture
-def own_input(tmp_path, monkeypatch):
+def own_input(tmp_path, monkeypatch, lean_installation):
     monkeypatch.syspath_prepend(str(EXAMPLE))
     inputs = importlib.import_module("inputs")
     synthetic = importlib.import_module("synthetic")
     loader = importlib.import_module("input_config").load_input_config
-    inputs.prepare_inputs(tmp_path)
+    inputs.prepare_inputs(tmp_path, portfolio=True)
     days = [x.isoformat() for x in synthetic.sessions()]
     codes = list(synthetic.instruments())
     config = {"contract_version": "qlib-own-input-v1", "research_id": "own_etf", "display_name": "自有ETF研究",
@@ -29,6 +32,14 @@ def own_input(tmp_path, monkeypatch):
             "equity_etf_codes": codes, "commission_ppm": 300, "min_commission_units": 5,
             "initial_cash_cny": 200000., "corporate_actions": [], "corporate_action_evidence": "合成无公司行动",
             "classification_evidence": "合成权益ETF", "policy_available_at": days[0]+"T00:00:00+08:00", "price_scale": 3}}
+    from lean_scope import write_synthetic_scope
+    config['columns'].update(high='fld_demo_high', low='fld_demo_low', volume='fld_demo_volume')
+    config['lean_execution'] = dict(scope_root=str(tmp_path), lean_home=str(lean_installation),
+        minute_scope=write_synthetic_scope(tmp_path, days=days, entities=codes, clock=config['fixed_clock']),
+        bars_request_id='portfolio_bars', open_request_id='portfolio_open', factor_request_id='portfolio_factors',
+        corporate_action_request_id='portfolio_actions', applicable_start=days[1]+'T09:30:00+08:00',
+        applicable_end=days[-24]+'T15:01:00+08:00', availability_policy_ref='available.etf.corporate_action.v1',
+        slippage_bps=0, slippage_ticks=0, participation_ppm=1000000)
     def load(value, mode="portfolio"):
         path = tmp_path / "input-config.json"
         path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
@@ -41,10 +52,12 @@ def test_own_input_preserves_frozen_requests_and_financial_parameters(own_input)
     actual, requests, archive = load(config)
     assert actual["finance"]["initial_cash_cny"] == 200000.
     assert actual["finance"]["price_scale"] == 3
-    assert {x["request_id"] for x in requests} == {"daily_feature", "daily_label"}
-    assert all(x["dataset_id"] == "public.synthetic.etf.daily" for x in requests)
+    assert {x["request_id"] for x in requests} == {'daily_feature', 'daily_label', 'portfolio_bars',
+        'portfolio_open', 'portfolio_factors', 'portfolio_actions'}
+    assert all(x['dataset_id'] == 'public.synthetic.etf.daily' for x in requests if x['request_id'].startswith('daily_'))
     assert Path(actual["catalog_lock"]).is_absolute()
-    assert all(x["binding_id"] == "synthetic.archived" for x in archive["requests"].values())
+    assert all(archive['requests'][key]['binding_id'] == 'synthetic.archived' for key in ('daily_feature', 'daily_label'))
+    assert actual['lean_execution']['open_request_id'] == 'portfolio_open'
 
 
 @pytest.mark.parametrize("change, message", [
@@ -64,13 +77,21 @@ def test_own_input_rejects_incomplete_or_future_facts(own_input, change, message
         load(candidate)
 
 
-def test_development_cannot_import_full_holdout_prices(own_input):
+def test_development_cannot_import_full_holdout_prices(own_input, tmp_path):
     config, load = own_input
+    config = deepcopy(config)
+    config.pop('lean_execution')
+    for key in ('high', 'low', 'volume'):
+        config['columns'].pop(key)
+    archive = json.loads((tmp_path/'inputs.json').read_text(encoding='utf-8'))
+    archive['requests'] = {key: value for key, value in archive['requests'].items() if key.startswith('daily_')}
+    (tmp_path/'model-inputs.json').write_text(json.dumps(archive), encoding='utf-8')
+    config['input_snapshot_manifest'] = 'model-inputs.json'
     with pytest.raises(ValueError, match="不得包含holdout"):
         load(config, "development")
 
 
-def test_portfolio_graph_forwards_cash_and_calendar_but_not_input_evidence(monkeypatch):
+def test_portfolio_graph_forwards_lean_sources_but_not_input_evidence(monkeypatch):
     monkeypatch.syspath_prepend(str(EXAMPLE))
     graph = importlib.import_module("portfolio_plan")
     prepare = importlib.import_module("prepare")
@@ -78,16 +99,22 @@ def test_portfolio_graph_forwards_cash_and_calendar_but_not_input_evidence(monke
         "calendar_sessions": ["2020-01-02"], "calendar_id": "cn_trade_days",
         "finance": {"initial_cash_cny": 234567., "commission_ppm": 120,
             "price_scale": 3, "classification_evidence": "固定权益ETF", "corporate_action_evidence": "窗口内无行动"}}
+    design['lean_execution'] = dict(bars_request_id='bars', open_request_id='opening', factor_request_id='factors',
+        corporate_action_request_id='actions', minute_scope={'rules_hash': 'a'*64}, lean_runtime={},
+        initial_cash_units=23456700, slippage_bps=0, slippage_ticks=0, participation_ppm=1000000,
+        as_of='2026-10-03T09:00:00+08:00', applicable_start='2020-01-02T09:30:00+08:00',
+        applicable_end='2020-01-03T15:00:00+08:00', availability_policy_ref='available.etf.corporate_action.v1')
     nodes = [{"node_id": "validity", "inputs": []}]
     declarations = [("validity", {"operator": {"input_ports": []}})]
     graph.extend_portfolio(nodes, declarations, [], design, prepare.node, prepare.declaration)
     parameters = next(x["parameters"] for x in nodes if x["node_id"] == "portfolio_simulation")
-    assert parameters["initial_cash_cny"] == 234567.
-    assert parameters["commission_ppm"] == 120
-    assert parameters["calendar_id"] == "cn_trade_days"
-    assert not {"price_scale", "classification_evidence", "corporate_action_evidence"} & set(parameters)
-    market = next(x["parameters"] for x in nodes if x["node_id"] == "portfolio_market")
-    assert market["design"] is design
+    assert parameters['initial_cash_units'] == 23456700
+    assert parameters['frequency'] == '1d' and parameters['price_scale'] == 3
+    assert parameters['open_request_id'] == 'opening'
+    assert not {'commission_ppm', 'classification_evidence', 'corporate_action_evidence'} & set(parameters)
+    strategy = next(x for x in nodes if x['node_id'] == 'portfolio_simulation')
+    assert {x['input_port'] for x in strategy['inputs']} == {'bars', 'snapshot', 'targets'}
+    assert not any(x['node_id'] == 'portfolio_market' for x in nodes)
 
 
 def test_generated_input_template_can_be_loaded(own_input, tmp_path):
@@ -95,6 +122,12 @@ def test_generated_input_template_can_be_loaded(own_input, tmp_path):
     module = importlib.import_module("input_config")
     design = {key: config[key] for key in ("entities", "calendar_sessions", "calendar_id", "calendar_source", "snapshot_scope")}
     design["finance"] = {"initial_cash_cny": 100000., "price_scale": 3}
+    from research_pipeline.platform.lean_runtime import freeze_lean_runtime
+    execution = deepcopy(config['lean_execution'])
+    installation = execution.pop('lean_home')
+    execution.pop('scope_root')
+    execution.update(lean_runtime=freeze_lean_runtime(installation), initial_cash_units=10000000, as_of=config['fixed_clock'])
+    design['lean_execution'] = execution
     design["market_fields"] = [config["columns"][key] for key in module.COLUMN_ROLES]
     path = module.write_input_template(tmp_path, design=design, research_id="public.qlib.etf",
         display_name="合成ETF日频Qlib研究", catalog_lock=tmp_path/"catalog", archive=tmp_path/"inputs.json",

@@ -2,6 +2,9 @@
 import json
 import sqlite3
 import pytest
+from importlib.util import find_spec
+
+pytestmark = pytest.mark.skipif(find_spec("rdagent") is None, reason="需要固定RD-Agent源码及Linux场景依赖")
 from quantwitness_rdagent.native_model_research import propose_model, reflect_model
 
 

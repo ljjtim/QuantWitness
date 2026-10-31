@@ -110,7 +110,8 @@ def _bind_windows_descendants_to_worker_lifetime() -> bool:
     kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
     kernel32.CloseHandle.restype = ctypes.c_int
 
-    handle = kernel32.CreateJobObjectW(None, None)
+    from research_pipeline.platform.process_resources import _WINDOWS_WORKER_JOB_ENV
+    handle = kernel32.CreateJobObjectW(None, os.environ.pop(_WINDOWS_WORKER_JOB_ENV, None))
     if not handle:
         return False
     limits = _WindowsJobExtendedLimitInformation()
@@ -132,6 +133,49 @@ def _bind_windows_descendants_to_worker_lifetime() -> bool:
     # Job handle，并终止仍存活的后代；监督器的 psutil 清理继续作为跨平台兜底。
     _WINDOWS_JOB_HANDLE = int(handle)
     return True
+
+
+def _make_worker_descendant_check():
+    """检查当前Worker的存活后代；Windows只查询已绑定Job的进程集合。"""
+    import psutil
+
+    if sys.platform != "win32":
+        process = psutil.Process()
+        return lambda: any(child.is_running() for child in process.children(recursive=True))
+    if _WINDOWS_JOB_HANDLE is None:
+        raise ValueError("project_worker_job_binding_failed")
+    handle = _WINDOWS_JOB_HANDLE
+    query = ctypes.WinDLL("kernel32", use_last_error=True).QueryInformationJobObject
+    query.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p)
+    query.restype = ctypes.c_int
+    # JobObjectBasicProcessIdList含两个DWORD和可变长ULONG_PTR数组。
+    capacity = 8
+    buffer = ctypes.create_string_buffer(8 + ctypes.sizeof(ctypes.c_size_t) * capacity)
+    current_pid = os.getpid()
+
+    def has_descendants():
+        nonlocal buffer, capacity
+        while True:
+            succeeded = query(handle, 3, buffer, ctypes.sizeof(buffer), None)
+            assigned, returned = (ctypes.c_uint32 * 2).from_buffer(buffer)
+            if succeeded and returned == assigned:
+                break
+            if not succeeded and ctypes.get_last_error() != 234:
+                raise ValueError("project_worker_job_query_failed")
+            capacity = max(capacity * 2, assigned)
+            buffer = ctypes.create_string_buffer(8 + ctypes.sizeof(ctypes.c_size_t) * capacity)
+        process_ids = (ctypes.c_size_t * returned).from_buffer(buffer, 8)
+        for pid in process_ids:
+            if pid == current_pid:
+                continue
+            try:
+                if psutil.Process(pid).is_running():
+                    return True
+            except psutil.NoSuchProcess:
+                continue
+        return False
+
+    return has_descendants
 
 
 @dataclass(frozen=True)
@@ -540,6 +584,28 @@ def _load_input(
             raise ValueError("project_request_table_input_invalid")
         normalized: dict[str, Mapping[str, object]] = {}
         for request in requests:
+            if isinstance(request, Mapping) and request.get("source_kind") == "direct":
+                from research_pipeline.data_plane.direct_sources import DirectDatasetRef
+
+                expected = {"request_id", "source_identity", "schema_hash", "source_kind",
+                            "source_revision_hash", "admitted_plan_hash", "direct_reference", "direct_root"}
+                if (set(request) not in (expected, expected | {"admission"})
+                        or not isinstance(request["request_id"], str) or not request["request_id"]
+                        or not isinstance(request["direct_reference"], Mapping)
+                        or not isinstance(request["direct_root"], str)
+                        or ("admission" in request and not isinstance(request["admission"], Mapping))):
+                    raise ValueError("project_request_table_input_invalid")
+                request_id = request["request_id"]
+                if request_id in normalized:
+                    raise ValueError("project_request_table_input_invalid")
+                reference = DirectDatasetRef.from_dict(request["direct_reference"])
+                if any(getattr(reference, name) != request[name]
+                       for name in ("source_identity", "schema_hash", "source_revision_hash")):
+                    raise ValueError("project_direct_table_identity_mismatch")
+                descriptor = {key: value for key, value in request.items() if key != "request_id"}
+                # 只传来源引用；首次打开 request 时由 Worker 自己解析并复验。
+                normalized[request_id] = descriptor
+                continue
             if (
                 not isinstance(request, Mapping)
                 or set(request) not in (

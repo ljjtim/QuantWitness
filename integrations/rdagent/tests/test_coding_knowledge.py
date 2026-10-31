@@ -2,7 +2,6 @@
 import json
 import sqlite3
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -123,15 +122,15 @@ def test_costeer_persists_error_repair_and_reuses_actual_prompt(tmp_path, monkey
 
 
 @NATIVE
-def test_source_requires_formal_verification_and_same_definition(tmp_path, monkeypatch, native_runtime):
+def test_source_requires_formal_result_and_same_definition(tmp_path, monkeypatch, native_runtime):
     from quantwitness_rdagent import coding_knowledge as ck
     source, _, _ = make_source(tmp_path, monkeypatch)
     value = payload(tmp_path / "next")
     value["coding_knowledge"]["source_session"] = str(source.session_root)
     def reject(*args):
-        raise ValueError("未通过正式独立验证")
+        raise ValueError("缺少正式Result")
     monkeypatch.setattr(ck, "_validate_formal_success", reject)
-    with pytest.raises(ValueError, match="独立验证"):
+    with pytest.raises(ValueError, match="正式Result"):
         make_coder(FrozenRequest.from_dict(value))
     value = payload(tmp_path / "different")
     value["coding_knowledge"]["source_session"] = str(source.session_root)
@@ -148,16 +147,14 @@ def test_knowledge_projection_excludes_full_diagnostics_and_resource_failures(tm
     request = FrozenRequest.from_dict(payload(tmp_path / "session"))
     coder = make_coder(request)
     task = RPTask(request)
-    evidence = {"command_status": "succeeded", "execution_status": "succeeded",
-        "verification_status": "fail", "formula_status": "fail",
-        "diagnostics": ["formula.baseline_mismatch I:/secret price=13.27 label=999"]}
+    evidence = {'command_status': 'failed', 'execution_status': 'failed', 'diagnostics': [{'stage': 'run', 'error_code': 'TypeError', 'candidate_operator': True, 'message': 'I:/secret price=13.27 label=999'}]}
     ws = SimpleNamespace(candidate_id="candidate-0000", feedback_ref=evidence, all_codes=SOURCE)
     step = EvoStep(SimpleNamespace(sub_tasks=[task], sub_workspace_list=[ws]))
     coder.rag.generate_knowledge([step])
     queried = coder.rag.query(SimpleNamespace(sub_tasks=[task]), [])
     view = ck.query_view(request, task, queried, 0)
     text = json.dumps(view)
-    assert "formula.baseline_mismatch" in text
+    assert "TypeError" in text
     assert "13.27" not in text and "secret" not in text and "999" not in text
     ws.candidate_id = "candidate-0001"
     ws.feedback_ref = {**evidence, "diagnostics": [{"stage": "run", "error_code": "worker_crash"}]}

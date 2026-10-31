@@ -1,17 +1,17 @@
-"""从四项研究的自包含 Result 和独立 VerificationResult 生成 Gate C 证据。
+"""从四项正式 Result 生成计划、窗口、只读源库和指标数值验收证据。
 
-输入采用 research-gate-c-input-v2，路径相对输入文件解析。data_scope 必须显式
-选择 synthetic 或 real；synthetic 只证明工程闭环。当前输入由
-tools/run_release_workflows.py 生成，候选与 BuildManifest 通过命令行参数绑定。
+输入采用 research-gate-c-input-v2，路径相对输入文件解析。data_scope 显式
+选择 synthetic 或 real；每项研究用 expected_metrics 声明预期数值、单位和
+样本量。合成研究只证明工程与确定性数值验收，候选绑定由命令行参数提供。
 """
 
 from __future__ import annotations
 
 import argparse
-import ast
 from datetime import date
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -23,16 +23,16 @@ if os.environ.get("RESEARCH_PIPELINE_ACCEPTANCE_RUNTIME") != "installed" and str
     sys.path.insert(0, str(SOURCE_ROOT))
 
 import research_pipeline  # noqa: E402
-from research_pipeline.evidence import load_verified_result_context  # noqa: E402
-from research_pipeline.extensions.verifier_bundle import ProjectVerifierBundleManifest  # noqa: E402
 from research_pipeline.platform import typed_canonical_hash  # noqa: E402
-from research_pipeline.results import ResultStore  # noqa: E402
+from research_pipeline.platform.operator_contracts import OperatorGraphRecipe  # noqa: E402
+from research_pipeline.results import ResultStore, metrics_from_snapshot  # noqa: E402
 
 from release_evidence_binding import release_evidence_binding  # noqa: E402
 
 
 INPUT_VERSION = "research-gate-c-input-v2"
-EVIDENCE_VERSION = "research-gate-c-evidence-v2"
+EVIDENCE_VERSION = "research-gate-c-evidence-v3"
+METRIC_ABSOLUTE_TOLERANCE = 1e-12
 
 
 def _load_json(path: Path) -> dict[str, object]:
@@ -64,21 +64,38 @@ def _path(item: dict[str, object], field: str, base: Path) -> Path:
     return (base / _text(item, field)).resolve()
 
 
-def _assert_oracle_independent(path: Path) -> str:
-    try:
-        source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(path))
-    except (OSError, UnicodeDecodeError, SyntaxError) as exc:
-        raise ValueError(f"独立 oracle 源码无法审计: {path}") from exc
-    imports = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.append(node.module)
-    if any(name == "research_pipeline" or name.startswith("research_pipeline.") for name in imports):
-        raise ValueError(f"独立 oracle 不得导入生产核心: {path}")
-    return _sha256(path)
+def _numeric_acceptance(item: dict[str, object], metrics: tuple) -> list[dict[str, object]]:
+    expected = item.get("expected_metrics")
+    if not isinstance(expected, list) or not expected or any(not isinstance(row, dict) for row in expected):
+        raise ValueError("Gate C expected_metrics 必须是非空指标预期列表")
+    by_ref = {}
+    for row in expected:
+        metric_ref = _text(row, "metric_ref")
+        value = row.get("value")
+        sample_size = row.get("sample_size")
+        if metric_ref in by_ref:
+            raise ValueError("Gate C expected_metrics 指标引用重复")
+        if type(value) not in (int, float) or not math.isfinite(value):
+            raise ValueError("Gate C 指标预期值必须是有限数值")
+        if type(sample_size) is not int or sample_size <= 0:
+            raise ValueError("Gate C 指标预期样本量必须是正整数")
+        _text(row, "unit")
+        by_ref[metric_ref] = row
+    if set(by_ref) != {metric.metric_ref for metric in metrics}:
+        raise ValueError("Gate C 预期指标集合与正式 Result 不一致")
+    accepted = []
+    for metric in metrics:
+        row = by_ref[metric.metric_ref]
+        if metric.unit != row["unit"] or metric.sample_size != row["sample_size"]:
+            raise ValueError(f"Gate C 指标单位或样本量不一致: {metric.metric_ref}")
+        if not math.isclose(metric.value, row["value"], rel_tol=0, abs_tol=METRIC_ABSOLUTE_TOLERANCE):
+            raise ValueError(f"Gate C 指标数值与预期不一致: {metric.metric_ref}")
+        accepted.append({
+            **metric.to_dict(), "expected_value": row["value"],
+            "absolute_error": abs(metric.value - row["value"]),
+            "absolute_tolerance": METRIC_ABSOLUTE_TOLERANCE,
+        })
+    return accepted
 
 
 def _request_windows(
@@ -143,63 +160,56 @@ def _database_evidence(item: dict[str, object], *, scope: str, result_id: str) -
     return evidence
 
 
+def _plan_identity_payload(plan: dict[str, object]) -> dict[str, object]:
+    """复验完整Recipe，再使用正式计划的已验证Recipe引用投影。"""
+    recipe_payload = dict(plan["recipe"])
+    declared_recipe_hash = recipe_payload.pop("recipe_hash", None)
+    recipe = OperatorGraphRecipe.from_dict(recipe_payload)
+    if recipe.recipe_hash != declared_recipe_hash:
+        raise ValueError("Gate C plan recipe 内容与 recipe_hash 不一致")
+    return {
+        **{key: value for key, value in plan.items() if key != "plan_hash"},
+        "recipe": recipe.recipe_hash,
+        "identity_projection": "validated-recipe-ref-v1",
+    }
+
+
 def _validate_reference(
     item: dict[str, object], maximum_days: int, *, scope: str, base: Path,
 ) -> dict[str, object]:
     plan_path = _path(item, "plan", base)
     result_directory = _path(item, "result_directory", base)
     result_root = _path(item, "result_store", base)
-    verification_path = _path(item, "verification_result", base)
-    oracle_script = _path(item, "oracle_script", base)
     plan = _load_json(plan_path)
     if plan.get("contract_version") != "research-operator-graph-package-v2":
         raise ValueError("Gate C 必须使用正式算子图计划")
     plan_hash = plan.get("plan_hash")
-    if plan_hash != typed_canonical_hash({key: value for key, value in plan.items() if key != "plan_hash"}):
+    if plan_hash != typed_canonical_hash(_plan_identity_payload(plan)):
         raise ValueError("Gate C plan 内容与 plan_hash 不一致")
     recipe = plan.get("recipe")
     if not isinstance(recipe, dict) or recipe.get("graph_id") != _text(item, "expected_graph_id"):
         raise ValueError("Gate C DAG 身份与批准输入不一致")
 
-    # 报告消费者只读指标表；Gate C 额外完整检查诊断表、支持材料及内嵌 Verifier。
-    store = ResultStore(result_root, create=False)
-    bundle = store.verify(result_directory)
-    if bundle.contract_version != "research-result-v3" or bundle.status != "finalized":
-        raise ValueError("Gate C 只接受已 finalize 的 research-result-v3")
+    # 数值验收使用同一完整快照，诊断表与支持文件也检查实际内容。
+    snapshot = ResultStore(result_root, create=False).open_snapshot(result_directory)
+    bundle = snapshot.bundle
+    if bundle.contract_version != "research-result-v4" or bundle.status != "finalized":
+        raise ValueError("Gate C 只接受已 finalize 的 research-result-v4")
+    if bundle.run.status != "succeeded":
+        raise ValueError("Gate C 只接受执行成功的正式 Result")
     if bundle.result_id != _text(item, "expected_result_id"):
         raise ValueError("Gate C Result 身份与批准输入不一致")
     if (
         bundle.plan_hash != plan_hash or bundle.package_hash != plan.get("package_hash")
         or bundle.result_spec.to_dict() != plan.get("result_spec")
-        or bundle.verification.run.fixed_clock != plan.get("fixed_clock")
+        or bundle.run.fixed_clock != plan.get("fixed_clock")
     ):
         raise ValueError("Gate C plan 与 Result 冻结合同不一致")
     namespace = result_directory.parent
     if {path.name for path in namespace.iterdir() if path.is_dir()} != {bundle.result_id}:
         raise ValueError("每个成功 Run 必须恰好只有一个正式 ResultBundle")
 
-    context = load_verified_result_context(verification_path, result_store=result_root)
-    verification = context.verification
-    if context.snapshot.bundle.result_id != bundle.result_id:
-        raise ValueError("Gate C VerificationResult 与指定 Result 不匹配")
-    if verification.status != "pass" or verification.validity_status != "pass":
-        raise ValueError("Gate C 独立 VerificationResult 必须通过")
-    closure = bundle.verification
-    if (
-        not closure.verifier_bundle_path or not closure.verifier_identity
-        or not verification.project_verifier_outcome_hash
-    ):
-        raise ValueError("Gate C 缺少绑定 Result 的独立 oracle")
-    verifier_root = result_directory / closure.verifier_bundle_path
-    verifier = ProjectVerifierBundleManifest.from_dict(_load_json(verifier_root / "manifest.json"))
-    entry_path = verifier.entry_module.replace(".", "/") + ".py"
-    entry = next((row for row in verifier.source_files if row["path"] == entry_path), None)
-    oracle_hash = _assert_oracle_independent(oracle_script)
-    if entry is None or oracle_hash != entry["sha256"]:
-        raise ValueError("Gate C oracle 源码不属于 Result 冻结的 Verifier 入口")
-    for source in verifier.source_files:
-        if str(source["path"]).endswith(".py"):
-            _assert_oracle_independent(verifier_root / "sources" / str(source["path"]))
+    metrics = _numeric_acceptance(item, metrics_from_snapshot(snapshot))
 
     request_ids = item.get("study_request_ids")
     if (
@@ -224,12 +234,9 @@ def _validate_reference(
         "result_contract": bundle.contract_version, "result_bundle_count_for_run": 1,
         "table_count": len(bundle.tables), "input_revision_count": len(bundle.input_revisions),
         "request_windows": windows,
-        "verification_contract": verification.contract_version,
-        "verification_hash": verification.verification_hash,
-        "verification_status": verification.status,
-        "oracle_identity": dict(closure.verifier_identity),
-        "oracle_outcome_hash": verification.project_verifier_outcome_hash,
-        "oracle_script_hash": oracle_hash,
+        "execution_status": bundle.run.status,
+        "limitations": list(bundle.run.limitations),
+        "metric_count": len(metrics), "metrics": metrics,
         "data_scope": scope, "database_evidence": database,
     }
 
@@ -274,10 +281,10 @@ def build_gate_c_evidence(
         "runtime_origin": str(Path(research_pipeline.__file__).resolve()),
         "input_hash": _sha256(input_path), "reference_count": len(results),
         "dag_family_count": len(families), "dag_families": families,
-        "all_results_contract": "research-result-v3",
-        "all_verifications_contract": "research-verification-result-v4",
+        "all_results_contract": "research-result-v4",
+        "acceptance_basis": "result_contract_and_metric_values",
         "each_successful_run_has_one_result_bundle": True,
-        "independent_oracle_count": len(results), "references": results,
+        "accepted_metric_count": sum(item["metric_count"] for item in results), "references": results,
     }
     output.mkdir(parents=True)
     (output / "gate-c-evidence.json").write_text(

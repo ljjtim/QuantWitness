@@ -255,6 +255,7 @@ class ResourceUsageSampler:
         self._thread: threading.Thread | None = None
         self._baseline_descendants: frozenset[tuple[int, float]] | None = None
         self._sampling_lock = threading.RLock()
+        self._last_project_sample_at = 0.0
 
     def __enter__(self) -> "ResourceUsageSampler":
         self._started = time.monotonic()
@@ -276,14 +277,22 @@ class ResourceUsageSampler:
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
-            self._sample()
+            with self._sampling_lock:
+                # 通信监督刚取得的完整读数已经计入节点峰值，不再立刻重复扫描。
+                if time.monotonic() - self._last_project_sample_at >= self.interval_seconds:
+                    self._sample()
 
     def sample_project_usage(self, worker_pid: int | None, observed_descendants: dict[int, float],
-                             scratch_roots: tuple[Path, ...]) -> tuple[int, int, int]:
+                             scratch_roots: tuple[Path, ...], *,
+                             windows_job_name: str | None = None) -> tuple[int, int, int]:
         """复用监督器本轮真实测量，治理峰值和 Worker 硬门禁共享同一读数。"""
         with self._sampling_lock:
             try:
-                rss, count = _project_process_usage(worker_pid, observed_descendants)
+                if windows_job_name is None:
+                    rss, count = _project_process_usage(worker_pid, observed_descendants)
+                else:
+                    rss, count = _project_process_usage(
+                        worker_pid, observed_descendants, windows_job_name=windows_job_name)
                 sizes = _measure_scratch_scopes((*self.scratch_roots, *scratch_roots))
                 governor_size = sum(sizes[path] for path in _nonoverlapping_roots(self.scratch_roots))
                 worker_size = sum(sizes[path] for path in _nonoverlapping_roots(scratch_roots))
@@ -293,6 +302,7 @@ class ResourceUsageSampler:
             self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
             self.max_processes = max(self.max_processes, count)
             self.peak_scratch_bytes = max(self.peak_scratch_bytes, governor_size)
+            self._last_project_sample_at = time.monotonic()
             return rss, count, worker_size
 
     def _sample(self) -> None:

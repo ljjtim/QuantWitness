@@ -1,6 +1,6 @@
 # 产物生命周期与回收
 
-Runtime 只自动释放本次成功节点已经交接的载荷。正式 ExternalArtifact、checkpoint、Result、VerificationResult、Verifier 和输入不会因为某次运行成功而删除。回收记录位于 `work/<attempt>/artifact-lifecycle.json`，其中 `released_files`、`released_bytes` 是实际删除成功的文件数和逻辑字节；保留和隔离另行记录。
+Runtime 只自动释放本次成功节点已经交接的载荷。正式 ExternalArtifact、checkpoint、Result 和持久输入不会因为某次运行成功而删除。回收记录位于 `work/<attempt>/artifact-lifecycle.json`，其中 `released_files`、`released_bytes` 是实际删除成功的文件数和逻辑字节；保留和隔离另行记录。
 
 ## 目录用途、提交与恢复
 
@@ -16,10 +16,12 @@ Runtime 只自动释放本次成功节点已经交接的载荷。正式 External
 | `cache/<entry>` | 原有缓存回收范围 | COMMITTED、pin/lease/active，以及存在的运行 owner 证据 | 沿用预览后隔离；不自动删除缓存 |
 | `input-artifacts`、归档输入、原始行情 | 冻结计划的研究来源，可被多个运行共享 | 不因本次交接解除其他计划的引用 | 保留 |
 | committed external、checkpoint、事件、invocation | 下游输入、inspect、resume、rerun 和跨运行复用 | 失败 run 内的成功节点仍可能有效 | 保留 |
-| Result、VerificationResult、内嵌 Verifier | 自包含交付与独立可信消费 | Result 移出 run root 后仍应可验证 | 保留 |
+| Result、配置、实现及输入引用 | 正式交付与直接结果消费 | 迁移时携带持久输入依赖 | 保留 |
 | holdout 账本及研究系列锚点 | 限制留出集重复消费 | 失败消费和已打开区间不能重置 | 保留 |
 
 ## 成功释放顺序
+
+LEAN Result保留orders、intents、daily、trace和metrics，必要账户与策略支持文件随结果保存。行情、规则、公司行动和信号来源仍由持久工件及计划引用；不能因为执行结果表数量较少，就把这些来源当作已被Result完整复制而删除。归档同时保存计划、输入引用及其实际依赖。
 
 先完成各输出及状态的正式提交和复验，再完成资源验收与节点 checkpoint 发布，等待 Worker 已退出，写入 attempt 与 node 的成功事件，最后确认旧载荷的全部文件均有正式替代位置。任何必要条件不满足都保留原件。
 

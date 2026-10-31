@@ -1,7 +1,7 @@
 """公开 Qlib 多期限标签、冻结身份和开发归档边界。"""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import importlib.util
 import json
 from pathlib import Path
@@ -14,6 +14,8 @@ import pytest
 import yaml
 
 from research_pipeline.platform import typed_canonical_hash
+from research_pipeline.research.modeling import assemble_daily_model_samples
+from research_pipeline.research.modeling.inputs import ModelMainlineError
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio"
 WINDOWS = {
@@ -29,8 +31,11 @@ def load_module(name, path):
     return module
 
 
-check = load_module("qlib_horizon_example_verifier", EXAMPLE / "verifier/check.py")
 operator = load_module("qlib_horizon_example_operator", EXAMPLE / "extension/operator.py")
+
+
+def at(day, hour, minute=0):
+    return datetime.fromisoformat(f"{day}T{hour:02d}:{minute:02d}:00+08:00")
 
 
 @pytest.fixture(autouse=True)
@@ -169,90 +174,61 @@ def label_case(horizon=5):
                 tables["features"].append({
                     "entity_id": "SYN", "observation_session": session,
                     "window_sessions": window, "feature_id": name,
-                    "value": value, "status": "ok",
-                    "observation_time": check._at(days[index - 1], 15),
-                    "available_time": check._at(session, 9, 30),
+                    "value": value, "status": "ok", "lineage_hash": "feature",
+                    "observation_time": at(days[index - 1], 15),
+                    "available_time": at(session, 9, 30),
                 })
         tables["labels"].append({
             "entity_id": "SYN", "observation_session": session,
             "horizon_sessions": horizon,
-            "forward_return": prices[index + horizon] / prices[index] - 1,
-            "decision_time": check._at(session, 9, 30),
-            "label_start_time": check._at(session, 15),
-            "label_end_time": check._at(days[index + horizon], 15),
-            "available_time": check._at(days[index + horizon + 1], 9, 30),
+            "forward_return": prices[index + horizon] / prices[index] - 1, "lineage_hash": "label",
+            "decision_time": at(session, 9, 30),
+            "label_start_time": at(session, 15),
+            "label_end_time": at(days[index + horizon], 15),
+            "available_time": at(days[index + horizon + 1], 9, 30),
         })
     return tables, design, days, prices
 
 
-def test_independent_horizon_five_labels_match_hand_calculated_prices():
-    tables, design, days, prices = label_case()
-    samples = check._inputs(tables, design)
-    assert set(samples) == {f"SYN:{day}:h5" for day in days[11:14]}
-    for sid, sample in samples.items():
-        index = days.index(sample["observation_session"])
-        assert sample["target"] == prices[index + 5] / prices[index] - 1
-        assert sample["label_end_time"] == check._at(days[index + 5], 15)
-        assert sample["label_available_time"] == check._at(days[index + 6], 9, 30)
+def test_horizon_five_samples_keep_hand_calculated_labels_and_maturity():
+    import pandas as pd
+    tables, _, days, prices = label_case()
+    samples, _ = assemble_daily_model_samples(
+        pd.DataFrame(tables["features"]), pd.DataFrame(tables["labels"]), horizon_sessions=5)
+    assert set(samples.sample_id) == {f"SYN:{day}:h5" for day in days[11:14]}
+    for row in samples.itertuples():
+        index = days.index(row.observation_session)
+        assert row.target == prices[index + 5] / prices[index] - 1
+        assert row.label_end_time == at(days[index + 5], 15)
+        assert row.label_available_time == at(days[index + 6], 9, 30)
+    metric = operator.prediction_metric([
+        {"prediction": 0.0, "actual": row.target, "observation_session": row.observation_session}
+        for row in samples.itertuples()], "project.qlib_demo.validation_mse@1.0.0")
+    expected = sum((prices[index + 5] / prices[index] - 1) ** 2 for index in range(11, 14)) / 3
+    assert metric["value"] == pytest.approx(expected, abs=1e-12)
 
 
-@pytest.mark.parametrize("change", ["wrong_horizon", "late_available", "early_available", "horizon_one_value", "wrong_end", "design_horizon"])
-def test_independent_inputs_reject_changed_horizon_or_label_fact(change):
-    tables, design, days, prices = label_case()
-    row = tables["labels"][0]
-    if change == "wrong_horizon":
-        row["horizon_sessions"] = 1
-    elif change == "late_available":
-        row["available_time"] += timedelta(hours=1)
-    elif change == "early_available":
-        row["available_time"] -= timedelta(days=1)
-    elif change == "horizon_one_value":
-        row["forward_return"] = prices[12] / prices[11] - 1
-    elif change == "wrong_end":
-        row["label_end_time"] = check._at(days[12], 15)
+@pytest.mark.parametrize("change", ["late_feature", "observation_after_available", "missing_horizon", "label_before_decision"])
+def test_horizon_samples_reject_unavailable_features_and_invalid_label_scope(change):
+    import pandas as pd
+    tables, _, _, _ = label_case()
+    if change == "late_feature":
+        tables["features"][0]["available_time"] += timedelta(days=1)
+    elif change == "observation_after_available":
+        tables["features"][0]["observation_time"] = tables["features"][0]["available_time"] + timedelta(hours=1)
+    elif change == "missing_horizon":
+        for row in tables["labels"]:
+            row["horizon_sessions"] = 1
     else:
-        design["horizon_sessions"] = 1
-    with pytest.raises(ValueError, match="标签"):
-        check._inputs(tables, design)
-
-
-def prediction_case():
-    tables, design, _, _ = label_case()
-    sid, sample = next(iter(check._inputs(tables, design).items()))
-    row = {
-        "sample_id": sid, "stage": "validation", "horizon_sessions": 5,
-        "entity_id": sample["entity_id"], "observation_session": sample["observation_session"],
-        "prediction": 0.0, "actual": sample["target"], "raw_label": sample["target"],
-        "evaluation_label": sample["target"], "score_semantics": "raw_return_prediction",
-        "feature_available_time": sample["decision_time"],
-        **{name: sample[name] for name in ("decision_time", "label_start_time", "label_end_time", "label_available_time")},
-    }
-    return row, sample
-
-
-def test_independent_prediction_accepts_raw_horizon_five_label():
-    row, sample = prediction_case()
-    assert check._prediction(row, sample, "validation") == sample["target"] ** 2
-
-
-@pytest.mark.parametrize("change", ["horizon", "late_available", "horizon_one_value"])
-def test_independent_prediction_rejects_wrong_horizon_value_or_time(change):
-    row, sample = prediction_case()
-    if change == "horizon":
-        row["horizon_sessions"] = 1
-    elif change == "late_available":
-        row["label_available_time"] += timedelta(hours=1)
-    else:
-        _, _, _, prices = label_case()
-        row["actual"] = prices[12] / prices[11] - 1
-    with pytest.raises(ValueError):
-        check._prediction(row, sample, "validation")
+        tables["labels"][0]["label_start_time"] = tables["labels"][0]["decision_time"] - timedelta(hours=1)
+    with pytest.raises(ModelMainlineError):
+        assemble_daily_model_samples(pd.DataFrame(tables["features"]), pd.DataFrame(tables["labels"]), horizon_sessions=5)
 
 
 def test_label_operator_uses_declared_horizon_end_price():
     tables, design, days, prices = label_case()
     design["price_fields"] = ["session", "entity_id", "close"]
-    work = {"key_rows": [["SYN", str(days[11]), 5]], "decision_time": check._at(days[11], 9, 30).isoformat()}
+    work = {"key_rows": [["SYN", str(days[11]), 5]], "decision_time": at(days[11], 9, 30).isoformat()}
     plan = {"kind": "label", "output_port": "labels", "key_columns": ["entity_id", "observation_session", "horizon_sessions"], "work_items": [work]}
     context = SimpleNamespace(parameters={"causal_plan": plan, "design": design, "lineage_ref": "1" * 64})
     source = SimpleNamespace(iter_batches=lambda **kwargs: pa.Table.from_pylist(tables["raw_prices"]).to_batches())
@@ -264,7 +240,7 @@ def test_label_operator_uses_declared_horizon_end_price():
 
     assert operator.run(context, [source], SimpleNamespace(write_batches=write_batches)) == "labels"
     assert saved[0]["forward_return"] == prices[16] / prices[11] - 1
-    assert saved[0]["label_end_time"] == check._at(days[16], 15)
+    assert saved[0]["label_end_time"] == at(days[16], 15)
     assert saved[0]["horizon_sessions"] == 5
     plan["work_items"][0]["key_rows"][0][2] = 1
     with pytest.raises(ValueError, match="期限"):

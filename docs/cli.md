@@ -1,151 +1,119 @@
 # 命令行参考
 
-最常用的路径是：检查研究包、确认数据可用、运行、独立验证、生成报告。Workspace 可以替你串起同一流程。遇到错误先看输出中的阶段与下一步建议，不必从所有命令里猜。
+正式流程是研究声明 → 准备与准入 → 运行 → Result → 报告。Workspace 串联同一应用服务；独立 `package lint` 用于主动诊断声明。
 
-下面列出命令入口。可执行参数以当前安装版本的 --help 为准。
+`run`、`workspace run` 和 `workspace execute` 默认直接读取已准入数据库或既有归档。添加 `--persist-inputs` 才保存查询输入；选择随首次调用冻结，恢复沿用原设置。来源引用、依赖保留和日数据预读见[直接输入](direct-inputs.md)。
 
-## 参数与行为说明
-
-正式顶层命令：
+## 命令入口
 
 ```text
 catalog, package, run, resume, retry-node, inspect, rerun-from,
-verify, report, compare, analysis, export-result, doctor, gc, capabilities,
+report, compare, analysis, export-result, doctor, gc, capabilities,
 operator, artifact, recipe, workspace
 ```
 
-以 `python -m research_pipeline --help` 和子命令 `--help` 为准。
+参数以 `python -m research_pipeline --help` 及各子命令 `--help` 为准。操作型命令提供互斥的 `--json` 与 `--summary`：前者返回完整 data 和 summary，后者返回摘要、错误和下一条命令。机器输出采用 UTF-8。
 
-## 发现与创建
+## 发现与声明
 
 ```powershell
 python -m research_pipeline capabilities --format json
 python -m research_pipeline operator list --format json
-python -m research_pipeline operator describe <operator-id> --format json
-python -m research_pipeline artifact describe <artifact-type> --format json
+python -m research_pipeline artifact describe data.columnar-bundle.v1 --format json
 python -m research_pipeline recipe list --format json
-python -m research_pipeline catalog dataset search <关键词> --catalog-lock <持久Catalog-Lock目录> --format json
-python -m research_pipeline package init <package目录> --json
-python -m research_pipeline package expand-variants --base <基包> --manifest <变体清单.yaml> --output-root <输出目录> --json
+python -m research_pipeline catalog dataset search daily --catalog-lock <持久Catalog-Lock目录> --format json
+python -m research_pipeline package init <新研究包目录> --json
+python -m research_pipeline package lint --package <研究包目录> --catalog-lock <持久Catalog-Lock目录> --json
 ```
 
-QuantWitness 公开发行包不附带供应商或个人数据库的 Catalog。先用自己的声明和审批文件执行
-`catalog validate/compile --definition ... --approvals ...` 生成持久 Catalog Lock，再显式传给
-搜索、lint 和 admit。当前公共 Recipe 清单为空，以 `package init` 创建未填写研究事实的中性草稿，补齐四份声明后才能通过正式准入。Catalog dataset/field 搜索机器结果统一返回
-`catalog_context`：其中的 `lock_reference` 是本次实际
-加载且可直接传给 `--catalog-lock` 的稳定目录，`source_profiles` 列出正式 profile/environment。
-dataset 命中项另含当前 `bindings`；`next_commands` 会带入 lock，并为每个命中 profile 保留显式
-只读路径占位符。field 命中项不重复大块 binding 数据。
+当前公共 Recipe 清单为空。`package init` 生成待填写的中性草稿；补齐四份声明后才能准入。`package lint` 不打开研究数据库，报告声明、算子端口、指标、结果表、来源与资源缺口。
 
-## lint 与准入
+Catalog 搜索返回本次实际加载的 `catalog_context.lock_reference`、来源 profile 和物理 bindings。按这些事实提供数据库路径，不猜测本机位置。公开源码不附带个人或供应商 Catalog；使用自己的定义与审批文件编译持久 Lock。
 
-```powershell
-python -m research_pipeline package lint --package <package目录> --catalog-lock <搜索结果.catalog_context.lock_reference> --json
-python -m research_pipeline package admit --package <package目录> --catalog-lock <搜索结果.catalog_context.lock_reference> --data-db <source:prod只读DuckDB> --output <计划目录> --json
-```
+项目指标可在 `spec/research.yaml` 的可选 `metric_definitions` 列表中声明，每项使用 `MetricDefinition.to_dict()` 格式。定义必须绑定实际生产输出、单位和测量语义。
 
-`package lint` 不打开研究数据库；草稿 lint 报出当前阻断字段，完整包 lint 返回编译结果、资源声明和 `required_inputs`。数据源、Catalog Lock 或输出目录仍需操作者选择时，不返回带尖括号占位符的 `next_command`。`package admit` 只接收完整包，根据显式只读数据源自动生成漂移/PIT 闭包。
-
-`workspace init` 同样创建中性草稿；`workspace validate` 检查工作区路径、四份 YAML 的结构与文件边界，不代替检查研究内容的 `package lint`。草稿补齐前不得运行 `package admit`。
-
-使用已提交的数据快照时，`package admit`、`run`、`workspace run/execute` 可传
-`--input-snapshot-manifest <清单.json>`，与 `--data-db/--source-db` 互斥。分钟仍显式传入
-`--minute-data-root`。清单引用原准入和工件，但新研究须使用当前批准的归档 Catalog 绑定；
-运行与恢复核对计划冻结的清单内容。格式与边界见 [数据平面](data_plane.md#封存输入)。
-
-多个数据源使用可重复的 `--source-db PROFILE=PATH`。来源声明为 `archived_snapshot` 时，lint、admit 和 package 消费命令必须提供 `--source-archive-root`。
-
-直接采集的 raw 分钟查询没有额外来源版本参数。admit 从当前 Catalog binding 判断来源是否为
-`raw + collected + pit_allowed`，并检查 completed bar、实际 schema、有界时区范围和稳定排序。
-复权分钟或历史截面状态缺少各自 PIT 快照时仍拒绝。分钟 `AUDIT` 可用于只读观察，但若其输出
-进入 Feature、Label、Signal、Statistics、Validity 或交易仿真，准入会明确拒绝。
-
-## 项目算子
+## 项目算子与准入
 
 ```powershell
 python -m research_pipeline operator scaffold --output <新算子目录> --project-id <项目ID> --operator-id <算子ID> --format json
 python -m research_pipeline operator validate --spec <operator.yaml> --source <源码目录> --format json
 python -m research_pipeline operator build --spec <operator.yaml> --source <源码目录> --output <bundle父目录> --format json
-python -m research_pipeline package lint --package <package目录> --extension-bundle <bundle目录> --json
-python -m research_pipeline package admit --package <package目录> --extension-bundle <bundle目录> --catalog-lock <Catalog-Lock> --data-db <只读DuckDB> --output <计划目录> --json
+python -m research_pipeline package admit --package <研究包目录> --extension-bundle <bundle目录> --catalog-lock <持久Catalog-Lock目录> --data-db <只读DuckDB> --output <新计划目录> --json
 ```
 
-scaffold 目标必须不存在，生成 `operator.yaml`、`source/operator.py` 和 README；声明由现行
-`ProjectOperatorDeclaration` 序列化，不维护第二套 schema。入口是可由 Worker 以三个位置参数调用
-的同步函数 `run(context, inputs, output_root)`。正式工件写入 `output_root`，返回每个声明端口对应的
-typed commit；缺少 commit、端口/Artifact 不符、未声明文件或字节/hash 漂移均失败。
+`--source` 是显式源码闭包。扩展入口为同步函数 `run(context, inputs, output_root)`，输出必须符合声明端口和 typed commit。准入后 bundle 随计划冻结，运行和恢复使用该计划。
 
-`--source` 是唯一源码闭包。CLI 不扫描当前目录、不自动安装依赖。bundle 在 admit 后进入计划闭包，run 和恢复不再接受 bundle 路径。
+多个数据源通过可重复的 `--source-db PROFILE=PATH` 指定。归档输入使用 `--input-snapshot-manifest`，与 `--data-db/--source-db` 互斥；分钟输入显式提供 `--minute-data-root`。来源正文采用 `archived_snapshot` 时，提供 `--source-archive-root`。
+
+准入只读检查物理 schema、来源、时区、排序和可见日期。直接采集的 raw 分钟按 `raw + collected + pit_allowed` 及 completed bar 语义准入；复权、财报、成分、行业、ST 和历史规则各自需要当时可见的来源。分钟 AUDIT 仅作观察，不能进入特征、标签、信号、统计或交易仿真。
 
 ## 运行与恢复
 
 ```powershell
-python -m research_pipeline run --plan <计划目录> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
-
-# 可重复提供；只机会式复用 pure/cacheable 节点，未命中时正常执行
-python -m research_pipeline run --plan <新计划目录> --reuse-run-root <已完成run目录> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
-
-# 指定节点及其必要上游必须复用；可非 pure/cacheable，完整复验失败时不得回退执行
-python -m research_pipeline run --plan <新计划目录> --reuse-run-root <已完成run目录> --require-reused-node <节点ID> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
-
-# 修正不改变 DAG 的计划后，从一个显式失败 run 的成功 checkpoint 继续
-python -m research_pipeline run --plan <新计划目录> --reuse-failed-run-root <失败run目录> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
+python -m research_pipeline run --plan <计划目录> --data-db <只读DuckDB> --artifact-root <工件目录> --run-root <新run目录> --result-store <ResultStore> --clock <带时区ISO时间> --root-seed 0 --json
 python -m research_pipeline inspect --run-root <run目录> --json
 python -m research_pipeline resume --run-root <run目录> --json
-python -m research_pipeline retry-node --run-root <run目录> --node <node-id> --json
-python -m research_pipeline rerun-from --run-root <父run目录> --output-run-root <子run目录> --node <node-id> --json
+python -m research_pipeline retry-node --run-root <run目录> --node <节点ID> --json
+python -m research_pipeline rerun-from --run-root <父run目录> --output-run-root <新子run目录> --node <节点ID> --json
 ```
 
-不提供资源参数时，单次 CLI 使用 16 GiB 总内存、当前进程可用的全部逻辑核心和 64 GiB scratch 上限。正式主 DAG 默认 `--mode deterministic_serial --workers 1`。并行需显式选择 `--mode bounded_parallel` 或 `--mode partitioned_batch`，并通过 `--workers N` 声明主 DAG 在途节点上限及单个模型节点的候选并发上限；未提供 workers 时仍为 1。workers 不增加节点或运行总资源预算，实际并发受 CPU、内存、临时空间与进程槽共同限制。项目 Worker 在节点总资源预算内管理内部工作。`--resource-memory-bytes`、`--resource-cpu-slots` 和 `--resource-scratch-bytes` 可以覆盖本次进程内容量。
+`inspect` 只读展示节点、attempt、checkpoint、心跳、真实进度和 Result 发布状态，并给出唯一 `recommended_action` 及 `next_command_argv`。同身份中断使用 resume；允许重试且仍有余额的错误使用 retry-node。输入、实现或配置变化后重新准入，不能修改原计划或手改成功状态。
 
-只有同时运行多个独立 CLI 时才需要仓库外 `--resource-state-dir`，并额外提供 process 总额度和 timeout。它只等待或拒绝，不改变样本、分区、seed 或金融语义。
+所有节点成功但 Result 尚未发布时，原 resume 可以只重试组装。Result 已发布时建议 `report --result`；报告失败不重跑研究。
 
-`inspect --json` 返回 Runtime/节点/attempt 状态，并把现有事件投影为 `waiting_for_dependencies`、
-`ready`、`waiting_for_resources`、`executing`、`checkpointing`、`finalizing` 或终态。每个节点同时包含
-开始时间、阶段时间、已运行时长、最近心跳、进程健康、资源申请和预留；启用共享资源池时还会
-列出各 run 的 FIFO 请求与活跃租约，且读取不会清理或改写治理状态。输出保留唯一
-`recommended_action`，完整命令同时提供 `next_command` 和 `next_command_argv`。
-只有 retry policy 允许且仍有余额的错误才建议 `retry-node`。需要人工修改 package 时，
-`next_command` 只给可直接执行的 `package lint --help`，不会伪造仓库未保存的 package 路径。
-finalize 失败但 `result_published=true` 时，`next_command` 使用真实 Result 路径进入 verify；该字段会实际改变下一步，不是只展示的回执。
+跨运行复用参数由 run、workspace run 和 workspace execute 共用：
 
-## 结果验证与消费
+| 参数 | 行为 |
+| --- | --- |
+| `--reuse-run-root` | 可重复，按显式顺序机会式复用完成态 run 的合格节点 |
+| `--require-reused-node` | 与完成态来源组合；指定节点及必要上游必须复用，不合格即拒绝启动 |
+| `--reuse-failed-run-root` | 使用一个终态失败 run 中合格的成功 checkpoint；不能与完成态来源混用 |
+
+恢复与复用核对节点身份、输入、工件和冻结时点，不重置已消费的 holdout。完整规则见[运行与恢复](runtime.md)。
+
+## 资源
+
+正式主 DAG 默认 `deterministic_serial`、workers=1。并行显式选择 `bounded_parallel` 或 `partitioned_batch`，通过 `--workers N` 设置并发上限；总预算不随 workers 增加。
+
+`--resource-memory-bytes`、`--resource-cpu-slots`、`--resource-scratch-bytes` 设置运行容量。多个独立 CLI 共用资源时，显式提供仓库外 `--resource-state-dir`、进程总额度与等待超时。`run --no-node-timeout` 取消主 DAG 节点累计时长限制；内存、磁盘、进程与单次回调限时继续生效。详见[资源预算](project_resource_budgets.md)。
+
+## Result 报告、比较与导出
 
 ```powershell
-python -m research_pipeline verify --result <Result目录> --result-store <ResultStore> --output <VerificationResult.json> --verification-memory-bytes <字节> --verification-temp-bytes <字节> --verification-process-slots <进程槽> --verification-scratch-root <临时目录> --json
-python -m research_pipeline report --verification-result <VerificationResult.json> --result-store <ResultStore> --output <报告.md> --format markdown --json
-python -m research_pipeline compare --left-verification-result <左.json> --left-result-store <左Store> --right-verification-result <右.json> --right-result-store <右Store> --json
-python -m research_pipeline analysis run --verification-result <VerificationResult.json> --result-store <ResultStore> --request <AnalysisRequest.yaml> --output <AnalysisResult.json> --analysis-memory-bytes <字节> --json
-python -m research_pipeline analysis compare --analysis-result <左AnalysisResult.json> --analysis-result <右AnalysisResult.json> --measure overall.compounded_return --direction higher_is_better --output <AnalysisComparison.json> --json
-python -m research_pipeline export-result --verification-result <VerificationResult.json> --result-store <ResultStore> --output <导出目录> --json
+python -m research_pipeline report --result <Result目录> --output <新报告.md> --format markdown --json
+python -m research_pipeline report --result <Result目录> --output <新报告.json> --format json --json
+python -m research_pipeline report --result <Result目录> --format html --request <报告请求.yaml> --output <新报告.html> --json
+python -m research_pipeline compare --left-result <左Result目录> --right-result <右Result目录> --json
+python -m research_pipeline export-result --result <Result目录> --output <新导出目录> --json
 ```
 
-`--verification-memory-bytes`、`--verification-temp-bytes` 和 `--verification-scratch-root` 用于独立金融 oracle，并作为项目 Verifier 的默认内存、临时空间和工作目录预算。默认内存为 1 GiB、临时盘为 8 GiB；未指定 scratch root 时使用系统临时目录。`--verification-process-slots` 单独约束项目 Verifier 的 Supervisor 与 Worker 树，默认 2，Windows venv 可显式声明 3，见[资源预算](project_resource_budgets.md)。大型 canonical/TCA 使用批次扫描和受限 DuckDB，不按固定 Result 大小跳过；真实额度不足会使 `verify` 执行失败且不产生输出文件。数值复核发现研究错误时则会生成 `status=fail` 的 VerificationResult，命令退出码不替代研究验证状态。
+可选 `--result-store` 显式指定存储根；compare 对应 `--left-result-store/--right-result-store`。结果消费者读取 Result，报告不连接研究数据库。省略 report 的 output 时将正文返回 stdout；文件输出采用 UTF-8 排他原子写入，不覆盖已有文件。JSON 报告版本为 `research-result-report-v1`；HTML 请求格式见[报告说明](qlib-report.md)与[LEAN 报告](lean-execution.md)。
 
-新项目 Result 已包含 Plan 冻结的 Verifier bundle，`verify` 不再要求外部路径；历史 Result 仍可用
-`--verifier-bundle` 提供同一身份的旧闭包。`report --output` 按 UTF-8 原子发布，目标已存在时拒绝
-覆盖；`--format json` 写版本化结构对象，不把 Markdown 正文再包成字符串。省略 `--output` 时保留
-原 stdout 报告行为。
+直接 compare 比较正式指标事实，返回 `formal_metric_facts`；指标定义、单位、样本、状态或声明结论不一致时不给部分 delta。包级语义比较使用 `package compare`，返回 `package_contract_and_metric_facts`，额外检查两侧 metric/claim 合同。包级 report、compare、export-result 同样使用 Result 参数，并显式指定 `--package`。
 
-`report --format html --request <Qlib报告请求.yaml> --output <报告.html>` 从 Result 的模型预测表或日频组合正式表生成离线图形。模型请求显式选择候选、fold、阶段、周期和日期窗口；组合请求以 `qlib-portfolio-report-v1` 绑定六张规范表及组合指标表，展示完整组合窗口的净值、回撤、费用和成交诊断，见 [Qlib 报告](qlib-report.md)。`package report` 使用相同参数和服务。HTML 保留原 VerificationResult 状态，不重新训练、不重跑交易、不修改 Result。
+export-result 复制正式 Result，不重新执行研究。迁移时同时保留 Result 引用的持久输入依赖。
 
-package 也提供绑定 ResearchPackage 的 report、compare 和 export-result 入口。直接 `compare`
-返回 `verified_metric_facts_only`，明确说明未检查 package 合同；它只在已验证的指标单位、方向、
-窗口、样本量、状态和实际 claim 事实一致时输出逐指标 delta。完整研究语义比较使用
-`package compare`，由 `packages.delivery` 唯一检查两侧 metric/claim 合同并返回
-`package_contract_and_verified_metric_facts`。不同 plan 只作为说明，不再单独否决比较。
-`export-result` 只复制并复核已验证 Result；真正重跑仍使用 package → admit → run → verify。
+## 时间序列分析
 
-`analysis run` 只接受 `status=pass` 的 VerificationResult。AnalysisRequest 必须显式绑定
-Result ID、Verification hash、表、日期列、数值列、窗口、值语义、频率、单位、费用口径、
-缺失值、不完整年度政策和聚合集。只有声明为非重叠期间收益的 `simple_return` 或
-`log_return` 才能计算复合收益、几何年化和最大回撤；`level` 只计算水平值与绝对变化，
-`observation` 不套收益公式。`--analysis-memory-bytes` 约束两个投影列的 Arrow 批次预算，
-不是整个 Python 进程的绝对内存上限。
+```powershell
+python -m research_pipeline analysis run --result <Result目录> --request <AnalysisRequest.yaml> --output <新AnalysisResult.json> --analysis-memory-bytes <字节> --json
+python -m research_pipeline analysis compare --analysis-result <左AnalysisResult.json> --analysis-result <右AnalysisResult.json> --measure overall.compounded_return --direction higher_is_better --output <新AnalysisComparison.json> --json
+```
 
-`analysis compare` 至少需要两份规范 AnalysisResult，排名指标和方向必须显式提供。分析规格、
-实际窗口、Arrow 类型、claim policy、claim level 或 claim ceiling 不一致时，输出
-`comparable=false`、稳定原因码和空排名，不生成部分结论。
+AnalysisRequest 显式绑定 Result ID、表列、窗口、值语义、频率、单位、费用口径、缺失值与年度处理政策。只读取日期和值两列；memory 参数约束批次工作集。非重叠期间收益才能计算复合收益、几何年化和回撤；水平值与普通观察不套收益公式。analysis compare 要求同规格、实际窗口和声明事实，条件不一致时返回原因及空排名。
+
+## Workspace
+
+```powershell
+python -m research_pipeline workspace init <新工作区> --from-package <完整研究包> --json
+python -m research_pipeline workspace execute --workspace <工作区> --catalog-lock <Lock目录> --data-db <只读DuckDB> --extension-bundle <算子bundle> --summary
+python -m research_pipeline workspace execute --workspace <工作区> --execution-id <原编号> --catalog-lock <Lock目录> --summary
+python -m research_pipeline workspace dashboard --workspace <工作区> --json
+```
+
+普通 execute 合并准备与准入，同次解析和编译后直接交接，不先完整调用独立 lint。主动诊断仍使用 package lint。成功返回 `status=succeeded`、`execution_status=succeeded`、`result_directory`、`result_id`、`result_store` 和 `report_path`。`command_status` 表示命令是否完成；执行状态需要 Result 已正式发布。报告失败保留执行成功与 Result 位置。
+
+未提供 execution-id 时建立新 execution；指定原编号时沿用原 plan、invocation、Result 和 holdout 记录。详见[模板与接续](workspace-continuation.md)。
 
 ## 运维
 
@@ -154,34 +122,4 @@ python -m research_pipeline doctor --run-root <run目录> --json
 python -m research_pipeline gc --root <工件根> --ttl-seconds 86400 --json
 ```
 
-`gc` 默认只给计划；真正应用需要显式 `--apply`。
-
-## 发现指标与诊断目标
-
-`artifact describe` 从正式 Metric registry 返回可绑定的 `metrics` 与 `schema.result_tables`，包括指标引用、单位、测量语义、结果 schema、字段类型和 `path_prefix`。ResultSpec 使用发现的 producer 端口和结果表声明；字段来源于查询的数据表仍由 Catalog 提供，Catalog 搜索必须显式传入持久 `--catalog-lock`。指标表匹配失败时显示预期节点、端口、schema 和实际表声明。
-
-`doctor --run-root <目录> --json` 未通过时返回非零退出码和 `doctor_failed`，`data.findings` 保留每个目标的状态、错误码、对象、说明与下一步建议。多个同名运行目录用完整路径定位失败对象。
-
-## Workspace 运行与复用
-
-完整合成研究流程见 [Workspace 入门](workspace-quickstart.md)。`workspace run` 自动管理工件、run 和 ResultStore 路径，与普通 `run` 共用复用选项及校验：
-
-- `--reuse-run-root <完成态run目录>` 可重复传入，按显式顺序尝试复用。
-- `--require-reused-node <节点ID>` 可重复传入；必须同时提供完成态来源，任一指定节点不可复用时在计算前拒绝。
-- `--reuse-failed-run-root <失败run目录>` 复用终态失败 run 中通过完整复验的成功 checkpoint，不能与完成态复用组合使用。
-
-`workspace run` 只执行已准入计划；clock 和 root-seed 必须与分配 execution 时一致。完整流程使用 `workspace execute`。
-
-## 状态摘要与完整流程
-
-支持 `--json` 的操作型命令也支持互斥的 `--summary`：前者保留完整 data 并附带 summary，后者只返回摘要、错误和下一步参数。默认文本输出展示主要状态、结果位置和诊断。
-
-`summary.command_status` 只描述命令是否完成；`execution_status` 需要 Runtime 与 Result 封存共同成功；`verification_status` 来自独立验证结论。尚未执行或不适用的状态为 null。单独 verify 的退出码含义保持不变，验证 fail 不能因命令退出 0 被解释为通过。
-
-```powershell
-python -m research_pipeline workspace init <新工作区> --from-package <完整研究包> --json
-python -m research_pipeline workspace execute --workspace <工作区> --catalog-lock <Lock目录> --data-db <只读DuckDB> --extension-bundle <算子bundle> --verifier-bundle <验证bundle> --summary
-python -m research_pipeline package lint --package <研究包> --summary
-```
-
-`workspace execute` 与 RD-Agent 正式包执行共用应用层的 lint、admit、run、恢复、verify、report 编排；时点和种子从包读取，显式值必须一致。未提供 `--execution-id` 时分配新 execution；提供原编号时接续原 plan、invocation 和 Result。失败返回 `failed_stage`、`stages` 与已生成的结果位置。验证 fail 仍生成失败报告，完整流程退出非零。运行不再要求 handoff 输出，`--artifact-root` 继续承担工件和 holdout 持久锚点职责；旧 invocation 保持原身份读取。来源与资源参数见各命令 --help。
+doctor 只读诊断；gc 默认只列清理计划，`--apply` 仅隔离候选。数据库写入和历史研究删除须另行授权，见[运维](operations.md)。

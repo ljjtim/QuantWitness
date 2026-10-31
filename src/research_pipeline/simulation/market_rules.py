@@ -5,24 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Mapping, TYPE_CHECKING
-from zoneinfo import ZoneInfo
+from typing import Mapping
 
-from research_pipeline.domain import MarketRuleSnapshot, Price
-from research_pipeline.domain.trading import InstrumentKey, instrument_key_from_legacy
+from research_pipeline.domain import MarketRuleSnapshot
 from research_pipeline.platform import typed_canonical_hash
 
-from .ledger import SpotLedgerState
-from .orders import Order, SimulationContractError
-
-if TYPE_CHECKING:
-    from .execution_market import OpeningSnapshot
+from .orders import SimulationContractError
 
 ETF_CATEGORIES = frozenset({"equity", "bond", "commodity", "cross_border", "money_market"})
 STOCK_BOARDS = frozenset({"sh_main", "sz_main", "chinext", "star", "bse"})
 LISTING_PHASES = frozenset({"regular", "ipo", "relisting", "delisting"})
-_BOARD_VENUES = {"sh_main": "XSHG", "sz_main": "XSHE", "chinext": "XSHE", "star": "XSHG", "bse": "XBSE"}
-_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def _integer_parameter(parameters: Mapping[str, object], key: str, *, minimum: int = 0) -> int:
@@ -107,8 +99,12 @@ class CashMarketPolicy:
             raise SimulationContractError("现金不足 policy 无效")
         parameters = dict(self.rule.parameters)
         _validate_cash_classification(parameters, market=self.market)
+        required = parameters.get("market_protection_required", False)
+        if type(required) is not bool:
+            raise SimulationContractError("market_protection_required 必须是明确布尔值")
         for side in ("buy", "sell"):
-            self.quantity_grid(side)
+            for order_type in ("market", "limit"):
+                self.quantity_grid(side, order_type=order_type)
         if self.quantity_grid("buy").step != self.lot_size:
             raise SimulationContractError("lot_size 必须等于显式买入数量步长")
 
@@ -130,8 +126,8 @@ class CashMarketPolicy:
             "cash_shortage_policy": self.cash_shortage_policy,
         }
 
-    def quantity_grid(self, side: str) -> CashQuantityGrid:
-        if side not in {"buy", "sell"}:
+    def quantity_grid(self, side: str, *, order_type: str = "limit", include_maximum: bool = True) -> CashQuantityGrid:
+        if side not in {"buy", "sell"} or order_type not in {"market", "limit"}:
             raise SimulationContractError("数量格点方向无效")
         parameters = dict(self.rule.parameters)
         minimum_key, step_key = f"{side}_min_quantity", f"{side}_quantity_step"
@@ -139,7 +135,10 @@ class CashMarketPolicy:
         minimum = _integer_parameter(parameters, minimum_key, minimum=1) if detailed else self.lot_size
         step = _integer_parameter(parameters, step_key, minimum=1) if detailed else self.lot_size
         maximum_key = f"{side}_max_quantity"
-        maximum = _integer_parameter(parameters, maximum_key, minimum=1) if maximum_key in parameters else None
+        if order_type == "market" and f"market_{maximum_key}" in parameters:
+            maximum_key = f"market_{maximum_key}"
+        maximum = (_integer_parameter(parameters, maximum_key, minimum=1)
+                   if include_maximum and maximum_key in parameters else None)
         # 旧整手 policy 延续沪深零股合同；具备细分格点的规则必须显式声明。
         legacy_remainder = (
             not detailed and "stock_board" not in parameters
@@ -162,8 +161,12 @@ def _validate_cash_classification(parameters: Mapping[str, object], *, market: s
             _integer_parameter(parameters, f"{side}_quantity_step", minimum=1)
         if type(parameters.get("sell_remainder_allowed")) is not bool:
             raise SimulationContractError("股票历史规则缺少明确零股政策")
-        if parameters.get("price_limit_mode") not in {"bounded", "unbounded"}:
+        if parameters.get("price_limit_mode") not in {"bounded", "unbounded", "suspended"}:
             raise SimulationContractError("股票历史规则缺少明确价格限制模式")
+        if parameters.get("price_limit_mode") == "suspended" and (
+            parameters.get("paused") is not True or parameters.get("trading_status") != "suspended"
+        ):
+            raise SimulationContractError("停牌价格模式必须绑定停牌事实")
         _require_cash_lifecycle(parameters, trading_date=None)
 
 
@@ -205,58 +208,22 @@ def require_cash_rule_applicable(rule: MarketRuleSnapshot, *, trading_date: date
         _require_cash_lifecycle(parameters, trading_date=trading_date)
 
 
-def _sell_remainder_allowed(order: Order, policy: CashMarketPolicy) -> bool:
-    return policy.quantity_grid("sell").sell_remainder_allowed
-
-
-def _reject_reason(order: Order, policy: CashMarketPolicy, snapshot: OpeningSnapshot, state: SpotLedgerState, execution_price: Price, *, execution_at: datetime) -> str | None:
-    require_cash_rule_applicable(policy.rule, trading_date=execution_at.astimezone(_SHANGHAI).date(), decision_at=execution_at)
-    instrument = order.instrument if isinstance(order.instrument, InstrumentKey) else instrument_key_from_legacy(order.instrument)
+def cash_order_submission_reason(order, policy: CashMarketPolicy) -> str | None:
+    """单笔申报限制在占款前校验；拆单由项目策略决定。"""
+    grid = policy.quantity_grid(order.side, order_type=order.order_type)
+    if grid.maximum is not None and order.quantity > grid.maximum:
+        return "order_quantity_exceeded"
     parameters = dict(policy.rule.parameters)
-    if parameters.get("source_instrument_id", instrument.instrument_id) != instrument.instrument_id:
-        raise SimulationContractError("现货规则标的与订单不一致")
-    board = parameters.get("stock_board")
-    if board is not None and _BOARD_VENUES[board] != instrument.venue:
-        raise SimulationContractError("股票板块与交易所不一致")
-    sellable = next((item.sellable for item in state.positions if item.instrument_hash == snapshot.instrument_hash), 0)
-    grid = policy.quantity_grid(order.side)
-    if (order.side == "sell" and "sell_remainder_allowed" not in parameters
-            and "sell_min_quantity" not in parameters
-            and (instrument.venue not in {"XSHG", "XSHE"}
-                 or order.submitted_at.astimezone(_SHANGHAI).date() < date(2006, 7, 1))
-            and order.quantity % grid.step):
-        return "invalid_lot"
-    if not grid.accepts(order.quantity, sellable=sellable):
-        return "invalid_lot"
-    if snapshot.paused or parameters.get("trading_status") == "suspended":
-        return "suspended"
-    limit_mode = parameters.get("price_limit_mode", "bounded")
-    if limit_mode not in {"bounded", "unbounded"}:
-        raise SimulationContractError("现货价格限制模式无效")
-    if limit_mode == "unbounded" and (snapshot.high_limit is not None or snapshot.low_limit is not None):
-        raise SimulationContractError("无涨跌幅限制的执行快照必须使用空上下界")
-    if limit_mode == "bounded":
-        if snapshot.high_limit is None or snapshot.low_limit is None:
-            raise SimulationContractError("有涨跌幅限制的执行快照缺少上下界")
-        if "price_scale" in parameters and execution_price.scale != parameters["price_scale"]:
-            raise SimulationContractError("现货执行报价精度与历史规则不一致")
-        if "high_limit_units" in parameters and snapshot.high_limit.units != parameters["high_limit_units"]:
-            raise SimulationContractError("现货涨停快照与历史规则不一致")
-        if "low_limit_units" in parameters and snapshot.low_limit.units != parameters["low_limit_units"]:
-            raise SimulationContractError("现货跌停快照与历史规则不一致")
-        if snapshot.low_limit.units > snapshot.high_limit.units:
-            raise SimulationContractError("现货价格限制上下界倒置")
-        if order.side == "buy" and execution_price.units >= snapshot.high_limit.units:
-            return "limit_up_buy_blocked"
-        if order.side == "sell" and execution_price.units <= snapshot.low_limit.units:
-            return "limit_down_sell_blocked"
-    if order.limit_price is not None:
-        if order.side == "buy" and execution_price.units > order.limit_price.units:
-            return "limit_price_not_reached"
-        if order.side == "sell" and execution_price.units < order.limit_price.units:
-            return "limit_price_not_reached"
-    if order.side == "sell" and sellable < order.quantity:
-        return "t1_sell_blocked" if policy.settlement_days == 1 else "insufficient_position"
+    if order.order_type != "market":
+        return None
+    protection = order.protection_price
+    if parameters.get("market_protection_required", False) and protection is None:
+        return "market_protection_required"
+    if protection is not None:
+        scale = parameters.get("price_scale", protection.scale)
+        tick = parameters.get("price_tick_units", 1)
+        if protection.scale != scale or protection.units % tick:
+            return "invalid_market_protection_price"
     return None
 
 

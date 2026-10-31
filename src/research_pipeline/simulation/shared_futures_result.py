@@ -76,7 +76,9 @@ class SharedFuturesResult:
             raise SimulationContractError("共享期货终态仍有资金缺口或订单冻结，不能发布结果")
 
 
-def write_shared_futures_result(result: SharedFuturesResult, root: str | Path) -> dict[str, object]:
+def write_shared_futures_tables(result: SharedFuturesResult, root: str | Path) -> dict[str, object]:
+    """写出九张正式表，返回各表路径、schema 和行数。"""
+
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     tables = {}
@@ -92,6 +94,12 @@ def write_shared_futures_result(result: SharedFuturesResult, root: str | Path) -
         arrow = pa.Table.from_pandas(frame, schema=shared_futures_arrow_schema(name), preserve_index=False, safe=True)
         pq.write_table(arrow, root / f"{name}.parquet")
         tables[name] = {"path": f"{name}.parquet", "schema_id": SHARED_FUTURES_SCHEMA_IDS[name], "rows": len(frame)}
+    return tables
+
+
+def write_shared_futures_result(result: SharedFuturesResult, root: str | Path) -> dict[str, object]:
+    root = Path(root)
+    tables = write_shared_futures_tables(result, root)
     (root / "context.json").write_text(json.dumps(result.context, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
     manifest = {"version": SHARED_FUTURES_RESULT_VERSION, "tables": tables, "context_path": "context.json"}
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")

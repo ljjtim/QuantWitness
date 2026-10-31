@@ -34,15 +34,7 @@ from .project_admission import (
     ProjectOperatorImplementationToken,
     build_admitted_operator_registry,
 )
-from .verifier_bundle import (
-    PROJECT_VERIFIER_ABI_VERSION,
-    PROJECT_VERIFIER_BUNDLE_VERSION,
-    AdmittedProjectVerifier,
-    ProjectVerifierBundleManifest,
-    admit_project_verifier_bundle,
-    compile_project_verifier_bundle,
-    verify_project_verifier_bundle,
-)
+
 from research_pipeline.platform.operator_contracts import (
     OPERATOR_CONTRACT_VERSION,
     OPERATOR_GRAPH_ADMISSION_VERSION,
@@ -73,10 +65,6 @@ __all__ = [
     "OperatorImplementationRef",
     "OperatorNodeRecipe", "OperatorSpec", "ParameterSpec", "ParameterType", "PortSpec",
     "ProjectArtifactCommit", "ProjectArtifactInput", "ProjectDirectoryCommit", "ProjectOperatorBundleManifest",
-    "PROJECT_VERIFIER_ABI_VERSION", "PROJECT_VERIFIER_BUNDLE_VERSION",
-    "AdmittedProjectVerifier", "ProjectVerifierBundleManifest",
-    "admit_project_verifier_bundle", "compile_project_verifier_bundle",
-    "verify_project_verifier_bundle",
     "ProjectOperatorContext", "ProjectOperatorDeclaration", "ProjectOperatorImplementationToken", "ProjectOperatorPermissionProfile",
     "RegisteredExtension", "RegisteredOperatorBinding", "ResourceProfile", "StrategyRole",
     "StrategySelection", "StrategySpec", "TrustedOperatorRegistry",

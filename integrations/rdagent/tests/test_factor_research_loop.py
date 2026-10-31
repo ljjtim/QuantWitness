@@ -13,12 +13,10 @@ def test_three_formal_rounds_and_resume(tmp_path, monkeypatch):
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
     import duckdb
     import sqlite3
-    from test_package_campaign_loop import readonly_sort_factory
     from quantwitness_rdagent import model_client
-    sorts = []
-    monkeypatch.setattr(duckdb, "connect", readonly_sort_factory(duckdb.connect, sorts))
     def forbidden(*args, **kwargs):
         raise AssertionError("固定文本研究不得写SQLite或调用付费模型")
+    monkeypatch.setattr(duckdb, "connect", forbidden)
     monkeypatch.setattr(sqlite3, "connect", forbidden)
     monkeypatch.setattr(model_client, "request_text", forbidden)
     example = Path(__file__).resolve().parents[1] / "examples/factor_research/prepare.py"
@@ -49,7 +47,7 @@ def test_three_formal_rounds_and_resume(tmp_path, monkeypatch):
     assert result["generated_candidates"] == 2
     assert result["paid_model_calls"] == 0 and result["holdout_evaluated"] is False
     assert len({row["metrics"]["result_id"] for row in result["rounds"]}) == 3
-    assert all(row["metrics"]["verification_status"] == "pass" and row["reflection"] for row in result["rounds"])
+    assert all(row["metrics"]["execution_status"] == "succeeded" and row["reflection"] for row in result["rounds"])
     assert len({row["expression"] for row in result["rounds"]}) == 3
     receipts = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((root / "session/calls").glob("*.json"))]
     assert len(receipts) == 7
@@ -60,4 +58,4 @@ def test_three_formal_rounds_and_resume(tmp_path, monkeypatch):
     assert snapshot == {name: (Path(name).stat().st_mtime_ns, Path(name).stat().st_size) for name in snapshot}
     (root / "acceptance.json").write_text(json.dumps({"status": "pass", "outcome": result,
         "resume_preserved_baseline": True, "completed_resume_unchanged": True,
-        "read_only_memory_sorts": len(sorts), "database_file_connections": 0, "paid_model_calls": 0}, ensure_ascii=False, indent=2), encoding="utf-8")
+        "database_file_connections": 0, "paid_model_calls": 0}, ensure_ascii=False, indent=2), encoding="utf-8")

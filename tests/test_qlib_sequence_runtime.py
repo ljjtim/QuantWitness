@@ -202,3 +202,29 @@ def test_gru_sampler_budget_accounts_for_dense_dates_and_securities(tmp_path):
     windows = load_runtime_windows(tmp_path/"split", metadata, PandasFrameBudget(BUDGET), runtime._load_table)
     with pytest.raises(PandasFrameBudgetError, match="GRU训练工作集"):
         sequence_for_candidate(windows, gru_candidate(), PandasFrameBudget(1))
+
+
+def test_runtime_windows_reject_retired_schema_before_loading():
+    from research_pipeline.runtime.model_sequence import load_runtime_windows
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("旧合同不得加载窗口文件")
+    metadata = {"feature_columns": ["x1__w1"], "sequence": {
+        "schema": "research.model-sequence-context.v1", "step_len": 3,
+        "feature_columns": ["x1__w1"], "missing_policy": "complete_window",
+        "candidate_sample_policy": "shared_complete_endpoints",
+    }}
+    with pytest.raises(ModelMainlineError, match="工件合同不受支持"):
+        load_runtime_windows(None, metadata, None, forbidden)
+
+
+def test_runtime_windows_current_metadata_round_trip():
+    from research_pipeline.runtime.model_sequence import load_runtime_windows, window_metadata
+    from test_qlib_sequence_windows import plan
+    windows = plan()
+    metadata = {"sequence": window_metadata(windows), "feature_columns": list(windows.feature_columns)}
+    frames = {"sequence_" + name: getattr(windows, name) for name in ("context", "targets", "members", "exclusions")}
+    restored = load_runtime_windows(None, metadata, None, lambda root, name, **kwargs: (frames[name], None))
+    assert restored.step_len == windows.step_len
+    assert restored.feature_columns == windows.feature_columns
+    for name in ("context", "targets", "members", "exclusions"):
+        pd.testing.assert_frame_equal(getattr(restored, name), getattr(windows, name))

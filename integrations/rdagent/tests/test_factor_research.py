@@ -76,11 +76,13 @@ def test_context_never_exposes_result_paths_or_unverified_metric(tmp_path):
         "diagnostic": "PRIVATE_DIAGNOSTIC"})
     write_json(tmp_path / "rounds/0001/record.json", {"candidate_id": "y", "status": "evaluated",
         "expression": "$close / Ref($close, 3) - 1", "hypothesis": "h", "reason": "r",
-        "metrics": {"value": 0.5, "rows": 3, "result_ref": "PRIVATE_RESULT", "test": 999},
+        "metrics": {"value": 0.5, "rows": 3, "result_ref": "PRIVATE_RESULT", "test": 999,
+                    "limitations": ["lean_next_completed_close_v1"]},
         "reflection": {"reason": "有界开发结论"}})
     result = value.context()
     assert "metrics" not in result["history"][0]
     assert result["history"][1]["metrics"] == {"value": 0.5, "rows": 3}
+    assert result["history"][1]["limitations"] == ["lean_next_completed_close_v1"]
     text = json.dumps(result)
     assert "PRIVATE" not in text and "holdout" not in text and '"test"' not in text
 
@@ -95,7 +97,7 @@ def test_freezing_refuses_changed_confirmation(tmp_path):
 def test_finish_does_not_claim_failed_or_unreflected_round_completed(tmp_path):
     value = session(tmp_path)
     write_json(tmp_path / "rounds/0000/record.json", {"round": 0, "candidate_id": "a", "status": "evaluated",
-        "metrics": {"value": 1, "result_ref": "r", "verification_ref": "v"}})
+        "metrics": {'value': 1, 'result_ref': 'r'}})
     result = value.finish("model_budget")
     assert result["status"] == "incomplete"
     assert result["generated_candidates"] == 0

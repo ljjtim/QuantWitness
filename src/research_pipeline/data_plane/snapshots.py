@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -25,6 +26,25 @@ from .verification_lifecycle import current_artifact_verification
 PHYSICAL_SNAPSHOT_VERSION = "physical-snapshot-v1"
 _PATH_POLICY = PathRolePolicy()
 _MAX_PENDING_BATCHES = 64
+
+
+def _month_groups(column: Any) -> Iterable[tuple[tuple[int, int], Any]]:
+    """按年月给出原行序下标，单月直接复用整块列式数据。"""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    if (pa.types.is_timestamp(column.type) and column.type.tz is not None
+            and column.type.tz.startswith(("+", "-"))):
+        offset = datetime.fromisoformat("2000-01-01T00:00:00" + column.type.tz).utcoffset()
+        # 去掉时区标签后是UTC瞬时值，加固定偏移仅用于计算本地年月。
+        unit = column.type.unit
+        column = pc.add(pc.cast(column, pa.timestamp(unit)), pa.scalar(offset, type=pa.duration(unit)))
+    months = pc.add(pc.multiply(pc.year(column), 12), pc.month(column))
+    keys = sorted(pc.unique(months).to_pylist())
+    for key in keys:
+        year, month = divmod(key - 1, 12)
+        indices = None if len(keys) == 1 else pc.indices_nonzero(pc.equal(months, key))
+        yield (year, month + 1), indices
 
 
 class _SnapshotLayoutWriter:
@@ -83,7 +103,7 @@ class _SnapshotLayoutWriter:
     def _take_buffer(self) -> Any:
         import pyarrow as pa
 
-        table = pa.Table.from_batches(self.pending, schema=self.schema).combine_chunks()
+        table = pa.Table.from_batches(self.pending, schema=self.schema)
         self.pending.clear()
         self.buffer_rows = 0
         self.buffer_bytes = 0
@@ -115,12 +135,9 @@ class _SnapshotLayoutWriter:
             import pyarrow as pa
 
             # 与原月份目录扫描一致：仅按月份聚合，月内维持来源顺序。
-            groups: dict[tuple[int, int], list[int]] = {}
-            for index, value in enumerate(table.column(self.event_time_field).to_pylist()):
-                groups.setdefault((value.year, value.month), []).append(index)
+            groups = [indices for _, indices in _month_groups(table.column(self.event_time_field))]
             if len(groups) > 1:
-                indices = [index for key in sorted(groups) for index in groups[key]]
-                table = table.take(pa.array(indices, type=pa.int64()))
+                table = table.take(pa.concat_arrays(groups))
         self.writer.write_table(table, row_group_size=self.policy.row_group_size)
         self.file_rows += table.num_rows
         self.file_bytes += int(table.nbytes)
@@ -166,16 +183,9 @@ class _SnapshotLayoutWriter:
                 self._flush()
 
     def _write_month_block(self, table: Any) -> None:
-        import pyarrow as pa
-
-        groups: dict[tuple[int, int], list[int]] = {}
-        for index, value in enumerate(table.column(self.event_time_field).to_pylist()):
-            groups.setdefault((value.year, value.month), []).append(index)
-        for key in sorted(groups):
+        for key, indices in _month_groups(table.column(self.event_time_field)):
             # 块内按月份聚合，月内下标保持来源顺序；不随证券切换开新文件。
-            month = table if len(groups) == 1 else table.take(
-                pa.array(groups[key], type=pa.int64())
-            )
+            month = table if indices is None else table.take(indices)
             for batch in month.to_batches():
                 self._feed_partition(batch, f"year={key[0]:04d}/month={key[1]:02d}")
             # 月份副本不跨块积压，使块、月份副本和 writer 输入最多三份共存。
@@ -256,6 +266,7 @@ def publish_parquet_snapshot(
     before_commit: Callable[[], None] | None = None,
     temporal_source: bool = False,
 ) -> Path:
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
     frozen_policy = plan.snapshot_layout
@@ -285,9 +296,9 @@ def publish_parquet_snapshot(
             if batch.num_rows == 0:
                 continue
             rows += int(batch.num_rows)
-            dates = batch.column(plan.event_time_field).to_pylist()
-            batch_minimum = min(dates)
-            batch_maximum = max(dates)
+            bounds = pc.min_max(batch.column(plan.event_time_field))
+            batch_minimum = bounds["min"].as_py()
+            batch_maximum = bounds["max"].as_py()
             if isinstance(plan.query.time_range, InstantRangeV2):
                 timezone_info = plan.query.time_range.start_at.tzinfo
                 if timezone_info is None:  # pragma: no cover - InstantRangeV2 已验证
@@ -336,7 +347,7 @@ def publish_parquet_snapshot(
         manifest: dict[str, Any] = {
             "contract_version": PHYSICAL_SNAPSHOT_VERSION,
             "logical_snapshot_id": logical_snapshot.logical_snapshot_id,
-            "admitted_plan_hash": plan.plan_hash,
+            "admitted_plan_hash": logical_snapshot.admitted_plan_hash,
             "gate_policy_hash": gate_policy_hash(plan),
             "schema_hash": typed_canonical_hash(str(schema)),
             "source_revision_hash": typed_canonical_hash(

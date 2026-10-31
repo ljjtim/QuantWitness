@@ -6,9 +6,8 @@ from research_pipeline.extensions import (
     ProjectOperatorImplementationToken,
     TrustedOperatorRegistry,
 )
-from research_pipeline.data_plane.query_ir import QUERY_IR_V2_VERSION
 from research_pipeline.platform import typed_canonical_hash
-from research_pipeline.platform.operator_contracts import OperatorGraphRecipe
+from research_pipeline.platform.operator_contracts import OperatorGraphRecipe, OperatorNodeRecipe
 from research_pipeline.platform.metric_contracts import MetricReachabilityProof
 
 from .compiler import build_production_registry, compile_production_dag
@@ -24,31 +23,7 @@ from .operator_definitions import build_mainline_operator_manifest
 from .operator_registry_builder import build_operator_registry_from_manifest
 
 
-NODE_IDENTITY_PROJECTION_CURRENT = "node-local-v2"
-NODE_IDENTITY_PROJECTION_LEGACY = "plan-global-v1"
-
-
-def _declared_request_ids(value: object) -> set[str]:
-    """提取声明式参数中显式命名的 request_id，不按算子或项目名称猜测。"""
-
-    found: set[str] = set()
-    if isinstance(value, dict):
-        for name, item in value.items():
-            if (
-                name == "request_id"
-                or name.endswith("_request_id")
-                or name == "request_ids"
-                or name.endswith("_request_ids")
-            ):
-                values = item if isinstance(item, (list, tuple)) else (item,)
-                for request_id in values:
-                    if isinstance(request_id, str) and request_id:
-                        found.add(request_id)
-            found.update(_declared_request_ids(item))
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            found.update(_declared_request_ids(item))
-    return found
+NODE_IDENTITY_PROJECTION_CURRENT = "node-local-v4"
 
 
 def _project_cross_run_cacheable(manifest: object) -> bool:
@@ -64,48 +39,12 @@ def _project_cross_run_cacheable(manifest: object) -> bool:
     )
 
 
-def _legacy_node_configuration_hash(
-    plan: object, node_payload: dict[str, object]
-) -> str:
-    queries = getattr(plan, "queries", ())
-    minute_queries = tuple(
-        query
-        for query in queries
-        if getattr(query, "ir_version", None) == QUERY_IR_V2_VERSION
-    )
-    payload: dict[str, object] = {
-        "node": node_payload,
-        "root_seed": getattr(plan, "root_seed", None),
-        "fixed_clock": getattr(plan, "fixed_clock", None),
-    }
-    metric_proofs = getattr(plan, "metric_proofs", ())
-    if metric_proofs:
-        if not isinstance(metric_proofs, tuple) or any(
-            not isinstance(item, MetricReachabilityProof) for item in metric_proofs
-        ):
-            raise ValueError("operator graph metric reachability proof 无效")
-        payload["metric_proof_digests"] = [
-            item.proof_digest
-            for item in sorted(metric_proofs, key=lambda item: item.metric_ref)
-        ]
-    research_semantics = getattr(plan, "research_semantics", None)
-    if research_semantics is not None:
-        payload["research_semantics_hash"] = research_semantics.semantics_hash
-    if minute_queries:
-        payload["minute_query_identity_hash"] = typed_canonical_hash(
-            [query.to_dict() for query in queries]
-        )
-    return typed_canonical_hash(payload)
-
-
 def _node_configuration_hash(
     plan: object,
-    node_payload: dict[str, object],
+    node_payload: OperatorNodeRecipe,
     *,
     identity_projection: str = NODE_IDENTITY_PROJECTION_CURRENT,
 ) -> str:
-    if identity_projection == NODE_IDENTITY_PROJECTION_LEGACY:
-        return _legacy_node_configuration_hash(plan, node_payload)
     if identity_projection != NODE_IDENTITY_PROJECTION_CURRENT:
         raise ValueError("operator graph 节点身份投影版本不受支持")
     request_ids = tuple(getattr(plan, "request_ids", ()))
@@ -113,7 +52,8 @@ def _node_configuration_hash(
     if len(request_ids) != len(queries) or len(request_ids) != len(set(request_ids)):
         raise ValueError("operator graph 节点身份缺少 request/query 对应关系")
     query_by_id = dict(zip(request_ids, queries, strict=True))
-    consumed_request_ids = tuple(sorted(_declared_request_ids(node_payload)))
+    consumed_request_ids = node_payload.declared_request_ids
+    node_content_hash = node_payload.content_hash
     unknown = tuple(
         request_id
         for request_id in consumed_request_ids
@@ -124,7 +64,7 @@ def _node_configuration_hash(
     return typed_canonical_hash(
         {
             "identity_projection": identity_projection,
-            "node": node_payload,
+            "node_content_hash": node_content_hash,
             "root_seed": getattr(plan, "root_seed", None),
             "fixed_clock": getattr(plan, "fixed_clock", None),
             "requests": [
@@ -209,7 +149,7 @@ def compile_operator_graph_dag(
             cacheable = definition.cache_profile_ref == "cache.semantic-pure.v1"
         configuration_hash = _node_configuration_hash(
             plan,
-            node.to_dict(),
+            node,
             identity_projection=identity_projection,
         )
         if implementation_identity is not None:
@@ -337,7 +277,6 @@ def admitted_implementation_manifest_hash(
 
 __all__ = [
     "NODE_IDENTITY_PROJECTION_CURRENT",
-    "NODE_IDENTITY_PROJECTION_LEGACY",
     "admitted_implementation_manifest_hash",
     "build_mainline_operator_registry",
     "compile_operator_graph_dag",

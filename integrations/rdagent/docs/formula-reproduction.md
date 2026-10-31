@@ -1,6 +1,6 @@
 # 给一篇 PDF，复现其中的因子
 
-你已经选好一篇研报或论文，想知道自己是否真正实现了原文的公式。这条流程把工作拆成“读懂定义、确认歧义、写代码、独立复算”，每一步都留下可追溯材料。
+你已经选好一篇研报或论文，想知道自己是否真正实现了原文的公式。这条流程把工作拆成“读懂定义、确认歧义、写代码、执行研究”，每一步都留下可追溯材料。
 
 **适用目标是明确公式的计算复现。** 要复现论文完整的收益结论，还需要匹配数据、证券池、样本区间、交易假设和评价办法，不能仅凭因子数值正确就宣布整篇论文复现成功。
 
@@ -11,18 +11,18 @@
 | 提取 | 指定包含定义的 PDF 页码 | 原文定位、模型提取草稿 |
 | 确认 | 核对公式、窗口、缺失值、信号时点 | 每项歧义的决定与确认记录 |
 | 编码 | 约束接口、候选范围和调用预算 | 候选源码、生成与修复记录 |
-| 执行 | 提供研究包、数据来源、独立验证器 | 正式输入、计算输出及 Result |
-| 复核 | 检查公式与时点是否符合约定 | VerificationResult、覆盖范围与报告 |
+| 执行 | 提供研究包、数据来源和指标定义 | 正式输入、计算输出及 Result |
+| 算法验收 | 用手算案例检查公式与时点 | 项目算法测试及正式报告 |
 
-**先体验：** [成交量集中度教学案例](../examples/volume_concentration/README.md)自带生成教学 PDF 的脚本、2,400 条合成分钟记录及独立验证器。它以固定响应演示错误候选被拒绝、正确候选通过，不需要付费模型，也不声称复现了外部论文。
+**先体验：** [成交量集中度教学案例](../examples/volume_concentration/README.md)自带生成教学 PDF 的脚本、2,400 条合成分钟记录及手算用例。它以固定响应演示错误候选被拒绝、正确候选通过，不需要付费模型，也不声称复现了外部论文。
 
-**再换成自己的材料：** 下面的命令使用 `spec-extract` 调用模型。你需要先准备好数据和研究包，模型不会从 PDF 自动创造可靠的历史行情或通用验证器。
+**再换成自己的材料：** 下面的命令使用 `spec-extract` 调用模型。你需要先准备好数据和研究包，模型不会从 PDF 自动创造可靠的历史行情或研究定义。
 
 ## 准备材料与环境
 
 使用本集成的完整源码，按[安装说明](../README.md#安装与入口)准备固定版本 RD-Agent 和 Linux 调度环境。可选包要求 Python 3.11 及以上；Windows 模型客户端另装 `live` 依赖，提取 PDF 的环境另装 `materials` 依赖。核心 RP 必须在工作环境可导入。当前已有本机验收，不等同于全新机器安装验收。
 
-开始前需要完整的 ResearchPackage、来源归档、输入快照清单、归档 Catalog Lock、固定 adapter、项目算子声明和独立 Verifier。冻结请求字段见[请求说明](../README.md#冻结请求)。这些输入须按具体研究准备；本入口不会从一篇论文自动补齐研究包与行情。
+开始前需要完整的 ResearchPackage、来源归档、输入快照清单、归档 Catalog Lock、固定 adapter、项目算子声明和正式指标定义。冻结请求字段见[请求说明](../README.md#冻结请求)。这些输入须按具体研究准备；本入口不会从一篇论文自动补齐研究包与行情。
 
 目录、环境、缓存及运行产物放研究磁盘。下文使用 `I:/research` 和 WSL 的 `/mnt/i/research` 示例，替换为自己的位置。模型、接口地址、密钥和代理只保存在仓库外 `.env`，字段见安装说明；不使用 `export` 或 `setx` 配置它们。
 
@@ -48,15 +48,15 @@ python -m quantwitness_rdagent spec-render --draft I:/research/paper-spec/draft.
 
 ## 生成代码与正式评价
 
-通过`request-build`把已确认规格放入一份新请求。先写显式模板，保留输入、独立Verifier、路径、预算和资源；live模板声明模型及接口地址，可省略由确认提供的`formula/interface`。完整公式进入`confirmed_formula`，live提示使用同一正文；固定响应也可绑定确认规格。
+通过`request-build`把已确认规格放入一份新请求。先写显式模板，保留输入、路径、预算和资源；live模板声明模型及接口地址，可省略由确认提供的`formula/interface`。完整公式进入`confirmed_formula`，live提示使用同一正文；固定响应也可绑定确认规格。
 
 ```powershell
 python -m quantwitness_rdagent request-build --template I:/research/request-template.json --draft I:/research/paper-spec/draft.json --materials I:/research/paper-spec/materials.json --decisions I:/research/paper-spec/decisions.json --confirmation I:/research/paper-spec/confirmation.json --output I:/research/request.json
 ```
 
-构建命令重验来源与确认，拒绝覆盖已有输出，不读取模型配置、不启动会话。新请求使用新会话目录；保留旧请求及原始模型响应。模板字段见[请求说明](../README.md#冻结请求)。不同公式通过`formula_evaluation`显式绑定自身Verifier及覆盖表。
+构建命令重验来源与确认，拒绝覆盖已有输出，不读取模型配置、不启动会话。新请求使用新会话目录；保留旧请求及原始模型响应。模板字段见[请求说明](../README.md#冻结请求)。项目自定义指标在 `spec/research.yaml.metric_definitions` 中声明。
 
-公式生成只允许纯计算，固定 adapter、输入、评价范围、资源和 Verifier 不由模型修改。先在覆盖缺失、窗口及交易时序的合成输入中完成正式验证，再按已批准的真实范围执行同一候选源码。真实重算需要相应执行批准，预算不能从历史会话自动延续。
+公式生成只允许纯计算，固定 adapter、输入、评价范围、资源及指标定义不由模型修改。先在覆盖缺失、窗口及交易时序的合成输入中完成算法验收，再按已批准的真实范围执行同一候选源码。真实重算需要相应执行批准，预算不能从历史会话自动延续。
 
 在已配置的 Linux 调度环境执行：
 
@@ -74,7 +74,7 @@ python -m quantwitness_rdagent request-build --template I:/research/request-temp
 "$RD_AGENT_PYTHON" -m quantwitness_rdagent inspect --request /mnt/i/research/request.json
 ```
 
-按 `session/outcome.json` 中的实际路径读取 Result、独立 VerificationResult 和报告。分别确认执行和验证状态；命令返回成功不等于验证通过。`model-calls/call-NNNN.json` 保存原始响应及调用用量，候选目录保存对应源码。保留材料、确认、请求、候选和结果的来源关联。
+按 `session/outcome.json` 中的实际路径读取 Result 和报告，确认 `execution_status=succeeded` 及结果引用。`model-calls/call-NNNN.json` 保存原始响应及调用用量，候选目录保存对应源码。保留材料、确认、请求、候选和结果的来源关联。
 
 恢复有副作用，可能继续未完成计算或使用剩余获准调用预算：
 
@@ -84,9 +84,11 @@ python -m quantwitness_rdagent request-build --template I:/research/request-temp
 
 恢复使用原冻结请求与原会话。已完成响应直接复用，调用预算不重置；`reserved` 或 `failed` 调用先核实状态，不自动重复付费。基础设施故障沿用原候选和 RP 诊断处理。输入、公式、模型身份或资源变更使用新请求，不能编辑历史会话绕过冻结规则。
 
-## 已验收案例
+## 历史验收案例
 
-“待著而救”案例完成指定第4—6页提取、13项人工决定、确认规格生成代码、23项边界样例、合成正式验证及同一源码的真实归档验证。真实输入为2525只证券全集、117个交易 session、69465600行分钟；八节点成功，联合 Verifier 3.0.0 与21类表对照通过。15150条月末记录与固定公式基线的最大绝对差为8.88e-16。
+本节记录既有项目在当时实现和输入下的验收结果。当前研究直接交付 Result，算法正确性通过开发期手算、确定性案例和必要差分测试检查；历史表对照数量及结论保留原验收口径。
+
+“待著而救”案例完成指定第4—6页提取、13项人工决定、确认规格生成代码、23项边界样例、合成正式验证及同一源码的真实归档验证。真实输入为2525只证券全集、117个交易 session、69465600行分钟；八节点成功，21类表对照通过。15150条月末记录与固定公式基线的最大绝对差为8.88e-16。
 
 这条材料到真实结果链使用两次模型调用、23876 token；真实归档回放没有新增模型调用。公开源码不附带研报原件、行情、私密配置及本地 Result，使用者须提供自己的材料与输入。
 
@@ -101,7 +103,7 @@ python -m quantwitness_rdagent request-build --template I:/research/request-temp
 
 ## 跨会话复用编码经验
 
-同一已确认公式可以读取前一完成会话的错误和修复代码。来源仍须保留完整请求、冻结材料、候选源码、正式 Result 和 VerificationResult；导入时复验公式覆盖、Verifier 身份及源码绑定。知识只进入编码提示，每个新会话仍按自身冻结输入执行并验证。
+同一已确认公式可以读取前一完成会话的错误和修复代码。来源仍须保留完整请求、冻结材料、候选源码、正式 Result；导入时核对执行成功、正式 Result、已准入计划及封存源码绑定。知识只进入编码提示，每个新会话仍按自身冻结输入执行。
 
 在请求模板增加：
 
@@ -117,4 +119,4 @@ python -m quantwitness_rdagent request-build --template I:/research/request-temp
 
 运行仍使用原来的 `run/resume/inspect` 命令。当前会话的 `coding-knowledge/input.json` 保存冻结来源，`query-0000.json` 等文件保存各次检索，`knowledge.pkl` 保存上游签名编码知识。已完成调用的实际提示保存在 `model-calls/call-0000.json`。恢复复用冻结知识和调用回执，不重新选择外部经验或重复付费。签名密钥沿用本会话 `rd-signing.key`，不随公开示例发布。
 
-这条路径按相同公式精确检索，复用 CoSTEER 的知识对象、历史查询、演化调度和存取。它不需要 embedding、SQLite 或额外模型调用。编码修复成功只表示该公式实现通过独立验证，不能用来表示收益改善。
+这条路径按相同公式精确检索，复用 CoSTEER 的知识对象、历史查询、演化调度和存取。它不需要 embedding、SQLite 或额外模型调用。编码修复成功表示候选完成正式执行，不能用来表示收益改善。

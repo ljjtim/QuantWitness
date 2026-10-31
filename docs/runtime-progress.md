@@ -29,7 +29,7 @@ python -m research_pipeline inspect --run-root <运行目录> --json
 
 ## 已知限制
 
-ETA 仅估计当前因果批阶段，不含后续输出组装、其他 DAG 节点及独立验证。该区间反映已观察耗时范围，不是置信区间；工作负载变化时可能超出；当前批用时超过已观察最长批时，停止显示ETA，直到下一次完成事件取得新样本。停滞、等待、停止及缺少足够样本时不展示 ETA。DAG 节点的工作量不同，只提供节点吞吐，不推算整次运行 ETA。首个长批返回前保持 `unknown`，不根据心跳猜测内部进度。
+ETA 仅估计当前因果批阶段，不含后续输出组装、其他 DAG 节点及报告。该区间反映已观察耗时范围，不是置信区间；工作负载变化时可能超出；当前批用时超过已观察最长批时，停止显示ETA，直到下一次完成事件取得新样本。停滞、等待、停止及缺少足够样本时不展示 ETA。DAG 节点的工作量不同，只提供节点吞吐，不推算整次运行 ETA。首个长批返回前保持 `unknown`，不根据心跳猜测内部进度。
 
 当前计数不表示数据读取行数、字节数或模型迭代次数。因果批中的读取、计算与核心封口合计为一个完成单位。
 
@@ -41,3 +41,6 @@ python -m pytest research_pipeline/tests/test_runtime_progress.py -q
 ```
 
 该测试文件使用临时 JSON、checkpoint、合成 Parquet 与本地 Worker，覆盖计数、吞吐、ETA、停滞判断、节点切换、失败重试与 checkpoint 复用；不访问数据库。
+
+
+策略仿真准备阶段使用`request_binding`表示冻结行情请求和规则来源的绑定检查；完整范围覆盖由包准入完成，运行不再重复遍历。行情循环仍单独记录`source_next`、`price_conversion`、`pit_binding`、`context_write`及`dispatch_and_session_close`。

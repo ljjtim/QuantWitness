@@ -13,7 +13,7 @@ def build(output, repo=None):
         rp = rp / "research_pipeline"
     sys.path[:0] = [str(rp / "src"), str(rp / "integrations/rdagent/src")]
     from quantwitness_rdagent.contracts import write_json
-    from quantwitness_rdagent.worker import _command
+    from quantwitness_rdagent.worker import find_or_build
     from quantwitness_rdagent.package_campaign import validate_package_campaign
     if root.exists():
         raise ValueError("输出目录必须尚不存在")
@@ -25,8 +25,7 @@ def build(output, repo=None):
     module.build(root / "input", rp, sys.executable, str(rp), str(root / "input"))
     template = json.loads((root / "input/request-template.json").read_text(encoding="utf-8"))
     binding = template["runtime_binding"]
-    built = _command(["operator", "build", "--spec", binding["operator_spec"], "--source", template["editable_source_root"],
-                      "--output", str(root / "operator-bundles"), "--format", "json"])
+    built = find_or_build(root / "operator-build", Path(template["editable_source_root"]), Path(binding["operator_spec"]))
     payload = make_request(root, template, [built["bundle_path"]])
     validate_package_campaign(payload)
     write_json(root / "request.json", payload)
@@ -39,9 +38,7 @@ def make_request(root, template, extension_bundles):
     payload = {"research_kind": "package", "campaign_id": "synthetic_window_research", "session_root": str(root / "session"),
         "source": {"kind": "research_package", "path": template["base_package"],
             "source_archive_root": template["source_archive_root"], "input_snapshot_manifest": template["input_snapshot_manifest"],
-            "catalog_lock": binding["catalog_lock"], "verifier_bundle": template["reference_bundle"],
-            "extension_bundles": extension_bundles, "runtime_options": binding["runtime_options"],
-            "verification_process_slots": 3 if sys.platform == "win32" else 2},
+            "catalog_lock": binding["catalog_lock"], "extension_bundles": extension_bundles, "runtime_options": binding["runtime_options"]},
         "development": {"start": "2025-01-08", "end": "2025-01-10", "as_of": "2025-01-13T16:00:00+08:00"},
         "objective": {"table_id": "daily", "schema_id": "project.volume-concentration.daily.v1", "value_column": "rolling_value",
             "date_column": "session", "availability_column": "available_at", "stage_column": None,

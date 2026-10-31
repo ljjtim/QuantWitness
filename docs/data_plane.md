@@ -4,6 +4,12 @@
 
 ## 参数与行为说明
 
+显式保存输入时，同一数据节点按数据库路径保持只读连接，首个未命中 partial 的请求才打开，已物化快照的恢复不打开源库；成功或失败退出批次后释放。默认直接来源按实际批读取打开只读连接，读取结束关闭；恢复仍复验来源修订。单请求内的 schema、来源版本观察和 Provider 继续共享同一数据库实例。各次查询及其范围、时态选择、质量检查、资源分配和 request 恢复照常执行。因子源连接仍由每个请求的发布租约管理，不在租约外延长生命周期。
+
+快照 writer 直接消费有界分块 Arrow 表，不为 Parquet 编码额外合并整块数据。布局缓冲仍复制输入切片并遵守原行数、字节和批次数上限；月份顺序、行组和全部时态版本保持。发布 manifest 与物化返回值复用已经核对的逻辑快照计划身份，独立计划核对与内容验证照常执行。
+
+直接来源创建时不预扫描完整查询，因此不产生 `data.row_count` 观察表。需要该表的 ResultSpec 应选择显式保存；策略与模型 Result 直接声明自身的正式输出表。
+
 ## 正式因子库发布绑定
 
 当前准入计划使用`admitted-query-plan-v6`，同时冻结快照布局策略。因子源计划的`factor_publication`保存当前表实际引用的
@@ -17,12 +23,12 @@ publication、compute run、Catalog、实现记录、整表内容身份和覆盖
 审计链，再取得真实`compute_code_hash`。审计目录缺失、正文被改、实现摘要与来源/Catalog不
 一致时均拒绝准入；不能用后来提交的SHA替换当时计算身份。
 
-因子准入只短暂取得共享读租约。物化时由`data_plane.service`持有完整租约，依次完成发布身份
+因子准入只短暂取得共享读租约。显式物化时由`data_plane.service`持有完整租约，依次完成发布身份
 复验、只读Arrow查询、提交前源与发布复验、不可变工件提交、引用验证和最终复验，再释放租约。
-研究端不导入因子 Publisher，也不写因子数据库；锁侧文件是发布协议的一部分。
+直接来源每次读取同样在完整共享租约内复验发布身份并读取，结束前再次复验。研究端不导入因子 Publisher，也不写因子数据库；锁侧文件是发布协议的一部分。
 新物化使用含布局声明的 v6 计划，旧计划不能自动采用新布局，必须重新 admit 并建立新 run；历史 Result 与已提交来源快照保持只读。
 
-数据平面是研究主链唯一打开数据库的层。它只接受已经通过 Catalog/PIT 准入的 QueryIR，并把查询结果写成带来源身份的 Arrow/Parquet 工件。
+数据平面是研究主链唯一打开数据库的层。它只接受已经通过 Catalog/PIT 准入的 QueryIR，默认保存来源引用并按需读取有界 Arrow 批次。`run --persist-inputs` 显式保存普通查询结果时，才生成 Arrow/Parquet 输入快照。
 
 ## 输入
 
@@ -36,18 +42,19 @@ publication、compute run、Catalog、实现记录、整表内容身份和覆盖
 
 ## 输出
 
-正式 `materialize_dataset_plan()` 生成 DatasetArtifactRef，再通过 `research-data-bundle-v1`
-和 ExternalArtifact 交给 Runtime；引用包含物理快照、manifest、schema、来源修订和分区。
-日期范围统一使用 `DateRangeV1`。旧整表缓存、共享矩阵、handoff 物化链及兼容别名已删除，
-Runtime 只消费当前列式引用，不重新打开研究数据库。
+默认 `reference_dataset_plan()` 生成 DirectDatasetRef，保存已准入计划、来源位置、schema、来源修订和执行预算。读取和恢复复验同一来源，数据库保持只读，不允许临时落盘。已有归档默认引用原文件。
 
-在正式 Runtime 中，Supervisor 对每个引用首次完整验证后冻结 manifest 与文件列表；同一 run
+显式保存时，`materialize_dataset_plan()` 生成 DatasetArtifactRef；引用包含物理快照、manifest、schema、来源修订和分区。两类引用均通过 `research-data-bundle-v1` 和 ExternalArtifact 交给 Runtime，由数据平面 resolver 提供统一批读取接口。
+日期范围统一使用 `DateRangeV1`。旧整表缓存、共享矩阵、handoff 物化链及兼容别名已删除，
+Runtime 只通过数据平面的列式引用读取数据，不自行查询研究数据库。
+
+对于已物化的文件引用，Supervisor 首次完整验证后冻结 manifest 与文件列表；同一 run
 的后续 resolver 和 iterator 只复用这份内存绑定，并继续执行列、分区、路径和时态选择约束。
 独立调用数据平面验证器时仍逐次完整验证。新的 run 或新的 resume 进程不会继承该内存绑定。
 
 同次目录遍历只解析一次根目录，复用已经核实的祖先路径；每个候选文件仍核对真实位置和类型，随后执行原有内容、schema 与文件集合检查。遍历结束不保存路径信任。小表文件布局与读取 batch 分开控制，具体上限和恢复规则见[快照布局](snapshot-layout.md)。
 
-同一 data 节点的多 request 物化以单个 request 的 DatasetArtifactRef 为最小恢复单位。每项提交后
+同一 data 节点以单个 request 的直接来源引用或 DatasetArtifactRef 为最小恢复单位。每项提交后
 只在 run 内记录 request id、当前 admitted plan hash、引用和只读数据库指纹；恢复时逐项复验，
 不把整个 ResearchPackage 身份复制到每项，也不新增逐 request ExternalArtifact。最终正式
 `research-data-bundle-v1` 的内容与一次性成功执行一致，下游不能读取该 partial index。
@@ -69,7 +76,7 @@ SQL 与逐决策工件统一先选当时可见的最新修订，再判断该修�
 新版已经关闭的有效区间不会回退到旧版继续生效。业务过滤不能掩盖最新修订冲突或有效区间重叠。过滤和排序使用的隐藏字段保留到选择完成，
 返回结果仍只含请求的公开列。
 
-逐决策来源物化保留截至 QueryIR `as_of` 的版本事实，不提前套用结果 `limit`；
+逐决策来源物化保留请求证券和业务日期范围内的完整版本事实，不按 QueryIR `as_of` 删除晚修订版本，也不提前套用结果 `limit`。晚修订版本用于检测公司行动缺史；实际金融值仍按消费时点和请求截止时点选择，不得读取未来值。
 原始事实流仍受 `max_rows/max_bytes` 约束。消费时跨批次、跨文件完成实体选择，
 利用已准入的主键升序前缀和组内查询排序保持稳定结果。
 
@@ -145,3 +152,10 @@ DatasetArtifactRef 或 raw 分钟 PartitionedDatasetRef、明确允许根以及�
 
 归档物化失败保留 request 级诊断，包括本次请求、已打开状态、批准预算和已完成请求列表。
 原恢复入口复验并复用已提交快照，失败请求按原冻结来源继续；不创建另一份恢复索引。
+
+
+快照的月份分组和事件时间边界使用Arrow列运算；单月输入直接复用原数据块，多月按原行序分组。月份布局、行组、来源版本及逐行可见时间门禁保持不变。
+
+发布质量门禁在会话初始化时保存固定的schema、证券集合、完整主键和时间范围。批内PIT、证券范围和主键顺序使用Arrow列运算，Python只读取批次边界及错误位置。分钟仍限定在半开时间范围内且不晚于as-of；时态来源检查完整版本顺序。跨批重复与乱序、空值排末、最早失败行和同行PIT优先的报错顺序保持不变。
+
+批次保活按物理源库路径去重。包含因子发布输入的源库及其别名不参与批次保活，所有连接继续限定在单请求因子读取租约内。

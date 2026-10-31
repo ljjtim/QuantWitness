@@ -6,10 +6,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from research_pipeline.evidence.validity_recompute import (
-    recompute_gate_results,
-    simulation_claim_ceiling_from_facts,
-)
 from research_pipeline.domain import MarketRuleSnapshot
 from research_pipeline.platform import typed_canonical_hash
 from research_pipeline.simulation import (
@@ -19,7 +15,6 @@ from research_pipeline.simulation import (
     SimulationSemanticsV1,
     build_cn_daily_simulation_semantics,
 )
-from validity_facts_support import default_passing_validity_facts
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -108,23 +103,6 @@ def test_close_to_close_account_return_window_is_supported() -> None:
     assert close_to_close.return_start_at == close_to_close.decision_at
     assert close_to_close.return_end_at == close_to_close.valuation_at
 
-    facts = default_passing_validity_facts()
-    session = facts["financial_tradability"]["simulation_semantics"]["blocks"][0]["sessions"][0]
-    session.update({
-        "valuation_at": "2024-01-02T15:00:00+08:00",
-        "return_start_at": "2024-01-01T15:00:00+08:00",
-        "return_end_at": "2024-01-02T15:00:00+08:00",
-    })
-    body = {
-        key: value
-        for key, value in session.items()
-        if key not in {"session", "semantics_hash"}
-    }
-    session["semantics_hash"] = typed_canonical_hash(body)
-    gates = recompute_gate_results(facts, input_hashes=(HASH_A,))
-    assert next(
-        item for item in gates if item.gate_id == "financial.tradability"
-    ).status == "pass"
 
 
 def test_forward_holding_return_window_remains_supported() -> None:
@@ -137,23 +115,6 @@ def test_forward_holding_return_window_remains_supported() -> None:
     )
     assert forward_holding.execution_at < forward_holding.return_start_at
 
-    facts = default_passing_validity_facts()
-    session = facts["financial_tradability"]["simulation_semantics"]["blocks"][0]["sessions"][0]
-    session.update({
-        "valuation_at": "2024-01-02T09:30:00+08:00",
-        "return_start_at": "2024-01-02T15:00:00+08:00",
-        "return_end_at": "2024-01-03T15:00:00+08:00",
-    })
-    body = {
-        key: value
-        for key, value in session.items()
-        if key not in {"session", "semantics_hash"}
-    }
-    session["semantics_hash"] = typed_canonical_hash(body)
-    gates = recompute_gate_results(facts, input_hashes=(HASH_A,))
-    assert next(
-        item for item in gates if item.gate_id == "financial.tradability"
-    ).status == "pass"
 
 
 def test_open_fill_cannot_use_same_day_total_volume() -> None:
@@ -192,87 +153,3 @@ def test_unknown_and_unbounded_have_distinct_claim_ceilings() -> None:
     assert unknown.claim_ceiling == "no_liquidity_claim"
     assert unbounded.claim_ceiling == "research_only"
     assert unknown.semantics_hash != unbounded.semantics_hash
-
-
-def test_verifier_recomputes_semantics_and_capacity_claim_ceiling() -> None:
-    facts = default_passing_validity_facts()
-    gates = recompute_gate_results(facts, input_hashes=(HASH_A,))
-    assert next(item for item in gates if item.gate_id == "financial.tradability").status == "pass"
-    assert simulation_claim_ceiling_from_facts(facts) == "tradable_simulation"
-
-    summary = facts["financial_tradability"]["simulation_semantics"]["summary"]
-    summary["claim_ceiling"] = "research_only"
-    assert simulation_claim_ceiling_from_facts(facts) == "portfolio_simulation_candidate"
-    summary["claim_ceiling"] = "no_liquidity_claim"
-    assert simulation_claim_ceiling_from_facts(facts) == "research_observation"
-
-    session = facts["financial_tradability"]["simulation_semantics"]["blocks"][0]["sessions"][0]
-    session["input_availability"][0]["available_at"] = "2024-01-02T15:00:00+08:00"
-    failed = recompute_gate_results(facts, input_hashes=(HASH_A,))
-    financial = next(item for item in failed if item.gate_id == "financial.tradability")
-    assert financial.status == "fail"
-    assert {item.code for item in financial.findings} >= {"financial.time_semantics_invalid"}
-
-
-def test_verifier_rejects_timezone_and_model_identity_tampering() -> None:
-    timezone_facts = default_passing_validity_facts()
-    session = timezone_facts["financial_tradability"]["simulation_semantics"]["blocks"][0]["sessions"][0]
-    session["signal_at"] = "2024-01-01T07:00:00+00:00"
-    failed = recompute_gate_results(timezone_facts, input_hashes=(HASH_A,))
-    financial = next(item for item in failed if item.gate_id == "financial.tradability")
-    assert {item.code for item in financial.findings} >= {
-        "financial.time_semantics_invalid"
-    }
-
-    model_facts = default_passing_validity_facts()
-    session = model_facts["financial_tradability"]["simulation_semantics"]["blocks"][0]["sessions"][0]
-    session["capacity_model_id"] = "../dynamic-model"
-    failed = recompute_gate_results(model_facts, input_hashes=(HASH_A,))
-    financial = next(item for item in failed if item.gate_id == "financial.tradability")
-    assert {item.code for item in financial.findings} >= {
-        "financial.capacity_semantics_invalid"
-    }
-
-
-def test_verifier_rejects_wrong_session_and_missing_required_inputs() -> None:
-    wrong_session_facts = default_passing_validity_facts()
-    session = wrong_session_facts["financial_tradability"]["simulation_semantics"]["blocks"][0]["sessions"][0]
-    session["session"] = "1999-01-01"
-    failed = recompute_gate_results(wrong_session_facts, input_hashes=(HASH_A,))
-    financial = next(item for item in failed if item.gate_id == "financial.tradability")
-    assert {item.code for item in financial.findings} >= {
-        "financial.time_semantics_invalid"
-    }
-
-    missing_input_facts = default_passing_validity_facts()
-    session = missing_input_facts["financial_tradability"]["simulation_semantics"]["blocks"][0]["sessions"][0]
-    session["capacity_mode"] = "assumed_unbounded"
-    session["capacity_model_id"] = "assumed-unbounded"
-    session["claim_ceiling"] = "research_only"
-    session["input_availability"] = [
-        item
-        for item in session["input_availability"]
-        if item["input_id"] == "market.rule"
-    ]
-    body = {
-        key: value
-        for key, value in session.items()
-        if key not in {"session", "semantics_hash"}
-    }
-    session["semantics_hash"] = typed_canonical_hash(body)
-    summary = missing_input_facts["financial_tradability"]["simulation_semantics"]["summary"]
-    summary.update({
-        "capacity_mode": "assumed_unbounded",
-        "capacity_model_id": "assumed-unbounded",
-        "claim_ceiling": "research_only",
-    })
-    block = missing_input_facts["financial_tradability"]["simulation_semantics"]["blocks"][0]
-    block.update({
-        "capacity_mode": "assumed_unbounded",
-        "claim_ceiling": "research_only",
-    })
-    failed = recompute_gate_results(missing_input_facts, input_hashes=(HASH_A,))
-    financial = next(item for item in failed if item.gate_id == "financial.tradability")
-    assert {item.code for item in financial.findings} >= {
-        "financial.time_semantics_invalid"
-    }

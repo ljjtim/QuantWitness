@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass, replace
+from copy import copy
 from datetime import datetime
 from pathlib import Path
 import shutil
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Mapping
 
 from research_pipeline.data_plane.admission import AdmittedQueryPlan
@@ -20,6 +22,7 @@ from research_pipeline.data_plane.execution_budget import (
 )
 from research_pipeline.data_plane.service import load_plan, save_plan
 from research_pipeline.platform.claim_levels import weakest_claim_level
+from research_pipeline.platform.lean_runtime import validate_lean_runtime
 from research_pipeline.packages.plan_contracts import OperatorGraphPlan
 from research_pipeline.packages.project_causal_admission import (
     project_causal_request_ids,
@@ -34,7 +37,6 @@ from research_pipeline.results import ResultSpec
 from research_pipeline.runtime.graph import DagSpec
 from research_pipeline.runtime.operator_registry import (
     NODE_IDENTITY_PROJECTION_CURRENT,
-    NODE_IDENTITY_PROJECTION_LEGACY,
     build_mainline_operator_registry,
     compile_operator_graph_dag,
 )
@@ -42,18 +44,39 @@ from research_pipeline.extensions import (
     AdmittedProjectOperatorRegistry,
     build_admitted_operator_registry,
     verify_project_operator_bundle,
-    verify_project_verifier_bundle,
 )
 
 
 PLAN_MANIFEST = "research-plan.json"
 QUERY_DIRECTORY = "queries"
 DAG_PLAN = "dag.json"
-OPERATOR_GRAPH_PLAN_VERSION = "research-cli-operator-graph-plan-v5"
-_LEGACY_OPERATOR_GRAPH_PLAN_VERSION = "research-cli-operator-graph-plan-v4"
+OPERATOR_GRAPH_PLAN_VERSION = "research-cli-operator-graph-plan-v8"
 OPERATOR_GRAPH_PLAN = "operator-graph-plan.json"
 PROJECT_BUNDLE_DIRECTORY = "extensions"
-VERIFIER_BUNDLE_DIRECTORY = "verifiers"
+
+
+@dataclass(frozen=True)
+class PreparedResearchPlan:
+    """同次准入直接交给执行的对象；持久目录仍用于独立运行与恢复。"""
+
+    directory: Path
+    manifest: Mapping[str, object]
+    admitted: Mapping[str, AdmittedQueryPlan]
+    dag: DagSpec
+    recipe: OperatorGraphRecipe
+    registry: object
+    minute_scope_inputs: Mapping[str, object]
+
+
+def _requires_causal_catalog(recipe) -> bool:
+    """同日来源恢复时使用原可见性合同，不跟随当前默认目录变化。"""
+    return any("strategy_declaration" in node.parameters and (
+        node.parameters.get("frequency") == "1d" or "open_request_id" in node.parameters)
+        for node in recipe.nodes) or any(
+        (source.get("daily_time") or {}).get("rule") in {"session_open", "business_effective_date"}
+        for node in recipe.nodes
+        for source in node.parameters.get("causal_plan", {}).get("sources", ())
+    )
 
 
 def publish_operator_graph_research_plan(
@@ -68,10 +91,19 @@ def publish_operator_graph_research_plan(
     execution_estimates: Mapping[str, ExecutionEstimate],
     dag: DagSpec,
     registry=None,
-    verifier=None,
     input_snapshot_manifest: Mapping[str, object] | None = None,
-) -> Path:
+    catalog=None,
+    minute_scope_inputs=None,
+    metric_definitions=(),
+) -> PreparedResearchPlan:
     """原子发布声明式多查询候选计划；G 阶段不执行它。"""
+    scope_inputs = minute_scope_inputs or {}
+    scope_references = tuple(node.parameters["minute_scope"] for node in plan.recipe.nodes
+                             if "minute_scope" in node.parameters)
+    if set(scope_inputs) != {reference["name"] for reference in scope_references} or any(
+        scope_inputs[reference["name"]].reference != reference for reference in scope_references
+    ):
+        raise ValueError("计划发布的分钟输入与节点声明不一致")
     target = Path(destination).resolve()
     if target.exists():
         raise ValueError("plan 输出目录必须不存在")
@@ -79,7 +111,26 @@ def publish_operator_graph_research_plan(
     if temporary.exists():
         raise ValueError("plan 临时目录已存在")
     query_root = temporary / QUERY_DIRECTORY
-    validate_project_causal_admitted_sources(plan.recipe, admitted_plans)
+    if package_id != f"research_package_{plan.package_hash[:16]}":
+        raise ValueError("operator graph package_id 与 package_hash 不一致")
+    identity = _validate_research_identity(
+        dict(research_identity), package_hash=plan.package_hash, package_plan_hash=plan.plan_hash,
+    )
+    for field, contract in (("metric_contract", metric_contract), ("claim_contract", claim_contract)):
+        contract_payload = dict(contract)
+        contract_hash = contract_payload.pop("contract_hash", None)
+        if contract_hash != typed_canonical_hash(contract_payload):
+            raise ValueError(f"operator graph {field} 内容 hash 不一致")
+        if identity[f"{field}_hash"] != contract_hash:
+            raise ValueError("operator graph research identity 合同 hash 不一致")
+    if set(plan.request_ids) != set(admitted_plans):
+        raise ValueError("operator graph QueryIR 集合不一致")
+    if any(query.to_dict() != admitted_plans[key].query.to_dict()
+           for key, query in zip(plan.request_ids, plan.queries, strict=True)):
+        raise ValueError("operator graph QueryIR 内容不一致")
+    validate_project_causal_admitted_sources(plan.recipe, admitted_plans, catalog=catalog)
+    from research_pipeline.packages.project_strategy_admission import validate_daily_strategy_plans
+    validate_daily_strategy_plans(plan.recipe, admitted_plans, catalog=catalog)
     admitted_hashes = {key: admitted_plans[key].plan_hash for key in sorted(admitted_plans)}
     if set(execution_estimates) != set(admitted_plans):
         raise ValueError("ExecutionEstimate 与 admitted request 集合不闭合")
@@ -155,6 +206,7 @@ def publish_operator_graph_research_plan(
         "result_spec": plan.result_spec.to_dict(),
         "admitted_plan_hashes": admitted_hashes,
         "execution_estimates": execution_estimate_payload,
+        "metric_definitions": [item.to_dict() for item in metric_definitions],
         "formal_ancestor_node_ids": list(formal_ancestor_node_ids),
         "consumed_request_ids": list(consumed_request_ids),
         "input_claim_ceilings": input_claim_ceilings,
@@ -162,8 +214,9 @@ def publish_operator_graph_research_plan(
         "node_identity_projection": NODE_IDENTITY_PROJECTION_CURRENT,
     }
     if input_snapshot_manifest is not None:
-        payload["contract_version"] = "research-cli-operator-graph-plan-v6"
         payload["input_snapshot_manifest"] = dict(input_snapshot_manifest)
+    if _requires_causal_catalog(plan.recipe):
+        payload["causal_catalog_lock"] = dict(catalog.payload)
     if plan.research_semantics is not None:
         payload["research_semantics"] = plan.research_semantics.to_dict()
     if plan.project_bundle_hashes:
@@ -172,13 +225,15 @@ def publish_operator_graph_research_plan(
             "bundle_hashes": list(plan.project_bundle_hashes),
             "implementation_hashes": dict(plan.project_implementation_hashes),
         }
-    if plan.verifier_identity is not None:
-        payload["verifier_admission"] = dict(plan.verifier_identity)
     _validate_admitted_query_facts(payload, admitted_plans)
     manifest = {**payload, "manifest_hash": typed_canonical_hash(payload)}
     graph_plan = {**plan.payload(), "plan_hash": plan.plan_hash}
     try:
         temporary.mkdir(parents=True)
+        from research_pipeline.domain.minute_scope_input import copy_minute_scope_input
+
+        for source in scope_inputs.values():
+            copy_minute_scope_input(source, temporary)
         query_root.mkdir()
         for request_id, admitted in sorted(admitted_plans.items()):
             if not request_id.replace("_", "").isalnum():
@@ -191,22 +246,26 @@ def publish_operator_graph_research_plan(
             plan=plan,
             registry=registry,
         )
-        _copy_verifier_bundle_closure(
-            target=temporary,
-            plan=plan,
-            verifier=verifier,
-        )
         (temporary / PLAN_MANIFEST).write_text(canonical_json(manifest), encoding="utf-8")
-        load_operator_graph_research_plan(target=temporary)
         os.replace(temporary, target)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
-    return target
+    execution_registry = registry
+    if isinstance(registry, AdmittedProjectOperatorRegistry):
+        execution_registry = copy(registry)
+        execution_registry.bundle_paths = MappingProxyType({
+            key: target / PROJECT_BUNDLE_DIRECTORY / registry.project_token_by_implementation(key).manifest.bundle_hash
+            for key in registry.bundle_paths
+        })
+    return PreparedResearchPlan(
+        target, manifest, dict(admitted_plans), dag, plan.recipe, execution_registry,
+        {name: replace(scope, root=target) for name, scope in scope_inputs.items()},
+    )
 
 
 def load_operator_graph_research_plan(
-    *, target: str | Path,
+    *, target: str | Path, loaded_minute_scopes: dict | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, AdmittedQueryPlan],
@@ -222,19 +281,19 @@ def load_operator_graph_research_plan(
         "research_identity", "metric_contract", "claim_contract", "admitted_plan_hashes", "manifest_hash",
         "formal_ancestor_node_ids", "consumed_request_ids", "input_claim_ceilings",
         "effective_claim_level",
-        "execution_estimates",
+        "execution_estimates", "metric_definitions",
     }
     if not isinstance(manifest, dict):
         raise ValueError("operator graph plan manifest schema 无效")
     version = manifest.get("contract_version")
-    if version == "research-cli-operator-graph-plan-v6":
-        expected_base.update({"node_identity_projection", "input_snapshot_manifest"})
-        if not isinstance(manifest.get("input_snapshot_manifest"), dict):
-            raise ValueError("封存来源计划缺少冻结清单")
-    elif version == OPERATOR_GRAPH_PLAN_VERSION:
-        expected_base.add("node_identity_projection")
-    elif version != _LEGACY_OPERATOR_GRAPH_PLAN_VERSION:
+    if version != OPERATOR_GRAPH_PLAN_VERSION:
         raise ValueError("operator graph plan manifest hash 或版本无效")
+    expected_base.add("node_identity_projection")
+    for name in ("input_snapshot_manifest", "causal_catalog_lock"):
+        if name in manifest:
+            expected_base.add(name)
+            if not isinstance(manifest[name], dict):
+                raise ValueError(f"计划 {name} 必须是映射")
     expected_v2 = {
         *expected_base,
         "metric_proofs", "result_spec",
@@ -244,10 +303,10 @@ def load_operator_graph_research_plan(
     has_project_admission = "project_admission" in manifest
     if has_project_admission:
         expected.add("project_admission")
-    if "verifier_admission" in manifest:
-        expected.add("verifier_admission")
     if set(manifest) != expected:
         raise ValueError("operator graph plan manifest schema 无效")
+    if manifest["node_identity_projection"] != NODE_IDENTITY_PROJECTION_CURRENT:
+        raise ValueError("operator graph node identity projection 版本无效")
     manifest_hash = manifest.pop("manifest_hash")
     if (
         manifest["plan_kind"] != "operator_graph_research_run_candidate"
@@ -258,8 +317,6 @@ def load_operator_graph_research_plan(
     graph_plan = json.loads((root / OPERATOR_GRAPH_PLAN).read_text(encoding="utf-8"))
     if not isinstance(graph_plan, dict) or graph_plan.pop("plan_hash", None) != manifest["package_plan_hash"]:
         raise ValueError("operator graph package plan 身份无效")
-    if typed_canonical_hash(graph_plan) != manifest["package_plan_hash"]:
-        raise ValueError("operator graph package plan 内容 hash 不一致")
     if (
         graph_plan.get("package_hash") != manifest["package_hash"]
         or graph_plan.get("research_id") != manifest["research_id"]
@@ -272,13 +329,6 @@ def load_operator_graph_research_plan(
     graph_project_admission = graph_plan.get("project_admission")
     if graph_project_admission != manifest.get("project_admission"):
         raise ValueError("operator graph 项目准入身份与 manifest 不一致")
-    graph_verifier_admission = graph_plan.get("verifier_admission")
-    if graph_verifier_admission != manifest.get("verifier_admission"):
-        raise ValueError("operator graph Verifier 准入身份与 manifest 不一致")
-    _verify_plan_verifier_bundle(
-        root=root,
-        verifier_admission=graph_verifier_admission,
-    )
     expected_package_id = f"research_package_{str(manifest['package_hash'])[:16]}"
     if manifest["package_id"] != expected_package_id:
         raise ValueError("operator graph package_id 与 package_hash 不一致")
@@ -291,20 +341,7 @@ def load_operator_graph_research_plan(
     }
     if any(plans[key].plan_hash != raw_hashes[key] for key in plans):
         raise ValueError("operator graph admitted plan hash 不一致")
-    estimates = load_execution_estimates(
-        manifest.get("execution_estimates"),
-        request_ids=tuple(sorted(plans)),
-    )
-    for request_id, estimate in estimates.items():
-        plan = plans[request_id]
-        if (
-            estimate.object_name != plan.object_name
-            or estimate.query_scope_hash
-            != typed_canonical_hash(plan.query.to_dict())
-        ):
-            raise ValueError(
-                f"request={request_id} ExecutionEstimate 与 QueryPlan 不一致"
-            )
+    estimates = _validate_admitted_query_facts(manifest, plans)
     graph_requests = graph_plan.get("requests")
     if (
         not isinstance(graph_requests, list)
@@ -328,8 +365,20 @@ def load_operator_graph_research_plan(
     recipe_payload = dict(raw_recipe)
     declared_recipe_hash = recipe_payload.pop("recipe_hash", None)
     recipe = OperatorGraphRecipe.from_dict(recipe_payload)
+    from research_pipeline.packages.minute_scope_admission import load_graph_minute_scopes
+
+    scope_inputs = load_graph_minute_scopes(root, (node.parameters for node in recipe.nodes))
+    if loaded_minute_scopes is not None:
+        loaded_minute_scopes.update(scope_inputs)
     if recipe.recipe_hash != declared_recipe_hash:
         raise ValueError("operator graph recipe hash 不一致")
+    plan_identity = {**graph_plan, "recipe": recipe.recipe_hash,
+                     "identity_projection": "validated-recipe-ref-v1"}
+    if typed_canonical_hash(plan_identity) != manifest["package_plan_hash"]:
+        raise ValueError("operator graph package plan 内容 hash 不一致")
+    for node in recipe.nodes:
+        if node.parameters.get("execution_backend") == "lean":
+            validate_lean_runtime(node.parameters.get("lean_runtime"), verify_files=True)
     admission_nodes = tuple(
         node
         for node in recipe.nodes
@@ -441,20 +490,19 @@ def load_operator_graph_research_plan(
         admission=registry,
         fixed_clock=datetime.fromisoformat(graph_plan["fixed_clock"]),
     )
-    validate_project_causal_admitted_sources(recipe, plans)
-    if isinstance(graph_project_admission, Mapping):
-        actual_bundle_hashes = tuple(getattr(registry, "bundle_hashes", ()))
-        actual_identities = getattr(registry, "implementation_identities", {})
-        actual_implementation_hashes = {
-            key: typed_canonical_hash(dict(value)) for key, value in actual_identities.items()
-        }
-        if (
-            list(actual_bundle_hashes) != graph_project_admission.get("bundle_hashes")
-            or actual_implementation_hashes != graph_project_admission.get("implementation_hashes")
-        ):
-            raise ValueError("operator graph extension bundle 与计划身份不一致")
-    elif getattr(registry, "bundle_hashes", ()):
-        raise ValueError("核心计划不得注入项目 extension bundle")
+    causal_catalog = None
+    if _requires_causal_catalog(recipe):
+        from research_pipeline.catalog import CompiledCatalog
+
+        locked_catalog = manifest.get("causal_catalog_lock")
+        if not isinstance(locked_catalog, dict):
+            raise ValueError("日期 causal 计划缺少冻结 Catalog Lock")
+        causal_catalog = CompiledCatalog.from_payload(locked_catalog)
+    elif "causal_catalog_lock" in manifest:
+        raise ValueError("计划没有消费已封存的日期 causal Catalog Lock")
+    validate_project_causal_admitted_sources(recipe, plans, catalog=causal_catalog)
+    from research_pipeline.packages.project_strategy_admission import validate_daily_strategy_plans
+    validate_daily_strategy_plans(recipe, plans, catalog=causal_catalog)
     expected_dag = compile_operator_graph_dag(
         SimpleNamespace(
             recipe=recipe,
@@ -472,11 +520,7 @@ def load_operator_graph_research_plan(
             research_semantics=research_semantics,
         ),
         registry,
-        identity_projection=(
-            str(manifest["node_identity_projection"])
-            if version in {OPERATOR_GRAPH_PLAN_VERSION, "research-cli-operator-graph-plan-v6"}
-            else NODE_IDENTITY_PROJECTION_LEGACY
-        ),
+        identity_projection=str(manifest["node_identity_projection"]),
     )
     if expected_dag.to_dict() != dag.to_dict():
         raise ValueError("operator graph DAG 不是可信 recipe 的唯一编译结果")
@@ -498,12 +542,13 @@ def load_operator_graph_research_plan(
         or identity.get("claim_contract_hash") != manifest["claim_contract"].get("contract_hash")
     ):
         raise ValueError("operator graph research identity 合同 hash 不一致")
-    _validate_admitted_query_facts(manifest, plans)
     return manifest, plans, dag, recipe, registry
 
 
-def _validate_admitted_query_facts(manifest, admitted_plans) -> None:
-    """独有准入检查属于计划边界，不再另写重复证明。"""
+def _validate_admitted_query_facts(
+    manifest, admitted_plans,
+) -> dict[str, ExecutionEstimate]:
+    """校验准入事实，返回本次调用已解析的估算供预算检查复用。"""
     from research_pipeline.data_plane import resolve_as_of_cutoff
 
     clock = datetime.fromisoformat(manifest["fixed_clock"])
@@ -522,6 +567,7 @@ def _validate_admitted_query_facts(manifest, admitted_plans) -> None:
         estimate = estimates[request_id]
         if estimate.object_name != plan.object_name or estimate.query_scope_hash != typed_canonical_hash(plan.query.to_dict()):
             raise ValueError(f"平台准入 ExecutionEstimate 与 QueryPlan 不一致: {request_id}")
+    return estimates
 
 
 def _validate_execution_estimate_budget(
@@ -658,59 +704,10 @@ def _copy_project_bundle_closure(
             raise ValueError("Plan 内项目 bundle 与 project_id 不一致")
 
 
-def _copy_verifier_bundle_closure(*, target: Path, plan: OperatorGraphPlan, verifier) -> None:
-    if plan.verifier_identity is None:
-        if verifier is not None:
-            raise ValueError("未冻结 Verifier identity 的计划不得携带 Verifier bundle")
-        return
-    if verifier is None:
-        raise ValueError("计划声明了 Verifier identity 但未提供 bundle")
-    manifest = verify_project_verifier_bundle(verifier.path)
-    if manifest.identity() != dict(plan.verifier_identity):
-        raise ValueError("计划与 Verifier bundle 身份不一致")
-    verifier_root = target / VERIFIER_BUNDLE_DIRECTORY
-    verifier_root.mkdir()
-    destination = verifier_root / manifest.bundle_hash
-    shutil.copytree(verifier.path, destination)
-    verify_project_verifier_bundle(destination)
 
 
-def _verify_plan_verifier_bundle(*, root: Path, verifier_admission: object) -> None:
-    verifier_root = root / VERIFIER_BUNDLE_DIRECTORY
-    if verifier_admission is None:
-        if verifier_root.exists():
-            raise ValueError("核心计划不得包含未声明的 Verifier bundle")
-        return
-    if not isinstance(verifier_admission, Mapping):
-        raise ValueError("operator graph Verifier 准入 schema 无效")
-    bundle_hash = verifier_admission.get("bundle_hash")
-    if (
-        not isinstance(bundle_hash, str)
-        or not verifier_root.is_dir()
-        or sorted(item.name for item in verifier_root.iterdir()) != [bundle_hash]
-    ):
-        raise ValueError("Plan 内 Verifier bundle 闭包无效")
-    manifest = verify_project_verifier_bundle(verifier_root / bundle_hash)
-    if manifest.identity() != dict(verifier_admission):
-        raise ValueError("Plan 内 Verifier bundle 与准入身份不一致")
 
 
-def resolve_plan_verifier_bundle(
-    target: str | Path,
-    verifier_admission: object,
-) -> Path | None:
-    """从已准入 Plan 中解析唯一、已复验的项目 Verifier bundle。"""
-
-    root = Path(target).resolve(strict=True)
-    _verify_plan_verifier_bundle(
-        root=root,
-        verifier_admission=verifier_admission,
-    )
-    if verifier_admission is None:
-        return None
-    if not isinstance(verifier_admission, Mapping):
-        raise ValueError("operator graph Verifier 准入 schema 无效")
-    return root / VERIFIER_BUNDLE_DIRECTORY / str(verifier_admission["bundle_hash"])
 
 
 def _load_plan_operator_registry(
@@ -800,5 +797,4 @@ def _validate_research_identity(
 __all__ = [
     "PLAN_MANIFEST", "load_operator_graph_research_plan",
     "publish_operator_graph_research_plan",
-    "resolve_plan_verifier_bundle",
 ]

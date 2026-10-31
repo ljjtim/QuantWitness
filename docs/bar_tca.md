@@ -49,27 +49,19 @@ Bar TCA 是正式仿真成交的诊断归因，不是第二个成交引擎。它
 无可见容量时，`liquidity_attribution_status=not_computable`，participation、modeled spread 和
 modeled impact 为 null，不能用 0 冒充已计算；结论上限自动收紧到 `analysis_only`。
 
-## 独立复核
+## 正式结果与开发验收
 
-```powershell
-python research_pipeline/tools/bar_tca_oracle.py `
-  --artifact-root <simulation-tca-dir> `
-  --input-json <simulation-tca-dir>/oracle-input.json `
-  --output <oracle-result.json>
-```
+TCA 消费规范订单、成交、持仓、现金、费用、估值，以及声明的基准和政策，不二次撮合。ResultSpec 选择正式表，报告直接读取 Result。生产路径检查 source fill 对应关系、金额单位及费用口径。
 
-oracle 不导入生产 TCA 实现。它从正式 orders/fills、决策基准、policy 和 ledger 身份独立重建逐笔
-观察实现差额，并比较 source fill 集合、数量、价格、费用及汇总。新增、删除、重复或修改正式成交映射
-都会失败。
+日频与分钟 TCA 工件保存 orders、fills、daily、research 四张正式表，以及 manifest.json 和 COMMITTED。清单记录政策、输入和来源身份、各表行数与内容摘要。Result 随正式表封存仿真及 TCA 的清单和提交标记；决策基准及成交观察在生产归因时消费。
 
-进入 Evidence v3 的 Bar TCA 结果必须在同一 ResultSpec 中同时公开 canonical
-`orders/fills/positions/cash/costs/valuations` 六表和 TCA `orders/fills/daily/research` 四表。
-独立 verifier 从显式的自包含 ResultStore 读取实际 Parquet、manifest、policy 和 oracle input，
-先复验字节、Arrow schema、行数与 lineage，再独立检查现金、持仓、费用、NAV
-守恒及 source fill 一一对应。只写一个形似 SHA-256 的值、`reconciliation_delta_units=0` 或
-`status=pass` 都不能通过。
+开发用例用手算订单和成交检查滑点、实施差额、参与率与聚合，覆盖零成交、部分成交、缺失基准和不同价格精度。核对失败修对应生产实现，不以状态字符串代替数值案例。
+
+项目通过 ResultSpec 选择账本与 TCA 表，按实际使用范围保留订单、成交、持仓、现金、费用、
+估值和成本归因。开发测试将 source fill、数量、价格、费用与手算对照，覆盖新增、删除、
+重复和错误关联。研究报告使用实际生产输出及声明的单位和样本范围。
 
 ## 能力边界
 
-本次修复关闭了第二套成交事实与期货开盘价回退，但没有提供 Tick/LOB、日内容量预测、实盘路由或
-外部信任域验收。能力状态仍以 `capabilities.json` 为准，不得从本地测试外推为 sealed TCA。
+当前范围不包含 Tick/LOB、日内容量预测或实盘路由。能力状态以 `capabilities.json` 为准，
+本地开发测试不构成全市场或实盘成交认证。

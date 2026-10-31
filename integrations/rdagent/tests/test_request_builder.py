@@ -168,20 +168,3 @@ def test_build_accepts_matching_formula_and_interface(setup):
     write_json(paths["template"], payload)
     payload["confirmed_formula"] = {key: payload["code_generation"][key] for key in ("formula", "interface")}
     assert request_builder.build_request(**paths).payload == payload
-
-
-@pytest.mark.parametrize("valid", [True, False])
-def test_build_preserves_and_validates_formula_evaluation(setup, valid):
-    paths, payload, _, _ = setup
-    evaluation = {"verifier_id": "project.volume_concentration", "verifier_version": "1.0.0",
-                  "coverage_schema_id": "project.volume_concentration.coverage.v1"}
-    if not valid:
-        del evaluation["verifier_id"]
-    payload["formula_evaluation"] = evaluation
-    write_json(paths["template"], payload)
-    if valid:
-        assert request_builder.build_request(**paths).payload["formula_evaluation"] == evaluation
-    else:
-        with pytest.raises(ValueError, match="formula_evaluation"):
-            request_builder.build_request(**paths)
-        assert not paths["output"].exists()

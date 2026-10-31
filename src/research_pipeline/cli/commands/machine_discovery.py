@@ -79,6 +79,7 @@ def _project_operator_bundle(args) -> dict[str, object]:
             reuse_scope=declaration.reuse_scope,
             parameter_preflight_module=declaration.parameter_preflight_module,
             parameter_preflight_function=declaration.parameter_preflight_function,
+            parameter_preflight_parameters=declaration.parameter_preflight_parameters,
         )
 
     if args.operator_command == "validate":

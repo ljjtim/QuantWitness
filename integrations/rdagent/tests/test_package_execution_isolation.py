@@ -12,11 +12,7 @@ from quantwitness_rdagent import package_execution, worker
 
 
 def arguments(root):
-    return {"root": root, "workspace_id": "campaign-candidate", "allocation_label": "candidate",
-            "base_package": str(root / "base"), "source_archive_root": str(root / "archive"),
-            "input_snapshot_manifest": str(root / "snapshot.json"), "verifier_bundle": str(root / "verifier"),
-            "binding": {"catalog_lock": str(root / "catalog"), "extension_bundles": [], "runtime_options": {},
-                        "verification_process_slots": 2}}
+    return {'root': root, 'workspace_id': 'campaign-candidate', 'allocation_label': 'candidate', 'base_package': str(root / 'base'), 'source_archive_root': str(root / 'archive'), 'input_snapshot_manifest': str(root / 'snapshot.json'), 'binding': {'catalog_lock': str(root / 'catalog'), 'extension_bundles': [], 'runtime_options': {}}}
 
 
 def test_public_process_receives_only_execution_inputs(tmp_path, monkeypatch):
@@ -38,7 +34,7 @@ def test_public_process_receives_only_execution_inputs(tmp_path, monkeypatch):
     assert options["env"]["MPLCONFIGDIR"] == str(tmp_path / "mpl")
     assert options["env"]["XDG_CACHE_HOME"] == str(tmp_path / "cache")
     assert "private-" not in options["input"]
-    assert json.loads(options["input"])["arguments"]["binding"]["verification_process_slots"] == 2
+    assert set(json.loads(options["input"])["arguments"]["binding"]) == {"catalog_lock", "extension_bundles", "runtime_options"}
 
 
 def test_formal_interruption_survives_process_boundary(tmp_path, monkeypatch):
@@ -108,9 +104,7 @@ def replacement(tmp_path, monkeypatch):
     import research_pipeline.packages as packages
     import research_pipeline.application.research_plan_store as plan_store
     import research_pipeline.data_plane.archived_inputs as archived
-    import research_pipeline.extensions as extensions
     import research_pipeline.results as results
-    import research_pipeline.evidence as evidence
 
     root = tmp_path / "candidate"
     kwargs = arguments(root)
@@ -120,10 +114,7 @@ def replacement(tmp_path, monkeypatch):
     allocations = {identifier: {"execution_id": identifier, "workspace_id": config.workspace_id,
                     "clock": package.spec_payload["fixed_clock"], "root_seed": 17, "label": label}
                    for identifier, label in (("old", "candidate"), ("new", "candidate-readmit-1"))}
-    manifests = {identifier: {"manifest_hash": "manifest", "package_hash": "package", "package_plan_hash": "plan",
-                 "fixed_clock": package.spec_payload["fixed_clock"], "root_seed": 17,
-                 "input_snapshot_manifest": {"requests": {"r": {"root": "archive"}}},
-                 "verifier_admission": {"bundle_hash": "verifier"}} for identifier in allocations}
+    manifests = {identifier: {'manifest_hash': 'manifest', 'package_hash': 'package', 'package_plan_hash': 'plan', 'fixed_clock': package.spec_payload['fixed_clock'], 'root_seed': 17, 'input_snapshot_manifest': {'requests': {'r': {'root': 'archive'}}}} for identifier in allocations}
     for identifier in allocations:
         execution = config.generated_root / "executions" / identifier
         (execution / "plan/admitted").mkdir(parents=True)
@@ -140,8 +131,8 @@ def replacement(tmp_path, monkeypatch):
     previous = {"execution_id": "old", "execution_root": str(config.generated_root / "executions/old")}
     (root / "execution-ref.json").write_text(json.dumps(previous), encoding="utf-8")
     (root / "execution-diagnostic.json").write_text('{"error_code":"project_worker_resource_exceeded"}', encoding="utf-8")
-    bundle = SimpleNamespace(result_id="result", package_hash="package", plan_hash="plan")
-    verification = SimpleNamespace(status="pass", claim_level="research_observation", limitations=[])
+    bundle = SimpleNamespace(result_id="result", package_hash="package", plan_hash="plan", run=SimpleNamespace(status="succeeded"))
+    context = SimpleNamespace(claim_level="research_observation", limitations=[], snapshot=SimpleNamespace(bundle=bundle))
     monkeypatch.setattr(workspace, "load_workspace", lambda p: config)
     def inspect(p, identifier):
         if identifier not in allocations:
@@ -152,7 +143,6 @@ def replacement(tmp_path, monkeypatch):
     monkeypatch.setattr(plan_store, "load_operator_graph_research_plan", lambda *, target: (
         manifests[Path(target).parent.parent.name], {"r": SimpleNamespace(catalog_hash="catalog")}, None, None, None))
     monkeypatch.setattr(archived, "load_archived_input_manifest", lambda p: {"requests": {"r": {"root": "archive"}}})
-    monkeypatch.setattr(extensions, "verify_project_verifier_bundle", lambda p: SimpleNamespace(bundle_hash="verifier"))
     from research_pipeline.application import research_package
     monkeypatch.setattr(research_package, "_execute", lambda args, **kwargs: {"checks": {"fields": {"catalog_hash": "catalog"}}})
     class Store:
@@ -163,13 +153,12 @@ def replacement(tmp_path, monkeypatch):
         def result_directory(self, value):
             return new / "results/result"
     monkeypatch.setattr(results, "ResultStore", Store)
-    monkeypatch.setattr(evidence, "load_verified_result_context", lambda *a, **kw: SimpleNamespace(
-        verification=verification, snapshot=SimpleNamespace(bundle=bundle)))
-    return kwargs, config, package, allocations, manifests, new, bundle, verification
+    monkeypatch.setattr(results, "load_result_context", lambda *a, **kw: context)
+    return kwargs, config, package, allocations, manifests, new, bundle, context
 
 
 def test_adopted_execution_stably_reuses_formal_result(replacement, monkeypatch):
-    kwargs, config, package, allocations, manifests, new, bundle, verification = replacement
+    kwargs, config, package, allocations, manifests, new, bundle, context = replacement
     adoption = package_execution._adopt_package_execution(execution_id="new", **kwargs)
     root = Path(kwargs["root"])
     assert json.loads((root / "execution-ref.json").read_text())["execution_id"] == "new"
@@ -189,8 +178,7 @@ def test_adopted_execution_stably_reuses_formal_result(replacement, monkeypatch)
     from research_pipeline.application import workspace_flow
     def execute(args, *, allocation_handler):
         allocation_handler(args.workspace, clock=package.spec_payload["fixed_clock"], root_seed=17, label=args.label)
-        return {"execution_status": "succeeded", "verification_status": "pass", "result_directory": str(new / "results/result"),
-            "verification_result": str(new / "verification/result.json"), "result_store": str(new / "results"), "claim_level": verification.claim_level}
+        return {'status': 'succeeded', 'result_id': bundle.result_id, 'execution_status': 'succeeded', 'result_directory': str(new / 'results/result'), 'result_store': str(new / 'results'), 'claim_level': context.claim_level}
     monkeypatch.setattr(workspace_flow, "execute_workspace", execute)
     first = package_execution._execute_package(**kwargs)
     repeated = package_execution._execute_package(**kwargs)
@@ -199,9 +187,9 @@ def test_adopted_execution_stably_reuses_formal_result(replacement, monkeypatch)
     assert package_execution._adopt_package_execution(execution_id="new", **kwargs) == adoption
 
 
-@pytest.mark.parametrize("drift", ["workspace", "package", "input", "catalog", "bundle", "clock", "seed", "plan", "invocation", "verification"])
+@pytest.mark.parametrize("drift", ["workspace", "package", "input", "catalog", "bundle", "clock", "seed", "plan", "invocation", "execution"])
 def test_replacement_identity_drift_is_rejected(replacement, monkeypatch, drift):
-    kwargs, config, package, allocations, manifests, new, bundle, verification = replacement
+    kwargs, config, package, allocations, manifests, new, bundle, context = replacement
     if drift == "workspace":
         config.workspace_id = "other-workspace"
     elif drift == "package":
@@ -225,7 +213,7 @@ def test_replacement_identity_drift_is_rejected(replacement, monkeypatch, drift)
         invocation["plan"] = str(new.parent / "old/plan/admitted")
         path.write_text(json.dumps(invocation), encoding="utf-8")
     else:
-        verification.status = "fail"
+        bundle.run.status = "failed"
     with pytest.raises(ValueError):
         package_execution._adopt_package_execution(execution_id="new", **kwargs)
     assert not (Path(kwargs["root"]) / "execution-adoption.json").exists()
@@ -299,7 +287,7 @@ def test_process_exit_does_not_reuse_diagnostic_from_previous_execution(tmp_path
     (execution / "run").mkdir(parents=True)
     (execution / "run/operator-dag-invocation.json").write_text("{}", encoding="utf-8")
     (root / "execution-ref.json").write_text(json.dumps({"execution_id": "new", "execution_root": str(execution)}), encoding="utf-8")
-    (root / "execution-diagnostic.json").write_text(json.dumps({"execution_ref": "old", "failed_stage": "verify"}), encoding="utf-8")
+    (root / "execution-diagnostic.json").write_text(json.dumps({"execution_ref": "old", "failed_stage": "report"}), encoding="utf-8")
     monkeypatch.setattr(package_execution.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=3, stderr="interrupted"))
     with pytest.raises(package_execution.PackageExecutionInterrupted) as captured:
         package_execution.execute_package(**arguments(root))

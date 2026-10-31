@@ -37,6 +37,8 @@ _FORMAL_CAUSAL_ARTIFACT_COLUMNS = {
     "research.label.v1": frozenset(CORE_LABEL_TIME_COLUMNS),
 }
 _CAUSAL_LINEAGE_METADATA_KEY = b"research_pipeline_causal_lineage"
+_CAUSAL_DATE_CONTRACT_METADATA_KEY = b"research_pipeline_causal_date_contract"
+_CAUSAL_DATE_CONTRACT_VERSION = b"project-causal-dates-v1"
 
 
 def _sha256(path: Path) -> str:
@@ -429,6 +431,12 @@ class ExternalArtifactStore:
                     list(causal_lineage)
                 ).encode("utf-8")
             table = pa.Table.from_pandas(attached, preserve_index=False)
+            if causal_lineage and any(fact.get("daily_time") is not None for fact in causal_lineage):
+                index = table.schema.get_field_index("decision_time")
+                field = table.schema.field(index).with_metadata({
+                    _CAUSAL_DATE_CONTRACT_METADATA_KEY: _CAUSAL_DATE_CONTRACT_VERSION,
+                })
+                table = table.cast(table.schema.set(index, field))
             pq.write_table(table.replace_schema_metadata(metadata), path)
         except RuntimeIntegrityError:
             raise

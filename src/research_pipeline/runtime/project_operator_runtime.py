@@ -64,6 +64,34 @@ def _declared_request_ids(parameters: Mapping[str, object]) -> frozenset[str]:
     return frozenset(values)
 
 
+def _request_table_descriptors(request_tables, parameters):
+    """只序列化节点显式声明的 request，保留原始来源身份和准入事实。"""
+    selected = _declared_request_ids(parameters)
+    requests = []
+    for request_id, descriptor in sorted(request_tables.items()):
+        if request_id not in selected:
+            continue
+        request = {
+            "request_id": request_id,
+            "source_identity": str(descriptor["source_identity"]),
+            "schema_hash": str(descriptor["schema_hash"]),
+            **({"admission": dict(descriptor["admission"])} if "admission" in descriptor else {}),
+        }
+        if descriptor.get("source_kind") == "direct":
+            request.update(
+                source_kind="direct", direct_reference=dict(descriptor["direct_reference"]),
+                direct_root=str(Path(descriptor["direct_root"]).resolve(strict=True)),
+                source_revision_hash=descriptor["source_revision_hash"],
+                admitted_plan_hash=descriptor["admitted_plan_hash"],
+            )
+        else:
+            request["files"] = [dict(file) for file in descriptor["files"]]
+        requests.append(request)
+    if not requests:
+        raise RuntimeIntegrityError("项目异构数据输入没有绑定节点参数中的 request_id")
+    return requests
+
+
 @dataclass(frozen=True)
 class ProjectRuntimeIdentity:
     project_id: str
@@ -296,7 +324,16 @@ def project_worker_adapter_hash() -> str:
             name: hashlib.sha256(runtime_path.with_name(name).read_bytes()).hexdigest()
             for name in ("project_table_input.py", "project_output.py", "project_causal.py",
                          "project_causal_worker.py", "project_causal_execution.py",
-                         "project_causal_minute.py", "causal_facts_codec.py", "causal_worker_session.py")
+                         "project_causal_minute.py", "causal_facts_codec.py", "causal_worker_session.py",
+                         "worker_process_session.py", "lean_strategy_execution.py", "lean_strategy_inputs.py", "lean_engine_worker.py",
+                         "lean_market_source.py", "lean_day_stream.py",
+                         "strategy_signal_inputs.py", "portfolio_target_inputs.py")
+        },
+        "strategy_contracts": {
+            name: hashlib.sha256(runtime_path.parent.parent.joinpath(name).read_bytes()).hexdigest()
+            for name in ("domain/strategy_protocol.py", "domain/strategy_declaration.py", "results/contracts.py", "platform/lean_contract.py",
+                         "platform/lean_runtime.py", "platform/daily_projection.py", "data_plane/daily_stream.py", "data_plane/dataset_files.py",
+                         "data_plane/dataset_artifacts.py", "data_plane/direct_sources.py", "data_plane/archive_read.py")
         },
         "resource_contracts": {
             name: hashlib.sha256(
@@ -520,16 +557,6 @@ def _run_project_worker(
                 },
             })
         elif item.request_tables:
-            declared_request_ids = _declared_request_ids(parameters)
-            selected = {
-                request_id: descriptor
-                for request_id, descriptor in item.request_tables.items()
-                if request_id in declared_request_ids
-            }
-            if not selected:
-                raise RuntimeIntegrityError(
-                    "项目异构数据输入没有绑定节点参数中的 request_id"
-                )
             input_contracts.append({
                 "input_kind": "request_tables",
                 "invocation": invocation,
@@ -537,16 +564,7 @@ def _run_project_worker(
                 "artifact_type": item.artifact.artifact_type,
                 "source_identity": item.artifact.artifact_key,
                 "source_root": str(item.source_root.resolve(strict=True)),
-                "requests": [
-                    {
-                        "request_id": request_id,
-                        "source_identity": str(descriptor["source_identity"]),
-                        "schema_hash": str(descriptor["schema_hash"]),
-                        **({"admission": dict(descriptor["admission"])} if "admission" in descriptor else {}),
-                        "files": [dict(file) for file in descriptor["files"]],
-                    }
-                    for request_id, descriptor in sorted(selected.items())
-                ],
+                "requests": _request_table_descriptors(item.request_tables, parameters),
             })
         elif item.request_admissions:
             declared_request_ids = _declared_request_ids(parameters)
@@ -706,7 +724,7 @@ def _run_project_worker(
                     measurement_status = "measurement_unavailable"
                     failure = "project_worker_measurement_unavailable"
                     break
-                if time.monotonic() - started > budget.wall_seconds:
+                if budget.wall_seconds and time.monotonic() - started > budget.wall_seconds:
                     failure = "project_worker_timeout"
                 elif process_slots is not None and process_count > process_slots:
                     failure = "project_worker_process_slots_exceeded"

@@ -1,8 +1,7 @@
-"""多期限滚动切分、成熟标签、序列预热和独立窗口复核。"""
+"""多期限滚动切分、成熟标签、序列预热和生产窗口验收。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import json
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -10,7 +9,7 @@ import pytest
 
 from research_pipeline.research.validation import HoldoutAccessPlan
 import research_pipeline.runtime.walk_forward_model_execution as runtime
-from test_qlib_horizon_example import WINDOWS, check
+from test_qlib_horizon_example import WINDOWS
 from test_qlib_model_integration import _read
 from test_research_locked_holdout import _freeze_payload
 from test_walk_forward_model_mainline import _write_input_artifact
@@ -139,51 +138,6 @@ def test_sequence_warmup_keeps_history_outside_fit_endpoints(split_case):
         assert later.observation_session.tolist() == [day.date() for day in days[6:9]]
         assert later_id in metadata["split_manifest"]["folds"][1]["train_ids"]
         assert f"SYN_0:{days[6].date()}:h{parameters['horizon_sessions']}" not in metadata["split_manifest"]["folds"][1]["train_ids"]
-
-
-def verifier_case(split_case):
-    root, _, parameters, metadata = split_case
-    frame = _read(root / "split", "samples")
-    samples = {row["sample_id"]: row for row in frame.to_dict("records")}
-    fits = [{
-        "fold_id": fold["fold_id"], "candidate_id": "ridge",
-        "train_ids_json": json.dumps(fold["train_ids"]),
-        "validation_ids_json": json.dumps(fold["validation_ids"]),
-        "evidence_scope": "processor_train_sample_scope",
-    } for fold in metadata["split_manifest"]["folds"]]
-    audit = [row for path in sorted((root / "split" / "split_audit").glob("*.parquet"))
-        for row in pq.ParquetFile(path).read().to_pylist()]
-    tables = {"split_audit": audit, "fit_audit": fits}
-    design = {**parameters, "split_calendar_sessions": parameters["calendar_sessions"], "candidate_ids": ["ridge"]}
-    return tables, design, samples, metadata
-
-
-def test_public_verifier_independently_rebuilds_rolling_and_expanding_folds(split_case, monkeypatch):
-    from research_pipeline.research import validation
-
-    tables, design, samples, metadata = verifier_case(split_case)
-    monkeypatch.setattr(validation, "build_walk_forward", lambda *a, **k: pytest.fail("独立Verifier不得调用生产切分"))
-    folds, candidates = check._splits(tables, design, samples)
-    assert candidates == {"ridge"}
-    for fold in metadata["split_manifest"]["folds"]:
-        for role, field in (("train", "train_ids"), ("validation", "validation_ids"), ("test", "test_ids"), ("purged", "purged_ids"), ("embargoed", "embargoed_ids")):
-            assert folds[fold["fold_id"]][role] == set(fold[field])
-
-
-@pytest.mark.parametrize("change", ["expanding", "window", "purge_role", "fit_scope"])
-def test_public_verifier_rejects_changed_window_or_fit_members(split_case, change):
-    tables, design, samples, _ = verifier_case(split_case)
-    if change == "expanding":
-        design["expanding"] = not design["expanding"]
-    elif change == "window":
-        design["train_sessions"] += 1
-    elif change == "purge_role":
-        row = next(row for row in tables["split_audit"] if row["role"] == "purged")
-        row["role"] = "train"
-    else:
-        tables["fit_audit"][0]["train_ids_json"] = "[]"
-    with pytest.raises(ValueError):
-        check._splits(tables, design, samples)
 
 
 def test_horizon_specific_holdout_ids_create_distinct_persistent_plan_identity(tmp_path):

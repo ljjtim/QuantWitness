@@ -1,4 +1,4 @@
-"""用公开合成研究的正式 Result 验证 Gate C 证据消费。"""
+"""公开合成研究的正式 Result、计划绑定与只读源库回归。"""
 
 from __future__ import annotations
 
@@ -18,20 +18,37 @@ import yaml
 from examples.build_bundles import build_all
 from examples.prepare_synthetic_environment import prepare
 from research_pipeline.cli import main
-from research_pipeline.platform import canonical_json, typed_canonical_hash
+from research_pipeline.results import (
+    ResultContractError, ResultMetric, ResultStore, compare_results, load_result_context, render_result_report,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from build_gate_c_evidence import build_gate_c_evidence, _request_windows  # noqa: E402
+from build_gate_c_evidence import build_gate_c_evidence, _numeric_acceptance  # noqa: E402
+
+
+EXPECTED_METRICS = {
+    "equity_cross_section": {
+        "metric_ref": "project.quantwitness.equity_cross_section.spread@1.0.0",
+        "value": (12.3 / 12.0 - 1) - (8.8 / 9.0 - 1), "unit": "decimal_return", "sample_size": 4,
+    },
+    "etf_time_series": {
+        "metric_ref": "project.quantwitness.etf_time_series.signal_return@1.0.0",
+        "value": 0.05 / 2, "unit": "decimal_return", "sample_size": 2,
+    },
+    "event_study": {
+        "metric_ref": "project.quantwitness.event_study.mean_window_return@1.0.0",
+        "value": (0.05 - 0.01) / 2, "unit": "decimal_return", "sample_size": 2,
+    },
+    "futures_term_structure": {
+        "metric_ref": "project.quantwitness.futures_term_structure.annualized_slope@1.0.0",
+        "value": 0.03 * 365 / 29, "unit": "annualized_decimal_slope", "sample_size": 2,
+    },
+}
 
 
 def _json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write(path: Path, payload):
-    path.write_text(canonical_json(payload), encoding="utf-8")
-    return path
 
 
 def _cli(*args):
@@ -58,7 +75,6 @@ def gate_inputs(tmp_path_factory):
         _cli(
             "package", "admit", "--package", project["package"],
             "--extension-bundle", project["operator_bundle"],
-            "--verifier-bundle", project["verifier_bundle"],
             "--catalog-lock", environment["catalog_lock"],
             "--data-db", str(database), "--output", str(plan_root),
         )
@@ -74,10 +90,8 @@ def gate_inputs(tmp_path_factory):
         ], cwd=target, env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, capture_output=True, text=True, encoding="utf-8", timeout=120)
         assert process.returncode == 0, process.stdout + process.stderr
         result = Path(json.loads(process.stdout)["data"]["result_directory"])
-        verification = target / "verification-result.json"
-        _cli("verify", "--verification-process-slots", "3" if os.name == "nt" else "2", "--result", str(result), "--result-store", str(store), "--output", str(verification))
-        verified = _json(verification)
-        assert verified["status"] == "pass"
+        context = load_result_context(result, result_store=store)
+        assert context.snapshot.bundle.run.status == "succeeded"
         after = {"size_bytes": database.stat().st_size, "mtime_ns": database.stat().st_mtime_ns}
         assert before == after
         plan = _json(plan_root / "operator-graph-plan.json")
@@ -85,203 +99,175 @@ def gate_inputs(tmp_path_factory):
             "reference": name, "dag_family": name,
             "package": project["package"], "plan": str(plan_root / "operator-graph-plan.json"),
             "result_directory": str(result), "result_store": str(store),
-            "verification_result": str(verification),
             "expected_graph_id": plan["recipe"]["graph_id"],
-            "expected_result_id": verified["result_reference"]["result_id"],
+            "expected_result_id": context.snapshot.bundle.result_id,
+            "expected_metrics": [dict(EXPECTED_METRICS[name])],
             "study_request_ids": [row["request_id"] for row in plan["requests"]],
-            "oracle_script": str(ROOT / "examples" / name / "verifier/source/check.py"),
             "database_evidence": {
                 "data_scope": "synthetic", "database_path": str(database),
-                "result_id": verified["result_reference"]["result_id"],
+                "result_id": context.snapshot.bundle.result_id,
                 "read_only": True, "database_unchanged": True, "before": before, "after": after,
             },
         })
-    return {
-        "contract_version": "research-gate-c-input-v2", "data_scope": "synthetic",
-        "minimum_dag_families": 3, "maximum_window_days": 400, "references": references,
-    }
+    return references
 
 
-def _build(tmp_path, inputs, **kwargs):
-    return build_gate_c_evidence(
-        input_path=_write(tmp_path / "input.json", inputs), output=tmp_path / "gate-c", **kwargs,
-    )
+def test_four_public_results_keep_plan_identity_and_readonly_sources(gate_inputs):
+    assert len(gate_inputs) == 4
+    result_ids = set()
+    for reference in gate_inputs:
+        context = load_result_context(reference["result_directory"], result_store=reference["result_store"])
+        bundle = context.snapshot.bundle
+        plan = _json(Path(reference["plan"]))
+        assert bundle.contract_version == "research-result-v4"
+        assert bundle.status == "finalized" and bundle.run.status == "succeeded"
+        assert bundle.result_id == reference["expected_result_id"]
+        assert bundle.plan_hash == plan["plan_hash"]
+        assert bundle.package_hash == plan["package_hash"]
+        assert bundle.run.fixed_clock == plan["fixed_clock"]
+        assert bundle.result_spec.to_dict() == plan["result_spec"]
+        assert {item.request_id for item in bundle.input_revisions} == set(reference["study_request_ids"])
+        assert reference["database_evidence"]["before"] == reference["database_evidence"]["after"]
+        assert bundle.metric_definitions and context.metrics
+        report = render_result_report(context)
+        assert bundle.result_id in report
+        assert all(metric.metric_ref in report for metric in context.metrics)
+        result_ids.add(bundle.result_id)
+    assert len(result_ids) == 4
 
 
-def test_gate_c_accepts_four_self_contained_public_results(tmp_path, gate_inputs):
-    inputs = deepcopy(gate_inputs)
-    for index, reference in enumerate(inputs["references"]):
+def test_public_result_metrics_read_after_relocation(tmp_path, gate_inputs):
+    for index, reference in enumerate(gate_inputs):
         source = Path(reference["result_directory"])
+        original = load_result_context(source, result_store=reference["result_store"])
         store = tmp_path / f"results-{index}"
         destination = store / source.relative_to(reference["result_store"])
         shutil.copytree(source, destination)
-        reference["result_store"] = str(store)
-        reference["result_directory"] = str(destination)
-    evidence = _build(tmp_path, inputs)
-    assert evidence["contract_version"] == "research-gate-c-evidence-v2"
-    assert evidence["gate_id"] == "gate-c"
-    assert evidence["all_results_contract"] == "research-result-v3"
-    assert evidence["all_verifications_contract"] == "research-verification-result-v4"
-    assert evidence["reference_count"] == evidence["independent_oracle_count"] == 4
-    assert evidence["dag_family_count"] == 4
-    assert evidence["data_scope"] == "synthetic"
-    assert evidence["acceptance_scope"] == "engineering"
-    assert evidence["evidence_scope"] == "diagnostic_unbound"
-    assert all(row["database_evidence"]["database_unchanged"] for row in evidence["references"])
+        copied = load_result_context(destination, result_store=store)
+        assert copied.snapshot.bundle == original.snapshot.bundle
+        assert copied.metrics == original.metrics
+        comparison = compare_results(original, copied)
+        assert comparison.comparable
+        assert comparison.left_result_id == comparison.right_result_id
+        assert all(row["delta"] == 0 for row in comparison.metric_comparisons)
 
 
-def test_gate_c_rejects_tampered_result_diagnostic_table(tmp_path, gate_inputs):
-    inputs = deepcopy(gate_inputs)
-    reference = inputs["references"][0]
-    original = Path(reference["result_directory"])
+def test_requested_diagnostic_table_rejects_modified_content(tmp_path, gate_inputs):
+    reference = gate_inputs[0]
+    source = Path(reference["result_directory"])
     store = tmp_path / "results"
-    result = store / original.relative_to(reference["result_store"])
-    shutil.copytree(original, result)
+    result = store / source.relative_to(reference["result_store"])
+    shutil.copytree(source, result)
     manifest = _json(result / "result.json")
     table = next(row for row in manifest["tables"] if row["role"] == "diagnostic")
     with (result / next(iter(table["files"]))).open("ab") as handle:
         handle.write(b"tampered")
-    reference.update(result_store=str(store), result_directory=str(result))
-    with pytest.raises(ValueError, match="hash|内容|Parquet|Result"):
-        _build(tmp_path, inputs)
-    assert not (tmp_path / "gate-c").exists()
+    with pytest.raises(ResultContractError):
+        load_result_context(result, result_store=store, additional_table_ids=(table["table_id"],))
+    references = deepcopy(gate_inputs)
+    references[0].update(result_directory=str(result), result_store=str(store))
+    with pytest.raises(ResultContractError):
+        build_gate_c_evidence(input_path=_gate_input_file(tmp_path, references), output=tmp_path / "evidence")
 
 
-def test_gate_c_rejects_other_valid_verification_result(tmp_path, gate_inputs):
-    inputs = deepcopy(gate_inputs)
-    store = tmp_path / "combined-results"
-    for reference in inputs["references"][:2]:
-        source = Path(reference["result_directory"])
-        destination = store / source.relative_to(reference["result_store"])
-        shutil.copytree(source, destination)
-        reference.update(result_directory=str(destination), result_store=str(store))
-    inputs["references"][0]["verification_result"] = inputs["references"][1]["verification_result"]
-    with pytest.raises(ValueError, match="VerificationResult.*不匹配"):
-        _build(tmp_path, inputs)
-
-
-def test_gate_c_rejects_rehashed_verification_with_wrong_plan(tmp_path, gate_inputs):
-    inputs = deepcopy(gate_inputs)
-    reference = inputs["references"][0]
-    verification = _json(Path(reference["verification_result"]))
-    verification["source_plan_hash"] = "f" * 64
-    verification["verification_hash"] = typed_canonical_hash({key: value for key, value in verification.items() if key != "verification_hash"})
-    reference["verification_result"] = str(_write(tmp_path / "wrong-verification.json", verification))
-    with pytest.raises(ValueError, match="绑定|身份"):
-        _build(tmp_path, inputs)
-
-
-@pytest.mark.parametrize("change", ["missing", "different_source", "missing_outcome"])
-def test_gate_c_rejects_missing_or_unbound_oracle(tmp_path, gate_inputs, change):
-    inputs = deepcopy(gate_inputs)
-    reference = inputs["references"][0]
-    if change == "missing":
-        del reference["oracle_script"]
-    elif change == "different_source":
-        reference["oracle_script"] = inputs["references"][1]["oracle_script"]
-    else:
-        verification = _json(Path(reference["verification_result"]))
-        del verification["project_verifier_identity"]
-        del verification["project_verifier_outcome_hash"]
-        verification["verification_hash"] = typed_canonical_hash({key: value for key, value in verification.items() if key != "verification_hash"})
-        reference["verification_result"] = str(_write(tmp_path / "no-oracle.json", verification))
-    with pytest.raises(ValueError, match="oracle|绑定|身份"):
-        _build(tmp_path, inputs)
-
-
-@pytest.mark.parametrize("start,end", [("2024-02-01", "2024-01-01"), ("2024-01-01", "2026-01-01"), ("bad", "2024-01-01")])
-def test_gate_c_rejects_invalid_request_dates(start, end):
-    plan = {"requests": [{"request_id": "study", "query": {"dataset_id": "synthetic", "time_range": {"start": start, "end": end}}}]}
-    with pytest.raises(ValueError, match="窗口|日期"):
-        _request_windows(plan, 400, {"study"})
-
-
-def test_gate_c_rejects_window_limit_and_missing_request(tmp_path, gate_inputs):
-    inputs = deepcopy(gate_inputs)
-    inputs["maximum_window_days"] = 1
-    with pytest.raises(ValueError, match="窗口"):
-        _build(tmp_path, inputs)
-    inputs["maximum_window_days"] = 400
-    inputs["references"][0]["study_request_ids"] = ["not-in-result"]
-    with pytest.raises(ValueError, match="正式输入"):
-        _build(tmp_path, inputs)
-
-
-@pytest.mark.parametrize("rehash", [False, True])
-def test_gate_c_rejects_changed_plan_dates(tmp_path, gate_inputs, rehash):
-    inputs = deepcopy(gate_inputs)
-    reference = inputs["references"][0]
-    plan = _json(Path(reference["plan"]))
-    plan["requests"][0]["query"]["time_range"]["start"] = "2024-01-01"
-    if rehash:
-        plan["plan_hash"] = typed_canonical_hash({key: value for key, value in plan.items() if key != "plan_hash"})
-    reference["plan"] = str(_write(tmp_path / "wrong-plan.json", plan))
-    with pytest.raises(ValueError, match="plan"):
-        _build(tmp_path, inputs)
-
-
-@pytest.mark.parametrize("change", ["scope", "readonly", "changed", "result"])
-def test_gate_c_rejects_database_evidence_mismatch(tmp_path, gate_inputs, change):
-    inputs = deepcopy(gate_inputs)
-    database = inputs["references"][0]["database_evidence"]
-    if change == "scope":
-        database["data_scope"] = "real"
-    elif change == "readonly":
-        database["read_only"] = False
-    elif change == "changed":
-        database["after"] = {**database["after"], "size_bytes": 1}
-    else:
-        database["result_id"] = "f" * 64
-    with pytest.raises(ValueError, match="数据库"):
-        _build(tmp_path, inputs)
-
-
-def test_gate_c_rejects_synthetic_relabelled_as_real(tmp_path, gate_inputs):
-    inputs = deepcopy(gate_inputs)
-    inputs["data_scope"] = "real"
-    for item in inputs["references"]:
-        item["database_evidence"]["data_scope"] = "real"
-    with pytest.raises(ValueError, match="合成数据"):
-        _build(tmp_path, inputs)
-
-
-def test_gate_c_requires_four_researches_and_three_families(tmp_path, gate_inputs):
-    inputs = deepcopy(gate_inputs)
-    inputs["references"].pop()
-    with pytest.raises(ValueError, match="四项"):
-        _build(tmp_path, inputs)
-    inputs = deepcopy(gate_inputs)
-    for item in inputs["references"]:
-        item["dag_family"] = "same"
-    with pytest.raises(ValueError, match="三种"):
-        _build(tmp_path, inputs)
-
-
-def test_gate_c_rejects_partial_candidate_binding_before_output(tmp_path, gate_inputs):
-    with pytest.raises(ValueError, match="BuildManifest"):
-        _build(tmp_path, gate_inputs, release_candidate_id="candidate")
-    assert not (tmp_path / "gate-c").exists()
-
-
-def test_gate_c_keeps_long_auxiliary_window_separate_from_study():
-    plan = {"requests": [
-        {"request_id": "study", "query": {"dataset_id": "prices", "time_range": {"start": "2024-01-01", "end": "2024-01-03"}}},
-        {"request_id": "history", "query": {"dataset_id": "calendar", "time_range": {"start": "2000-01-01", "end": "2024-01-03"}}},
-    ]}
-    windows = _request_windows(plan, 10, {"study"})
-    assert windows[0]["study_window"] is True
-    assert windows[1]["study_window"] is False
-    assert windows[1]["calendar_days"] > 400
-
-
-def test_gate_c_rejects_extra_result_for_successful_run(tmp_path, gate_inputs):
-    inputs = deepcopy(gate_inputs)
-    reference = inputs["references"][0]
-    original = Path(reference["result_directory"])
+def test_result_rejects_modified_plan_identity(tmp_path, gate_inputs):
+    reference = gate_inputs[0]
+    source = Path(reference["result_directory"])
     store = tmp_path / "results"
-    result = store / original.relative_to(reference["result_store"])
-    shutil.copytree(original, result)
-    (result.parent / "another-result").mkdir()
-    reference.update(result_store=str(store), result_directory=str(result))
-    with pytest.raises(ValueError, match="恰好只有一个"):
-        _build(tmp_path, inputs)
+    result = store / source.relative_to(reference["result_store"])
+    shutil.copytree(source, result)
+    manifest = _json(result / "result.json")
+    manifest["plan_hash"] = "f" * 64
+    (result / "result.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ResultContractError):
+        load_result_context(result, result_store=store)
+
+
+def test_result_identity_lookup_rejects_other_result(gate_inputs):
+    first, second = gate_inputs[:2]
+    context = load_result_context(first["result_directory"], result_store=first["result_store"])
+    bundle = context.snapshot.bundle
+    with pytest.raises(ResultContractError):
+        ResultStore(first["result_store"], create=False).load_by_identity(
+            project_id=bundle.project_id, run_id=bundle.run_id,
+            result_id=second["expected_result_id"],
+        )
+
+
+def _gate_input_file(root: Path, references: list[dict]) -> Path:
+    path = root / "gate-c-input.json"
+    path.write_text(json.dumps({
+        "contract_version": "research-gate-c-input-v2", "data_scope": "synthetic",
+        "minimum_dag_families": 3, "maximum_window_days": 400, "references": references,
+    }), encoding="utf-8")
+    return path
+
+
+def test_gate_c_accepts_four_result_outputs_and_hand_calculated_metrics(tmp_path, gate_inputs):
+    output = tmp_path / "evidence"
+    evidence = build_gate_c_evidence(input_path=_gate_input_file(tmp_path, gate_inputs), output=output)
+    assert evidence == _json(output / "gate-c-evidence.json")
+    assert evidence["contract_version"] == "research-gate-c-evidence-v3"
+    assert evidence["status"] == "pass"
+    assert evidence["evidence_scope"] == "diagnostic_unbound"
+    assert evidence["acceptance_scope"] == "engineering"
+    assert evidence["acceptance_basis"] == "result_contract_and_metric_values"
+    assert evidence["reference_count"] == evidence["accepted_metric_count"] == 4
+    assert evidence["all_results_contract"] == "research-result-v4"
+    assert evidence["dag_family_count"] == 4
+    assert "all_verifications_contract" not in evidence and "independent_oracle_count" not in evidence
+    for reference in evidence["references"]:
+        assert reference["execution_status"] == "succeeded"
+        assert reference["metric_count"] == 1
+        assert "verification_status" not in reference and "oracle_identity" not in reference
+        expected = EXPECTED_METRICS[reference["reference"]]
+        metric, = reference["metrics"]
+        assert metric["metric_ref"] == expected["metric_ref"]
+        assert metric["expected_value"] == expected["value"]
+        assert metric["absolute_error"] <= metric["absolute_tolerance"] == 1e-12
+        assert metric["sample_start"] and metric["sample_end"]
+        assert metric["unit"] == expected["unit"]
+        assert metric["sample_size"] == expected["sample_size"]
+
+
+@pytest.mark.parametrize("field,value,match", [
+    ("value", 0.1, "指标数值"),
+    ("unit", "percent_return", "单位或样本量"),
+    ("sample_size", 1, "单位或样本量"),
+    ("metric_ref", "project.unrelated@1.0.0", "预期指标集合"),
+])
+def test_gate_c_rejects_different_numeric_expectation(tmp_path, gate_inputs, field, value, match):
+    references = deepcopy(gate_inputs)
+    references[0]["expected_metrics"][0][field] = value
+    output = tmp_path / "evidence"
+    with pytest.raises(ValueError, match=match):
+        build_gate_c_evidence(input_path=_gate_input_file(tmp_path, references), output=output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("change,match", [
+    ({"expected_graph_id": "other_graph"}, "DAG 身份"),
+    ({"expected_result_id": "other_result"}, "Result 身份"),
+    ({"study_request_ids": ["other_request"]}, "正式输入"),
+    ({"expected_metrics": []}, "非空指标预期"),
+])
+def test_gate_c_keeps_reference_bindings(tmp_path, gate_inputs, change, match):
+    references = deepcopy(gate_inputs)
+    references[0].update(change)
+    with pytest.raises(ValueError, match=match):
+        build_gate_c_evidence(input_path=_gate_input_file(tmp_path, references), output=tmp_path / "evidence")
+
+
+@pytest.mark.parametrize("field,value,match", [
+    ("value", float("nan"), "有限数值"),
+    ("value", float("inf"), "有限数值"),
+    ("value", True, "有限数值"),
+    ("sample_size", 0, "正整数"),
+])
+def test_numeric_acceptance_rejects_invalid_expectations(field, value, match):
+    expected = dict(EXPECTED_METRICS["event_study"])
+    metric = ResultMetric(metric_ref=expected["metric_ref"], value=expected["value"], unit=expected["unit"],
+        sample_start="2024-01-03", sample_end="2024-01-05", sample_size=2, status="computed", table_id="metrics")
+    expected[field] = value
+    with pytest.raises(ValueError, match=match):
+        _numeric_acceptance({"expected_metrics": [expected]}, (metric,))

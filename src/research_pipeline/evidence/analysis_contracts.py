@@ -1,10 +1,11 @@
-"""已验证 Result 的通用时间序列分析合同。"""
+"""正式 Result 的通用时间序列分析合同。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
 import math
+import re
 from typing import Mapping
 
 from research_pipeline.platform import typed_canonical_hash
@@ -12,12 +13,33 @@ from research_pipeline.platform.claim_levels import CLAIM_LEVELS
 from research_pipeline.results import ResultReference
 
 from .errors import EvidenceContractError
-from .facets import require_id, require_sha256, strict_fields
 
 
-ANALYSIS_REQUEST_VERSION = "research-result-analysis-request-v1"
-ANALYSIS_RESULT_VERSION = "research-result-analysis-v1"
-ANALYSIS_COMPARISON_VERSION = "research-result-analysis-comparison-v1"
+_STABLE_ID = re.compile(r"^[a-z0-9][a-z0-9_.:-]*$")
+
+
+def require_sha256(value: object, field: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise EvidenceContractError(f"{field} 必须是 sha256 小写十六进制")
+    return value
+
+
+def require_id(value: object, field: str) -> str:
+    if not isinstance(value, str) or not _STABLE_ID.fullmatch(value):
+        raise EvidenceContractError(f"{field} 必须是稳定 ID")
+    return value
+
+
+def strict_fields(payload: Mapping[str, object], expected: set[str], label: str) -> None:
+    actual = set(payload)
+    if actual != expected:
+        raise EvidenceContractError(f"{label} 字段不匹配: missing={sorted(expected-actual)}, unknown={sorted(actual-expected)}")
+
+
+
+ANALYSIS_REQUEST_VERSION = "research-result-analysis-request-v2"
+ANALYSIS_RESULT_VERSION = "research-result-analysis-v2"
+ANALYSIS_COMPARISON_VERSION = "research-result-analysis-comparison-v2"
 
 VALUE_SEMANTICS = frozenset({
     "observation", "level", "simple_return", "log_return",
@@ -56,7 +78,6 @@ COMPARISON_REASON_CODES = frozenset({
     "actual_window_mismatch",
     "date_type_mismatch",
     "value_type_mismatch",
-    "claim_policy_mismatch",
     "claim_level_mismatch",
     "claim_ceiling_mismatch",
     "measure_unavailable",
@@ -292,7 +313,6 @@ class AnalysisPolicies:
 @dataclass(frozen=True)
 class AnalysisRequest:
     result_id: str
-    verification_hash: str
     selection: AnalysisSelection
     semantics: AnalysisSemantics
     window: AnalysisWindow
@@ -302,7 +322,6 @@ class AnalysisRequest:
 
     def __post_init__(self) -> None:
         require_sha256(self.result_id, "analysis result_id")
-        require_sha256(self.verification_hash, "analysis verification_hash")
         if self.contract_version != ANALYSIS_REQUEST_VERSION:
             raise EvidenceContractError("AnalysisRequest 版本不受支持")
         normalized = tuple(sorted(set(self.aggregations)))
@@ -343,7 +362,6 @@ class AnalysisRequest:
     def payload(self) -> dict[str, object]:
         return {
             "result_id": self.result_id,
-            "verification_hash": self.verification_hash,
             "selection": self.selection.to_dict(),
             **self.spec_payload(),
         }
@@ -366,7 +384,7 @@ class AnalysisRequest:
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "AnalysisRequest":
         base_fields = {
-            "result_id", "verification_hash", "selection", "semantics",
+            "result_id", "selection", "semantics",
             "window", "policies", "aggregations", "contract_version",
         }
         with_hashes = base_fields | {"request_hash", "analysis_spec_hash"}
@@ -381,7 +399,6 @@ class AnalysisRequest:
             raise EvidenceContractError("AnalysisRequest aggregations 必须是字符串列表")
         request = cls(
             result_id=str(payload["result_id"]),
-            verification_hash=str(payload["verification_hash"]),
             selection=AnalysisSelection.from_dict(_mapping(payload["selection"], "selection")),
             semantics=AnalysisSemantics.from_dict(_mapping(payload["semantics"], "semantics")),
             window=AnalysisWindow.from_dict(_mapping(payload["window"], "window")),
@@ -404,9 +421,6 @@ class AnalysisSource:
     plan_hash: str
     runtime_hash: str
     implementation_manifest_hash: str
-    verification_hash: str
-    policy_id: str
-    policy_hash: str
     claim_level: str
     claim_ceiling: str
     limitations: tuple[str, ...]
@@ -414,10 +428,9 @@ class AnalysisSource:
     def __post_init__(self) -> None:
         for field in (
             "package_hash", "plan_hash", "runtime_hash",
-            "implementation_manifest_hash", "verification_hash", "policy_hash",
+            "implementation_manifest_hash",
         ):
             require_sha256(getattr(self, field), f"analysis source {field}")
-        require_id(self.policy_id, "analysis source policy_id")
         if self.claim_level not in CLAIM_LEVELS or self.claim_ceiling not in CLAIM_LEVELS:
             raise EvidenceContractError("analysis source claim 不受支持")
         if (
@@ -433,9 +446,6 @@ class AnalysisSource:
             "plan_hash": self.plan_hash,
             "runtime_hash": self.runtime_hash,
             "implementation_manifest_hash": self.implementation_manifest_hash,
-            "verification_hash": self.verification_hash,
-            "policy_id": self.policy_id,
-            "policy_hash": self.policy_hash,
             "claim_level": self.claim_level,
             "claim_ceiling": self.claim_ceiling,
             "limitations": list(self.limitations),
@@ -445,8 +455,8 @@ class AnalysisSource:
     def from_dict(cls, payload: Mapping[str, object]) -> "AnalysisSource":
         expected = {
             "result_reference", "package_hash", "plan_hash", "runtime_hash",
-            "implementation_manifest_hash", "verification_hash", "policy_id",
-            "policy_hash", "claim_level", "claim_ceiling", "limitations",
+            "implementation_manifest_hash",
+            "claim_level", "claim_ceiling", "limitations",
         }
         strict_fields(payload, expected, "AnalysisSource")
         reference = _mapping(payload["result_reference"], "result_reference")
@@ -459,8 +469,8 @@ class AnalysisSource:
             ResultReference.from_dict(reference),
             *(str(payload[field]) for field in (
                 "package_hash", "plan_hash", "runtime_hash",
-                "implementation_manifest_hash", "verification_hash", "policy_id",
-                "policy_hash", "claim_level", "claim_ceiling",
+                "implementation_manifest_hash",
+                "claim_level", "claim_ceiling",
             )),
             tuple(str(item) for item in limitations),
         )
@@ -729,7 +739,6 @@ class AnalysisResult:
             raise EvidenceContractError("AnalysisResult 实际窗口越出请求窗口")
         reconstructed = AnalysisRequest(
             result_id=self.source.result_reference.result_id,
-            verification_hash=self.source.verification_hash,
             selection=AnalysisSelection(
                 self.table.table_id,
                 self.table.date_column,
@@ -1028,19 +1037,19 @@ def _validate_comparison_source(
     item: Mapping[str, object],
 ) -> tuple[str, Mapping[str, object]]:
     expected = {
-        "analysis_hash", "result_reference", "verification_hash", "package_hash",
-        "plan_hash", "runtime_hash", "implementation_manifest_hash", "policy_id",
-        "policy_hash", "claim_level", "claim_ceiling", "table_id", "schema_id",
+        "analysis_hash", "result_reference", "package_hash",
+        "plan_hash", "runtime_hash", "implementation_manifest_hash",
+        "claim_level", "claim_ceiling", "table_id", "schema_id",
         "table_manifest_hash",
     }
     strict_fields(item, expected, "AnalysisComparison source")
     for field in (
-        "analysis_hash", "verification_hash", "package_hash", "plan_hash",
-        "runtime_hash", "implementation_manifest_hash", "policy_hash",
+        "analysis_hash", "package_hash", "plan_hash",
+        "runtime_hash", "implementation_manifest_hash",
         "table_manifest_hash",
     ):
         require_sha256(item[field], f"AnalysisComparison source {field}")
-    for field in ("policy_id", "table_id", "schema_id"):
+    for field in ("table_id", "schema_id"):
         require_id(item[field], f"AnalysisComparison source {field}")
     if item["claim_level"] not in CLAIM_LEVELS or item["claim_ceiling"] not in CLAIM_LEVELS:
         raise EvidenceContractError("AnalysisComparison source claim 不受支持")

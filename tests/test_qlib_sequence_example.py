@@ -1,72 +1,84 @@
-"""公开序列示例独立筛选完整历史窗口。"""
-from datetime import date, timedelta
+"""公开序列示例的生产窗口资格与冻结候选。"""
+from datetime import date, datetime, timedelta
 import importlib.util
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
-SOURCE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio/verifier/check.py"
-spec = importlib.util.spec_from_file_location("sequence_example_verifier", SOURCE)
-check = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(check)
+from research_pipeline.research.modeling.inputs import ModelMainlineError
+from research_pipeline.research.modeling.sequence import build_sequence_windows
+from research_pipeline.research.modeling import assemble_daily_model_samples
+
+EXAMPLE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio"
+
+
+def at(day, hour=9, minute=30):
+    return datetime.fromisoformat(f"{day}T{hour:02d}:{minute:02d}:00+08:00")
 
 
 def case():
     days = [date(2024, 1, 2) + timedelta(days=i) for i in range(4)]
     columns = ["historical_return__w10", "historical_return__w5", "volatility__w10", "volatility__w5"]
-    design = {"split_calendar_sessions": [str(day) for day in days], "sequence": {
-        "calendar_sessions": [str(day) for day in days], "step_len": 3,
-        "feature_columns": columns, "missing_policy": "complete_window",
-        "candidate_sample_policy": "shared_complete_endpoints"}}
-    features = [{"entity_id": "SYN", "observation_session": day, "status": "ok",
-        "feature_id": feature, "window_sessions": window, "available_time": check._at(day, 9, 30)}
-        for day in days for feature in ("historical_return", "volatility") for window in (5, 10)]
-    tables = {"features": features, **{"sequence_" + name: [] for name in ("context", "targets", "members", "exclusions")}}
-    samples = {str(day): {"entity_id": "SYN", "observation_session": day,
-        "decision_time": check._at(day, 9, 30)} for day in days}
-    return tables, design, samples, days
+    features = pd.DataFrame([
+        {"entity_id": "SYN", "observation_session": day, "status": "ok", "value": index / 100,
+         "feature_id": feature, "window_sessions": window, "observation_time": at(day, 9, 0),
+         "available_time": at(day), "lineage_hash": "feature"}
+        for index, day in enumerate(days) for feature in ("historical_return", "volatility") for window in (5, 10)])
+    targets = pd.DataFrame([
+        {"sample_id": str(day), "entity_id": "SYN", "observation_session": day, "decision_time": at(day)}
+        for day in days])
+    parameters = {"calendar_sessions": days, "feature_columns": columns, "step_len": 3}
+    return features, targets, parameters, days
 
 
 def test_sequence_example_excludes_incomplete_history():
-    tables, design, samples, days = case()
-    assert set(check._sequence_samples(tables, design, samples)) == {str(day) for day in days[2:]}
+    features, targets, parameters, days = case()
+    windows = build_sequence_windows(features, targets, **parameters)
+    assert set(windows.members.sample_id) == {str(day) for day in days[2:]}
+    assert windows.exclusions.reason_code.tolist() == ["insufficient_history", "insufficient_history"]
+    assert set(windows.members.groupby("sample_id").size()) == {3}
 
 
 @pytest.mark.parametrize("kind", ["missing", "late"])
 def test_sequence_example_uses_visible_complete_feature_set(kind):
-    tables, design, samples, days = case()
+    features, targets, parameters, days = case()
     if kind == "missing":
-        tables["features"][0]["status"] = "missing"
+        features.loc[0, "status"] = "missing"
     else:
-        tables["features"][0]["available_time"] = check._at(days[-1], 10)
-    assert set(check._sequence_samples(tables, design, samples)) == {str(days[-1])}
+        features.loc[0, "available_time"] = at(days[-1], 10, 0)
+    windows = build_sequence_windows(features, targets, **parameters)
+    assert set(windows.members.sample_id) == {str(days[-1])}
+    reason = "missing_feature" if kind == "missing" else "feature_not_visible"
+    assert windows.exclusions.set_index("sample_id").loc[str(days[2]), "reason_code"] == reason
 
 
-@pytest.mark.parametrize("kind", ["calendar", "columns", "step", "evidence"])
+@pytest.mark.parametrize("kind", ["calendar", "columns", "step"])
 def test_sequence_example_rejects_inconsistent_design(kind):
-    tables, design, samples, days = case()
-    if kind == "calendar":
-        design["sequence"]["calendar_sessions"] = []
-    elif kind == "columns":
-        design["sequence"]["feature_columns"] = []
-    elif kind == "step":
-        design["sequence"]["step_len"] = True
-    else:
-        tables.pop("sequence_members")
-    with pytest.raises(ValueError):
-        check._sequence_samples(tables, design, samples)
+    features, targets, parameters, _ = case()
+    parameters[{"calendar": "calendar_sessions", "columns": "feature_columns", "step": "step_len"}[kind]] = True if kind == "step" else []
+    with pytest.raises(ModelMainlineError):
+        build_sequence_windows(features, targets, **parameters)
 
 
-def test_table_example_keeps_existing_sample_set():
-    tables, design, samples, _ = case()
-    design.pop("sequence")
-    assert check._sequence_samples(tables, design, samples) == samples
+def test_table_example_keeps_short_history_endpoints():
+    features, targets, _, days = case()
+    labels = targets.drop(columns="sample_id").copy()
+    labels["horizon_sessions"] = 1
+    labels["forward_return"] = 0.01
+    labels["lineage_hash"] = "label"
+    labels["label_start_time"] = pd.to_datetime(labels.decision_time) + pd.Timedelta(hours=5, minutes=30)
+    labels["label_end_time"] = labels.label_start_time + pd.Timedelta(days=1)
+    labels["available_time"] = labels.label_end_time + pd.Timedelta(hours=18, minutes=30)
+    samples, _ = assemble_daily_model_samples(features, labels, horizon_sessions=1)
+    assert set(samples.sample_id) == {f"SYN:{day}:h1" for day in days}
+
 
 @pytest.mark.parametrize("model_class", ["GRU", "LSTM"])
 def test_public_prepare_freezes_explicit_gru_candidates(tmp_path, monkeypatch, model_class):
     import json
     import yaml
-    example = SOURCE.parents[1]
+    example = EXAMPLE
     monkeypatch.syspath_prepend(str(example))
     module_spec = importlib.util.spec_from_file_location("sequence_candidate_prepare", example / "prepare.py")
     prepare = importlib.util.module_from_spec(module_spec)

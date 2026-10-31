@@ -21,7 +21,6 @@ def compile_research_package(
     *,
     admission: object | None = None,
     platform_admission: object | None = None,
-    verifier_admission: object | None = None,
 ) -> OperatorGraphPlan:
     if package.builder_id == OPERATOR_GRAPH_BUILDER_ID:
         queries = compile_package_queries(package)
@@ -30,7 +29,6 @@ def compile_research_package(
             query_result=queries,
             admission=admission,
             platform_admission=platform_admission,
-            verifier_admission=verifier_admission,
         )
     raise ResearchPackageError(f"未登记的 ResearchPackage builder: {package.builder_id}")
 

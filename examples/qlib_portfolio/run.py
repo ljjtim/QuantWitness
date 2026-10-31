@@ -1,4 +1,4 @@
-"""从公开封存输入执行正式lint、admit、run、verify和报告。"""
+"""从公开封存输入执行正式lint、admit、run与Result报告。"""
 import argparse
 import json
 import os
@@ -8,12 +8,12 @@ import tempfile
 import subprocess
 
 from research_pipeline.cli import build_parser
-from research_pipeline.application import research_package, research_run, evidence_lifecycle, runtime_lifecycle
+from research_pipeline.application import research_package, research_run, result_delivery, runtime_lifecycle
 from prepare import (prepare, CLOCK, SEED, add_research_series_arguments,
     research_series_from_arguments)
 
 
-def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reused_nodes=(), input_config=None, sequence_step_len=None, horizon_sessions=1, window_config=None, model_candidates=None, feature_suite=None, resource_state_dir=None, research_series=None):
+def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reused_nodes=(), input_config=None, sequence_step_len=None, horizon_sessions=1, window_config=None, model_candidates=None, feature_suite=None, resource_state_dir=None, research_series=None, lean_home=None):
     if stage != "prepare" and research_series is not None:
         raise ValueError("继续研究不能重新声明research_series；读取原冻结request")
     root=Path(root).resolve()
@@ -24,10 +24,10 @@ def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reuse
     if stage=="prepare":
         return prepare(root,mode,input_config,sequence_step_len=sequence_step_len,
             horizon_sessions=horizon_sessions,window_config=window_config,model_candidates=model_candidates,
-            feature_suite=feature_suite,research_series=research_series)
+            feature_suite=feature_suite,research_series=research_series,lean_home=lean_home)
     bundle=json.loads((root/"bundle-paths.json").read_text(encoding="utf-8"))
     extensions=[arg for path in bundle["extensions"] for arg in ("--extension-bundle",path)]
-    common=["--package",bundle["package"],"--catalog-lock",bundle["catalog_lock"],"--verifier-bundle",bundle["verifier"],*extensions]
+    common=["--package",bundle["package"],"--catalog-lock",bundle["catalog_lock"],*extensions]
     if stage=="lint":
         args=["package","lint",*common,"--json"];handler=research_package._execute
     elif stage=="admit":
@@ -45,14 +45,12 @@ def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reuse
         handler=research_run._execute
     elif stage=="resume":
         args=["resume","--run-root",str(root/"run"),"--json"];handler=runtime_lifecycle._execute
-    elif stage=="verify":
+    elif stage=="report":
         result=json.loads((root/"run-receipt.json").read_text(encoding="utf-8"))
-        args=["verify","--result",result["result_directory"],"--result-store",str(root/"results"),
-            "--verifier-bundle",bundle["verifier"],"--output",str(root/"verification.json"),"--verification-process-slots","3",
-            "--verification-scratch-root",str(scratch),"--json"];handler=evidence_lifecycle._execute
+        args=["report","--result",result["result_directory"],"--result-store",str(root/"results"),
+            "--output",str(root/"report.md")];handler=result_delivery._execute
     else:
-        args=["report","--verification-result",str(root/"verification.json"),"--result-store",str(root/"results"),
-            "--output",str(root/"report.md")];handler=evidence_lifecycle._execute
+        raise ValueError("不支持的研究阶段："+str(stage))
     # 子进程通过已安装包或当前源码根导入同一正式入口。
     import research_pipeline
     os.chdir(Path(research_pipeline.__file__).resolve().parent.parent)
@@ -65,8 +63,6 @@ def execute(root, stage, mode="model", reuse_failed_run_root=None, require_reuse
     (root/(("run" if stage=="resume" else stage)+"-receipt.json")).write_text(json.dumps(result,ensure_ascii=False,indent=2,default=str),encoding="utf-8")
     if stage in {"run", "resume"} and result.get("status") != "result_finalized":
         raise RuntimeError("研究尚未封存正式Result，请检查run-receipt.json并恢复原运行")
-    if stage == "verify" and result.get("status") != "pass":
-        raise RuntimeError("独立验证未通过，请检查verification.json")
     return result
 
 
@@ -74,10 +70,11 @@ def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
     parser.add_argument("--mode", choices=("development", "model", "portfolio"))
-    parser.add_argument("--stage", choices=("prepare", "lint", "admit", "run", "resume", "verify", "report", "all"), default="all")
+    parser.add_argument("--stage", choices=("prepare", "lint", "admit", "run", "resume", "report", "all"), default="all")
     parser.add_argument("--reuse-failed-run-root")
     parser.add_argument("--require-reused-node", action="append", default=[])
     parser.add_argument("--input-config")
+    parser.add_argument("--lean-home", help="portfolio模式使用的完整LEAN安装目录")
     parser.add_argument("--resource-state-dir", help="仓库外的资源调度状态目录")
     parser.add_argument("--sequence-step-len", type=int)
     parser.add_argument("--factor-suite", choices=("volume_price_v1", "alpha158_selected_v1", "alpha360_selected_v1"))
@@ -106,7 +103,7 @@ def main(argv=None):
     window_config = window_config or None
     from horizons import GROUP_FILE, prepare_horizons, execute_horizons
     group_path = root / GROUP_FILE
-    stages = ("prepare", "lint", "admit", "run", "verify", "report") if args.stage == "all" else (args.stage,)
+    stages = ("prepare", "lint", "admit", "run", "report") if args.stage == "all" else (args.stage,)
     if args.factor_suite is not None and args.stage not in {"prepare", "all"}:
         parser.error("继续研究不能重新声明因子集合；读取原冻结声明")
     if (args.factor_suite is not None or args.resource_state_dir is not None) and (args.horizons is not None or group_path.exists()):
@@ -138,7 +135,7 @@ def main(argv=None):
         prepare_args = [sys.executable, "-B", str(Path(__file__).resolve()),
             "--output", str(root), "--mode", args.mode or "model",
             "--stage", "prepare", "--factor-suite", args.factor_suite]
-        for name in ("input_config", "sequence_step_len", "horizon_sessions",
+        for name in ("input_config", "lean_home", "sequence_step_len", "horizon_sessions",
                 "window_mode", "train_sessions", "validation_sessions",
                 "test_sessions", "step_sessions", "embargo_sessions"):
             value = getattr(args, name)
@@ -153,8 +150,8 @@ def main(argv=None):
         subprocess.run(prepare_args, check=True)
         stages = stages[1:]
     for stage in stages:
-        if args.stage == "all" and args.factor_suite is not None and stage in {"verify", "report"}:
-            # 复核使用自己的资源预算，不继承模型训练的依赖占用。
+        if args.stage == "all" and args.factor_suite is not None and stage == "report":
+            # 报告进程只读取Result，不保留模型训练的依赖占用。
             subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()),
                 "--output", str(root), "--mode", args.mode or "model",
                 "--stage", stage], check=True)
@@ -163,7 +160,7 @@ def main(argv=None):
             args.require_reused_node, args.input_config, args.sequence_step_len,
             horizon_sessions=1 if args.horizon_sessions is None else args.horizon_sessions,
             window_config=window_config, feature_suite=args.factor_suite, resource_state_dir=args.resource_state_dir,
-            research_series=research_series if stage == "prepare" else None)
+            research_series=research_series if stage == "prepare" else None, lean_home=args.lean_home)
         print(json.dumps(result, ensure_ascii=True, default=str), flush=True)
 
 

@@ -1,4 +1,4 @@
-"""有限参数变体的正式研究循环，提案只消费已验证的开发指标。"""
+"""有限参数变体的正式研究循环，提案只消费正式开发指标。"""
 from datetime import date, datetime, timedelta
 import json
 import math
@@ -28,20 +28,15 @@ def validate_package_campaign(value):
             raise ValueError(name + "必须非空")
     source = request["source"]
     source_fields = {"kind", "path", "source_archive_root", "input_snapshot_manifest", "catalog_lock",
-                     "verifier_bundle", "extension_bundles", "runtime_options", "verification_process_slots"}
-    if (not source_fields <= set(source) or set(source) - source_fields - {"verification_memory_bytes"}
-            or source["kind"] != "research_package"):
-        raise ValueError("来源必须绑定完整研究包、归档、Catalog和Verifier")
-    for key in ("path", "source_archive_root", "input_snapshot_manifest", "catalog_lock", "verifier_bundle"):
+                     "extension_bundles", "runtime_options"}
+    if set(source) != source_fields or source["kind"] != "research_package":
+        raise ValueError("来源必须绑定完整研究包、归档和Catalog")
+    for key in ("path", "source_archive_root", "input_snapshot_manifest", "catalog_lock"):
         if not isinstance(source[key], str) or not source[key]:
             raise ValueError("来源路径必须明确:" + key)
     if (not isinstance(source["extension_bundles"], list) or
-            any(not isinstance(x, str) or not x for x in source["extension_bundles"]) or
-            type(source["verification_process_slots"]) is not int or source["verification_process_slots"] < 1):
-        raise ValueError("扩展或Verifier资源声明无效")
-    if "verification_memory_bytes" in source and (
-            type(source["verification_memory_bytes"]) is not int or source["verification_memory_bytes"] < 1):
-        raise ValueError("verification_memory_bytes必须为正整数")
+            any(not isinstance(x, str) or not x for x in source["extension_bundles"])):
+        raise ValueError("扩展声明无效")
     if not isinstance(source["runtime_options"], dict) or set(source["runtime_options"]) & {
         "data_db", "source_db", "input_snapshot_manifest", "reuse_run_root", "reuse_failed_run_root", "require_reused_node"}:
         raise ValueError("研究循环只消费冻结归档，不跨候选复用运行")
@@ -156,7 +151,7 @@ class PackageCampaign(Campaign):
         package = load_research_package(source["path"])
         _check_development_package(package, self.payload["development"])
         archived = load_archived_input_manifest(source["input_snapshot_manifest"])
-        inputs = {key: source[key] for key in ("path", "source_archive_root", "input_snapshot_manifest", "catalog_lock", "verifier_bundle")}
+        inputs = {key: source[key] for key in ("path", "source_archive_root", "input_snapshot_manifest", "catalog_lock")}
         inputs.update({"bundle_" + str(i): path for i, path in enumerate(source["extension_bundles"])})
         inputs.update({"archive_" + key: entry["root"] for key, entry in archived["requests"].items()})
         PathRolePolicy().validate({"campaign_output": str(self.root), **inputs}, read_only_roles=tuple(inputs))
@@ -174,7 +169,7 @@ class PackageCampaign(Campaign):
         if not active.is_dir():
             active = lock / "versions" / current.read_text(encoding="utf-8").strip()
         files.extend(path for path in active.rglob("*") if path.is_file())
-        for bundle in [source["verifier_bundle"], *source["extension_bundles"]]:
+        for bundle in source["extension_bundles"]:
             files.extend(path for path in Path(bundle).rglob("*") if path.is_file() and path.suffix in {".json", ".py", ".yaml"})
         facts = {str(path): path.read_text(encoding="utf-8") for path in files}
         identity = {"files": facts, "archived_inputs": archived, "payload": self.payload}
@@ -223,13 +218,14 @@ class PackageCampaign(Campaign):
                 "reason": "评价冻结基准" if not history else "以当前开发目标最优候选为父节点检验下一参数变体"}
 
     def prompt(self):
-        facts = {"question": "比较已声明研究包参数变体的独立验证开发结果", "objective": self.payload["objective"],
+        facts = {"question": "比较已声明研究包参数变体的正式开发结果", "objective": self.payload["objective"],
                  "development": self.payload["development"], "candidates": self.payload["candidates"],
                  "baseline_id": self.payload["baseline_id"], "history": []}
         for row in self.history():
             item = {key: row[key] for key in ("round", "candidate_id", "status", "parent_id", "improvement") if key in row}
             if row["status"] == "evaluated":
                 item["value"] = row["metrics"]["value"]
+                item["limitations"] = list(row["metrics"].get("limitations", ()))
             facts["history"].append(item)
         return json.dumps(facts, ensure_ascii=False, allow_nan=False)
 
@@ -241,7 +237,7 @@ class PackageCampaign(Campaign):
         result = execute_package(root=self.root / "candidates" / candidate["id"],
             workspace_id=self.payload["campaign_id"] + "-" + candidate["id"], allocation_label=candidate["id"],
             base_package=self.data["packages"][candidate["id"]]["path"], source_archive_root=source["source_archive_root"],
-            input_snapshot_manifest=source["input_snapshot_manifest"], verifier_bundle=source["verifier_bundle"], binding=source)
+            input_snapshot_manifest=source["input_snapshot_manifest"], binding=source)
         return project_development_metric(result, self.payload)
 
     def loss(self, metrics):
@@ -254,17 +250,16 @@ class PackageCampaign(Campaign):
     def outcome_fields(self, best):
         return {"scope": "development_package_research", "new_formal_result": bool(best),
                 "selected_development_value": best["metrics"]["value"] if best else None,
-                "selected_result_ref": best["metrics"]["result_ref"] if best else None,
-                "selected_verification_ref": best["metrics"]["verification_ref"] if best else None}
+                "selected_result_ref": best["metrics"]["result_ref"] if best else None}
 
 
 def project_development_metric(result, payload):
-    from research_pipeline.evidence import load_verified_result_context
+    from research_pipeline.results import load_result_context
     objective, scope, budget = payload["objective"], payload["development"], payload["budget"]
-    context = load_verified_result_context(result["verification_ref"], result_store=Path(result["execution_ref"]) / "results",
+    context = load_result_context(result["result_ref"], result_store=Path(result["execution_ref"]) / "results",
                                            additional_table_ids=(objective["table_id"],))
-    if context.verification.status != "pass":
-        raise ValueError("候选未通过独立验证")
+    if (result.get("execution_status") != "succeeded" or context.snapshot.bundle.run.status != "succeeded"):
+        raise ValueError("候选尚未完成正式执行")
     tables = [table for table in context.snapshot.bundle.tables if table.table_id == objective["table_id"]]
     if len(tables) != 1 or tables[0].schema_id != objective["schema_id"]:
         raise ValueError("开发目标与正式结果表绑定不符")
@@ -301,4 +296,5 @@ def project_development_metric(result, payload):
     if not values or (objective["reduction"] == "single" and len(values) != 1):
         raise ValueError("开发目标样本数量不符合声明")
     return {"value": fmean(values), "rows": len(values), "result_id": context.snapshot.bundle.result_id,
-            "result_ref": result["result_ref"], "verification_ref": result["verification_ref"], "verification_status": "pass"}
+            "result_ref": result["result_ref"], "execution_status": "succeeded",
+            "limitations": list(context.limitations)}

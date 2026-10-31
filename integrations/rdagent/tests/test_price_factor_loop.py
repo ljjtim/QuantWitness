@@ -1,4 +1,4 @@
-"""两类新增价格特征的正式研究结果、独立验证与恢复。"""
+"""两类新增价格特征的正式研究结果与恢复。"""
 import importlib.util
 import json
 from pathlib import Path
@@ -12,13 +12,11 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="正式RD研究�
 def test_price_families_formal_results_and_resume(tmp_path, monkeypatch):
     import duckdb
     import sqlite3
-    from test_package_campaign_loop import readonly_sort_factory
     from quantwitness_rdagent import model_client, package_execution
     from quantwitness_rdagent.contracts import write_json
     def forbidden(*args, **kwargs):
         raise AssertionError("本验收不得打开数据库文件、付费或重复已完成实验")
-    sorts = []
-    monkeypatch.setattr(duckdb, "connect", readonly_sort_factory(duckdb.connect, sorts))
+    monkeypatch.setattr(duckdb, "connect", forbidden)
     monkeypatch.setattr(sqlite3, "connect", forbidden)
     monkeypatch.setattr(model_client, "request_text", forbidden)
     example = Path(__file__).resolve().parents[1] / "examples/factor_research/prepare.py"
@@ -56,7 +54,7 @@ def test_price_families_formal_results_and_resume(tmp_path, monkeypatch):
     outcome = run_factor_research(payload)
     assert outcome["status"] == "completed", outcome
     assert [row["expression"] for row in outcome["rounds"]] == [volatility, position]
-    assert all(row["metrics"]["verification_status"] == "pass" for row in outcome["rounds"])
+    assert all(row["metrics"]["execution_status"] == "succeeded" for row in outcome["rounds"])
     assert len({row["metrics"]["result_id"] for row in outcome["rounds"]}) == 2
     assert len(list((root / "session/calls").glob("*.json"))) == 4
     assert outcome["paid_model_calls"] == 0 and outcome["holdout_evaluated"] is False
@@ -66,4 +64,4 @@ def test_price_families_formal_results_and_resume(tmp_path, monkeypatch):
     assert before == {p: (Path(p).stat().st_size, Path(p).stat().st_mtime_ns) for p in before}
     write_json(root / "acceptance.json", {"status": "pass", "outcome": outcome,
         "database_file_connections": 0, "paid_model_calls": 0,
-        "completed_resume_unchanged": True, "readonly_memory_sorts": len(sorts)})
+        "completed_resume_unchanged": True})

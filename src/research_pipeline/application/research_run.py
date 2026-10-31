@@ -18,14 +18,10 @@ from research_pipeline.extensions import (
 )
 from research_pipeline.platform import canonical_json, installed_distribution_digest, typed_canonical_hash
 from research_pipeline.platform.metric_contracts import (
-    MetricReachabilityProof,
+    MetricDefinition, MetricReachabilityProof,
 )
 from research_pipeline.research.semantics import ResearchSemantics
 from research_pipeline.results import ResultAssembler, ResultSpec
-from research_pipeline.evidence.validity_recompute import (
-    VALIDITY_FACTS_PRODUCER_HASH,
-    policy_id_for_claim,
-)
 from research_pipeline.runtime import (
     AuditEnvironmentManifest,
     ArtifactRef,
@@ -41,7 +37,7 @@ from research_pipeline.runtime.liveness import RuntimeLiveness
 from research_pipeline.runtime.scheduler import (
     DEFAULT_RUNTIME_MEMORY_BYTES,
     DEFAULT_RUNTIME_SCRATCH_BYTES,
-    available_cpu_slots,
+    DEFAULT_RUNTIME_CPU_SLOTS,
 )
 from research_pipeline.runtime.diagnostics import (
     read_finalize_status,
@@ -52,7 +48,6 @@ from research_pipeline.runtime.operator_definitions import build_mainline_operat
 from research_pipeline.runtime.adapters.common import ResearchRunEnvironment
 from research_pipeline.runtime.dag_parallel import spawn_base_process_slots, supervisor_process_slots
 from research_pipeline.runtime.operator_registry import (
-    NODE_IDENTITY_PROJECTION_LEGACY,
     admitted_implementation_manifest_hash,
     operator_process_slots_by_node,
 )
@@ -61,40 +56,46 @@ from research_pipeline.runtime.required_run_reuse import prepare_required_run_re
 
 from .research_plan_store import (
     load_operator_graph_research_plan,
-    resolve_plan_verifier_bundle,
 )
 from .command_suggestion import command_suggestion
 
 
-def _execute(args) -> dict[str, object]:
-    return _execute_operator_graph(args)
+def _execute(args, *, prepared_plan=None) -> dict[str, object]:
+    return _execute_operator_graph(args, prepared_plan=prepared_plan)
 
 
-def _execute_operator_graph(args) -> dict[str, object]:
+def _execute_operator_graph(args, *, prepared_plan=None) -> dict[str, object]:
     _require_formal_execution_arguments(args)
     if getattr(args, "acceptance_proof", None) is not None:
-        raise ValueError("acceptance-proof 已删除；研究复现请声明项目 Verifier")
+        raise ValueError("acceptance-proof 已删除；研究复现请使用项目算法测试")
     _validate_run_paths(args)
+    _validate_input_storage_reuse(args)
     owner = RuntimeLiveness(args.run_root, run_id=None, phase="starting").start()
     try:
-        return _execute_owned_operator_graph(args, owner)
+        return _execute_owned_operator_graph(args, owner, prepared_plan=prepared_plan)
     finally:
         owner.stop()
 
 
-def _execute_owned_operator_graph(args, owner: RuntimeLiveness) -> dict[str, object]:
+def _execute_owned_operator_graph(args, owner: RuntimeLiveness, *, prepared_plan=None) -> dict[str, object]:
     if getattr(args, "execution_engine", "unified") != "unified":
         raise ValueError("execution_engine 迁移参数已删除；正式运行只使用统一 Runtime")
     _require_data_run_arguments(args)
-    _validate_run_paths(args)
-    manifest, admitted, dag, recipe, registry = load_operator_graph_research_plan(
-        target=args.plan,
-    )
+    minute_scope_inputs = {}
+    if prepared_plan is None:
+        manifest, admitted, dag, recipe, registry = load_operator_graph_research_plan(
+            target=args.plan, loaded_minute_scopes=minute_scope_inputs,
+        )
+    else:
+        if (prepared_plan.directory != Path(args.plan).resolve()
+                or getattr(args, "runtime_resume", False)):
+            raise ValueError("同次准入对象只能用于其原计划的新运行")
+        manifest, admitted, dag, recipe, registry = (
+            prepared_plan.manifest, prepared_plan.admitted, prepared_plan.dag,
+            prepared_plan.recipe, prepared_plan.registry,
+        )
+        minute_scope_inputs.update(prepared_plan.minute_scope_inputs)
     _validate_frozen_input_source(args, manifest)
-    verifier_bundle_source = resolve_plan_verifier_bundle(
-        args.plan,
-        manifest.get("verifier_admission"),
-    )
     implementation_manifest_hash = admitted_implementation_manifest_hash(registry)
     if args.root_seed != manifest["root_seed"] or args.clock != manifest["fixed_clock"]:
         raise ValueError("run 的 clock/root_seed 必须与算子图计划完全一致")
@@ -148,10 +149,9 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness) -> dict[str, obj
                 "effective_claim_level": manifest["effective_claim_level"],
             },
         )
-    if args.root_seed != manifest["root_seed"] or args.clock != manifest["fixed_clock"]:
-        raise ValueError("run 的 clock/root_seed 必须与算子图计划完全一致")
     runtime_result = _execute_unified_operator_runtime(
         args=args,
+        minute_scope_inputs=minute_scope_inputs,
         manifest=manifest,
         admitted=admitted,
         dag=dag,
@@ -172,7 +172,6 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness) -> dict[str, obj
         manifest=manifest,
         admitted=admitted,
         runtime_result=runtime_result,
-        verifier_bundle_source=verifier_bundle_source,
         implementation_manifest_hash=implementation_manifest_hash,
         database=database,
         database_probe=database_probe,
@@ -182,29 +181,16 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness) -> dict[str, obj
     )
     completion = {
         **result_payload,
-        "next_action": "运行 verify，以自包含 Result 生成结构化 VerificationResult；通过后可使用 report、compare、export-result 或 Dashboard 消费结果。",
+        "next_action": "运行 report 读取 Result；也可使用 compare、export-result 或 Dashboard 消费结果。",
         **command_suggestion(
-            "python", "-m", "research_pipeline", "verify",
+            "python", "-m", "research_pipeline", "report",
             "--result", result_payload["result_directory"],
             "--result-store", args.result_store,
-            "--output", str(
-                _available_verification_output(Path(args.run_root).resolve())
-            ),
+            "--output", str(Path(args.run_root).resolve() / "report.md"),
             "--json",
         ),
     }
     return completion
-
-
-def _available_verification_output(run_root: Path) -> Path:
-    candidate = run_root / "verification-result.json"
-    if not candidate.exists():
-        return candidate
-    for index in range(2, 10_000):
-        candidate = run_root / f"verification-result-{index}.json"
-        if not candidate.exists():
-            return candidate
-    raise ValueError("无法为 VerificationResult 选择未占用输出路径")
 
 
 def _finalize_operator_graph_result(
@@ -218,7 +204,6 @@ def _finalize_operator_graph_result(
     database_probe: tuple[int, int] | None,
     source_databases: Mapping[str, Path],
     source_database_probes: Mapping[str, tuple[int, int]],
-    verifier_bundle_source: Path | None = None,
     owner: RuntimeLiveness | None = None,
 ) -> dict[str, object]:
     """投影 Runtime 之后的唯一 Result finalize 生命周期。"""
@@ -295,12 +280,13 @@ def _finalize_operator_graph_result(
             data_references=references,
             metric_proofs=metric_proofs,
             implementation_manifest_hash=implementation_manifest_hash,
-            verification_policy_id=policy_id_for_claim(effective_claim_level),
-            validity_producer_hash=VALIDITY_FACTS_PRODUCER_HASH,
-            verifier_identity=manifest.get("verifier_admission"),
-            verifier_bundle_source=verifier_bundle_source,
+            claim_level=effective_claim_level,
             formal_input_request_ids=tuple(manifest["consumed_request_ids"]),
             input_claim_ceilings=manifest["input_claim_ceilings"],
+            metric_definitions=tuple(
+                MetricDefinition.from_dict(item)
+                for item in manifest.get("metric_definitions", ())
+            ),
             published_hook=capture_published_result,
         )
         result_payload = {
@@ -317,7 +303,6 @@ def _finalize_operator_graph_result(
             "runtime_run_id": runtime_result["run_id"],
             "result_id": result_bundle.result_id,
             "result_directory": str(result_directory),
-            "verification_policy_id": result_bundle.verification.policy_id,
             "completion_metadata": dict(completion_metadata),
         }
         write_finalize_status(
@@ -367,22 +352,13 @@ def _execute_unified_operator_runtime(
     minute_data_root,
     resource_capacity,
     owner: RuntimeLiveness | None = None,
+    minute_scope_inputs=None,
 ):
     """把现行算子实现交给唯一统一 Runtime。"""
     runtime_root = Path(args.run_root).resolve()
     _write_or_verify_runtime_invocation(runtime_root, args)
-    raw_graph_plan = json.loads(
-        (Path(args.plan).resolve() / "operator-graph-plan.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    raw_nodes = raw_graph_plan.get("recipe", {}).get("nodes", [])
-    if not isinstance(raw_nodes, list):
-        raise ValueError("统一 Runtime operator graph nodes 无效")
     node_parameters = {
-        str(item["node_id"]): item.get("parameters", {})
-        for item in raw_nodes
-        if isinstance(item, Mapping) and isinstance(item.get("parameters"), Mapping)
+        node.node_id: node.to_dict()["parameters"] for node in recipe.nodes
     }
     raw_semantics = manifest.get("research_semantics")
     semantics = (
@@ -395,14 +371,9 @@ def _execute_unified_operator_runtime(
     }
     if len(strategy_spec_hashes) != len(registry.strategy_specs):
         raise ValueError("统一 Runtime StrategySpec ID 重复")
-    operator_graph_strategy_hash = typed_canonical_hash({
-        "contract_version": "operator-graph-strategy-v1",
-        "nodes": raw_nodes,
-    })
-
     environment = ResearchRunEnvironment(
         plan_root=Path(args.plan).resolve(),
-        manifest=manifest,
+        manifest={**manifest, "persist_inputs": bool(getattr(args, "persist_inputs", False))},
         admitted_plans=admitted,
         database=database,
         source_databases=source_databases,
@@ -415,12 +386,13 @@ def _execute_unified_operator_runtime(
         workers=args.workers,
         resource_timeout_seconds=getattr(args, "resource_timeout_seconds", None),
         strategy_spec_hashes=strategy_spec_hashes,
-        operator_graph_strategy_hash=operator_graph_strategy_hash,
+        minute_scope_inputs=minute_scope_inputs or {},
     )
 
     audit, dependencies = _build_runtime_audit_environment()
     resource_governor = _build_resource_governor(args, resource_capacity)
     service = RuntimeExecutionService(
+        no_node_timeout=getattr(args, "no_node_timeout", False),
         audit_environment=audit,
         numerical_backend_names=tuple(sorted(dependencies)),
         resource_capacity=resource_capacity,
@@ -451,12 +423,7 @@ def _execute_unified_operator_runtime(
         "workers": args.workers,
         "process_slots_by_node": process_slots_by_node,
         "reuse_run_roots": tuple(getattr(args, "reuse_run_root", ())),
-        "node_identity_projection": str(
-            manifest.get(
-                "node_identity_projection",
-                NODE_IDENTITY_PROJECTION_LEGACY,
-            )
-        ),
+        "node_identity_projection": str(manifest["node_identity_projection"]),
     }
     recovery = None
     parent_run_root = getattr(args, "runtime_rerun_parent_root", None)
@@ -473,12 +440,7 @@ def _execute_unified_operator_runtime(
             root_seed=args.root_seed,
             fixed_clock=args.clock,
             required_node_ids=required_reused_nodes,
-            node_identity_projection=str(
-                manifest.get(
-                    "node_identity_projection",
-                    NODE_IDENTITY_PROJECTION_LEGACY,
-                )
-            ),
+            node_identity_projection=str(manifest["node_identity_projection"]),
         )
     if failed_reuse_root:
         recovery = prepare_failed_run_reuse(
@@ -491,9 +453,7 @@ def _execute_unified_operator_runtime(
             fixed_clock=args.clock,
             mode=ExecutionMode(args.mode),
             required_node_ids=required_reused_nodes,
-            node_identity_projection=str(manifest.get(
-                "node_identity_projection", NODE_IDENTITY_PROJECTION_LEGACY,
-            )),
+            node_identity_projection=str(manifest["node_identity_projection"]),
         )
     elif parent_run_root:
         recovery_path = runtime_root / "recovery-plan.json"
@@ -585,6 +545,17 @@ def _build_runtime_audit_environment(
     )
 
 
+def _validate_input_storage_reuse(args) -> None:
+    """复用数据节点时保持输入保存选择，防止复用跳过显式物化。"""
+    roots = list(getattr(args, "reuse_run_root", ()))
+    if getattr(args, "reuse_failed_run_root", None):
+        roots.append(args.reuse_failed_run_root)
+    for root in roots:
+        original = _load_operator_invocation(root)
+        if bool(getattr(original, "persist_inputs", False)) != bool(getattr(args, "persist_inputs", False)):
+            raise ValueError("复用运行的persist_inputs必须与本次一致；改变输入保存方式须重新运行数据节点")
+
+
 def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
     """保存正式恢复所需的不可变调用参数，不把数据库内容写入运行目录。"""
     holdout_ledger_anchor = _holdout_ledger_anchor(args)
@@ -598,15 +569,7 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
     )
     resource_capacity = _runtime_resource_capacity(args)
     payload = {
-        "contract_version": (
-            "research-operator-dag-invocation-v13"
-            if required_reused_nodes
-            else (
-                "research-operator-dag-invocation-v12"
-                if failed_reuse_root
-                else "research-operator-dag-invocation-v11"
-            )
-        ),
+        "contract_version": "research-operator-dag-invocation-v16",
         "plan": str(Path(args.plan).resolve()),
         "data_db": None if not args.data_db else str(Path(args.data_db).resolve()),
         "source_dbs": {
@@ -633,10 +596,7 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
         ],
     }
     if getattr(args, "input_snapshot_manifest", None):
-        payload["contract_version"] = "research-operator-dag-invocation-v14"
         payload["input_snapshot_manifest"] = str(Path(args.input_snapshot_manifest).resolve())
-    if failed_reuse_root and required_reused_nodes:
-        payload["contract_version"] = "research-operator-dag-invocation-v15"
     if required_reused_nodes:
         payload["required_reused_nodes"] = required_reused_nodes
     if failed_reuse_root:
@@ -654,14 +614,10 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
             "stale_seconds": args.resource_stale_seconds,
         }
     )
-    original_version = getattr(args, "_invocation_contract_version", None)
-    if original_version and original_version != "research-operator-dag-invocation-v16":
-        payload["contract_version"] = original_version
-        payload["handoff_out"] = args.handoff_out
-        if original_version == "research-operator-dag-invocation-v10":
-            payload.pop("reuse_run_roots", None)
-    else:
-        payload["contract_version"] = "research-operator-dag-invocation-v16"
+    if getattr(args, "no_node_timeout", False):
+        payload["no_node_timeout"] = True
+    if getattr(args, "persist_inputs", False):
+        payload["persist_inputs"] = True
     document = {**payload, "invocation_hash": typed_canonical_hash(payload)}
     if target.exists():
         existing = json.loads(target.read_text(encoding="utf-8"))
@@ -678,18 +634,17 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
     invocation_hash = payload.pop("invocation_hash", None)
     original_payload = dict(payload)
     if "acceptance_proof" in payload:
-        raise ValueError("旧 acceptance-proof invocation 不再支持；研究复现请声明项目 Verifier")
+        raise ValueError("旧 acceptance-proof invocation 不再支持；研究复现请使用项目算法测试")
     version = payload.get("contract_version")
     expected = {
-        "contract_version", "plan", "data_db", "source_dbs", "minute_data_root", "artifact_root", "holdout_ledger_anchor", "handoff_out",
+        "contract_version", "plan", "data_db", "source_dbs", "minute_data_root", "artifact_root", "holdout_ledger_anchor",
         "run_root", "result_store", "mode", "workers", "root_seed", "clock",
         "execution_engine", "resource_capacity",
         "resource_governance",
     }
     if version == "research-operator-dag-invocation-v16":
-        expected.remove("handoff_out")
         expected.add("reuse_run_roots")
-        for optional in ("input_snapshot_manifest", "required_reused_nodes", "reuse_failed_run_root"):
+        for optional in ("input_snapshot_manifest", "required_reused_nodes", "reuse_failed_run_root", "no_node_timeout", "persist_inputs"):
             if optional in payload:
                 expected.add(optional)
         if "input_snapshot_manifest" in payload and (
@@ -700,30 +655,12 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
             raise ValueError("严格节点复用 invocation 缺少来源")
         if payload.get("reuse_run_roots") and payload.get("reuse_failed_run_root"):
             raise ValueError("完成态与失败节点复用来源互斥")
-    elif version == "research-operator-dag-invocation-v15":
-        expected.update({"reuse_run_roots", "required_reused_nodes", "reuse_failed_run_root"})
-        if payload.get("reuse_run_roots") or not payload.get("required_reused_nodes") or not payload.get("reuse_failed_run_root"):
-            raise ValueError("严格失败节点复用 invocation 来源或节点无效")
-        if "input_snapshot_manifest" in payload:
-            expected.add("input_snapshot_manifest")
-            if not payload.get("input_snapshot_manifest") or payload.get("data_db") is not None or payload.get("source_dbs"):
-                raise ValueError("封存输入 invocation 不得混用数据库来源")
-    elif version == "research-operator-dag-invocation-v14":
-        expected.update({"reuse_run_roots", "input_snapshot_manifest"})
-        if "required_reused_nodes" in payload:
-            expected.add("required_reused_nodes")
-        if "reuse_failed_run_root" in payload:
-            expected.add("reuse_failed_run_root")
-        if not payload.get("input_snapshot_manifest") or payload.get("data_db") is not None or payload.get("source_dbs"):
-            raise ValueError("封存输入 invocation 不得混用数据库来源")
-    elif version == "research-operator-dag-invocation-v13":
-        expected.update({"reuse_run_roots", "required_reused_nodes"})
-    elif version == "research-operator-dag-invocation-v12":
-        expected.update({"reuse_run_roots", "reuse_failed_run_root"})
-    elif version == "research-operator-dag-invocation-v11":
-        expected.add("reuse_run_roots")
-    elif version != "research-operator-dag-invocation-v10":
+    else:
         raise ValueError("正式 operator DAG invocation 版本、路径或 hash 无效")
+    if "no_node_timeout" in payload and payload["no_node_timeout"] is not True:
+        raise ValueError("无限时运行声明必须为true")
+    if "persist_inputs" in payload and payload["persist_inputs"] is not True:
+        raise ValueError("保存输入声明必须为true")
     if "parent_run_root" in payload or "rerun_from_node" in payload:
         expected.update({"parent_run_root", "rerun_from_node"})
     if (
@@ -734,12 +671,10 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
         or invocation_hash != typed_canonical_hash(original_payload)
     ):
         raise ValueError("正式 operator DAG invocation 版本、路径或 hash 无效")
-    payload["_invocation_contract_version"] = version
     source_dbs = payload.pop("source_dbs")
-    reuse_run_roots = payload.pop("reuse_run_roots", [])
+    reuse_run_roots = payload.pop("reuse_run_roots")
     reuse_failed_run_root = payload.pop("reuse_failed_run_root", None)
     required_reused_nodes = payload.pop("required_reused_nodes", [])
-    payload.setdefault("minute_data_root", None)
     if not isinstance(source_dbs, Mapping):
         raise ValueError("正式 operator DAG source_dbs 无效")
     if (
@@ -817,6 +752,7 @@ def inspect_operator_graph(run_root: str | Path) -> dict[str, object]:
     _require_original_research_identity(Path(run_root).resolve(), _manifest)
     audit, dependencies = _build_runtime_audit_environment()
     service = RuntimeExecutionService(
+        no_node_timeout=getattr(args, "no_node_timeout", False),
         audit_environment=audit,
         numerical_backend_names=tuple(sorted(dependencies)),
         project_registry=(
@@ -854,13 +790,11 @@ def rerun_operator_graph(
     args.run_root = str(child)
     args.artifact_root = str(child.with_name(f"{child.name}-artifacts"))
     args.__dict__.pop("handoff_out", None)
-    args.__dict__.pop("_invocation_contract_version", None)
     args.result_store = str(child.with_name(f"{child.name}-results"))
     args.runtime_resume = True
     args.runtime_retry_node = None
     args.runtime_rerun_parent_root = str(parent)
     args.runtime_rerun_node = node_id
-    _validate_run_paths(args)
     return _execute_operator_graph(args)
 
 
@@ -1111,7 +1045,7 @@ def _runtime_resource_capacity(args) -> ResourceCapacity:
     memory_bytes = (
         DEFAULT_RUNTIME_MEMORY_BYTES if memory_bytes is None else memory_bytes
     )
-    cpu_slots = available_cpu_slots() if cpu_slots is None else cpu_slots
+    cpu_slots = DEFAULT_RUNTIME_CPU_SLOTS if cpu_slots is None else cpu_slots
     scratch_bytes = (
         DEFAULT_RUNTIME_SCRATCH_BYTES if scratch_bytes is None else scratch_bytes
     )

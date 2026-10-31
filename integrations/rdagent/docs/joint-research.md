@@ -19,16 +19,16 @@ python -m quantwitness_rdagent joint-resume --request /mnt/i/research/joint-demo
 
 ## 方向、特征与知识
 
-第一轮执行已确认因子基线；后续方向选择明确返回 factor、model 或 stop，并引用实际采用的 record_id。因子方向为收盘动量、均价偏离、相对波动和区间位置；模型方向为受支持的生成式前馈网络。方向、假设和反思只接收独立验证通过的开发指标、定义及已有反思。
+第一轮执行已确认因子基线；后续方向选择明确返回 factor、model 或 stop，并引用实际采用的 record_id。因子方向为收盘动量、均价偏离、相对波动和区间位置；模型方向为受支持的生成式前馈网络。方向、假设和反思只接收执行成功的正式开发指标、定义及已有反思。
 
-模型使用当前已验证因子中开发指标最好的表达式，绑定既有 historical_return 特征槽。模型提案保存 factor_record_id 与 factor_expression；正式变体设计、研究身份、Result 和独立验证均覆盖该绑定。标签、处理器、训练设置、开发范围保持冻结。指标相同时保留较早因子。共同评价资格从正式样本、标签时点和 validation 成员逐条绑定到基线；冻结特征缺失或评价成员/标签变化的候选保留正式实验，不进入金融反馈和最佳因子选择。metrics.rows 是指标行数，实际样本数保存于 population-check.json。
+模型使用当前已完成因子中开发指标最好的表达式，绑定既有 historical_return 特征槽。模型提案保存 factor_record_id 与 factor_expression；正式变体设计、研究身份、Result 均覆盖该绑定。标签、处理器、训练设置、开发范围保持冻结。指标相同时保留较早因子。共同评价资格从正式样本、标签时点和 validation 成员逐条绑定到基线；冻结特征缺失或评价成员/标签变化的候选保留正式实验，不进入金融反馈和最佳因子选择。metrics.rows 是指标行数，实际样本数保存于 population-check.json。
 
 rounds/ 保存每轮方向、引用、提案、评价、反思与记录；branches/factor 和 branches/model 保存原分支正式实验。calls/ 保存统一调用预约与响应，已完成请求恢复时复用。原生JSON请求在正文末尾列出本阶段任务约束、字段及只返回JSON对象的要求；不合格式的响应保留原文并停止，不自动增加付费调用。已完成实验沿用原 Workspace 和 Result，未知调用结果停止等待核对。模型编码经验继续使用 model_request.coding_knowledge 来源。
 
 
 ## 正式执行与替代执行恢复
 
-每个候选的 lint、admit、run、verify、report 默认由独立轻量 Python 进程完成。研究进程保存方向、调用账本和阶段状态；计算进程仅接收包、归档输入、Catalog、bundle 和运行预算，不接收模型环境文件或凭据。计算进程沿用正式 Workspace 和 Runtime 的诊断、ResultStore 与独立验证，失败不会生成成功反馈。
+每个候选的 lint、admit、run、report 默认由独立轻量 Python 进程完成。研究进程保存方向、调用账本和阶段状态；计算进程仅接收包、归档输入、Catalog、bundle 和运行预算，不接收模型环境文件或凭据。计算进程沿用正式 Workspace 和 Runtime 的诊断、ResultStore，失败不会生成成功反馈。
 
 候选目录的 `.package-execution.lock` 使用核心已有的进程身份锁。研究父进程中断后，仍存活的计算子进程继续持有它；恢复返回 `wait`，须等待原计算结束再恢复。计算退出后释放锁，异常退出留下的失效锁由同一核心规则处理。
 
@@ -37,11 +37,11 @@ Runtime 推荐 `resume` 或 `retry-node` 时，恢复继续同一 execution。�
 ~~~bash
 python -m research_pipeline workspace execute --workspace <候选目录>/workspace --label factor_0001-readmit-1 \
   --catalog-lock <冻结Catalog> --source-archive-root <来源归档> \
-  --input-snapshot-manifest <冻结输入清单> --verifier-bundle <冻结Verifier> \
+  --input-snapshot-manifest <冻结输入清单> \
   --extension-bundle <冻结算子bundle> --json
 ~~~
 
-重复传入实验声明中的所有 extension-bundle，并提供原 runtime_options 与验证资源参数。命令完成后，用公开 Python 入口采用该 execution。以联合会话中的单候选 PackageCampaign 为例：
+重复传入实验声明中的所有 extension-bundle，并提供原 runtime_options 与运行资源参数。命令完成后，用公开 Python 入口采用该 execution。以联合会话中的单候选 PackageCampaign 为例：
 
 ~~~python
 import json
@@ -60,14 +60,13 @@ adoption = adopt_package_execution(
     base_package=str(experiment / "packages" / ("candidate_" + candidate_id)),
     source_archive_root=source["source_archive_root"],
     input_snapshot_manifest=source["input_snapshot_manifest"],
-    verifier_bundle=source["verifier_bundle"],
     binding=source,
 )
 ~~~
 
-采用入口只接受同一候选 Workspace 中已经生成正式 Result 且独立验证为 pass 的替代 execution。它核对当前冻结包、归档输入、Catalog、算子与 Verifier bundle、时钟、种子、原正式 Plan 和运行资源；身份不符时保留原关联。
+采用入口只接受同一候选 Workspace 中已经生成正式 Result 且执行成功 的替代 execution。它核对当前冻结包、归档输入、Catalog、算子 bundle、时钟、种子、原正式 Plan 和运行资源；身份不符时保留原关联。
 
-成功采用后，`execution-adoption.json` 保存明确的新 ID 与正式 Result 身份，`execution-ref.json` 指向新执行。原引用、诊断及此前采用记录保留在 `execution-history/<旧execution_id>/`，旧 Workspace execution 保持原位。之后执行 `joint-resume`，评价按采用 ID 复用该 Result 及 VerificationResult，不再按原标签选回失败执行；重复采用同一 execution 沿用同一记录。
+成功采用后，`execution-adoption.json` 保存明确的新 ID 与正式 Result 身份，`execution-ref.json` 指向新执行。原引用、诊断及此前采用记录保留在 `execution-history/<旧execution_id>/`，旧 Workspace execution 保持原位。之后执行 `joint-resume`，评价按采用 ID 复用该 Result ，不再按原标签选回失败执行；重复采用同一 execution 沿用同一记录。
 
 ## 已知限制
 
@@ -86,6 +85,6 @@ adoption = adopt_package_execution(
 
 `joint-inspect --request REQUEST.json` 只读查看已有会话，不创建文件、不调用模型或重跑正式评价。`not_started` 表示尚未建立会话，`incomplete` 表示已冻结但尚无终态，`interrupted` 列出未记录完的轮次及已有执行引用、诊断；原执行锁仍存活时返回 `running` 和 `next_action=wait`。已保存 outcome 保留原状态。
 
-`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `joint-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入已验证开发指标反馈，test/holdout 不参与研究循环。
+`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `joint-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入正式开发指标反馈，test/holdout 不参与研究循环。
 
 未取得确定结果的模型调用预约显示在 `unresolved_model_calls`；`next_action=review_model_calls` 要求核对原调用收据，不自动重复调用或释放已预约预算。

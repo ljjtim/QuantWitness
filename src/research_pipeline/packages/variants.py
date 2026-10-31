@@ -57,7 +57,7 @@ def expand_research_package_variants(
                     seen_graph_ids=seen_graph_ids,
                 )
                 destination = staging / variant["package_slug"]
-                _materialize_variant(base_path, destination, variant)
+                _materialize_variant(base_path, destination, variant, minute_scope_inputs=base.minute_scope_inputs)
                 materialized = load_research_package(destination)
                 generated.append(
                     {
@@ -167,6 +167,7 @@ def _materialize_variant(
     base_root: Path,
     destination: Path,
     variant: Mapping[str, object],
+    *, minute_scope_inputs=None,
 ) -> None:
     destination.mkdir()
     for relative in PACKAGE_FILES:
@@ -174,6 +175,10 @@ def _materialize_variant(
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
+    from research_pipeline.domain.minute_scope_input import copy_minute_scope_input
+
+    for source in (minute_scope_inputs or {}).values():
+        copy_minute_scope_input(source, destination)
     readme = base_root / "README.md"
     if readme.is_file():
         shutil.copyfile(readme, destination / "README.md")

@@ -3,11 +3,9 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
-from research_pipeline.evidence import model_validity as validity
 from research_pipeline.evidence.errors import EvidenceContractError
 from research_pipeline.runtime import walk_forward_model_execution as execution
 from test_walk_forward_model_mainline import _write_input_artifact
-from test_model_validity import model_fixture
 
 
 def _inputs(tmp_path):
@@ -56,37 +54,3 @@ def test_final_split_retains_holdout_index_by_default(tmp_path):
         parameters=parameters, output_root=tmp_path/"split", fixed_clock="2025-01-01T00:00:00Z", max_memory_bytes=64*1024**2)
     assert result["row_counts"]["holdout_index"] == 10
     assert result["holdout_end"] is not None
-
-
-def _development(monkeypatch):
-    model = model_fixture()
-    if isinstance(model, tuple):
-        model = model[0]
-    for name in ("test_predictions", "selection", "fold_selections", "holdout_predictions", "holdout_receipt"):
-        model["tables"].pop(name, None)
-    model["holdout_ledger"] = {}
-    model["tables"]["holdout_index"] = []
-    monkeypatch.setattr(validity, "_fit_configs", lambda *args: None)
-    samples, folds, candidates = validity._split(model)
-    return model, samples, folds, candidates
-
-
-def test_development_validates_validation_predictions(monkeypatch):
-    args = _development(monkeypatch)
-    mse, count = validity._development(*args)
-    assert mse >= 0 and count > 0
-
-
-@pytest.mark.parametrize("attack", ["test_predictions", "selection", "holdout_predictions", "holdout_receipt", "holdout_index", "ledger", "future_feature", "wrong_actual"])
-def test_development_rejects_final_evaluation_and_leakage(monkeypatch, attack):
-    model, samples, folds, candidates = _development(monkeypatch)
-    if attack == "ledger":
-        model["holdout_ledger"] = {"opened": {}}
-    elif attack == "future_feature":
-        model["tables"]["validation_predictions"][0]["feature_available_time"] = "2030-01-01T00:00:00+00:00"
-    elif attack == "wrong_actual":
-        model["tables"]["validation_predictions"][0]["actual"] += 1
-    else:
-        model["tables"][attack] = [{}]
-    with pytest.raises(EvidenceContractError):
-        validity._development(model, samples, folds, candidates)

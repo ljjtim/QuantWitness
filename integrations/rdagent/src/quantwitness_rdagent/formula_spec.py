@@ -282,5 +282,5 @@ def render_spec(draft_path, materials_path, decisions_path, confirmation_path):
             text.append(f"  出处：PDF第{ref['pdf_page']}页行{ref['line_start']}—{ref['line_end']}；{ref['quote']}")
     text.extend(['','人工审阅说明：'+decisions['review_notes'],'','材料限制：'])
     text.extend('- '+item for item in [*materials['review_notes'],*draft['limitations']])
-    text.append('仅实现已确认规则。此规格不授权自动运行研究，不改变输入可见时点或独立验证器。')
+    text.append('仅实现已确认规则。此规格不授权自动运行研究，不改变输入可见时点或指标定义。')
     return '\n'.join(text)+'\n'

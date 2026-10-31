@@ -118,45 +118,9 @@ def compile_duckdb_query(
     ctes = [f'"__scan" AS (SELECT {scan_projection} FROM {source}{where})']
     current = '"__scan"'
     if preserve_temporal_facts:
-        temporal = plan.temporal_selection
-        global_clauses: list[str] = []
         if plan.query.as_of is None:
             raise QueryIRInvalidError("时态版本事实物化必须声明 QueryIR as_of")
-        if temporal.visibility_filter is not None:
-            for field, inclusive in temporal.visibility_filter.time_fields:
-                clause, value = _upper_bound_clause(
-                    plan,
-                    field,
-                    plan.query.as_of,
-                    inclusive=inclusive,
-                    end_of_date=True,
-                )
-                global_clauses.append(clause)
-                params.append(value)
-        revision = temporal.revision_selector
-        if revision is not None:
-            revision_time_field = revision.order_fields[0]
-            if (
-                temporal.visibility_filter is None
-                or revision_time_field not in {
-                    field for field, _inclusive in temporal.visibility_filter.time_fields
-                }
-            ):
-                clause, value = _upper_bound_clause(
-                    plan,
-                    revision_time_field,
-                    plan.query.as_of,
-                    inclusive=True,
-                    end_of_date=True,
-                )
-                global_clauses.append(clause)
-                params.append(value)
-        if global_clauses:
-            ctes.append(
-                f'"__bounded_versions" AS (SELECT * FROM {current} WHERE '
-                f"{' AND '.join(global_clauses)})"
-            )
-            current = '"__bounded_versions"'
+        # 保留业务范围内的晚修订版本供缺史检测；实际值仍按消费时点选择。
         sql = (
             f"WITH {', '.join(ctes)} SELECT {public_projection} FROM {current} "
             f"ORDER BY {ordering}"
@@ -164,6 +128,16 @@ def compile_duckdb_query(
         return sql, params
     temporal = plan.temporal_selection
     temporal_clauses: list[str] = []
+    cutoff_fields = dict(temporal.visibility_filter.time_fields) if temporal.visibility_filter else {}
+    if temporal.revision_selector is not None:
+        cutoff_fields.setdefault(temporal.revision_selector.order_fields[0], True)
+    if plan.query.as_of is not None:
+        for field, inclusive in cutoff_fields.items():
+            clause, value = _upper_bound_clause(
+                plan, field, plan.query.as_of, inclusive=inclusive, end_of_date=True,
+            )
+            temporal_clauses.append(clause)
+            params.append(value)
     if temporal.session_close_selection is not None:
         clause, values = _session_close_clause(plan)
         temporal_clauses.append(clause)

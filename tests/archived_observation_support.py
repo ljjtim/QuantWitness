@@ -110,11 +110,7 @@ def build_archived_observation_fixture(root):
     spec["graph"] = {"contract_version": "research-operator-graph-recipe-v1",
         "graph_id": "archived_observation_fixture", "nodes": [
             {"node_id": "data_plane", "operator_id": "data.columnar.materialize",
-                "operator_version": "1.0.0", "inputs": [], "parameters": {}, "strategies": []},
-            {"node_id": "validity", "operator_id": "research.validity.data-observation",
-                "operator_version": "1.0.0", "inputs": [{"input_port": "data",
-                    "source_node_id": "data_plane", "source_output_port": "data"}],
-                "parameters": {}, "strategies": []}]}
+                "operator_version": "1.0.0", "inputs": [], "parameters": {}, "strategies": []}]}
     spec_file.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
     manifest_path = root / "input-snapshot-manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")

@@ -49,12 +49,9 @@ class _StoreLock:
             except FileExistsError:
                 try:
                     owner = json.loads(self.path.read_text(encoding="utf-8"))
-                    started_at = owner.get("process_started_at")
-                    alive = (
-                        psutil.pid_exists(int(owner["pid"])) if started_at is None
-                        else process_identity_alive(int(owner["pid"]), float(started_at))
-                    )
-                    if alive:
+                    if process_identity_alive(
+                        int(owner["pid"]), float(owner["process_started_at"])
+                    ):
                         raise RuntimeStateError("事件库已有活动写者")
                     self.path.unlink()
                 except RuntimeStateError:

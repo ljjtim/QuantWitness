@@ -16,7 +16,7 @@ import run_release_gate_tests as gates  # noqa: E402
 def test_gate_prerequisite_rejects_other_candidate(tmp_path: Path) -> None:
     path = tmp_path / "gate-c.json"
     path.write_text(json.dumps({
-        "contract_version": "research-gate-c-evidence-v2", "status": "pass",
+        "contract_version": "research-gate-c-evidence-v3", "status": "pass",
         "evidence_scope": "release_candidate", "release_candidate_id": "old",
         "build_manifest_hash": "a" * 64,
     }), encoding="utf-8")
@@ -59,6 +59,20 @@ def test_gate_l_rejects_wrong_prerequisite_type(tmp_path: Path) -> None:
                                 "status": "pass", "gate_id": "gate-d"}), encoding="utf-8")
     with pytest.raises(ValueError, match="当前 Gate C"):
         gates._pass_evidence_hash(path, binding)
+
+
+@pytest.mark.parametrize("version", ["research-gate-c-evidence-v2", "research-gate-c-evidence-v3"])
+def test_gate_l_requires_current_gate_c_version(tmp_path: Path, version: str) -> None:
+    binding = {"evidence_scope": "release_candidate", "release_candidate_id": "current",
+               "build_manifest_hash": "a" * 64}
+    path = tmp_path / "gate-c.json"
+    path.write_text(json.dumps({**binding, "contract_version": version,
+                                "status": "pass", "gate_id": "gate-c"}), encoding="utf-8")
+    if version == "research-gate-c-evidence-v3":
+        assert len(gates._pass_evidence_hash(path, binding)) == 64
+    else:
+        with pytest.raises(ValueError, match="当前 Gate C"):
+            gates._pass_evidence_hash(path, binding)
 
 
 def test_installed_inventory_rejects_same_version_old_content(tmp_path: Path, monkeypatch) -> None:

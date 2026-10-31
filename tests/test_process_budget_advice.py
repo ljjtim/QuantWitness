@@ -20,9 +20,6 @@ budget = importlib.import_module("research_pipeline.platform.process_budget_advi
         ("win32", True, (3, 10), "worker", 4),
         ("win32", True, (3, 11), "worker", 3),
         ("win32", False, (3, 11), "worker", 2),
-        ("win32", True, (3, 10), "verifier", 3),
-        ("win32", False, (3, 10), "verifier", 2),
-        ("darwin", True, (3, 13), "verifier", 2),
     ],
 )
 def test_startup_advice_uses_documented_process_tree(
@@ -47,8 +44,6 @@ def test_startup_advice_uses_documented_process_tree(
         platform_name == "win32" and version == (3, 10) and purpose == "worker"
     )
     assert "硬上限" in advice["message"]
-    if purpose == "verifier":
-        assert advice["parameter"] == "--verification-process-slots"
 
 
 def test_larger_declared_budget_is_not_reduced():
@@ -100,14 +95,6 @@ def test_measurement_failure_is_not_reported_as_budget_shortage():
     assert advice["exceeded"] == {}
 
 
-def test_process_failure_without_counts_does_not_invent_measurement():
-    advice = budget.resource_failure_advice(
-        {"process_cleanup_status": "complete"},
-        error_code="project_verifier_process_slots_exceeded", purpose="verifier",
-    )
-    assert advice["status"] == "process_slots_exceeded"
-    assert advice["exceeded"] == {}
-    assert advice["parameter"] == "--verification-process-slots"
 
 
 def test_unrelated_failure_has_no_budget_advice():

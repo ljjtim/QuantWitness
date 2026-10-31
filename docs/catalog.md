@@ -4,6 +4,14 @@
 
 第一次使用，先完成[入门教程](workspace-quickstart.md)。那里已经准备好合成数据和数据说明；这里再解释如何换成自己的来源。
 
+研究包同次准入按数据库路径、数据源名字和环境复用只读连接。各请求仍按自己的证券、日期、字段和过滤条件执行范围统计；遇到结构漂移或准入失败即拒绝，并关闭连接。
+
+## 日线策略的完整行情与开盘价
+
+股票 `cn_equity.daily_bar` 第3版提供未复权 OHLCV，high/low绑定真实物理列，完整日线保持 `available.daily.v1/next_session_open` 可见性。当天开盘价通过已有 `cn_equity.session_open_state` 的date/code/open投影按 `session_open` 单独取得；开盘请求不能把当天high/low/close/volume作为已知行情。
+
+日线策略在同一个列式data bundle内显式声明 `bars_request_id` 和 `open_request_id`。两个请求的证券和日期范围必须一致，均采用raw口径；框架同时检查物理字段映射和批准Catalog的可见性规则。自建股票或ETF来源可使用自己的dataset ID及source profile，仍须满足相同合同。股票价格精度为2位，ETF为3位，策略声明的资产类型须与证券及Catalog一致。
+
 ## 1. 先判断手上的数据能走哪条路
 
 | 手上的数据 | 接入方式 | 还要准备什么 |
@@ -211,14 +219,14 @@ python -m research_pipeline package admit --package $package --catalog-lock $loc
 if ($LASTEXITCODE -ne 0) { throw '未通过数据与时点准入；查看具体缺失项' }
 ```
 
-`$package` 要指向已经填写完整的研究包，`plan` 输出目录应不存在。自定义算法和验证器按研究包要求另外提供 bundle。准入通过后，再按研究教程执行 `run → verify → report`。
+`$package` 要指向已经填写完整的研究包，`plan` 输出目录应不存在。自定义算法按研究包要求另外提供 bundle。准入通过后，再按研究教程执行 `run → report`。
 
 **常见卡点：** 表名不对就改绑定；类型或结构变化就重新观察和确认；可见时间没有证据就补来源；缺历史市场规则就缩小研究范围或补齐规则。不要通过关闭检查把错误的数据变成“可用”。
 
 ## 接入边界与进阶参考
 
 - 本例演示日频、单数据库、显式行可见时间。多个数据源、分钟归档、因子发布与下一交易日可见规则见下文和[数据读取](data_plane.md)。
-- Catalog 描述可见性，具体算子和独立验证器还要正确执行这些约定；不能仅靠填写 `available_at` 就宣称所有研究自动无前视。
+- Catalog 描述可见性，实际数据读取和算法消费者执行这些约定；不能仅靠填写 `available_at` 就宣称所有研究自动无前视。
 - 工作目录含结构观察、说明、确认、Lock 和计划；不要把它们当作通用默认数据随源码分发。源数据库始终只读。
 
 ## 从发现结果交给准入

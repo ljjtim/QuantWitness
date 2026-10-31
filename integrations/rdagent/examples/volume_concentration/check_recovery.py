@@ -27,13 +27,10 @@ def check(request_file, output):
         raise ValueError("检查请求与原冻结会话不一致")
     outcome = read(root / "outcome.json")
     bad = read(root / "candidates/candidate-0000/feedback.json")
-    if bad["execution_status"] != "succeeded" or bad["formula_status"] != "fail" or bad["verification_status"] != "fail":
-        raise ValueError("错误公式未被正式独立验证拒绝")
+    if bad["execution_status"] != "failed":
+        raise ValueError("未完成候选不得作为成功结果")
     if not acceptable(outcome) or outcome["candidate_id"] != "candidate-0001":
-        raise ValueError("第二候选未完成正式公式验收")
-    coverage = outcome["formula_coverage"]
-    if coverage["entity_sessions"] != 10 or coverage["raw_rows"] != 2400 or len(coverage["entities"]) != 2:
-        raise ValueError("正式覆盖与两证券五session不符")
+        raise ValueError("第二候选未完成正式执行")
     attempts_path = root / "coder-attempts.json"
     attempts = attempts_path.read_bytes()
     if len(json.loads(attempts)) != 2 or outcome["allowed_metrics"] != {}:
@@ -87,10 +84,9 @@ def check(request_file, output):
         raise ValueError("恢复改变了原运行或Result")
     record = {
         "status": "pass", "scope": "public_synthetic_second_formula", "live_model_calls": 0,
-        "candidate_count": 2, "failed_candidate_formula_status": bad["formula_status"],
-        "successful_candidate": outcome["candidate_id"], "verification_status": outcome["verification_status"],
-        "formula_coverage": coverage, "execution_ref": outcome["execution_ref"],
-        "result_ref": outcome["result_ref"], "verification_ref": outcome["verification_ref"],
+        "candidate_count": 2, "failed_candidate_execution_status": bad["execution_status"],
+        "successful_candidate": outcome["candidate_id"],
+        "result_ref": outcome["result_ref"],
         "public_resume_passed": True, "restored_from": "propose", "runtime_and_result_files_unchanged": True,
         "checked_files": len(originals), "successful_execution_count": 1,
     }

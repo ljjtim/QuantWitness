@@ -42,16 +42,12 @@ _NODE_LOCAL_MUTATION_TESTS = (
 
 
 def _validate_public_semantic_registries() -> None:
-    from research_pipeline.evidence.verification_result import (
-        validate_builtin_verification_semantics,
-    )
     from research_pipeline.platform.metric_contracts import (
         build_mainline_metric_registry,
     )
 
     build_reference_transform_recipes()
     build_mainline_metric_registry()
-    validate_builtin_verification_semantics()
 
 
 def _validate_node_local_mutations(repository_root: str | Path) -> None:

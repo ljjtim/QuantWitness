@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 import re
 
-from .contracts import write_json
 from .factor_research import ResearchCalls, ResearchBudgetExhausted, _freeze, _read
 from .package_campaign import PackageCampaign, validate_package_campaign
 
@@ -73,9 +72,8 @@ class ModelResearch:
                 raise ValueError(".env模型身份与冻结请求不同")
         from research_pipeline.packages import load_research_package
         from research_pipeline.data_plane import PathRolePolicy
-        from research_pipeline.extensions.verifier_bundle import verify_project_verifier_bundle
         source = self.payload["package_template"]["source"]
-        paths = {k: source[k] for k in ("path", "catalog_lock", "verifier_bundle", "input_snapshot_manifest", "source_archive_root")}
+        paths = {k: source[k] for k in ("path", "catalog_lock", "input_snapshot_manifest", "source_archive_root")}
         paths.update({"extension_"+str(i): p for i, p in enumerate(source["extension_bundles"])})
         paths["confirmation"] = self.payload["confirmed_spec"]
         paths.update({"response_"+str(i): p for i, p in enumerate(self.payload["proposer"].get("responses", []))})
@@ -90,9 +88,10 @@ class ModelResearch:
             raise ValueError("生成模型研究只接受表格development包")
         self.fit_parameters = dict(nodes["model_fit"]["parameters"])
         self.processors = json.loads(self.fit_parameters["candidate_jsons"][0])["processors"]
-        verifier = verify_project_verifier_bundle(source["verifier_bundle"])
+        from research_pipeline.platform.metric_contracts import MetricDefinition
+        definitions_from_package = tuple(MetricDefinition.from_dict(item) for item in package.spec_payload.get("metric_definitions", ()))
         objective = self.payload["package_template"]["objective"]
-        definitions = [d for d in verifier.metric_definitions if d.metric_ref == self.design["metric_ref"] and d.result_schema_id == objective["schema_id"]]
+        definitions = [d for d in definitions_from_package if d.metric_ref == self.design["metric_ref"] and d.result_schema_id == objective["schema_id"]]
         if len(definitions) != 1:
             raise ValueError("模型开发目标缺少唯一正式指标定义")
         definition = definitions[0].payload()
@@ -127,6 +126,7 @@ class ModelResearch:
             item = {k: row[k] for k in ("candidate_id", "hypothesis", "reason", "definition", "status") if k in row}
             if row["status"] == "evaluated":
                 item["metrics"] = {k: row["metrics"][k] for k in ("value", "rows")}
+                item["limitations"] = list(row["metrics"].get("limitations", ()))
                 if "reflection" in row:
                     item["reflection"] = row["reflection"]
             history.append(item)
@@ -171,7 +171,7 @@ class ModelResearch:
                         _freeze(attempt_path, {"status": "fail", "response": response, "error": error})
                         if self.knowledge:
                             self.knowledge.record(candidate_id=f"model_{index:04d}_attempt_{attempt}", source=response,
-                                evidence={"model_status": "fail", "diagnostics": [{"stage": "model_validation", "error_code": "model.definition_invalid", "error_type": "ValueError"}]})
+                                evidence={"diagnostics": [{"stage": "model_validation", "error_code": "model.definition_invalid", "error_type": "ValueError"}]})
                         if attempt >= self.payload["budget"]["repairs"]:
                             proposal = {"action": "reject", "reason": "model_compile_failed"}
                             break
@@ -242,6 +242,7 @@ class ModelResearch:
             context = self.context()
             context["current"] = {k: evaluation[k] for k in ("candidate_id", "definition", "hypothesis", "reason", "status")}
             context["current"]["metrics"] = {k: evaluation["metrics"][k] for k in ("value", "rows")}
+            context["current"]["limitations"] = list(evaluation["metrics"].get("limitations", ()))
             try:
                 result["reflection"] = reflect_model(context, ResearchCalls(self, f"{index:04d}-reflection"))
             except ResearchBudgetExhausted:

@@ -106,10 +106,9 @@
       "notes": "resume、retry-node、inspect 和 rerun-from 消费当前 invocation、计划内算子闭包和已验证 checkpoint；run 与 workspace run 共用复用参数和正式运行校验；--reuse-run-root 只按显式顺序接受现行节点局部身份下已成功发布 Result 的完成态 run，并机会式复用 pure/cacheable 节点。配合 --require-reused-node 时，指定节点及其必要上游允许不是 pure/cacheable，但必须在 Worker 启动前全部通过节点局部身份、输入、checkpoint、typed 输出和 ExternalArtifact 内容复验，且不得回退执行。run --reuse-failed-run-root 只接受一个显式失败终态 run，要求新旧 DAG、节点身份环境、clock 和 seed 完全一致，只把状态为成功且完整复验通过的 checkpoint 复制进目标 run，再从首个未成功节点继续。两种跨运行来源不能混用，不扫描磁盘或依赖裸 ResultStore。同一次 execute 复用 Supervisor 已冻结的工件验证结果，新的 resume 进程、rerun child 或新 run 必须重新完整验证。多请求 data 节点另以 run 内 partial index 逐项复验已提交 DatasetArtifactRef，只重做失效 request；partial 不进入正式输出。旧计划仍可 inspect/resume/retry，但不能开启跨运行复用。该边界仍为 local_only。"
     },
     {
-      "id": "evidence.consume",
+      "id": "result.consume",
       "state": "local_only",
       "commands": [
-        "verify",
         "report",
         "export-result",
         "compare",
@@ -117,56 +116,25 @@
         "analysis compare"
       ],
       "required_inputs": [
-        "结构化 VerificationResult",
-        "自包含 ResultStore",
-        "analysis run 使用显式 AnalysisRequest；analysis compare 使用两份或多份规范 AnalysisResult"
+        "正式 Result 目录",
+        "ResultStore",
+        "analysis run 使用显式 AnalysisRequest；analysis compare 使用同规格 AnalysisResult"
       ],
       "implementation_anchors": [
-        "research_pipeline/src/research_pipeline/evidence/verification_result.py::load_verified_result_context",
-        "research_pipeline/src/research_pipeline/evidence/verification_result.py::compare_verification_results",
-        "research_pipeline/src/research_pipeline/evidence/analysis_contracts.py::AnalysisRequest",
-        "research_pipeline/src/research_pipeline/evidence/result_analysis.py::analyze_verified_result",
-        "research_pipeline/src/research_pipeline/evidence/result_analysis.py::compare_analysis_results",
-        "research_pipeline/src/research_pipeline/packages/delivery.py::compare_research_package_results",
-        "research_pipeline/src/research_pipeline/cli/parser.py::_add_evidence",
-        "research_pipeline/src/research_pipeline/cli/parser.py::_add_analysis"
+        "research_pipeline/src/research_pipeline/results/delivery.py::load_result_context",
+        "research_pipeline/src/research_pipeline/results/delivery.py::compare_results",
+        "research_pipeline/src/research_pipeline/results/delivery.py::export_result",
+        "research_pipeline/src/research_pipeline/evidence/result_analysis.py::analyze_result",
+        "research_pipeline/src/research_pipeline/packages/delivery.py::compare_research_package_results"
       ],
       "verification_anchors": [
-        "research_pipeline/tests/test_generic_lifecycle.py::test_verification_result_survives_run_root_removal",
-        "research_pipeline/tests/test_cli_mainline.py::test_structured_cli_consumers_work_without_run_root",
-        "research_pipeline/tests/test_verification_result_comparison.py::test_different_plans_with_same_metric_contract_are_comparable",
-        "research_pipeline/tests/test_cli_mainline.py::test_package_compare_delegates_once_to_delivery_and_reports_package_scope",
-        "research_pipeline/tests/test_generic_result_analysis.py::test_monthly_simple_return_matches_independent_oracle",
-        "research_pipeline/tests/test_generic_result_analysis.py::test_analysis_projects_only_date_and_value_columns",
-        "research_pipeline/tests/test_generic_result_analysis.py::test_four_same_spec_results_rank_and_mismatch_disables_ranking"
+        "research_pipeline/tests/test_direct_result_cli.py",
+        "research_pipeline/tests/test_direct_result_workspace.py",
+        "research_pipeline/tests/test_generic_result_analysis.py"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "verify 直接从自包含 Result 生成结构化 VerificationResult；report、compare、analysis、export-result 和 Dashboard 不依赖 run-root。analysis run 只消费 status=pass 的 VerificationResult，要求外部请求显式声明表列、窗口、值语义、频率、单位、费用口径和处理政策，只投影日期和值两列并生成独立 AnalysisResult，不修改 Result、VerificationResult 或 claim。analysis compare 只对同规格、同实际窗口和同 claim 事实的 AnalysisResult 排名，任一必要事实不一致时不输出部分排名。直接 compare 仍只比较已验证指标事实并明示未检查 package 合同；package compare 由 delivery 唯一检查 metric/claim 合同。export-result 仅复制并复核已验证 Result，不重新执行研究。该合同尚未通过独立发布验收，因此保持 local_only。"
-    },
-    {
-      "id": "evidence.validity_recompute",
-      "state": "local_only",
-      "commands": [
-        "verify"
-      ],
-      "required_inputs": [
-        "ResultBundle 中闭合的 canonical 六表、TCA 四表、policy 与 lineage",
-        "显式自包含 ResultStore"
-      ],
-      "implementation_anchors": [
-        "research_pipeline/src/research_pipeline/evidence/result_financial_oracle.py::verify_result_financial_oracle",
-        "research_pipeline/src/research_pipeline/results/artifact_reader.py::ExternalArtifactReader"
-      ],
-      "verification_anchors": [
-        "research_pipeline/tests/test_result_financial_oracle.py",
-        "research_pipeline/tests/financial_oracle_probe.py",
-        "research_pipeline/tests/test_package_dependency_scc.py",
-        "research_pipeline/release/financial-validity-real-acceptance/acceptance.json"
-      ],
-      "evidence_level": "local_acceptance",
-      "trust_level": "local_only",
-      "notes": "独立 verify 从已封存的 canonical 六表与 Bar TCA 四表复核金融守恒、费用与 lineage；金融 oracle 使用有界 Arrow 批次和受配额 DuckDB 扫描，篡改或资源不足均阻止生成 VerificationResult。公开源码提供合同测试，不附带个人真实数据 Result 或独立发布验收；能力保持 local_only，不代表策略盈利、实盘成交或可交易性。"
+      "notes": "report、compare、analysis、export-result 和 Dashboard 直接消费正式 Result，不依赖 run-root。报告只投影需要的表与列。analysis 的请求显式声明窗口、值语义、单位、费用和处理政策；只有规格与实际窗口相同的结果才能排名。package compare 另检查研究包的指标与结论合同。Result 中的结论级别是研究声明及输入范围，不是独立认证。"
     },
     {
       "id": "operator_graph.generic_run",
@@ -182,8 +150,7 @@
         "通过加载校验的不可变计划",
         "绑定的只读数据库快照",
         "显式输出目录、时钟与 seed",
-        "恢复时使用首次 run 保存并哈希绑定的 invocation",
-        "verify 使用自包含 ResultStore 生成结构化 VerificationResult"
+        "恢复时使用首次 run 保存并哈希绑定的 invocation"
       ],
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/packages/operator_graph.py::compile_operator_graph_package",
@@ -191,7 +158,6 @@
         "research_pipeline/src/research_pipeline/data_plane/verification_lifecycle.py::RunScopedArtifactVerification",
         "research_pipeline/src/research_pipeline/runtime/external_artifact.py::ExternalArtifactCommit",
         "research_pipeline/src/research_pipeline/results/assembler.py::ResultAssembler",
-        "research_pipeline/src/research_pipeline/evidence/verification_result.py::verify_result",
         "research_pipeline/src/research_pipeline/application/research_plan_store.py::load_operator_graph_research_plan"
       ],
       "verification_anchors": [
@@ -205,7 +171,7 @@
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "正式 run 由 Runtime v2 调度，节点返回按端口索引的 typed refs，checkpoint 绑定全部端口；成功后唯一 finalize 自包含 Result，再由独立 verify 生成 VerificationResult。该边界尚缺独立发布验收，因此仍是 local_only。"
+      "notes": "正式 run 由统一 Runtime 调度，节点返回按端口索引的类型化工件，checkpoint 绑定全部端口；成功后原子发布 Result，报告与开发反馈直接读取结果。恢复继续核对输入、配置、实现和检查点，失败不能作为成功研究反馈。当前范围保持 local_only。"
     },
     {
       "id": "research.walk_forward_model",
@@ -242,31 +208,29 @@
         "run"
       ],
       "required_inputs": [
-        "四资产 1m Catalog 合同",
-        "冻结 scope revision 5",
-        "分钟 session 与市场规则快照",
-        "准入时冻结研究范围和来源修订",
-        "适用资产的 PIT 复权快照、完整历史交易规则与正式仿真账本"
+        "已批准的1m Catalog合同与来源修订",
+        "冻结交易日历与逐证券历史规则",
+        "股票或ETF的PIT复权和公司行动快照",
+        "已准入策略bundle及冻结LEAN安装"
       ],
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/data_plane/minute_scan.py::build_minute_scan_plan",
         "research_pipeline/src/research_pipeline/data_plane/minute_resampling.py::execute_minute_resample",
         "research_pipeline/src/research_pipeline/research/minute_operators.py::build_intraday_features",
-        "research_pipeline/src/research_pipeline/simulation/minute_execution.py::run_minute_event_simulation",
-        "research_pipeline/src/research_pipeline/research/statistics/minute_profile.py::build_minute_statistics_artifact",
-        "research_pipeline/src/research_pipeline/evidence/minute_validity.py::recompute_minute_validity_issues"
+        "research_pipeline/src/research_pipeline/runtime/lean_strategy_execution.py::execute_lean_strategy_node",
+        "research_pipeline/src/research_pipeline/research/statistics/minute_profile.py::build_minute_statistics_artifact"
       ],
       "verification_anchors": [
-        "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_and_intervals",
+        "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_at_one_minute",
         "research_pipeline/tests/test_minute_cli_contract.py::test_formal_minute_run_records_serial_seed_workers",
         "research_pipeline/tests/test_minute_cli_contract.py::test_formal_minute_run_preserves_parallel_mode",
-        "research_pipeline/tests/test_minute_event_simulation.py::test_futures_same_session_round_trip_keeps_terminal_position_snapshot",
-        "research_pipeline/tests/test_result_financial_oracle.py::test_futures_minute_context_recomputes_settlement_and_margin",
-        "research_pipeline/release/minute-reference-acceptance/real-data-smoke.md"
+        "research_pipeline/release/minute-reference-acceptance/real-data-smoke.md",
+        "research_pipeline/tests/test_daily_stream.py::test_month_scan_once_and_stable_clipping",
+        "research_pipeline/tests/test_lean_daily_admission.py::test_frequency_rejects_other_intervals_and_port_conflicts"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "四类中国市场资产可按当前 Catalog、已完成分钟 bar、PIT 快照与历史规则进入同一研究主链；随包规则仅覆盖文档列明的参考标的及窗口，范围外无默认规则。公开源码提供合同与合成示例，不附带真实分钟数据或研究结果；能力保持 local_only，不代表全历史、全品种或实盘可交易。"
+      "notes": "股票与ETF的一分钟策略使用LEAN原生订单与账户，按已准入来源、完成bar和历史可见规则执行。读取层按月整理、按天消费并预读下一交易日；预读不改变策略可见时点。日线使用独立开盘来源。当前策略频率为1m或1d，能力保持local_only。"
     },
     {
       "id": "minute_line.real_data_smoke",
@@ -277,22 +241,21 @@
       "required_inputs": [
         "显式只读来源的股票、ETF、指数和期货 raw completed-bar 分钟数据",
         "指数仅作非交易 diagnostic，交易资产不在规则不足时进入仿真",
-        "自包含 ResultStore 与通过的 VerificationResult",
+        "正式 ResultStore",
         "结论上限固定为 research_observation"
       ],
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/data_plane/minute_scan.py::build_minute_scan_plan",
-        "research_pipeline/src/research_pipeline/data_plane/minute_resampling.py::execute_minute_resample",
-        "research_pipeline/src/research_pipeline/evidence/verification_result.py::verify_result"
+        "research_pipeline/src/research_pipeline/data_plane/minute_resampling.py::execute_minute_resample"
       ],
       "verification_anchors": [
-        "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_and_intervals",
+        "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_at_one_minute",
         "research_pipeline/tests/test_minute_runtime_adapters.py::test_formal_minute_observation_chain_publishes_result_metric",
         "research_pipeline/release/minute-reference-acceptance/real-data-smoke.md"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "公开包提供四资产分钟输入和只读 Result/VerificationResult 合同，不附带供应商原始数据或个人真实运行收据。真实数据观察须由使用者在自己的来源、窗口和规则下重新执行并独立验证；当前能力只到 local_only，不宣称供应商历史版本精确重放或分钟交易仿真。"
+      "notes": "公开包提供四资产分钟输入和只读 Result 合同，不附带供应商原始数据或个人运行记录。真实数据观察由使用者在自己的来源、窗口和规则下执行；当前能力为 local_only，不代表供应商历史版本精确重放或分钟交易仿真。"
     },
     {
       "id": "simulation.bar_tca",
@@ -306,16 +269,15 @@
         "决策时可见的价格基准、正式费用与规则快照",
         "流动性归因只有在容量当时可见时才可计算",
         "缺少逐笔正式 fill 的分钟结果必须失败关闭",
-        "正式结果必须进入唯一 Result 与 VerificationResult"
+        "正式结果必须进入正式 Result"
       ],
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/simulation/bar_tca.py::run_bar_tca",
-        "research_pipeline/src/research_pipeline/simulation/minute_execution.py::run_minute_event_simulation",
         "research_pipeline/src/research_pipeline/runtime/bar_tca_adapter.py::execute_simulation_result_bar_tca"
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_bar_tca.py::test_tca_attributes_each_formal_fill_without_generating_another_fill",
-        "research_pipeline/tests/test_bar_tca.py::test_artifact_and_independent_oracle_bind_formal_fill_set",
+        "research_pipeline/tests/test_bar_tca.py::test_artifact_writer_preserves_formal_fill_set",
         "research_pipeline/tests/test_simulation_result_contract.py::test_tca_consumes_only_canonical_orders_fills_and_visible_benchmark",
         "research_pipeline/tools/bar_tca_oracle.py"
       ],

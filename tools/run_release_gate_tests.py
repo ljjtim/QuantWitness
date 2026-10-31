@@ -56,7 +56,7 @@ def _pass_evidence_hash(path: Path, binding: dict[str, object]) -> str:
         raise ValueError(f"前置 Gate evidence 未通过: {path}")
     if any(payload.get(key) != value for key, value in binding.items()):
         raise ValueError("前置 Gate evidence 未绑定同一候选")
-    if payload.get("gate_id") != "gate-c" or payload.get("contract_version") != "research-gate-c-evidence-v2":
+    if payload.get("gate_id") != "gate-c" or payload.get("contract_version") != "research-gate-c-evidence-v3":
         raise ValueError("Gate L 前置必须是当前 Gate C 证据")
     return _sha256(path)
 

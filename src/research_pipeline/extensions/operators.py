@@ -390,7 +390,7 @@ class TrustedOperatorRegistry:
                 spec = self.require_operator(node.operator_id, node.operator_version)
                 node_specs[node.node_id] = spec
                 operator_hashes[node.node_id] = spec.spec_hash
-                validate_parameters(node.parameters, spec.parameters, f"node.{node.node_id}.parameters")
+                node.validate_parameters(spec.parameters)
                 expected_roles = tuple(item.value for item in spec.strategy_roles)
                 actual_roles = tuple(item.role.value for item in node.strategies)
                 if actual_roles != expected_roles:

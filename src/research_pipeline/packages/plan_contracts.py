@@ -74,11 +74,14 @@ class OperatorGraphPlan:
     project_id: str | None = None
     project_bundle_hashes: tuple[str, ...] = ()
     project_implementation_hashes: Mapping[str, str] | None = None
-    verifier_identity: Mapping[str, object] | None = None
     research_semantics: ResearchSemantics | None = None
     contract_version: str = OPERATOR_GRAPH_PLAN_VERSION
 
     def __post_init__(self) -> None:
+        if self.plan_hash != self._validated_hash():
+            raise ResearchPackageError("OperatorGraphPlan hash 不一致")
+
+    def _validated_hash(self) -> str:
         if not self.research_id:
             raise ResearchPackageError("OperatorGraphPlan research_id 不能为空")
         if self.contract_version != OPERATOR_GRAPH_PLAN_VERSION:
@@ -113,17 +116,43 @@ class OperatorGraphPlan:
             "project_implementation_hashes",
             MappingProxyType(dict(sorted(implementation_hashes.items()))),
         )
-        if self.verifier_identity is not None:
-            if not isinstance(self.verifier_identity, Mapping):
-                raise ResearchPackageError("OperatorGraphPlan Verifier identity 无效")
-            verifier_identity = dict(self.verifier_identity)
-            if verifier_identity.get("project_id") != (self.project_id or self.research_id):
-                raise ResearchPackageError("OperatorGraphPlan Verifier project_id 不一致")
-            object.__setattr__(self, "verifier_identity", MappingProxyType(verifier_identity))
-        if self.plan_hash != typed_canonical_hash(self.payload()):
-            raise ResearchPackageError("OperatorGraphPlan hash 不一致")
+        return typed_canonical_hash(self.identity_payload())
+
+    @classmethod
+    def build(
+        cls, *, research_id: str, package_hash: str, request_ids: tuple[str, ...],
+        queries: tuple[QueryIR, ...], recipe: OperatorGraphRecipe,
+        topological_order: tuple[str, ...], registry_hash: str, admission_hash: str,
+        metric_proofs: tuple[MetricReachabilityProof, ...], result_spec: ResultSpec,
+        root_seed: int, fixed_clock: str, project_id: str | None = None,
+        project_bundle_hashes: tuple[str, ...] = (),
+        project_implementation_hashes: Mapping[str, str] | None = None,
+        research_semantics: ResearchSemantics | None = None,
+    ) -> "OperatorGraphPlan":
+        result = object.__new__(cls)
+        for field, value in (
+            ("research_id", research_id), ("package_hash", package_hash),
+            ("request_ids", request_ids), ("queries", queries), ("recipe", recipe),
+            ("topological_order", topological_order), ("registry_hash", registry_hash),
+            ("admission_hash", admission_hash), ("metric_proofs", metric_proofs),
+            ("result_spec", result_spec), ("root_seed", root_seed), ("fixed_clock", fixed_clock),
+            ("project_id", project_id), ("project_bundle_hashes", project_bundle_hashes),
+            ("project_implementation_hashes", project_implementation_hashes),
+            ("research_semantics", research_semantics),
+            ("contract_version", OPERATOR_GRAPH_PLAN_VERSION),
+        ):
+            object.__setattr__(result, field, value)
+        object.__setattr__(result, "plan_hash", result._validated_hash())
+        return result
+
+    def identity_payload(self) -> dict[str, object]:
+        return {**self._payload(self.recipe.recipe_hash),
+                "identity_projection": "validated-recipe-ref-v1"}
 
     def payload(self) -> dict[str, object]:
+        return self._payload(self.recipe.to_dict())
+
+    def _payload(self, recipe) -> dict[str, object]:
         payload = {
             "research_id": self.research_id,
             "package_hash": self.package_hash,
@@ -131,7 +160,7 @@ class OperatorGraphPlan:
                 {"request_id": request_id, "query": query.to_dict()}
                 for request_id, query in zip(self.request_ids, self.queries, strict=True)
             ],
-            "recipe": self.recipe.to_dict(),
+            "recipe": recipe,
             "topological_order": list(self.topological_order),
             "registry_hash": self.registry_hash,
             "admission_hash": self.admission_hash,
@@ -149,8 +178,6 @@ class OperatorGraphPlan:
                 "bundle_hashes": list(self.project_bundle_hashes),
                 "implementation_hashes": dict(self.project_implementation_hashes),
             }
-        if self.verifier_identity is not None:
-            payload["verifier_admission"] = dict(self.verifier_identity)
         return payload
 
 

@@ -24,10 +24,10 @@ DATASET = "public.synthetic.etf.daily"
 PRICE_FIELDS = ("fld_equity_daily_date", "fld_equity_daily_code", "fld_equity_daily_close")
 
 
-def prepare_inputs(root, *, end_session=None, include_factor_fields=False):
+def prepare_inputs(root, *, end_session=None, include_factor_fields=False, portfolio=False):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    rows = synthetic.rows(include_factor_fields=include_factor_fields)
+    rows = synthetic.rows(include_factor_fields=include_factor_fields or portfolio)
     if end_session is not None:
         rows = [row for row in rows if row[PRICE_FIELDS[0]] <= end_session]
     table = pa.Table.from_pylist(rows)
@@ -61,41 +61,55 @@ def prepare_inputs(root, *, end_session=None, include_factor_fields=False):
     binding = PhysicalBindingContract("synthetic.original", 1, DATASET, 1, "synthetic_generator", "example", "source",
         inventory.schema_revision, "drift.strict.v1", {field.field_id: {"kind": "direct", "column": field.field_id} for field in fields})
     archived = replace(binding, binding_id="synthetic.archived", source_profile="public_synthetic", object_name="snapshot")
-    contracts = (*policies, *fields, dataset, binding, archived)
+    extra_contracts, portfolio_inputs = (), ()
+    if portfolio:
+        from lean_inputs import portfolio_sources
+        extra_contracts, portfolio_inputs = portfolio_sources(rows)
+    contracts = (*policies, *fields, dataset, binding, archived, *extra_contracts)
     kinds = {FieldContract: ("field", "field_id"), DatasetContract: ("dataset", "dataset_id"),
              PolicyContract: ("policy", "policy_id"), PhysicalBindingContract: ("physical_binding", "binding_id")}
     decisions = tuple(ApprovalDecision(kinds[type(item)][0], getattr(item, kinds[type(item)][1]), item.content_hash,
         "approved", "公开合成ETF输入", (), "example", "2026-10-03T00:00:00Z") for item in contracts)
     baseline = CatalogCoverageBaseline("public.synthetic.v1", 1, ("public_synthetic",))
     decisions += (ApprovalDecision("coverage_slot", "public_synthetic", None, "approved", "公开合成来源", (), "example", "2026-10-03T00:00:00Z"),)
-    manifest = CatalogSourceManifest("public.synthetic.v1", 1, baseline.content_hash, None, ("public_synthetic",), (), {}, {"public_synthetic": (DATASET,)})
+    datasets = tuple(dict.fromkeys((DATASET, *(item[1].dataset_id for item in portfolio_inputs))))
+    manifest = CatalogSourceManifest("public.synthetic.v1", 1, baseline.content_hash, None, ("public_synthetic",), (), {}, {"public_synthetic": datasets})
     catalog = compile_catalog(baseline=baseline, expected_baseline_hash=baseline.content_hash, manifest=manifest,
         contracts=contracts, decisions=decisions, release_root=root / "catalog")
     session_days = synthetic.sessions()
     outputs = {}
     requests = []
-    for kind in ("feature", "label"):
-        query = QueryIR(DATASET, 1, tuple(table.column_names), QueryPurpose(kind),
-            DateRangeV1(session_days[0], end_session or session_days[99]), UniverseSelection(synthetic.instruments()), (),
-            tuple(SortKey(name) for name in PRICE_FIELDS[:2]), QueryBudget(2000, 16*1024**2, 8192),
+    source_inputs = [("daily_"+kind, dataset, table, binding, archived, QueryPurpose(kind))
+                     for kind in ("feature", "label")]
+    source_inputs.extend((*item, QueryPurpose.FEATURE) for item in portfolio_inputs)
+    for request_id, source_dataset, source_table, source_binding, archive_binding, purpose in source_inputs:
+        dates = source_table[source_dataset.event_time_field].to_pylist()
+        start, end = session_days[0], end_session or session_days[99]
+        if request_id.startswith('portfolio_'):
+            start, end = (min(dates), max(dates)) if dates else (session_days[1], session_days[78])
+        query = QueryIR(source_dataset.dataset_id, 1, tuple(source_table.column_names), purpose,
+            DateRangeV1(start, end), UniverseSelection(synthetic.instruments()), (),
+            tuple(SortKey(name) for name in source_dataset.sort_order), QueryBudget(2000, 16*1024**2, 8192),
             adjustment="unadjusted", as_of=(end_session or session_days[-1]).isoformat())
         policy = policies[1]
-        attestation = DriftAttestation(catalog.catalog_hash, binding.binding_id, binding.source_profile,
-            binding.environment, binding.expected_schema_revision, binding.expected_schema_revision, policy.content_hash, True)
-        plan = admit_query(query, catalog=catalog, binding=catalog.bindings[binding.binding_id], attestation=attestation)
+        attestation = DriftAttestation(catalog.catalog_hash, source_binding.binding_id, source_binding.source_profile,
+            source_binding.environment, source_binding.expected_schema_revision, source_binding.expected_schema_revision, policy.content_hash, True)
+        plan = admit_query(query, catalog=catalog, binding=catalog.bindings[source_binding.binding_id], attestation=attestation)
         revision = SourceRevision("public_synthetic", "deterministic_generator",
             (SourceFileEvidence("synthetic.py", Path(synthetic.__file__).stat().st_size, 0),),
-            typed_canonical_hash([{key: value.isoformat() if hasattr(value, "isoformat") else value for key, value in row.items()} for row in synthetic.rows(include_factor_fields=include_factor_fields)]), None, "metadata")
-        output = root / "inputs" / kind
-        snapshot = publish_parquet_snapshot(batches=table.to_batches(), schema=table.schema, plan=plan,
-            logical_snapshot=build_logical_snapshot(plan, source_revisions=(revision,), output_schema=table.schema,
-                provider_version="public-synthetic-v1", compiler_version="public-synthetic-v1"), root=output)
+            typed_canonical_hash([{key: value.isoformat() if hasattr(value, "isoformat") else value for key, value in row.items()}
+                for row in synthetic.rows(include_factor_fields=include_factor_fields or portfolio)]), None, "metadata")
+        output = root / "inputs" / (request_id.removeprefix('daily_') if request_id.startswith('daily_') else request_id)
+        snapshot = publish_parquet_snapshot(batches=source_table.to_batches(), schema=source_table.schema, plan=plan,
+            logical_snapshot=build_logical_snapshot(plan, source_revisions=(revision,), output_schema=source_table.schema,
+                provider_version="public-synthetic-v1", compiler_version="public-synthetic-v1"), root=output,
+            temporal_source=plan.temporal_selection.requires_consumer_binding)
         reference = build_dataset_artifact_ref(snapshot, allowed_root=output)
-        outputs["daily_"+kind] = {"kind": "dataset", "original_plan": plan.to_dict(), "root": str(output),
-            "reference": reference.to_dict(), "binding_id": archived.binding_id}
+        outputs[request_id] = {"kind": "dataset", "original_plan": plan.to_dict(), "root": str(output),
+            "reference": reference.to_dict(), "binding_id": archive_binding.binding_id}
         request = query.to_dict()
         request.pop("contract_version", None)
-        request["request_id"] = "daily_"+kind
+        request["request_id"] = request_id
         requests.append(request)
     manifest_path = root / "inputs.json"
     manifest_path.write_text(json.dumps({"contract_version": "archived-input-manifest-v1", "requests": outputs},

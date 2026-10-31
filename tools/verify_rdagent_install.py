@@ -5,10 +5,48 @@ import argparse
 import importlib.metadata
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+
+def verify_formula_result(result_directory: Path) -> dict[str, int]:
+    """安装验收按固定教学公式核对正式表，不向研究反馈追加验证状态。"""
+    import pyarrow.parquet as pq
+
+    manifest = json.loads((result_directory / "result.json").read_text(encoding="utf-8"))
+    if not (result_directory / "COMMITTED").is_file():
+        raise ValueError("正确候选未发布正式Result")
+    tables = {}
+    for name in ("bars", "coverage", "daily"):
+        table, = [item for item in manifest["tables"] if item["table_id"] == name]
+        tables[name] = [row for relative in table["files"]
+                       for row in pq.ParquetFile(result_directory / relative).read().to_pylist()]
+    groups = {}
+    for row in tables["bars"]:
+        groups.setdefault((row["entity"], row["session"]), []).append(row["volume"])
+    if (len(tables["bars"]) != 2400 or len(groups) != 10
+            or len(tables["coverage"]) != 10 or len(tables["daily"]) != 10
+            or any(row["raw_rows"] != 240 for row in tables["coverage"])
+            or any(len(values) != 240 for values in groups.values())):
+        raise ValueError("公开示例的正式公式覆盖范围不完整")
+    history = {}
+    for row in sorted(tables["daily"], key=lambda item: (item["entity"], item["session"])):
+        values = groups[row["entity"], row["session"]]
+        expected = sum(value * value for value in values) / sum(values) ** 2
+        if row["status"] != "computed" or not math.isclose(row["value"], expected, rel_tol=1e-12):
+            raise ValueError("正式日值与教学公式不一致")
+        series = history.setdefault(row["entity"], [])
+        series.append(expected)
+        if len(series) < 3:
+            if row["rolling_status"] != "warmup" or row["rolling_value"] is not None:
+                raise ValueError("三日公式预热状态不一致")
+        elif (row["rolling_status"] != "computed"
+                or not math.isclose(row["rolling_value"], sum(series[-3:]) / 3, rel_tol=1e-12)):
+            raise ValueError("正式三日值与教学公式不一致")
+    return {"raw_rows": 2400, "entity_sessions": 10}
 
 
 def verify_install(project: Path, output: Path) -> dict[str, object]:
@@ -84,15 +122,19 @@ def verify_install(project: Path, output: Path) -> dict[str, object]:
         command(f"candidate-{index}", ["-m", "quantwitness_rdagent.worker"],
                 json.dumps({"request": request.payload, "candidate_id": candidate}))
         feedback = json.loads((request.session_root / "candidates" / candidate / "feedback.json").read_text(encoding="utf-8"))
-        expected = "fail" if index == 0 else "pass"
-        if (feedback["command_status"] != "succeeded" or feedback["execution_status"] != "succeeded"
-                or feedback["verification_status"] != expected
-                or feedback["formula_status"] != expected):
-            raise ValueError(f"{candidate} 未得到预期的独立公式验证结论：{feedback}")
-        coverage = feedback["formula_coverage"]
-        if coverage.get("raw_rows") != 2400 or coverage.get("entity_sessions") != 10:
-            raise ValueError("公开示例的正式公式覆盖范围不完整")
-        records.append({"candidate_id": candidate, **feedback})
+        if index == 0:
+            if (feedback["command_status"] != "failed" or feedback["execution_status"] != "failed"
+                    or feedback.get("result_ref") is not None
+                    or not any(item.get("error_type") == "NameError" and item.get("candidate_operator")
+                               for item in feedback["diagnostics"])):
+                raise ValueError(f"{candidate} 未保留预期的候选执行错误：{feedback}")
+            observation = {"expected_failure": "NameError"}
+        else:
+            if (feedback["command_status"] != "succeeded" or feedback["execution_status"] != "succeeded"
+                    or not feedback.get("result_ref")):
+                raise ValueError(f"{candidate} 未完成正式执行：{feedback}")
+            observation = verify_formula_result(Path(feedback["result_ref"]))
+        records.append({"candidate_id": candidate, **feedback, "installation_check": observation})
     result = {
         "status": "pass", "python": sys.version, "platform": sys.platform,
         "prefix": str(prefix), "import_origins": origins,

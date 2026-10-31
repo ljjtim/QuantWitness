@@ -34,6 +34,7 @@ class ProjectTableInput:
         self.port = port
         self.artifact_type = artifact_type
         self.source_identity = source_identity
+        self._source_root = source_root
         self._paths: dict[str, Path] = {}
         self._parquet_paths: tuple[str, ...] = ()
         self._homogeneous_schema = None
@@ -70,6 +71,20 @@ class ProjectTableInput:
         """返回 Supervisor 已验证的提交清单，不扫描目录。"""
 
         return tuple(self._paths)
+
+    def resolve_causal_direct_source(self, reference):
+        """仅供核心因果 Worker 重新解析 Supervisor 交接的来源描述。"""
+        from research_pipeline.data_plane import ArtifactResolver
+        from research_pipeline.data_plane.direct_sources import DirectDatasetRef
+
+        if (not isinstance(reference, DirectDatasetRef)
+                or self.file_paths != (reference.relative_path,)
+                or self.source_identity != reference.source_identity):
+            raise ValueError("project_causal_direct_source_identity_mismatch")
+        return ArtifactResolver(
+            self._source_root, max_batch_rows=self._max_batch_rows,
+            max_batch_bytes=self._max_batch_bytes,
+        ).resolve(reference)
 
     def _path(self, relative_path: str) -> Path:
         if not isinstance(relative_path, str) or relative_path not in self._paths:
@@ -241,6 +256,57 @@ class ProjectTableInput:
         }
 
 
+class ProjectDirectTableInput:
+    """直接 request 的有界消费句柄；时态请求必须显式提供消费时点。"""
+
+    def __init__(self, *, port, artifact_type, descriptor):
+        from research_pipeline.data_plane import ArtifactResolver
+        from research_pipeline.data_plane.direct_sources import DirectDatasetRef
+
+        reference = DirectDatasetRef.from_dict(descriptor["direct_reference"])
+        if any(getattr(reference, name) != descriptor[name]
+               for name in ("source_identity", "schema_hash", "source_revision_hash")):
+            raise ValueError("project_direct_table_identity_mismatch")
+        self.port = port
+        self.artifact_type = artifact_type
+        self.source_identity = reference.source_identity
+        self._dataset = ArtifactResolver(descriptor["direct_root"]).resolve(reference)
+        if self._dataset.manifest["admitted_plan_hash"] != descriptor["admitted_plan_hash"]:
+            raise ValueError("project_direct_table_admission_mismatch")
+        self._started = False
+        self._complete = False
+        self._consumed_columns = ()
+        self._consumed_rows = 0
+
+    def iter_batches(self, *, columns, batch_size=65_536, consumer_time=None):
+        if self._started:
+            raise ValueError("project_table_input_already_consumed")
+        self._started = True
+        self._consumed_columns = tuple(columns)
+        if self._dataset.manifest.get("temporal_source"):
+            if consumer_time is None:
+                raise ValueError("project_direct_table_consumer_time_required")
+            batches = self._dataset.iter_batches_at(
+                plan=self._dataset.plan, consumer_time=consumer_time,
+                columns=tuple(columns), batch_size=batch_size,
+            )
+        else:
+            batches = self._dataset.iter_batches(columns=tuple(columns), batch_size=batch_size)
+        for batch in batches:
+            self._consumed_rows += batch.num_rows
+            yield batch
+        self._complete = True
+
+    def assert_complete(self):
+        if not self._started or not self._complete:
+            raise ValueError("project_table_input_not_fully_consumed")
+
+    @property
+    def consumption(self):
+        self.assert_complete()
+        return {"columns": list(self._consumed_columns), "row_count": self._consumed_rows}
+
+
 class ProjectRequestTableInput:
     """只暴露节点参数显式绑定的数据 request，不暴露 bundle 目录。"""
 
@@ -258,7 +324,7 @@ class ProjectRequestTableInput:
         self.source_identity = source_identity
         self._source_root = source_root
         self._requests = MappingProxyType(dict(sorted(requests.items())))
-        self._opened: dict[str, ProjectTableInput] = {}
+        self._opened: dict[str, ProjectTableInput | ProjectDirectTableInput] = {}
         self._admission_reads: set[str] = set()
 
     def admission(self, request_id: str) -> Mapping[str, object]:
@@ -275,7 +341,7 @@ class ProjectRequestTableInput:
     def request_ids(self) -> tuple[str, ...]:
         return tuple(self._requests)
 
-    def request(self, request_id: str) -> ProjectTableInput:
+    def request(self, request_id: str) -> ProjectTableInput | ProjectDirectTableInput:
         """取得一个声明过的 request；同一 request 只能创建一个消费句柄。"""
 
         if not isinstance(request_id, str) or request_id not in self._requests:
@@ -283,6 +349,13 @@ class ProjectRequestTableInput:
         if request_id in self._opened:
             raise ValueError("project_request_table_already_opened")
         descriptor = self._requests[request_id]
+        if descriptor.get("source_kind") == "direct":
+            table = ProjectDirectTableInput(
+                port=f"{self.port}:{request_id}", artifact_type=self.artifact_type,
+                descriptor=descriptor,
+            )
+            self._opened[request_id] = table
+            return table
         files = descriptor.get("files")
         if not isinstance(files, tuple):
             raise ValueError("project_request_table_descriptor_invalid")

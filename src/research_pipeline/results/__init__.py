@@ -7,23 +7,21 @@ from .contracts import (
     MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS,
     QLIB_MODEL_INVENTORY_SCHEMA_ID,
     RESULT_BUNDLE_VERSION,
-    RESULT_EMBEDDED_VERIFIER_CLOSURE_VERSION,
     RESULT_INPUT_REVISION_VERSION,
     RESULT_REF_VERSION,
     RESULT_RUN_SUMMARY_VERSION,
     RESULT_SPEC_VERSION,
     RESULT_SUPPORT_FILE_VERSION,
     RESULT_TABLE_MANIFEST_VERSION,
-    RESULT_VERIFICATION_CLOSURE_VERSION,
     ResultBundle,
     ResultInputRevision,
+    ResultSourceRevision,
     ResultReference,
     ResultRunSummary,
     ResultSpec,
     ResultSupportFile,
     ResultTableManifest,
     ResultTableSpec,
-    ResultVerificationClosure,
 )
 from .errors import ResultContractError
 
@@ -54,6 +52,12 @@ def __getattr__(name: str) -> object:
             "load_result_metrics": load_result_metrics,
             "metrics_from_snapshot": metrics_from_snapshot,
         }
+    elif name in {"ResultContext", "ResultReport", "ResultComparison", "load_result_context",
+                  "build_result_report", "render_result_report", "compare_results", "export_result"}:
+        from importlib import import_module
+        value = getattr(import_module(".delivery", __name__), name)
+        globals()[name] = value
+        return value
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     globals().update(values)
@@ -62,14 +66,16 @@ def __getattr__(name: str) -> object:
 __all__ = [
     "BAR_TCA_SCHEMA_IDS", "CANONICAL_SIMULATION_SCHEMA_IDS",
     "MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS", "QLIB_MODEL_INVENTORY_SCHEMA_ID",
-    "RESULT_BUNDLE_VERSION", "RESULT_EMBEDDED_VERIFIER_CLOSURE_VERSION",
+    "RESULT_BUNDLE_VERSION",
     "RESULT_COMMITTED_NAME", "RESULT_INPUT_REVISION_VERSION",
     "RESULT_MANIFEST_NAME", "RESULT_REFERENCE_FILE", "RESULT_REF_VERSION",
     "RESULT_RUN_SUMMARY_VERSION",
     "RESULT_SPEC_VERSION", "RESULT_SUPPORT_FILE_VERSION", "RESULT_TABLE_MANIFEST_VERSION", "ResultAssembler", "ResultBundle",
-    "ResultContractError", "ResultInputRevision", "ResultOperatorResolver",
-    "RESULT_VERIFICATION_CLOSURE_VERSION", "ResultReference", "ResultRunSummary",
+    "ResultContractError", "ResultInputRevision", "ResultSourceRevision", "ResultOperatorResolver",
+    "ResultReference", "ResultRunSummary",
     "ResultSnapshot", "ResultSpec", "ResultStore", "ResultSupportFile",
-    "ResultTableManifest", "ResultTableSpec", "ResultVerificationClosure",
+    "ResultTableManifest", "ResultTableSpec",
+    "ResultContext", "ResultReport", "ResultComparison", "load_result_context",
+    "build_result_report", "render_result_report", "compare_results", "export_result",
     "compile_result_spec", "load_result_metrics", "metrics_from_snapshot", "ResultMetric",
 ]

@@ -36,6 +36,8 @@ def execute_guarded(args: Any, handler: Callable[[Any], dict[str, object]]) -> i
         failure_payload = getattr(exc, "failure_payload", None)
         data = dict(failure_payload) if isinstance(failure_payload, dict) else {}
         run_root = getattr(args, "run_root", None)
+        if getattr(args, "command", None) == "rerun-from":
+            run_root = getattr(args, "output_run_root", None)
         runtime_failure = _runtime_failure_details(exc, run_root)
         if runtime_failure is not None:
             data.update(runtime_failure)
@@ -124,7 +126,7 @@ def emit(
         print(render_summary_text(summary, data=data, error_code=error_code, message=message))
         command = getattr(args, "command", None)
         action = getattr(args, "workspace_command", None) if command == "workspace" else command
-        concise = action in {"run", "resume", "retry-node", "rerun-from", "verify"}
+        concise = action in {"run", "resume", "retry-node", "rerun-from"}
         concise = concise or command == "inspect"
         concise = concise or (command == "workspace" and action == "execute")
         # 发现和文档命令的正文就是请求结果，不能只保留状态。
