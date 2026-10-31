@@ -2,6 +2,10 @@
 
 QuantWitness 面向个人的 AI 协作研究：用声明固定问题、数据、时点和算法，按依赖执行，发布 Result，再生成报告或开发反馈。
 
+[![QuantWitness 模块架构：研究声明、数据准入、Runtime、Qlib、LEAN 与 Result 交付](docs/architecture/research-pipeline-architecture.svg)](https://ljjtim.github.io/QuantWitness/research-pipeline-architecture.html)
+
+点击图片打开交互架构图；其他视角见[在线图册](https://ljjtim.github.io/QuantWitness/)和[图册说明](docs/architecture/README.md)。离线可直接打开 `docs/architecture/index.html`。
+
 ## 三层职责
 
 | 层 | 解决的问题 | 主要组件 |

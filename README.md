@@ -4,7 +4,11 @@ QuantWitness 是面向个人、由 AI 协作开展量化研究与回测的框架
 
 主链为：**研究声明 → 准备与准入 → 计算或回测 → Result → 报告与开发反馈**。项目日线与一分钟策略使用本地 LEAN，日频模型使用 Qlib；RD-Agent 是可选的因子与模型提案层。报告、比较、分析、导出和 Dashboard 直接读取正式 Result。
 
-[入门教程](docs/workspace-quickstart.md) · [数据接入](docs/catalog.md) · [研究包](docs/research_package.md) · [LEAN 执行](docs/lean-execution.md) · [RD-Agent](integrations/rdagent/README.md) · [文档导航](docs/index.md) · [模块职责](docs/architecture.md) · [框架约定](docs/framework-contracts.md)
+[入门教程](docs/workspace-quickstart.md) · [数据接入](docs/catalog.md) · [研究包](docs/research_package.md) · [LEAN 执行](docs/lean-execution.md) · [RD-Agent](integrations/rdagent/README.md) · [文档导航](docs/index.md) · [模块职责](docs/architecture.md) · [架构图集](docs/architecture/README.md) · [框架约定](docs/framework-contracts.md)
+
+[![QuantWitness 总体概览：研究声明、准备与准入、执行、Result 与报告](docs/architecture/overview.svg)](https://ljjtim.github.io/QuantWitness/overview.html)
+
+点击图片打开交互概览；[在线图册](https://ljjtim.github.io/QuantWitness/)提供模块职责、数据追溯、研究流程、调用时序和运行状态六种视角。离线可直接打开 `docs/architecture/index.html`。
 
 ## 一次研究怎样完成
 
