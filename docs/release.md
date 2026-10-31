@@ -14,11 +14,15 @@ wheel 是可安装程序包，sdist 是用于构建的源码包，完整公开�
 
 ## 分发内容与命令适用范围
 
-sdist 和源码 zip 均按显式清单附带当前公开操作文档、文档链接所需的根目录说明、项目扩展合同及示例说明。源码 zip 另含核心测试及 RD 集成的执行恢复、隔离和错误分类专项；RD sdist 附带同一集成的公开测试。wheel 只安装运行所需的包代码和资源。分钟参考规则随包包含当前默认 v6 和已发布历史版本（原始版本及 v5），安装后可加载默认规则并复核历史结果；未发布的中间版本不列入正式分发。
+sdist 和源码 zip 均按显式清单附带当前公开操作文档、文档链接所需的根目录说明、项目扩展合同及示例说明。源码 zip 另含核心测试及 RD 集成的执行恢复、隔离和错误分类专项；RD sdist 附带同一集成的公开测试。wheel 只安装运行所需的包代码和资源。分钟参考资源只分发当前规则v6、会话v6、能力v3及期货收盘会话v4；当前文件内部的历史日期、修订和可见时间继续保留。
 
 本文的发布构建、最低版本验收、干净 wheel 验收及公开 CI 命令从独立公开源码仓库的根目录执行，也可在完整单仓的 `research_pipeline/` 下执行发布构建和验收。发布工具、`tests/test_release_metadata_ssot.py` 及通用研究示例的可执行源码随独立公开源码仓库提供。sdist 和源码 zip 另外包含 `integrations/lean/` 安装源码与 `examples/lean_quickstart/` 的可执行合成示例，可按该示例 README 安装并运行 LEAN；wheel 只提供 Python 框架。LEAN 安装流程要求 Windows x64 与 PowerShell 7，Linux 核心或模型验收不代表支持 Linux LEAN 安装。
 
 文档由 `tools/release_allowlist.py` 的 `CORE_DOC_FILES` 与 `MANIFEST.in` 显式列入，不递归收录历史文档。个人研究项目源码、真实研究数据、私有 Catalog 声明和 Lock、内部整改基线及维护脚本均不进入三类发行产物。需要 Catalog 的命令由调用方提供自己的持久 Lock。
+
+公开仓库按 `public_source_paths()` 返回的文件集合同步，不是整个本机目录的镜像。功能退役时同步检查测试调用、夹具、辅助模块、文档和分发条目；公开仓库的受跟踪文件须与当前集合一致，包括移除已退出清单的文件。历史版本可从Git历史查阅，用户研究Result及其恢复依赖不属于源码清理范围。
+
+框架只支持当前版本合同，不提供旧版本兼容层或自动迁移。当前Result加载器接受 `research-result-v4`，拒绝旧合同及退役策略、Python仿真、Bar TCA和共享期货结果表；旧计划、checkpoint和旧发布资源不能用于当前运行。Git历史、已发布Release和用户研究结果保留，源码清理不修改用户保存的输入或留出账本。
 
 公开示例与可选集成的使用说明随核心文档一起分发，包含[待著而救日级合同](../integrations/rdagent/docs/dai-daily-research.md)，保持本地文档链接可读；除 LEAN 安装与 `lean_quickstart` 外，对应示例脚本和可选集成代码仍需完整公开源码。日频现金节点的本地准入说明及其引用的[模型资源复核](../release/model-resource-review.md)、[因果执行性能复核](../release/causal-performance-review.md)单独列入文档清单，其余内部发布证据不随包分发。
 

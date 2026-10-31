@@ -34,14 +34,6 @@ from .store import ResultStore
 
 
 RESULT_REFERENCE_FILE = "result-ref.json"
-_BAR_TCA_SUPPORT_PATHS = (
-    "simulation/result-contract/manifest.json",
-    "simulation/result-contract/COMMITTED",
-    "simulation/tca/manifest.json",
-    "simulation/tca/COMMITTED",
-)
-
-
 class ResultAssembler:
     """不访问数据库、不运行研究算法，也不改变任何 claim。"""
 
@@ -309,29 +301,11 @@ class ResultAssembler:
     ) -> tuple[ResultSupportFile, ...]:
         """按正式表声明封存正式报告所需控制与模型状态。"""
 
-        from .contracts import BAR_TCA_SCHEMA_IDS
-
         declared = {item.schema_id for item in result_spec.tables}
         selected = []
         selected.extend(ResultAssembler._model_support_files(
             tables, commits, external=external,
         ))
-        daily_cash_keys = {
-            table.artifact_key for table in tables
-            if table.artifact_type == "research.daily-simulation.v1"
-        }
-        for key in sorted(daily_cash_keys):
-            commit = commits[key]
-            source_path = "simulation/portfolio-report.json"
-            if source_path not in commit.files:
-                raise ResultContractError("日频组合 Result 缺少必要报告数据")
-            selected.append(ResultSupportFile(
-                artifact_key=commit.semantic_hash,
-                artifact_type="research.daily-simulation.v1",
-                source_path=source_path,
-                relative_path=f"support/{commit.semantic_hash}/{source_path}",
-                content_hash=commit.files[source_path],
-            ))
         if include_model_ledger:
             holdout_keys = {
                 item.artifact_key for item in tables
@@ -377,66 +351,6 @@ class ResultAssembler:
                     relative_path=f"support/{lean_commit.semantic_hash}/{source_path}",
                     content_hash=lean_commit.files[source_path],
                 ))
-        if not declared & set(BAR_TCA_SCHEMA_IDS.values()):
-            return tuple(sorted(
-                selected, key=lambda item: (item.artifact_key, item.source_path)
-            ))
-        financial_commits: dict[str, object] = {}
-        for source_path in _BAR_TCA_SUPPORT_PATHS:
-            matches = tuple(commit for commit in commits.values() if source_path in commit.files)
-            if len(matches) != 1:
-                raise ResultContractError(f"Bar TCA Result 缺少唯一控制文件: {source_path}")
-            commit = matches[0]
-            financial_commits[source_path] = commit
-            selected.append(ResultSupportFile(
-                artifact_key=commit.semantic_hash,
-                artifact_type="research.financial-control.v1",
-                source_path=source_path,
-                relative_path=f"support/{commit.semantic_hash}/{source_path}",
-                content_hash=commit.files[source_path],
-            ))
-        try:
-            simulation_manifest = json.loads(
-                external.read_bytes(
-                    financial_commits["simulation/result-contract/manifest.json"],
-                    "simulation/result-contract/manifest.json",
-                ).decode("utf-8")
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ResultContractError("SimulationResult manifest 无法读取") from exc
-        semantics = simulation_manifest.get("semantics")
-        requires_lifecycle = (
-            isinstance(semantics, Mapping)
-            and semantics.get("contract_version") == "research-simulation-result-semantics-v2"
-        )
-        if requires_lifecycle and "order_lifecycle_contract" not in simulation_manifest:
-            raise ResultContractError("新仿真语义合同缺少订单生命周期声明")
-        lifecycle = simulation_manifest.get("order_lifecycle_contract")
-        if "order_lifecycle_contract" in simulation_manifest:
-            from .contracts import ORDER_LIFECYCLE_PATH_PREFIX
-
-            if lifecycle != {
-                "contract_version": "research-order-lifecycle-v1",
-                "path_prefix": ORDER_LIFECYCLE_PATH_PREFIX,
-            }:
-                raise ResultContractError("订单生命周期合同声明无效")
-            commit = financial_commits["simulation/result-contract/manifest.json"]
-            prefix = str(lifecycle["path_prefix"]) + "/"
-            paths = sorted(path for path in commit.files if path.startswith(prefix))
-            if not paths or any(
-                len(path.removeprefix(prefix).split("/")) != 2
-                or not path.removeprefix(prefix).startswith("session=")
-                or not path.endswith("/data.parquet")
-                for path in paths
-            ):
-                raise ResultContractError("新仿真 Result 缺少订单生命周期分区或路径无效")
-            selected.extend(ResultSupportFile(
-                artifact_key=commit.semantic_hash,
-                artifact_type="research.order-lifecycle.v1",
-                source_path=path,
-                relative_path=f"support/{commit.semantic_hash}/{path}",
-                content_hash=commit.files[path],
-            ) for path in paths)
         return tuple(sorted(
             selected, key=lambda item: (item.artifact_key, item.source_path)
         ))

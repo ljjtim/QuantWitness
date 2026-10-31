@@ -34,9 +34,9 @@
 | 风险约束组合 | [组合风险目标](qlib-portfolio-risk.md) |
 | 项目分钟策略 | [LEAN 执行](lean-execution.md) · [策略协议](strategy-protocol.md) |
 | 历史分钟范围 | [项目范围](minute-project-scope.md) · [规则来源](minute_rule_provenance.md) |
-| 订单、成交和账户 | [金融计算](financial_simulation.md) · [显式订单](explicit_orders.md) |
+| 订单、成交和账户 | [金融计算](financial_simulation.md) · [策略协议](strategy-protocol.md) |
 | 公司行动和信用账户 | [现货与信用](spot_account.md) |
-| 期货资金共享 | [共享期货](shared_futures.md) |
+| 金融合同参考 | [共享期货](shared_futures.md) · [历史显式订单](explicit_orders.md) |
 | 统计与选择偏差 | [稳健研究](robust_research.md) |
 
 数据可见性、标签、holdout、可用资金和交易规则在生产读取及状态转换处执行。算法正确性在开发时通过确定性案例、手算与必要差分验收。

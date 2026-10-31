@@ -14,26 +14,6 @@ from research_pipeline.platform.metric_contracts import MetricDefinition, Metric
 from .errors import ResultContractError
 
 
-ORDER_LIFECYCLE_SCHEMA_ID = "research.order-lifecycle.v1"
-ORDER_LIFECYCLE_PATH_PREFIX = "simulation/context-tables/order-lifecycle"
-
-STRATEGY_SCHEMA_IDS = {"events": "research.strategy.events.v2", "decisions": "research.strategy.decisions.v1",
-    "state": "research.strategy.state.v2", "market": "research.strategy.market.v2"}
-STRATEGY_PATHS = {name: f"simulation/strategy/{name}" for name in STRATEGY_SCHEMA_IDS}
-STRATEGY_INPUTS_SCHEMA_ID = "research.strategy.inputs.v1"
-STRATEGY_INPUTS_PATH = "simulation/strategy/inputs"
-STRATEGY_SIGNAL_SOURCE_SCHEMA_ID = "research.strategy.signal-source.v1"
-STRATEGY_SIGNALS_CONTRACT_VERSION = "research-strategy-signals-v1"
-
-def strategy_schema_ids(declared):
-    """只接收当前策略证据合同，旧版本直接拒绝。"""
-    declared = {item for item in declared if item.startswith("research.strategy.")}
-    allowed = set(STRATEGY_SCHEMA_IDS.values()) | {STRATEGY_INPUTS_SCHEMA_ID, STRATEGY_SIGNAL_SOURCE_SCHEMA_ID}
-    if declared - allowed:
-        raise ResultContractError("策略证据schema版本不受支持")
-    return STRATEGY_SCHEMA_IDS
-
-
 RESULT_SPEC_VERSION = "research-result-spec-v1"
 RESULT_BUNDLE_VERSION = "research-result-v4"
 RESULT_TABLE_MANIFEST_VERSION = "research-result-table-manifest-v2"
@@ -46,26 +26,6 @@ QLIB_MODEL_INVENTORY_SCHEMA_ID = "research.qlib-model-inventory.v1"
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TABLE_ROLES = frozenset({"primary", "diagnostic", "metrics", "portfolio", "orders", "trades"})
-
-CANONICAL_SIMULATION_SCHEMA_IDS = MappingProxyType({
-    name: f"research.simulation.{name}.v1"
-    for name in ("orders", "fills", "positions", "cash", "costs", "valuations")
-})
-BAR_TCA_SCHEMA_IDS = MappingProxyType({
-    name: f"research.bar-tca.{name}.v1"
-    for name in ("orders", "fills", "daily", "research")
-})
-MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS = MappingProxyType({
-    "execution_bars": "research.minute-financial-context.execution-bars.v2",
-    "decision_benchmarks": (
-        "research.minute-financial-context.decision-benchmarks.v2"
-    ),
-    "execution_observations": (
-        "research.minute-financial-context.execution-observations.v1"
-    ),
-    "settlement_events": "research.minute-financial-context.settlement-events.v1",
-})
-
 
 def _require_id(value: object, field: str) -> str:
     if not isinstance(value, str) or not _SAFE_ID.fullmatch(value):
@@ -126,6 +86,16 @@ class ResultTableSpec:
             _require_id(getattr(self, field), f"result table {field}")
         if self.role not in _TABLE_ROLES:
             raise ResultContractError("result table role 不受支持")
+        if self.schema_id.startswith((
+            "research.strategy.", "research.simulation.", "research.bar-tca.",
+            "research.shared-futures.", "research.minute-financial-context.",
+            "research.daily-simulation.",
+        )) or self.schema_id in {"research.order-lifecycle.v1", "research.futures-daily-context.v1"}:
+            raise ResultContractError("Result 表使用不受支持的退役 schema")
+        if self.artifact_type in {
+            "research.daily-simulation.v1", "research.shared-futures-simulation.v1",
+        }:
+            raise ResultContractError("Result 表使用不受支持的退役工件类型")
         object.__setattr__(self, "path_prefix", _safe_prefix(self.path_prefix))
 
     def to_dict(self) -> dict[str, str]:
@@ -182,27 +152,6 @@ class ResultSpec:
         schema_ids = tuple(item.schema_id for item in self.tables)
         if len(schema_ids) != len(set(schema_ids)):
             raise ResultContractError("ResultSpec schema_id 必须唯一")
-        declared = set(schema_ids)
-        tca_ids = set(BAR_TCA_SCHEMA_IDS.values())
-        if declared & tca_ids:
-            required = tca_ids | set(CANONICAL_SIMULATION_SCHEMA_IDS.values())
-            if not required <= declared:
-                raise ResultContractError("Bar TCA 公共结果必须同时包含规范六表和四张 TCA 表")
-        minute_context_ids = set(MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS.values())
-        if declared & minute_context_ids and not minute_context_ids <= declared:
-            raise ResultContractError("分钟金融上下文必须完整包含三张列式事实表")
-        strategy_ids = set(strategy_schema_ids(declared).values())
-        if declared & {STRATEGY_INPUTS_SCHEMA_ID, STRATEGY_SIGNAL_SOURCE_SCHEMA_ID}:
-            if not strategy_ids <= declared or not {STRATEGY_INPUTS_SCHEMA_ID, STRATEGY_SIGNAL_SOURCE_SCHEMA_ID} <= declared:
-                raise ResultContractError("策略signals必须同时封存完整策略证据和正式Feature源表")
-            source = next(item for item in self.tables if item.schema_id == STRATEGY_SIGNAL_SOURCE_SCHEMA_ID)
-            if source.artifact_type != "research.feature-set.v1":
-                raise ResultContractError("策略signals源表必须是正式causal Feature")
-        if declared & strategy_ids:
-            required = strategy_ids | minute_context_ids | tca_ids | set(CANONICAL_SIMULATION_SCHEMA_IDS.values()) | {ORDER_LIFECYCLE_SCHEMA_ID, "research.minute-targets.payload.v1"}
-            snapshots = declared & {"data.adjustment-factor-snapshot.payload.v1", "data.adjustment-factor-snapshot.payload.v2"}
-            if not required <= declared or len(snapshots) != 1:
-                raise ResultContractError("策略结果必须完整封存当前版本策略证据和正式金融事实")
         if self.contract_version != RESULT_SPEC_VERSION:
             raise ResultContractError("ResultSpec 版本不受支持")
         if self.result_spec_hash != typed_canonical_hash(self.payload()):
@@ -448,15 +397,7 @@ class ResultSupportFile:
         sequence_window = source_path.endswith(tuple(
             f"/sequence/{name}.parquet" for name in ("context", "targets", "members")
         ))
-        order_lifecycle = (
-            self.artifact_type == ORDER_LIFECYCLE_SCHEMA_ID
-            and re.fullmatch(
-                re.escape(ORDER_LIFECYCLE_PATH_PREFIX)
-                + r"/session=(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|empty)/data\.parquet",
-                source_path,
-            ) is not None
-        )
-        if source_path.endswith(".parquet") and not (sequence_window or order_lifecycle):
+        if source_path.endswith(".parquet") and not sequence_window:
             raise ResultContractError("Result support file 不能代替正式 Parquet 表")
         if self.contract_version != RESULT_SUPPORT_FILE_VERSION:
             raise ResultContractError("ResultSupportFile 版本不受支持")
@@ -900,9 +841,7 @@ class ResultReference:
 
 
 __all__ = [
-    "BAR_TCA_SCHEMA_IDS", "CANONICAL_SIMULATION_SCHEMA_IDS",
-    "MINUTE_FINANCIAL_CONTEXT_SCHEMA_IDS", "RESULT_BUNDLE_VERSION",
-    "RESULT_EMBEDDED_VERIFIER_CLOSURE_VERSION",
+    "RESULT_BUNDLE_VERSION",
     "RESULT_INPUT_REVISION_VERSION", "RESULT_REF_VERSION",
     "QLIB_MODEL_INVENTORY_SCHEMA_ID",
     "RESULT_SPEC_VERSION", "RESULT_SUPPORT_FILE_VERSION", "RESULT_TABLE_MANIFEST_VERSION", "ResultBundle",

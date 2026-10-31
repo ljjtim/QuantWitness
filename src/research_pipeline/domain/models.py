@@ -1,11 +1,11 @@
-"""研究信号到订单意图之间的最小不可变领域对象。"""
+"""证券身份、研究信号和目标持仓的不可变领域对象。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 import math
-from numbers import Integral, Real
+from numbers import Real
 
 from research_pipeline.platform.asset_taxonomy import (
     AssetTaxonomyError,
@@ -15,7 +15,7 @@ from research_pipeline.platform.asset_taxonomy import (
 from research_pipeline.platform.canonical import typed_canonical_hash
 from research_pipeline.platform.errors import MainlineError
 
-from .time import TimeContractError, require_aware_datetime
+from .time import require_aware_datetime
 
 
 class DomainContractError(MainlineError):
@@ -128,45 +128,6 @@ class TargetPortfolio:
         return typed_canonical_hash(self.to_dict())
 
 
-@dataclass(frozen=True)
-class OrderIntent:
-    instrument: InstrumentId
-    side: str
-    quantity: int
-    decision_time: datetime
-    order_time: datetime
-    target_portfolio_hash: str
-
-    def __post_init__(self) -> None:
-        if self.side not in {"buy", "sell"}:
-            raise DomainContractError("order side 只能是 buy 或 sell")
-        if (
-            isinstance(self.quantity, bool)
-            or not isinstance(self.quantity, Integral)
-            or self.quantity < 1
-        ):
-            raise DomainContractError("order quantity 必须是正整数")
-        require_aware_datetime(self.decision_time, "decision_time")
-        require_aware_datetime(self.order_time, "order_time")
-        if self.order_time < self.decision_time:
-            raise TimeContractError("order_time 早于 decision_time")
-        _require_hash(self.target_portfolio_hash, "target_portfolio_hash")
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "instrument": self.instrument.to_dict(),
-            "side": self.side,
-            "quantity": int(self.quantity),
-            "decision_time": self.decision_time.isoformat(),
-            "order_time": self.order_time.isoformat(),
-            "target_portfolio_hash": self.target_portfolio_hash,
-        }
-
-    @property
-    def intent_hash(self) -> str:
-        return typed_canonical_hash(self.to_dict())
-
-
 def _require_hash(value: object, field: str) -> str:
     if (
         not isinstance(value, str)
@@ -190,7 +151,6 @@ def _require_finite(value: object, field: str) -> float:
 __all__ = [
     "DomainContractError",
     "InstrumentId",
-    "OrderIntent",
     "Signal",
     "TargetPortfolio",
     "TargetWeight",

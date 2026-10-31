@@ -60,57 +60,28 @@ budget:
 
 输出是单个 HTML，内嵌 Plotly 脚本一次，可以离线打开。采用排他原子写入，已有路径不覆盖，也不写回封存 Result。模型图使用 Qlib、Plotly、statsmodels、matplotlib；由项目的 ML 可选依赖提供。
 
-## 组合请求
+## 组合与策略请求
 
-组合报告沿用同一 `report --format html --request` 与 `package report` 入口。请求显式绑定日频现金仿真的六张规范表和组合指标表，七表必须来自同一节点与输出端口，并对应唯一组合。报告保留完整样本窗口，不筛选部分交易日后套用全样本指标。
+Qlib组合和项目策略统一使用LEAN结果报告。请求通过同一 `report --format html --request` 入口绑定正式 `daily`、`orders`、`metrics` 三表，三表必须来自同一simulation工件。
 
 ```yaml
-contract_version: qlib-portfolio-report-v1
+contract_version: lean-research-report-v1
 result_id: <实际 Result ID>
-portfolio_id: default
 tables:
-  cash: canonical_cash
-  valuations: canonical_valuations
-  orders: canonical_orders
-  fills: canonical_fills
-  positions: canonical_positions
-  costs: canonical_costs
-  metrics: portfolio_metrics
+  daily: <实际 daily table_id>
+  orders: <实际 orders table_id>
+  metrics: <实际 metrics table_id>
 budget:
   max_rows: 100000
   memory_bytes: 268435456
 ```
 
-表 ID 以实际 Result 为准。七表合计共享行数和内存预算，只投影展示必需的列，超限停止，不自动抽样。所需表通过与模型报告相同的 ResultStore 正式表与输入身份合同读取。
+表ID以实际Result为准。三表合计共享行数和内存预算；超过预算时停止，不自动抽样。报告从已封存表读取结果，不连接数据库、不执行交易或重新训练。
 
-组合 HTML 包含：
+HTML展示收益与回撤、资金使用、双边成交额、费用、逐日账户和订单明细。正式指标保留实际单位、样本区间和计算状态；成交费用已计入账户权益，不重复扣除。报告使用实际初始权益和逐日权益展示净值。
 
-- 含费用净值：直接使用正式估值表的 `nav_units / opening_cash_units`，初始资金参考线为 1。现金与估值已经包含费用，不再次扣除。
-- 收盘回撤：当日收盘估值除以截至当日最高收盘估值，再减 1。与正式最大回撤指标相同，首个收盘会话为 0；首日相对初始资金的损益留在净值曲线中。
-- 资金与持仓：正式净资产、总现金、可用现金和每日持仓市值。
-- 交易费用：从正式费用表汇总每日和累计费用。
-- 成交金额与订单终态：按实际买卖成交额和订单状态展示；双边成交金额不冒充换手率。
-- 正式组合指标原值及其单位、样本起止和计算状态，逐日资金表、成交明细、订单明细、费用明细及期末持仓。
-
-现金、估值、成交额和费用的 `*_units` 金额按分换算为人民币元。成交价单独使用 `execution_price_units / 10**price_scale`，支持三位小数的 ETF 价格。数量以股或份展示。正式指标保留原单位：`decimal_return` 为小数收益，`ratio` 为比率，`CNY` 为人民币元。
-
-组合图使用现有 Plotly 依赖，图形文字显式使用微软雅黑，不重新调用 Qlib 回测、交易仿真或数据库。HTML 内嵌脚本一次，可离线打开；输出依旧不可覆盖。原 `qlib-research-report-v1` 模型请求保持兼容。
-
-## 账户、资金流与信用报告数据
-
-日频生产输出通过 simulation/portfolio-report.json 保存报告专用投影，合同为 research-daily-cash-report-v1。它与七张正式表属于同一个已提交仿真工件，由 ResultAssembler 封存；导出后仍可离线报告。
-
-净资产、现金、持仓、成交、费用和正式指标直接读取金融表。额外投影只包含报告无法从这些表取得的字段：
-
-- 期初净资产，区分期初现金与已有持仓、权益和信用负债。
-- 账户日终负债与待登记权益，以及税款核定和扣收事件。
-- 生产已算好的资金流调整收益序列与生效前后估值；入出金改变资产规模，不构成收益。
-- 信用日终本金、利息、保证金和风险状态，以及利息确认、还本和付息的展示金额与协议引用。
-
-投影不包含完整账户输入、税务book、原始行情、规则历史或事后验证上下文。报告不会从当前数据库补取缺失材料，不重新计算交易或金融账本。必需投影缺失、会话或工件身份不符时返回错误，不以现金起点代替权益或信用净资产。
-
-投影和正式表共同受报告行数、内存预算约束。税款核定与扣收分别展示；利息确认与现金偿还分开，均不重复计入交易费用或扣减正式净资产。
+LEAN日线与一分钟的执行时点、资金及交易规则见[LEAN执行](lean-execution.md)。报告输出为单个可离线打开的HTML，已有文件不覆盖。
 
 ## 已知限制
 
-报告展示正式指标和声明限制；生成图形不代表预测有效或可交易收益。组合报告当前支持日频 CNY 现金组合，不补造没有封存的基准、超额收益或假设成本曲线。
+报告展示正式指标和声明限制；生成图形不代表预测有效或可交易收益。报告不补造没有封存的基准、超额收益或假设成本曲线。框架只读取当前合同的Result和报告请求。

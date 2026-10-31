@@ -29,10 +29,6 @@ def validate_report_request(value: object) -> dict:
     from .lean_report import LEAN_REPORT_VERSION, validate_lean_report_request
     if value.get("contract_version") == LEAN_REPORT_VERSION:
         return validate_lean_report_request(value)
-    from .portfolio_report import PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION, validate_portfolio_request
-
-    if value.get("contract_version") in {PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION}:
-        return validate_portfolio_request(value)
     request = dict(value)
     fields = {"contract_version", "result_id", "table_id", "selection", "window", "columns", "method", "budget"}
     if set(request) != fields or request["contract_version"] != REPORT_REQUEST_VERSION:
@@ -237,10 +233,6 @@ def render_qlib_report(context, request: Mapping, *, result_summary: str) -> str
     from .lean_report import LEAN_REPORT_VERSION, render_lean_report
     if request["contract_version"] == LEAN_REPORT_VERSION:
         return render_lean_report(context, request, result_summary=result_summary)
-    from .portfolio_report import PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION, render_portfolio_report
-
-    if request["contract_version"] in {PORTFOLIO_REPORT_VERSION, SHARED_FUTURES_REPORT_VERSION}:
-        return render_portfolio_report(context, request, result_summary=result_summary)
     frame = read_prediction_frame(context, request)
     figures, diagnostics, notes = _model_figures(frame, request["method"])
     from plotly.io import to_html

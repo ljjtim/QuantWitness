@@ -1,8 +1,6 @@
 """项目策略绑定已准入bundle、行情输入及正式结果。"""
 from research_pipeline.domain.trading import InstrumentKey
 from research_pipeline.domain.strategy_declaration import parse_strategy_declaration
-from research_pipeline.results.contracts import (STRATEGY_SCHEMA_IDS, STRATEGY_PATHS,
-    STRATEGY_INPUTS_SCHEMA_ID, STRATEGY_INPUTS_PATH, STRATEGY_SIGNAL_SOURCE_SCHEMA_ID)
 from .models import ResearchPackageError
 
 

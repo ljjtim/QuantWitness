@@ -3,7 +3,6 @@
 from .models import (
     DomainContractError,
     InstrumentId,
-    OrderIntent as LegacyOrderIntent,
     Signal,
     TargetPortfolio,
     TargetWeight,
@@ -16,12 +15,9 @@ from .trading import (
     EXECUTION_CAPABILITY_MATRIX,
     InstrumentKey,
     OrderIntent,
-    OrderIntentV1,
     PortfolioTarget,
     PortfolioTargetEntry,
     TradingRuleBinding,
-    instrument_key_from_legacy,
-    portfolio_target_from_legacy,
     require_declared_trading_capability,
 )
 from .time import (
@@ -112,9 +108,7 @@ __all__ = [
     "MinuteRuleSnapshotError",
     "MinuteRuleSource",
     "Money",
-    "LegacyOrderIntent",
     "OrderIntent",
-    "OrderIntentV1",
     "Price",
     "RuleBinding",
     "SESSION_POLICY_BUNDLE_VERSION",
@@ -158,8 +152,6 @@ __all__ = [
     "resolve_instrument_alias",
     "resolve_market_rule",
     "resolve_corporate_actions",
-    "instrument_key_from_legacy",
-    "portfolio_target_from_legacy",
     "require_declared_trading_capability",
     "validate_label_session_horizon",
 ]

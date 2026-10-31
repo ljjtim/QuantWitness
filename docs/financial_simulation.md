@@ -16,7 +16,7 @@ LEAN 负责事件驱动、订单、成交、账户和指标。项目策略通过
 
 ## 账户和金融规则
 
-`research_pipeline.domain` 与 `research_pipeline.simulation` 仍保存金额、费用、订单、成交、结算、公司行动、现货账本和期货账本等纯金融类型。它们服务于历史 Result 的解释、公共事实合同和 LEAN 边界，类型存在不等于存在可运行的旧算子或 CLI 入口。
+`research_pipeline.domain` 与 `research_pipeline.simulation` 仍保存金额、费用、订单、成交、结算、公司行动、现货账本和期货账本等纯金融类型。它们服务于金融算法、公共事实合同和LEAN边界，类型存在不等于存在可运行的旧算子或 CLI 入口。
 
 当前股票和 ETF 账户从 ResearchPackage 声明的期初现金和持仓开始。账户状态区分现金、持仓、可卖数量、活动订单和预占金额；账户估值记录 `equity_semantics`、`valuation_at`、价格来源和可见时间。日线估值优先使用当日可见 Open；缺少 Open 时使用已知历史价格，并保留估值来源。分钟结果使用已完成行情进行日终估值。
 

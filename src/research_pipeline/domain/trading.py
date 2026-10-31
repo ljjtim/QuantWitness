@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 from datetime import datetime
-from decimal import Decimal
 import math
 from numbers import Integral, Real
 from typing import Mapping
@@ -22,7 +21,7 @@ from research_pipeline.platform.trading_capabilities import (
     require_declared_trading_capability as _require_declared_trading_capability,
 )
 
-from .models import DomainContractError, InstrumentId, TargetPortfolio
+from .models import DomainContractError
 from .time import require_aware_datetime
 
 
@@ -442,62 +441,6 @@ class OrderIntent:
         )
 
 
-# 代码中显式带 V1 的名字仅用于迁移期源码兼容；序列化版本仍由 contract_version 决定。
-OrderIntentV1 = OrderIntent
-
-
-def instrument_key_from_legacy(value: InstrumentId, *, venue: str | None = None) -> InstrumentKey:
-    """只读迁移旧 InstrumentId；新写路径使用 InstrumentKey。"""
-    resolved_venue = venue or _venue_from_code(value.code)
-    contract_kind = {
-        "stock": "stock",
-        "etf": "etf",
-        "future": "future_contract",
-    }[value.instrument_type]
-    return InstrumentKey(
-        value.code,
-        value.market,
-        resolved_venue,
-        value.currency,
-        contract_kind,
-    )
-
-
-def portfolio_target_from_legacy(
-    value: TargetPortfolio,
-    *,
-    venue_by_code: Mapping[str, str] | None = None,
-) -> PortfolioTarget:
-    """把旧只做多权重目标迁移为显式现金和杠杆合同。"""
-    venues = {} if venue_by_code is None else venue_by_code
-    entries = tuple(
-        PortfolioTargetEntry(
-            instrument_key_from_legacy(
-                item.instrument,
-                venue=venues.get(item.instrument.code),
-            ),
-            "weight",
-            item.weight,
-        )
-        for item in value.targets
-    )
-    return PortfolioTarget(
-        decision_time=value.decision_time,
-        target_type="weight",
-        entries=entries,
-        base_currency="CNY",
-        cash_weight=float(
-            Decimal("1") - sum(
-                (Decimal(str(item.weight)) for item in value.targets),
-                Decimal("0"),
-            )
-        ),
-        short_allowed=False,
-        leverage_limit=1.0,
-        source_hashes=value.source_signal_hashes,
-    )
-
-
 def require_declared_trading_capability(
     *,
     backend_id: str,
@@ -519,13 +462,6 @@ def require_declared_trading_capability(
         )
     except TradingCapabilityError as exc:
         raise DomainContractError(str(exc)) from exc
-
-
-def _venue_from_code(code: str) -> str:
-    suffix = code.rpartition(".")[2]
-    if not suffix:
-        raise DomainContractError("旧 InstrumentId 缺少可推导 venue 的代码后缀")
-    return suffix
 
 
 def _exact_keys(payload: Mapping[str, object], expected: set[str], name: str) -> None:
@@ -583,11 +519,8 @@ __all__ = [
     "EXECUTION_CAPABILITY_MATRIX",
     "InstrumentKey",
     "OrderIntent",
-    "OrderIntentV1",
     "PortfolioTarget",
     "PortfolioTargetEntry",
     "TradingRuleBinding",
-    "instrument_key_from_legacy",
-    "portfolio_target_from_legacy",
     "require_declared_trading_capability",
 ]

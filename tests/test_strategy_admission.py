@@ -8,7 +8,6 @@ from research_pipeline.domain import InstrumentKey
 from research_pipeline.extensions import OperatorSpec, ParameterSpec, ParameterType, PortSpec, compile_project_operator_bundle, project_source_hash, build_admitted_operator_registry
 from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
 from research_pipeline.packages import compile_research_package, load_research_package, ResearchPackageError
-from research_pipeline.results.contracts import STRATEGY_SCHEMA_IDS, STRATEGY_PATHS
 from tests.test_minute_project_scope import _project_package, CODE
 from tests.strategy_execution_fixture import declaration
 

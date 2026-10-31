@@ -758,15 +758,11 @@ class SessionCalendarResolver:
 
 
 def published_session_bundle_hash(manifest_hash: str) -> str:
-    """历史Result引用的会话来源仍绑定其原发布版本。"""
+    """返回当前能力绑定的会话来源身份。"""
     from research_pipeline.platform.minute_reference import CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH
 
     if manifest_hash == CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH:
         return CURRENT_SESSION_POLICY_BUNDLE_HASH
-    if manifest_hash == "73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033":
-        return "ae4be8044e5c8bfdc07aed7d7a8b19d1066ea0eb1038e777b1b6f76fb439bac2"
-    if manifest_hash == "a2d3bdebba11b28e72076a29cf9d6e10ca0650822822da387460abb62a560cf9":
-        return "9c2b4dd0489508e6fcbd7b3d81cf606c9770928101a51d053b00015ed0f156f0"
     raise SessionCalendarError("分钟能力没有已发布的session bundle")
 
 
