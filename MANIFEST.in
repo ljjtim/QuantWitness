@@ -34,6 +34,12 @@ include docs/architecture/sources/dataflow.json
 include docs/architecture/sources/workflow.json
 include docs/architecture/sources/sequence.json
 include docs/architecture/sources/lifecycle.json
+include docs/architecture/sources/detailed/overview.json
+include docs/architecture/sources/detailed/architecture.json
+include docs/architecture/sources/detailed/dataflow.json
+include docs/architecture/sources/detailed/workflow.json
+include docs/architecture/sources/detailed/sequence.json
+include docs/architecture/sources/detailed/lifecycle.json
 include docs/financial_simulation.md
 include docs/spot_account.md
 include docs/explicit_orders.md

@@ -1,0 +1,253 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "一次研究任务的完整流程",
+    "output": "workflow-research-task.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "animation": "trace",
+    "visual_preset": "classic"
+  },
+  "lanes": [
+    {
+      "id": "author",
+      "label": "研究声明与一次准备、准入"
+    },
+    {
+      "id": "runtime",
+      "label": "执行、Result 发布与直接交付"
+    },
+    {
+      "id": "exception",
+      "label": "例外与恢复",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "p-plan",
+      "label": "准入与计划",
+      "fromCol": 2,
+      "toCol": 3
+    },
+    {
+      "id": "p-exec",
+      "label": "执行与证据",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "spec"
+    ],
+    "allowedTerminals": [
+      "holdout",
+      "retry_policy",
+      "report"
+    ]
+  },
+  "nodes": [
+    {
+      "id": "spec",
+      "lane": "author",
+      "col": 0,
+      "type": "backend",
+      "label": "研究声明",
+      "sublabel": "ResearchPackage"
+    },
+    {
+      "id": "prepare",
+      "lane": "author",
+      "col": 1,
+      "type": "security",
+      "label": "解析与编译",
+      "sublabel": "prepare_package"
+    },
+    {
+      "id": "admit",
+      "lane": "author",
+      "col": 2,
+      "type": "security",
+      "label": "数据准入",
+      "sublabel": "同次准备对象"
+    },
+    {
+      "id": "plan",
+      "lane": "author",
+      "col": 3,
+      "type": "backend",
+      "label": "不可变运行计划",
+      "sublabel": "OperatorGraphPlan"
+    },
+    {
+      "id": "execute",
+      "lane": "runtime",
+      "col": 2,
+      "type": "backend",
+      "label": "run 执行 DAG",
+      "sublabel": "调度 / 取数前复查"
+    },
+    {
+      "id": "report",
+      "lane": "runtime",
+      "col": 5,
+      "type": "backend",
+      "label": "report",
+      "sublabel": "报告与比较"
+    },
+    {
+      "id": "result",
+      "lane": "runtime",
+      "col": 3,
+      "type": "backend",
+      "label": "正式 Result",
+      "sublabel": "应用服务原子发布"
+    },
+    {
+      "id": "delivery",
+      "lane": "runtime",
+      "col": 4,
+      "type": "security",
+      "label": "结果读取",
+      "sublabel": "ResultContext"
+    },
+    {
+      "id": "holdout",
+      "lane": "runtime",
+      "col": 0,
+      "type": "security",
+      "label": "holdout 账本",
+      "sublabel": "消费后不可回退"
+    },
+    {
+      "id": "node_failed",
+      "lane": "exception",
+      "col": 2,
+      "type": "security",
+      "label": "节点失败",
+      "sublabel": "run 转 paused 或 failed"
+    },
+    {
+      "id": "retry_policy",
+      "lane": "exception",
+      "col": 3,
+      "type": "security",
+      "label": "重试策略",
+      "sublabel": "max_attempts / 错误码"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-spec-lint",
+      "from": "spec",
+      "to": "prepare",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-lint-admit",
+      "from": "prepare",
+      "to": "admit",
+      "label": "直接交接",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-admit-plan",
+      "from": "admit",
+      "to": "plan",
+      "label": "发布计划",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-plan-execute",
+      "from": "plan",
+      "to": "execute",
+      "label": "已准入计划",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-execute-result",
+      "from": "execute",
+      "to": "result",
+      "label": "原子发布结果",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-execute-holdout",
+      "from": "execute",
+      "to": "holdout",
+      "label": "消费 holdout",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "e-result-delivery",
+      "from": "result",
+      "to": "delivery",
+      "label": "只读加载",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-delivery-report",
+      "from": "delivery",
+      "to": "report",
+      "label": "正式表与指标",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e-execute-failed",
+      "from": "execute",
+      "to": "node_failed",
+      "label": "节点异常",
+      "variant": "dashed",
+      "role": "error"
+    },
+    {
+      "id": "e-failed-retry",
+      "from": "node_failed",
+      "to": "retry_policy",
+      "label": "可重试",
+      "variant": "dashed",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "准备、准入与直接交付",
+      "items": [
+        "ResearchPackage 保存数据、算子图与结果合同；独立 package lint 用于主动诊断",
+        "Workspace execute 只解析和编译一次，同次准备对象交给 Catalog、来源与 PIT 准入",
+        "Runtime 执行 DAG，检查资源与输出并提交 checkpoint；Qlib 负责模型，LEAN 负责日线与一分钟策略",
+        "应用服务原子发布 Result，ResultContext 直接供报告、比较、分析、导出及开发反馈使用"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败与恢复",
+      "items": [
+        "声明或准入条件不满足时返回诊断，不产生可运行计划",
+        "节点错误可重试且次数未耗尽时 run 转 paused，否则转 failed",
+        "paused 必须用 retry-node 指定失败节点；恢复先进入 running，再继续执行",
+        "进程中断的 running 用 resume 恢复；已提交节点复验后复用"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "留出账本、发布与报告",
+      "items": [
+        "最终 holdout 在读取前登记 opened，失败也不重置消费；最终 test/holdout 不进入 AI 开发反馈",
+        "全部节点成功但 Result 未发布时，resume 仅重试组装；已发布结果不重开",
+        "报告失败保留正式 Result，只重试报告；checkpoint 不跨输入、实现或配置变化复用"
+      ]
+    }
+  ]
+}

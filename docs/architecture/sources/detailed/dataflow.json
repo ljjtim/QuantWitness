@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "研究数据与结果血缘",
+    "output": "dataflow-research-lineage.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "subtitle": "只读来源、准入计划、直接输入与正式结果",
+    "animation": "trace",
+    "visual_preset": "classic"
+  },
+  "stages": [
+    {
+      "label": "数据源"
+    },
+    {
+      "label": "目录与准入"
+    },
+    {
+      "label": "取数与计算"
+    },
+    {
+      "label": "Result 与消费"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "source",
+      "type": "database",
+      "label": "研究数据源",
+      "sublabel": "DuckDB + Parquet",
+      "tag": "只读打开",
+      "stage": 0,
+      "row": 0
+    },
+    {
+      "id": "catalog",
+      "type": "security",
+      "label": "Catalog / PIT 准入",
+      "sublabel": "声明编译 + 漂移证明",
+      "tag": "approved 槽位",
+      "stage": 1,
+      "row": 0
+    },
+    {
+      "id": "plan",
+      "type": "backend",
+      "label": "AdmittedQueryPlan",
+      "sublabel": "静态准入结果",
+      "stage": 2,
+      "row": 0
+    },
+    {
+      "id": "provider",
+      "type": "messagebus",
+      "label": "列式取数 provider",
+      "sublabel": "默认直接读 · 可选保存",
+      "stage": 2,
+      "row": 2
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "研究计算 / LEAN",
+      "sublabel": "因子 · Qlib · 日线 / 1m",
+      "stage": 2,
+      "row": 3
+    },
+    {
+      "id": "bundle",
+      "type": "backend",
+      "label": "ResultBundle",
+      "sublabel": "正式表 · 指标 · 输入引用",
+      "stage": 3,
+      "row": 3
+    },
+    {
+      "id": "consume",
+      "type": "security",
+      "label": "Result 直接消费",
+      "sublabel": "报告 · 分析 · 比较 · 导出",
+      "tag": "按需读取正式表",
+      "stage": 3,
+      "row": 1
+    }
+  ],
+  "flows": [
+    {
+      "id": "source-catalog",
+      "from": "source",
+      "to": "catalog",
+      "label": "schema / 修订",
+      "classification": "只读观测",
+      "variant": "security"
+    },
+    {
+      "id": "catalog-plan",
+      "from": "catalog",
+      "to": "plan",
+      "label": "绑定 / PIT",
+      "classification": "准入事实",
+      "variant": "security"
+    },
+    {
+      "id": "plan-provider",
+      "from": "plan",
+      "to": "provider",
+      "label": "查询计划",
+      "classification": "执行依据",
+      "variant": "security",
+      "labelAt": [
+        475,
+        295
+      ]
+    },
+    {
+      "id": "source-provider",
+      "from": "source",
+      "to": "provider",
+      "label": "只读数据",
+      "classification": "实际输入",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          100,
+          385
+        ]
+      ],
+      "labelAt": [
+        285,
+        372
+      ]
+    },
+    {
+      "id": "provider-engine",
+      "from": "provider",
+      "to": "engine",
+      "label": "列式输入 / 来源引用",
+      "classification": "数据引用",
+      "variant": "emphasis",
+      "labelAt": [
+        470,
+        446
+      ]
+    },
+    {
+      "id": "engine-bundle",
+      "from": "engine",
+      "to": "bundle",
+      "label": "正式结果表",
+      "classification": "封存数据",
+      "variant": "emphasis"
+    },
+    {
+      "id": "bundle-consume",
+      "from": "bundle",
+      "to": "consume",
+      "label": "正式结果与引用",
+      "classification": "直接消费",
+      "variant": "emphasis",
+      "labelAt": [
+        832,
+        402
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "数据与计划分别进入取数节点",
+      "items": [
+        "源数据提供实际记录；Catalog 只读观察来源并给出绑定、可见日期与 PIT 准入事实",
+        "AdmittedQueryPlan 是取数依据，不承载原始数据；普通查询默认按需直接读取准入来源",
+        "run、workspace run/execute 显式使用 --persist-inputs 才保存查询输入；该选择随调用冻结",
+        "DuckDB 以 read_only=True 打开；来源描述与物理快照分开记录，归档仍须正式 Catalog/PIT 准入"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "时间可见性与漂移",
+      "items": [
+        "可见日期、completed bar 和来源修订政策由当前 Catalog Lock 约束",
+        "直接输入与恢复检查原来源身份；来源变化后重新准入，不向旧检查点接入新数据",
+        "财报、成分、行业、复权、公司行动与市场规则使用当时可见的快照或有效区间",
+        "模型 holdout 在读取前登记 opened，失败消费不重置；最终评价不进入开发反馈"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "正式 Result 与直接消费",
+      "items": [
+        "ResultBundle 绑定正式表、指标、运行摘要、配置、实现与输入引用，正式 Result 原子发布后只读",
+        "报告、比较、分析、导出和 Dashboard 直接消费 Result；分析生成独立 AnalysisResult",
+        "Qlib 执行日频模型；LEAN 执行日线与一分钟策略，输出 orders、intents、daily、trace 及 metrics",
+        "正式 Result、模型、计划和 holdout 账本持续保存；归档迁移同时保留实际输入依赖",
+        "报告失败只重新报告，不重跑训练或交易；开发反馈只读取成功 Result 的开发指标"
+      ]
+    }
+  ]
+}

@@ -1,81 +1,255 @@
 {
-  "schema_version": 4,
+  "schema_version": 3,
   "diagram_type": "lifecycle",
-  "title": "运行状态",
-  "question": "节点、运行和结果组装各自保留真实状态。",
-  "output": "lifecycle-research-run",
+  "title": "执行、结果发布与报告",
+  "question": "运行成功后如何发布 Result，中断或交付失败时怎样接续。",
+  "width": 1120,
+  "height": 695,
   "nodes": [
     {
-      "id": "plan",
-      "label": "已准入计划",
-      "detail": "固定输入、实现、参数与预算。"
+      "id": "created",
+      "label": "created",
+      "sub": "已建立运行",
+      "x": 35,
+      "y": 60,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "Runtime 已建立运行记录。",
+      "source": "src/research_pipeline/runtime/state.py"
+    },
+    {
+      "id": "planned",
+      "label": "planned",
+      "sub": "计划就绪",
+      "x": 415,
+      "y": 60,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "执行前的计划状态。",
+      "source": "src/research_pipeline/runtime/state.py"
     },
     {
       "id": "running",
-      "label": "节点执行",
-      "detail": "queued/running与心跳不代表输出成功。"
+      "label": "running",
+      "sub": "节点执行中",
+      "x": 795,
+      "y": 60,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "进程意外终止时可能保留本状态，随后用 resume 恢复。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
     },
     {
-      "id": "checkpoint",
-      "label": "成功 checkpoint",
-      "detail": "内容、资源与交接合格后才能复用。"
+      "id": "paused",
+      "label": "paused",
+      "sub": "可重试节点失败，等待处理",
+      "x": 795,
+      "y": 280,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "按 inspect 建议使用 retry-node；该命令先将运行恢复为 running。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
     },
     {
-      "id": "failure",
-      "label": "中断或节点失败",
-      "detail": "同身份resume或允许的retry；更改声明后重新准入。"
+      "id": "failed",
+      "label": "failed",
+      "sub": "不可重试 / 次数已耗尽",
+      "x": 415,
+      "y": 280,
+      "w": 240,
+      "h": 90,
+      "kind": "error",
+      "detail": "需要查阅诊断。不能把失败步骤输出当正式结果。",
+      "source": "src/research_pipeline/runtime/state.py"
+    },
+    {
+      "id": "success",
+      "label": "succeeded",
+      "sub": "全部节点成功",
+      "x": 35,
+      "y": 280,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "仅指 Runtime 全部节点成功，随后还需组装并原子发布 Result。",
+      "source": "src/research_pipeline/runtime/state.py"
     },
     {
       "id": "finalize",
-      "label": "Result组装",
-      "detail": "全部节点成功但组装失败时只重试组装。"
+      "label": "Result 组装与发布",
+      "sub": "pending → succeeded / failed",
+      "x": 35,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "应用层记录独立发布状态。全部节点成功但 Result 尚未发布时，resume 核对原身份和 checkpoint 后只重试组装，不重复训练、交易或消费 holdout。",
+      "source": "src/research_pipeline/runtime/diagnostics.py"
     },
     {
-      "id": "published",
-      "label": "Result已发布",
-      "detail": "结果只读，补齐completion与索引不重跑节点。"
+      "id": "consume",
+      "label": "Result 直接消费",
+      "sub": "报告 · 比较 · 分析 · 导出",
+      "x": 415,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "正式 Result 发布后保持只读。报告失败保留 Result，使用 report --result 单独重新生成报告。",
+      "source": "src/research_pipeline/application/result_delivery.py"
     },
     {
       "id": "delivery",
-      "label": "报告或导出",
-      "detail": "结果消费失败后只重试交付，不重复训练或holdout。"
+      "label": "可阅读、可复核的交付",
+      "sub": "正式 Result + 报告",
+      "x": 795,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "报告直接读取正式 Result；开发反馈只使用成功结果中的开发指标，最终留出评价不进入迭代。",
+      "source": "src/research_pipeline/application/report_output.py"
     }
   ],
   "edges": [
     {
-      "source": "plan",
-      "target": "running",
-      "label": "启动"
+      "from_id": "created",
+      "to_id": "planned",
+      "label": "",
+      "kind": "main"
     },
     {
-      "source": "running",
-      "target": "checkpoint",
-      "label": "提交成功"
+      "from_id": "planned",
+      "to_id": "running",
+      "label": "",
+      "kind": "main"
     },
     {
-      "source": "running",
-      "target": "failure",
-      "label": "失败"
+      "from_id": "running",
+      "to_id": "paused",
+      "label": "可重试失败",
+      "kind": "main"
     },
     {
-      "source": "failure",
-      "target": "running",
-      "label": "合法恢复"
+      "from_id": "running",
+      "to_id": "failed",
+      "label": "终止性错误",
+      "kind": "main",
+      "points": [
+        [
+          915,
+          150
+        ],
+        [
+          915,
+          215
+        ],
+        [
+          535,
+          215
+        ],
+        [
+          535,
+          280
+        ]
+      ],
+      "label_pos": [
+        750,
+        201
+      ]
     },
     {
-      "source": "checkpoint",
-      "target": "finalize",
-      "label": "全部完成"
+      "from_id": "running",
+      "to_id": "success",
+      "label": "全部节点成功",
+      "kind": "main",
+      "points": [
+        [
+          1035,
+          105
+        ],
+        [
+          1080,
+          105
+        ],
+        [
+          1080,
+          460
+        ],
+        [
+          320,
+          460
+        ],
+        [
+          320,
+          325
+        ],
+        [
+          275,
+          325
+        ]
+      ],
+      "label_pos": [
+        680,
+        450
+      ]
     },
     {
-      "source": "finalize",
-      "target": "published",
-      "label": "原子发布"
+      "from_id": "paused",
+      "to_id": "running",
+      "label": "retry-node",
+      "kind": "optional",
+      "points": [
+        [
+          1035,
+          325
+        ],
+        [
+          1058,
+          325
+        ],
+        [
+          1058,
+          180
+        ],
+        [
+          1030,
+          150
+        ]
+      ],
+      "label_pos": [
+        1053,
+        252
+      ]
     },
     {
-      "source": "published",
-      "target": "delivery",
-      "label": "直接读取"
+      "from_id": "success",
+      "to_id": "finalize",
+      "label": "封存",
+      "kind": "main"
+    },
+    {
+      "from_id": "finalize",
+      "to_id": "consume",
+      "label": "成功后",
+      "kind": "main"
+    },
+    {
+      "from_id": "consume",
+      "to_id": "delivery",
+      "label": "报告与开发反馈",
+      "kind": "main"
     }
+  ],
+  "notes": [
+    "cancelled 在状态表中允许，但当前执行主控没有直接写入路径；这里不画成可操作的“取消按钮”。",
+    "node 与 attempt 有各自状态；node 可经过 waiting_for_resources，异常中断的 attempt 可转为 lost / cancelled。",
+    "holdout：frozen → prepared → opened → committed / consumed_failed；打开后不因失败而重新获得机会。",
+    "Runtime 成功但 Result 未发布：原 resume 仅重试组装；Result 已发布后不重开执行。",
+    "报告失败保留正式 Result，仅用 report --result 重报；Workspace execute --execution-id 接续原 execution。"
   ]
 }

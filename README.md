@@ -8,7 +8,7 @@ QuantWitness 是面向个人、由 AI 协作开展量化研究与回测的框架
 
 [![QuantWitness 总体概览：研究声明、准备与准入、执行、Result 与报告](docs/architecture/overview.svg)](https://ljjtim.github.io/QuantWitness/overview.html)
 
-点击图片打开交互概览；[在线图册](https://ljjtim.github.io/QuantWitness/)提供模块职责、数据追溯、研究流程、调用时序和运行状态六种视角。离线可直接打开 `docs/architecture/index.html`。
+点击图片打开 Archify 详细交互图，可搜索节点、追踪关系、切换主题和视觉风格；[在线图册](https://ljjtim.github.io/QuantWitness/)提供模块职责、数据追溯、研究流程、调用时序和运行状态六种视角。离线可直接打开 `docs/architecture/index.html`。
 
 ## 一次研究怎样完成
 

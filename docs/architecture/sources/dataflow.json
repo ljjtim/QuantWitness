@@ -1,76 +1,233 @@
 {
-  "schema_version": 4,
+  "schema_version": 3,
   "diagram_type": "dataflow",
-  "title": "数据追溯",
-  "question": "来源、时点、算法和结果由正式对象关联。",
-  "output": "dataflow-research-lineage",
+  "title": "结果从哪里来，如何追溯",
+  "question": "把只读来源、执行约定、实际输入和正式 Result 的消费串起来。",
+  "width": 1120,
+  "height": 730,
   "nodes": [
     {
       "id": "source",
-      "label": "原始来源",
-      "detail": "数据库只读；输入归档与数据库来源互斥。"
+      "label": "原始研究数据",
+      "sub": "数据库 / Parquet 归档",
+      "x": 60,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "只读数据库或既有 Parquet 归档提供实际记录；来源描述与物理快照分开保存，历史可见性按 Catalog 准入。",
+      "source": "src/research_pipeline/data_plane/providers/duckdb.py"
     },
     {
       "id": "catalog",
-      "label": "Catalog Lock",
-      "detail": "固定字段、物理绑定和可见性规则。"
+      "label": "数据说明与历史可见性",
+      "sub": "Catalog + PIT",
+      "x": 440,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "字段、物理绑定、可见日期和修订来源组成数据约定。",
+      "source": "src/research_pipeline/catalog/compiler.py"
     },
     {
       "id": "plan",
-      "label": "准入计划",
-      "detail": "冻结请求、日期、参数、clock、seed和实现引用。"
+      "label": "已准入的查询计划",
+      "sub": "来源与时间边界固定",
+      "x": 820,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "绑定查询、预算、输入来源与可见时点。",
+      "source": "src/research_pipeline/data_plane/admission.py"
     },
     {
-      "id": "artifact",
-      "label": "列式输入 / 工件",
-      "detail": "保留必要历史版本，按预算有界读取。"
+      "id": "input",
+      "label": "正式输入与来源引用",
+      "sub": "默认直接读 · 可选保存",
+      "x": 60,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "普通查询默认直接读取只读来源；run、workspace run/execute 使用 --persist-inputs 才保存查询输入，该选择随调用冻结。",
+      "source": "src/research_pipeline/application/grid_data.py"
     },
     {
       "id": "compute",
-      "label": "算法 / 交易节点",
-      "detail": "实际消费处限制 PIT、标签、资金与历史规则。"
+      "label": "因子、模型与仿真",
+      "sub": "Qlib / LEAN 日线与 1m",
+      "x": 440,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "Qlib 执行日频模型；LEAN 执行股票与 ETF 日线和一分钟策略。PIT、标签、holdout、资金和交易规则在实际读取及状态转换处约束。",
+      "source": "src/research_pipeline/runtime/adapters/model.py"
     },
     {
       "id": "result",
-      "label": "Result",
-      "detail": "正式表、指标、模型及配置和持久输入引用。"
+      "label": "Result：封存研究",
+      "sub": "正式表 + 指标 + 版本引用",
+      "x": 820,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "原子发布正式表、指标、配置、实现和输入引用；直接来源不等于已保存的查询快照，迁移须携带实际依赖。",
+      "source": "src/research_pipeline/results/assembler.py"
     },
     {
-      "id": "delivery",
-      "label": "报告 / 分析 / 导出",
-      "detail": "ResultContext直接读取所需列；原始持久依赖随归档保留。"
+      "id": "consume",
+      "label": "Result 直接消费",
+      "sub": "报告 · 比较 · 分析 · 导出",
+      "x": 820,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "ResultContext 加载正式 Result，按请求读取所需表与列；报告失败不重跑交易或训练。",
+      "source": "src/research_pipeline/results/__init__.py"
+    },
+    {
+      "id": "projection",
+      "label": "分析与报告投影",
+      "sub": "显式窗口 · 单位 · 费用",
+      "x": 440,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "分析生成独立 AnalysisResult；报告呈现正式结果。claim_level 和 limitations 是声明事实，分析不会提高结论级别。",
+      "source": "src/research_pipeline/evidence/result_analysis.py"
+    },
+    {
+      "id": "report",
+      "label": "报告 / 开发反馈",
+      "sub": "直接使用成功 Result",
+      "x": 60,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "报告与 AI 开发反馈直接消费正式 Result；RD-Agent 只读取开发指标，最终 test/holdout 不进入反馈。",
+      "source": "integrations/rdagent/src/quantwitness_rdagent/package_campaign.py"
     }
   ],
   "edges": [
     {
-      "source": "source",
-      "target": "catalog",
-      "label": "物理来源"
+      "from_id": "source",
+      "to_id": "catalog",
+      "label": "字段与修订",
+      "kind": "main"
     },
     {
-      "source": "catalog",
-      "target": "plan",
-      "label": "批准绑定"
+      "from_id": "catalog",
+      "to_id": "plan",
+      "label": "准入",
+      "kind": "main"
     },
     {
-      "source": "plan",
-      "target": "artifact",
-      "label": "请求范围"
+      "from_id": "source",
+      "to_id": "input",
+      "label": "实际记录",
+      "kind": "main"
     },
     {
-      "source": "artifact",
-      "target": "compute",
-      "label": "当时可见数据"
+      "from_id": "plan",
+      "to_id": "input",
+      "label": "取数约定",
+      "kind": "main",
+      "points": [
+        [
+          940,
+          145
+        ],
+        [
+          940,
+          215
+        ],
+        [
+          180,
+          215
+        ],
+        [
+          180,
+          285
+        ]
+      ],
+      "label_pos": [
+        560,
+        201
+      ]
     },
     {
-      "source": "compute",
-      "target": "result",
-      "label": "正式输出"
+      "from_id": "input",
+      "to_id": "compute",
+      "label": "列式输入",
+      "kind": "main"
     },
     {
-      "source": "result",
-      "target": "delivery",
-      "label": "按需投影"
+      "from_id": "compute",
+      "to_id": "result",
+      "label": "输出与来源",
+      "kind": "main"
+    },
+    {
+      "from_id": "result",
+      "to_id": "consume",
+      "label": "只读",
+      "kind": "main"
+    },
+    {
+      "from_id": "consume",
+      "to_id": "projection",
+      "label": "按需分析与投影",
+      "kind": "main"
+    },
+    {
+      "from_id": "projection",
+      "to_id": "report",
+      "label": "展示研究结果",
+      "kind": "main"
+    },
+    {
+      "from_id": "result",
+      "to_id": "report",
+      "label": "数值与来源",
+      "kind": "optional",
+      "points": [
+        [
+          1060,
+          330
+        ],
+        [
+          1090,
+          330
+        ],
+        [
+          1090,
+          658
+        ],
+        [
+          180,
+          658
+        ],
+        [
+          180,
+          605
+        ]
+      ],
+      "label_pos": [
+        670,
+        648
+      ]
     }
+  ],
+  "notes": [
+    "来源描述与已保存的查询快照分别记录；默认直接读取，--persist-inputs 才保存查询输入。",
+    "报告、比较、分析与导出直接消费 Result；开发反馈来自成功 Result 的开发指标。",
+    "PIT、标签与 holdout 约束在生产读取处执行；LEAN 输出 orders、intents、daily、trace 及 metrics，并保留必要支持文件。"
   ]
 }
