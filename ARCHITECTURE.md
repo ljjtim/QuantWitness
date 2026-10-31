@@ -4,7 +4,7 @@ QuantWitness 面向个人的 AI 协作研究：用声明固定问题、数据、
 
 [![QuantWitness 模块架构：研究声明、数据准入、Runtime、Qlib、LEAN 与 Result 交付](docs/architecture/research-pipeline-architecture.svg)](https://ljjtim.github.io/QuantWitness/research-pipeline-architecture.html)
 
-点击图片打开交互架构图；其他视角见[在线图册](https://ljjtim.github.io/QuantWitness/)和[图册说明](docs/architecture/README.md)。离线可直接打开 `docs/architecture/index.html`。
+点击图片打开 Archify 详细交互架构图，可搜索节点、追踪关系、切换主题和视觉风格；其他视角见[在线图册](https://ljjtim.github.io/QuantWitness/)和[图册说明](docs/architecture/README.md)。离线可直接打开 `docs/architecture/index.html`。
 
 ## 三层职责
 

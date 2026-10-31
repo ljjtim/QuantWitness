@@ -1,76 +1,183 @@
 {
-  "schema_version": 4,
+  "schema_version": 3,
   "diagram_type": "workflow",
-  "title": "研究流程",
-  "question": "独立 lint 是主动诊断；普通 execute 不重复完整准备。",
-  "output": "workflow-research-task",
+  "title": "完成一次研究，要经过什么",
+  "question": "一次准备与准入、执行与 Result 交付；发生中断时按原执行恢复。",
+  "width": 1120,
+  "height": 685,
   "nodes": [
     {
-      "id": "question",
-      "label": "研究问题与约定",
-      "detail": "确认公式和研究边界。"
-    },
-    {
-      "id": "draft",
-      "label": "完整研究包",
-      "detail": "填写四份声明与输入；lint可主动诊断缺项。"
+      "id": "spec",
+      "label": "① 写清研究问题",
+      "sub": "数据范围 · 公式 · 评价办法",
+      "x": 60,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "可由人填写或由 AI 辅助起草；用 ResearchPackage 保存。",
+      "source": "src/research_pipeline/packages/lint.py"
     },
     {
       "id": "prepare",
-      "label": "准备与准入",
-      "detail": "一次解析、编译、检查并交接对象。"
+      "label": "② 解析与编译声明",
+      "sub": "prepare_package",
+      "x": 440,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "Workspace execute 解析并编译一次，将准备对象直接交给准入，不先完整 lint 再重复准备。独立 package lint 用于主动诊断。",
+      "source": "src/research_pipeline/application/research_plan.py"
+    },
+    {
+      "id": "admit",
+      "label": "③ 准入与持久计划",
+      "sub": "Catalog · PIT · 来源",
+      "x": 820,
+      "y": 55,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "复用本次准备对象，检查实际来源与可见性，发布不可变计划。",
+      "source": "src/research_pipeline/application/research_plan.py"
     },
     {
       "id": "run",
-      "label": "执行 DAG",
-      "detail": "发布合格 checkpoint，记录资源与真实进展。"
+      "label": "④ 执行并保存进度",
+      "sub": "run",
+      "x": 820,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "Runtime 调度节点、控制资源、记录事件并提交检查点。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
     },
     {
       "id": "result",
-      "label": "发布 Result",
-      "detail": "封存正式表、模型和必要来源引用。"
+      "label": "⑤ 封存研究结果",
+      "sub": "ResultAssembler → Result",
+      "x": 440,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "data",
+      "detail": "节点全部成功后，应用服务原子发布正式 Result。未发布时 resume 仅重试组装；已发布结果不重开。",
+      "source": "src/research_pipeline/application/research_run.py"
+    },
+    {
+      "id": "delivery",
+      "label": "⑥ 直接读取结果",
+      "sub": "ResultContext",
+      "x": 60,
+      "y": 285,
+      "w": 240,
+      "h": 90,
+      "kind": "check",
+      "detail": "读取正式表、指标与声明事实，供报告、比较、分析、导出和开发反馈。",
+      "source": "src/research_pipeline/results/delivery.py"
     },
     {
       "id": "report",
-      "label": "报告与开发反馈",
-      "detail": "直接 Result 交付；报告失败不重跑金融。"
+      "label": "⑦ 阅读与比较",
+      "sub": "report / compare",
+      "x": 60,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "human",
+      "detail": "报告失败保留正式 Result，只需重试报告。AI 仅接收成功 Result 的开发指标，最终留出不参与反馈。",
+      "source": "src/research_pipeline/results/delivery.py"
     },
     {
-      "id": "holdout",
-      "label": "最终评价",
-      "detail": "单独确认候选后消费持久留出，打开后失败不返还。"
+      "id": "recover",
+      "label": "中断或可重试失败",
+      "sub": "inspect → resume / retry-node",
+      "x": 820,
+      "y": 515,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "进程中断用 resume；paused 状态按诊断对指定节点 retry-node。不可恢复错误先修正问题并重新准入。",
+      "source": "src/research_pipeline/runtime/diagnostics.py"
     }
   ],
   "edges": [
     {
-      "source": "question",
-      "target": "draft",
-      "label": "声明"
+      "from_id": "spec",
+      "to_id": "prepare",
+      "label": "完整约定",
+      "kind": "main"
     },
     {
-      "source": "draft",
-      "target": "prepare",
-      "label": "execute"
+      "from_id": "prepare",
+      "to_id": "admit",
+      "label": "同次对象交接",
+      "kind": "main"
     },
     {
-      "source": "prepare",
-      "target": "run",
-      "label": "计划"
+      "from_id": "admit",
+      "to_id": "run",
+      "label": "已准入计划",
+      "kind": "main"
     },
     {
-      "source": "run",
-      "target": "result",
-      "label": "成功输出"
+      "from_id": "run",
+      "to_id": "result",
+      "label": "节点完成",
+      "kind": "main"
     },
     {
-      "source": "result",
-      "target": "report",
-      "label": "直接消费"
+      "from_id": "result",
+      "to_id": "delivery",
+      "label": "已封存结果",
+      "kind": "main"
     },
     {
-      "source": "report",
-      "target": "holdout",
-      "label": "选定候选"
+      "from_id": "delivery",
+      "to_id": "report",
+      "label": "正式表与指标",
+      "kind": "main"
+    },
+    {
+      "from_id": "run",
+      "to_id": "recover",
+      "label": "异常 / 中断",
+      "kind": "optional"
+    },
+    {
+      "from_id": "recover",
+      "to_id": "run",
+      "label": "按诊断恢复",
+      "kind": "optional",
+      "points": [
+        [
+          1060,
+          560
+        ],
+        [
+          1090,
+          560
+        ],
+        [
+          1090,
+          330
+        ],
+        [
+          1060,
+          330
+        ]
+      ],
+      "label_pos": [
+        1090,
+        445
+      ]
     }
+  ],
+  "notes": [
+    "Workspace execute 共用一次准备与准入；普通运行无需先执行独立 lint。",
+    "检查或准入失败：补齐研究声明／数据条件，不产生可执行计划。",
+    "最终留出集单独管理。AI 开发循环不得读取 test / holdout 作为改进反馈。"
   ]
 }

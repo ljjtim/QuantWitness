@@ -1,76 +1,132 @@
 {
-  "schema_version": 4,
+  "schema_version": 3,
   "diagram_type": "sequence",
-  "title": "调用时序",
-  "question": "同次对象交接与跨进程持久计划分别处理。",
-  "output": "sequence-research-run",
+  "title": "一次运行中，谁先调用谁",
+  "question": "只读来源交接、节点执行、Result 原子发布与直接交付。",
+  "width": 1120,
+  "height": 740,
   "nodes": [
     {
-      "id": "execute",
-      "label": "execute_workspace",
-      "detail": "分配或接续原 execution。"
-    },
-    {
-      "id": "prepare",
-      "label": "prepare_package",
-      "detail": "解析和编译一次，交接已准备对象。"
-    },
-    {
-      "id": "admit",
-      "label": "admit_package",
-      "detail": "检查实际来源、结构和可见性，发布计划。"
+      "id": "cli",
+      "label": "应用服务",
+      "sub": "Workspace / run",
+      "x": 20,
+      "y": 30,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "统一准备、准入、运行与结果交付。",
+      "source": "src/research_pipeline/application/research_run.py"
     },
     {
       "id": "runtime",
-      "label": "RuntimeExecutionService",
-      "detail": "调度有界 Worker，消费合格输入并保存 checkpoint。"
+      "label": "运行主控",
+      "sub": "Runtime",
+      "x": 295,
+      "y": 30,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "调度算法步骤，验证并提交检查点。",
+      "source": "src/research_pipeline/runtime/execution_service.py"
     },
     {
-      "id": "assemble",
-      "label": "ResultAssembler",
-      "detail": "节点成功后发布 Result；组装失败可恢复。"
+      "id": "adapter",
+      "label": "节点适配器",
+      "sub": "计算 / 数据平面",
+      "x": 570,
+      "y": 30,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "数据节点调用数据平面，算法节点消费正式输入。",
+      "source": "src/research_pipeline/application/grid_data.py"
     },
     {
-      "id": "context",
-      "label": "load_result_context",
-      "detail": "加载正式输出、指标、结论范围和限制。"
-    },
-    {
-      "id": "report",
-      "label": "report / compare / export",
-      "detail": "按需读取正式表，直接交付研究结果。"
+      "id": "store",
+      "label": "结果发布与交付",
+      "sub": "Result / ResultContext",
+      "x": 845,
+      "y": 30,
+      "w": 240,
+      "h": 90,
+      "kind": "core",
+      "detail": "原子发布正式结果，报告与分析直接消费 Result。",
+      "source": "src/research_pipeline/results/delivery.py"
     }
   ],
-  "edges": [
-    {
-      "source": "execute",
-      "target": "prepare",
-      "label": "准备"
-    },
-    {
-      "source": "prepare",
-      "target": "admit",
-      "label": "同一对象"
-    },
-    {
-      "source": "admit",
-      "target": "runtime",
-      "label": "持久计划"
-    },
-    {
-      "source": "runtime",
-      "target": "assemble",
-      "label": "typed输出"
-    },
-    {
-      "source": "assemble",
-      "target": "context",
-      "label": "Result位置"
-    },
-    {
-      "source": "context",
-      "target": "report",
-      "label": "ResultContext"
-    }
+  "edges": [],
+  "notes": [
+    "每个箭头表示一条调用或返回。数据访问只在对应数据节点发生。",
+    "默认直接读取数据库或既有归档；--persist-inputs 才保存查询输入。Result 在 Runtime 完成后原子发布。",
+    "Checkpoint 只复用完整、身份匹配的已提交节点，不复用半成品。"
+  ],
+  "messages": [
+    [
+      "cli",
+      "runtime",
+      "执行已准入计划",
+      175
+    ],
+    [
+      "runtime",
+      "adapter",
+      "调度数据节点与上下文",
+      225
+    ],
+    [
+      "adapter",
+      "runtime",
+      "返回只读来源或持久输入引用",
+      275
+    ],
+    [
+      "runtime",
+      "runtime",
+      "核验输出并提交 checkpoint",
+      325
+    ],
+    [
+      "runtime",
+      "adapter",
+      "调度因子、模型或仿真节点",
+      375
+    ],
+    [
+      "adapter",
+      "runtime",
+      "返回计算产出",
+      425
+    ],
+    [
+      "runtime",
+      "cli",
+      "全部节点完成，返回运行摘要",
+      475
+    ],
+    [
+      "cli",
+      "store",
+      "封存 Result，记录 finalize 状态",
+      525
+    ],
+    [
+      "store",
+      "cli",
+      "返回结果位置",
+      575
+    ],
+    [
+      "cli",
+      "store",
+      "直接读取正式 Result",
+      625
+    ],
+    [
+      "store",
+      "cli",
+      "返回 ResultContext",
+      675
+    ]
   ]
 }

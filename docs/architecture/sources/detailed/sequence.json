@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Research Run 的执行与交付",
+    "output": "sequence-research-run.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1020,
+      650
+    ],
+    "column_fit": "spread",
+    "subtitle": "只读来源交接 → 节点执行 → Result 发布 → 直接消费",
+    "animation": "trace",
+    "visual_preset": "classic",
+    "legend": {
+      "entries": {
+        "security": {
+          "label": "结果读取"
+        }
+      }
+    }
+  },
+  "participants": [
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "应用服务",
+      "sublabel": "Workspace / run"
+    },
+    {
+      "id": "svc",
+      "type": "backend",
+      "label": "run 主控",
+      "sublabel": "RuntimeExecutionService"
+    },
+    {
+      "id": "adapter",
+      "type": "messagebus",
+      "label": "算子适配器",
+      "sublabel": "含数据节点"
+    },
+    {
+      "id": "plane",
+      "type": "backend",
+      "label": "data_plane",
+      "sublabel": "只读来源 / 持久输入"
+    },
+    {
+      "id": "results",
+      "type": "backend",
+      "label": "results",
+      "sublabel": "Assembler / Store"
+    },
+    {
+      "id": "evidence",
+      "type": "security",
+      "label": "Result 交付",
+      "sublabel": "ResultContext"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 312,
+      "label": "数据节点"
+    },
+    {
+      "from": 318,
+      "to": 410,
+      "label": "下游执行"
+    },
+    {
+      "from": 416,
+      "to": 546,
+      "label": "发布与交付"
+    }
+  ],
+  "messages": [
+    {
+      "id": "m-run",
+      "from": "cli",
+      "to": "svc",
+      "y": 160,
+      "label": "执行已准入 DAG",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-data-adapter",
+      "from": "svc",
+      "to": "adapter",
+      "y": 194,
+      "label": "数据节点 + 上下文",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-materialize",
+      "from": "adapter",
+      "to": "plane",
+      "y": 228,
+      "label": "准备来源或持久输入",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-dataset",
+      "from": "plane",
+      "to": "adapter",
+      "y": 262,
+      "label": "来源描述 / 输入引用",
+      "variant": "return"
+    },
+    {
+      "id": "m-data-output",
+      "from": "adapter",
+      "to": "svc",
+      "y": 296,
+      "label": "数据节点产出",
+      "variant": "return"
+    },
+    {
+      "id": "m-downstream",
+      "from": "svc",
+      "to": "adapter",
+      "y": 330,
+      "label": "提交后调度下游节点",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-node-output",
+      "from": "adapter",
+      "to": "svc",
+      "y": 364,
+      "label": "研究 / 仿真节点产出",
+      "variant": "return"
+    },
+    {
+      "id": "m-runtime-return",
+      "from": "svc",
+      "to": "cli",
+      "y": 398,
+      "label": "checkpoint 完成 / 运行摘要",
+      "variant": "return"
+    },
+    {
+      "id": "m-finalize",
+      "from": "cli",
+      "to": "results",
+      "y": 432,
+      "label": "ResultAssembler.finalize",
+      "variant": "emphasis"
+    },
+    {
+      "id": "m-result",
+      "from": "results",
+      "to": "cli",
+      "y": 466,
+      "label": "ResultBundle",
+      "variant": "return"
+    },
+    {
+      "id": "m-load-result",
+      "from": "cli",
+      "to": "evidence",
+      "y": 500,
+      "label": "load_result_context",
+      "variant": "security"
+    },
+    {
+      "id": "m-result-context",
+      "from": "evidence",
+      "to": "cli",
+      "y": 534,
+      "label": "ResultContext",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "svc",
+      "from": 158,
+      "to": 404,
+      "type": "backend"
+    },
+    {
+      "participant": "adapter",
+      "from": 190,
+      "to": 302,
+      "type": "messagebus"
+    },
+    {
+      "participant": "adapter",
+      "from": 326,
+      "to": 370,
+      "type": "messagebus"
+    },
+    {
+      "participant": "plane",
+      "from": 224,
+      "to": 268,
+      "type": "backend"
+    },
+    {
+      "participant": "results",
+      "from": 428,
+      "to": 472,
+      "type": "backend"
+    },
+    {
+      "participant": "evidence",
+      "from": 496,
+      "to": 540,
+      "type": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "按声明取数",
+      "items": [
+        "数据节点交接只读来源，算法节点按所需列和日期消费；原始来源与已保存的物理快照分别记录",
+        "默认直接读取只读数据库或既有归档；--persist-inputs 才保存查询输入，选择随调用冻结",
+        "主控复验节点产出并提交 checkpoint，再把正式引用传给就绪的下游节点",
+        "RuntimeNodeContext 承载输入、工作路径与预算，由适配器读取"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "应用服务发布 Result",
+      "items": [
+        "Runtime 负责节点执行与检查点，返回运行摘要和正式输出",
+        "应用服务调用 ResultAssembler / ResultStore 原子发布正式 Result",
+        "节点全部成功但 Result 未发布时，原 resume 只重试组装；已发布结果不重开",
+        "当前结果保留来源、实现和配置引用；归档时携带实际依赖"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "直接交付与恢复",
+      "items": [
+        "load_result_context 读取正式 Result 的表、指标、声明限制和研究成本假设",
+        "报告、比较、分析与导出直接消费 Result；报告失败不会重跑模型或交易",
+        "AI 仅接收成功 Result 的开发指标；最终 test/holdout 不进入反馈"
+      ]
+    }
+  ]
+}

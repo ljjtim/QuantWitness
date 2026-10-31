@@ -1,0 +1,363 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "总体概览：从研究想法，到正式结果",
+    "subtitle": "RD-Agent 提出候选；QuantWitness 按声明准备、准入与执行，Result 直接用于报告和开发反馈。",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "visual_preset": "classic",
+    "animation": "trace",
+    "output": "overview.html",
+    "legend": {
+      "mode": "all",
+      "entries": {
+        "frontend": {
+          "label": "研究约定与报告"
+        },
+        "backend": {
+          "label": "研究执行"
+        },
+        "database": {
+          "label": "数据与结果"
+        },
+        "security": {
+          "label": "时点与结果交付"
+        },
+        "external": {
+          "label": "可选 AI 助手"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "human",
+      "type": "frontend",
+      "label": "你：问题与研究约定",
+      "sublabel": "确认公式 · 数据范围 · 预算",
+      "pos": [
+        55,
+        55
+      ],
+      "size": [
+        240,
+        90
+      ]
+    },
+    {
+      "id": "rd",
+      "type": "external",
+      "label": "AI 研究助手 · RD-Agent",
+      "sublabel": "提取定义 · 提案 · 代码与反思",
+      "pos": [
+        430,
+        55
+      ],
+      "size": [
+        240,
+        90
+      ]
+    },
+    {
+      "id": "data",
+      "type": "database",
+      "label": "你的研究数据",
+      "sublabel": "只读数据库 / 已封存行情",
+      "pos": [
+        805,
+        55
+      ],
+      "size": [
+        240,
+        90
+      ]
+    },
+    {
+      "id": "entry",
+      "type": "backend",
+      "label": "研究入口 · Workspace",
+      "sublabel": "一次准备与准入 → 执行",
+      "pos": [
+        55,
+        275
+      ],
+      "size": [
+        240,
+        90
+      ]
+    },
+    {
+      "id": "pit",
+      "type": "security",
+      "label": "数据与时点检查",
+      "sublabel": "数据目录 · 可见日期 · 来源变化",
+      "pos": [
+        430,
+        275
+      ],
+      "size": [
+        240,
+        90
+      ]
+    },
+    {
+      "id": "compute",
+      "type": "backend",
+      "label": "模型计算与策略回测",
+      "sublabel": "Qlib 模型 · LEAN 交易",
+      "pos": [
+        805,
+        275
+      ],
+      "size": [
+        240,
+        90
+      ]
+    },
+    {
+      "id": "result",
+      "type": "database",
+      "label": "正式结果包 · Result",
+      "sublabel": "来源 · 配置 · 代码 · 数值表",
+      "pos": [
+        805,
+        495
+      ],
+      "size": [
+        240,
+        90
+      ]
+    },
+    {
+      "id": "delivery",
+      "type": "security",
+      "label": "直接读取 · ResultContext",
+      "sublabel": "指标 · 声明 · 限制",
+      "pos": [
+        430,
+        495
+      ],
+      "size": [
+        240,
+        90
+      ]
+    },
+    {
+      "id": "report",
+      "type": "frontend",
+      "label": "报告与实验比较",
+      "sublabel": "读结论，也能追到来源",
+      "pos": [
+        55,
+        495
+      ],
+      "size": [
+        240,
+        90
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "flow-0",
+      "from": "human",
+      "to": "rd",
+      "label": "确认约定",
+      "variant": "emphasis"
+    },
+    {
+      "id": "flow-1",
+      "from": "human",
+      "to": "entry",
+      "label": "直接研究也可",
+      "variant": "emphasis"
+    },
+    {
+      "id": "flow-2",
+      "from": "rd",
+      "to": "entry",
+      "label": "提交候选",
+      "variant": "dashed",
+      "via": [
+        [
+          330,
+          100
+        ],
+        [
+          330,
+          247
+        ],
+        [
+          175,
+          247
+        ]
+      ],
+      "labelAt": [
+        272,
+        212
+      ]
+    },
+    {
+      "id": "flow-3",
+      "from": "entry",
+      "to": "pit",
+      "label": "检查数据",
+      "variant": "emphasis"
+    },
+    {
+      "id": "flow-4",
+      "from": "data",
+      "to": "pit",
+      "label": "来源与历史信息",
+      "variant": "emphasis",
+      "via": [
+        [
+          925,
+          207
+        ],
+        [
+          550,
+          207
+        ]
+      ],
+      "labelAt": [
+        775,
+        190
+      ]
+    },
+    {
+      "id": "flow-5",
+      "from": "pit",
+      "to": "compute",
+      "label": "准入后执行",
+      "variant": "emphasis"
+    },
+    {
+      "id": "flow-6",
+      "from": "compute",
+      "to": "result",
+      "label": "封存",
+      "variant": "emphasis"
+    },
+    {
+      "id": "flow-7",
+      "from": "result",
+      "to": "delivery",
+      "label": "读取正式结果",
+      "variant": "emphasis"
+    },
+    {
+      "id": "flow-8",
+      "from": "delivery",
+      "to": "report",
+      "label": "直接交付",
+      "variant": "emphasis"
+    },
+    {
+      "id": "flow-9",
+      "from": "delivery",
+      "to": "rd",
+      "label": "仅开发指标反馈",
+      "variant": "dashed",
+      "via": [
+        [
+          550,
+          640
+        ],
+        [
+          15,
+          640
+        ],
+        [
+          15,
+          10
+        ],
+        [
+          550,
+          10
+        ]
+      ],
+      "labelAt": [
+        280,
+        620
+      ],
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "你：问题与研究约定",
+      "items": [
+        "人确认公式含义、窗口、可用时点、研究范围与预算。AI 草稿不能代替人的确认。",
+        "实现位置：integrations/rdagent/src/quantwitness_rdagent/formula_spec.py"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "AI 研究助手 · RD-Agent",
+      "items": [
+        "可选集成，位于框架核心之外。公式复现固定定义；探索模式仅使用成功 Result 的开发指标，test/holdout 不进入反馈。",
+        "实现位置：integrations/rdagent/src/quantwitness_rdagent/package_campaign.py"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "你的研究数据",
+      "items": [
+        "数据由使用者提供。归档快照与数据库是互斥来源；历史可见性必须有相应字段和来源说明。",
+        "实现位置：src/research_pipeline/data_plane/providers/duckdb.py"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "研究入口 · Workspace",
+      "items": [
+        "Workspace 共用正式主链，同次解析和编译后直接交接准入与执行。独立 package lint 是主动诊断入口。",
+        "实现位置：src/research_pipeline/application/workspace_flow.py"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "数据与时点检查",
+      "items": [
+        "Catalog 描述字段及来源；准入绑定来源和时点。取数时复查来源，按决策时点限制数据。PIT 不证明供应商没有修订历史。",
+        "实现位置：src/research_pipeline/data_plane/admission.py"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "模型计算与策略回测",
+      "items": [
+        "Runtime 调度依赖图、资源与检查点。Qlib 提供模型、处理器和表达式；日线与一分钟策略由 LEAN 执行，使用当时可见的数据及市场规则。",
+        "实现位置：src/research_pipeline/runtime/execution_service.py"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "正式结果包 · Result",
+      "items": [
+        "应用服务在节点完成后调用 ResultAssembler，原子发布正式表、指标与实现引用。默认记录只读来源，--persist-inputs 才保存查询输入。",
+        "实现位置：src/research_pipeline/application/research_run.py"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "直接读取 · ResultContext",
+      "items": [
+        "直接读取正式 Result，交付 snapshot、metrics、claim_level、limitations 和研究成本假设。成功 Result 的开发指标供 AI 反馈；报告不是反馈的前置步骤。",
+        "实现位置：src/research_pipeline/results/delivery.py"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "报告与实验比较",
+      "items": [
+        "报告、比较、分析和导出直接消费 Result。模型报告使用 Qlib，组合和策略报告读取 LEAN 正式表；报告失败只重试报告。",
+        "实现位置：src/research_pipeline/results/delivery.py"
+      ]
+    }
+  ]
+}
