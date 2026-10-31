@@ -227,8 +227,6 @@ PUBLIC_TEST_FILES = (
     "tests/p6_daily_cash_runtime_fixture.py",
     "tests/p7_daily_orders_fixture.py",
     "tests/p8_shared_execution_fixture.py",
-
-    "tests/strategy_legacy_fixture.py",
     "tests/test_minute_statistics_profile.py",
     "tests/test_minute_event_simulation.py",
     "tests/test_minute_project_scope.py",
@@ -246,7 +244,6 @@ PUBLIC_TEST_FILES = (
     "tests/test_generic_run_admission.py",
     "tests/test_data_plane_provider_contract.py",
     "tests/test_qlib_own_input.py",
-    "tests/test_portfolio_report.py",
     "tests/test_qlib_development.py",
     "tests/test_qlib_expressions.py",
     "tests/test_training_recorder.py",
@@ -307,94 +304,6 @@ PUBLIC_TEST_FILES = (
     "tests/test_cn_stock_simulation.py",
     "tests/test_cn_etf_simulation.py",
     "tests/test_cn_futures_simulation.py",
-)
-PUBLIC_TEST_FIXTURE_FILES = (
-    "tests/fixtures/legacy_strategy/README.md",
-    "tests/fixtures/legacy_strategy/index.json",
-    "tests/fixtures/legacy_strategy/bundle_identity_is_bound_to_strategy_declaration.json",
-    "tests/fixtures/legacy_strategy/columnar_strategy_preserves_signals_only_inline_and_formal_source.json",
-    "tests/fixtures/legacy_strategy/delayed_completed_bar_and_later_bar_share_one_callback_batch.json",
-    "tests/fixtures/legacy_strategy/deleted_callback_cannot_pass_after_renumbering--kind-after_trading.json",
-    "tests/fixtures/legacy_strategy/deleted_callback_cannot_pass_after_renumbering--kind-bar.json",
-    "tests/fixtures/legacy_strategy/deleted_callback_cannot_pass_after_renumbering--kind-before_trading.json",
-    "tests/fixtures/legacy_strategy/deleted_callback_cannot_pass_after_renumbering--kind-initialize.json",
-    "tests/fixtures/legacy_strategy/deleted_callback_cannot_pass_after_renumbering--kind-scheduled.json",
-    "tests/fixtures/legacy_strategy/events_and_decisions_support_reiterable_sequence_without_slicing.json",
-    "tests/fixtures/legacy_strategy/execution_uses_average_when_open_differs.json",
-    "tests/fixtures/legacy_strategy/existing_explicit_oracle_accepts_strategy_contract--options-.json",
-    "tests/fixtures/legacy_strategy/existing_explicit_oracle_accepts_strategy_contract--options-amount-true-partial-true.json",
-    "tests/fixtures/legacy_strategy/existing_explicit_oracle_accepts_strategy_contract--options-no_orders-true.json",
-    "tests/fixtures/legacy_strategy/existing_explicit_oracle_accepts_strategy_contract--options-partial-true.json",
-    "tests/fixtures/legacy_strategy/expected_callbacks_indexes_calendar_once_and_keeps_visible_revisions.json",
-    "tests/fixtures/legacy_strategy/external_bar_windows_rebuild_full_strategy_accounts--options-.json",
-    "tests/fixtures/legacy_strategy/external_bar_windows_rebuild_full_strategy_accounts--options-days-2.json",
-    "tests/fixtures/legacy_strategy/external_bar_windows_rebuild_full_strategy_accounts--options-no_orders-true.json",
-    "tests/fixtures/legacy_strategy/external_bar_windows_rebuild_full_strategy_accounts--options-partial-true.json",
-    "tests/fixtures/legacy_strategy/external_batch_lookup_preserves_execution_rejections.json",
-    "tests/fixtures/legacy_strategy/external_execution_observations_are_read_in_one_pass--no_orders-false.json",
-    "tests/fixtures/legacy_strategy/external_execution_observations_are_read_in_one_pass--no_orders-true.json",
-    "tests/fixtures/legacy_strategy/feedback_order_cannot_be_rearranged.json",
-    "tests/fixtures/legacy_strategy/generated_closed_session_evidence_and_missing_marker.json",
-    "tests/fixtures/legacy_strategy/indexed_order_rules_keep_full_revisions_and_do_not_rescan_bundle.json",
-    "tests/fixtures/legacy_strategy/market_verifies_from_sealed_tables_after_writer_directory_removed.json",
-    "tests/fixtures/legacy_strategy/nonzero_slippage_sell_reserves_quantity_and_keeps_visible_reference--slippage_bps-10--slippage_ticks-1.json",
-    "tests/fixtures/legacy_strategy/nonzero_slippage_sell_reserves_quantity_and_keeps_visible_reference--slippage_bps-5--slippage_ticks-0.json",
-    "tests/fixtures/legacy_strategy/retired_strategy_state_is_rejected.json",
-    "tests/fixtures/legacy_strategy/same_batch_sale_cannot_expand_old_buy_budget.json",
-    "tests/fixtures/legacy_strategy/same_batch_starting_cash_is_shared_across_instruments.json",
-    "tests/fixtures/legacy_strategy/same_timestamp_fill_feedback_can_cancel_remainder.json",
-    "tests/fixtures/legacy_strategy/strategy_diagnostics_do_not_change_financial_conclusion.json",
-    "tests/fixtures/legacy_strategy/strategy_evidence_rebuilds_accounts_and_closes_state--options-.json",
-    "tests/fixtures/legacy_strategy/strategy_evidence_rebuilds_accounts_and_closes_state--options-amount-true-partial-true.json",
-    "tests/fixtures/legacy_strategy/strategy_evidence_rebuilds_accounts_and_closes_state--options-days-2.json",
-    "tests/fixtures/legacy_strategy/strategy_evidence_rebuilds_accounts_and_closes_state--options-no_orders-true.json",
-    "tests/fixtures/legacy_strategy/strategy_evidence_rebuilds_accounts_and_closes_state--options-partial-true.json",
-    "tests/fixtures/legacy_strategy/strategy_evidence_rejects_changed_fact.json",
-    "tests/fixtures/legacy_strategy/strategy_result_tables_bind_projection_source_and_state.json",
-    "tests/fixtures/legacy_strategy/verified_corporate_events_rebuild_receivables_and_shares--kind-cash_dividend.json",
-    "tests/fixtures/legacy_strategy/verified_corporate_events_rebuild_receivables_and_shares--kind-reverse_split.json",
-    "tests/fixtures/legacy_strategy/verified_corporate_events_rebuild_receivables_and_shares--kind-stock_dividend.json",
-    "tests/fixtures/legacy_strategy_result/.gitignore",
-    "tests/fixtures/legacy_strategy_result/COMMITTED",
-    "tests/fixtures/legacy_strategy_result/README.md",
-    "tests/fixtures/legacy_strategy_result/result.json",
-    "tests/fixtures/legacy_strategy_result/support/2e70df2b1fd2a87173472aae32bdd50868a2f08f6397e90e66836146cd6cafad/result.json",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/context-tables/order-lifecycle/session=2024-01-02/data.parquet",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/context.json",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/minute-scopes/runtime_scope_1/instruments.parquet",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/minute-scopes/runtime_scope_1/manifest.json",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/minute-scopes/runtime_scope_1/parameters.parquet",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/minute-scopes/runtime_scope_1/policies.parquet",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/minute-scopes/runtime_scope_1/rules.parquet",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/minute-scopes/runtime_scope_1/segments.parquet",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/minute-scopes/runtime_scope_1/sources.parquet",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/result-contract/COMMITTED",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/result-contract/manifest.json",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/tca/COMMITTED",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/tca/manifest.json",
-    "tests/fixtures/legacy_strategy_result/support/951e79375ff46a17c6e0781a7bdc935d15d22d83afe7bb4724c7092d51a15bd3/simulation/tca/oracle-input.json",
-    "tests/fixtures/legacy_strategy_result/tables/fact-0/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-1/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-10/session=2024-01-02/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-11/session=2024-01-02/data.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-12/session=2024-01-02/data.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-13/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-14/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-15/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-16/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-17/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-18/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-19/session=2024-01-02/data.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-2/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-3/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-4/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-5/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-6/session=2024-01-02/data.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-7/session=2024-01-02/data.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-8/session=2024-01-02/data.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/fact-9/part-00000.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/metrics/metrics.parquet",
-    "tests/fixtures/legacy_strategy_result/tables/pit-snapshot/data.parquet",
 )
 LEAN_INSTALL_FILES = (
     "integrations/lean/README.md",
@@ -606,8 +515,7 @@ def _validate_relative(path: str) -> str:
         relative.is_absolute()
         or ".." in relative.parts
         or any(part.lower() in _FORBIDDEN_PARTS for part in relative.parts)
-        or (lowered.endswith(_FORBIDDEN_SUFFIXES)
-            and not (path in PUBLIC_TEST_FIXTURE_FILES and lowered.endswith(".parquet")))
+        or lowered.endswith(_FORBIDDEN_SUFFIXES)
     ):
         raise ValueError(f"发布清单包含禁止路径: {path}")
     return relative.as_posix()
@@ -661,10 +569,20 @@ def package_file_paths(project: Path) -> tuple[str, ...]:
             if (
                 package_name == "research_pipeline"
                 and package_relative[:2] == ("domain", "rule_snapshots")
-                and path.name not in {"minute_reference_rules.json", "minute_reference_rules.v5.json", "minute_reference_rules.v6.json"}
+                and path.name != "minute_reference_rules.v6.json"
             ):
                 continue
-            if relative == "src/research_pipeline/platform/minute_capabilities/minute_inventory.v3.json":
+            if (
+                package_name == "research_pipeline"
+                and package_relative[:2] == ("domain", "session_policies")
+                and path.name not in {"minute_reference_sessions.v6.json", "futures_session_close.v4.json"}
+            ):
+                continue
+            if (
+                package_name == "research_pipeline"
+                and package_relative[:2] == ("platform", "minute_capabilities")
+                and path.name not in {"minute_capability_manifest.v3.json", "minute_inventory.v3.public.json"}
+            ):
                 continue
             if (
                 any(part.lower() in _FORBIDDEN_PARTS for part in PurePosixPath(relative).parts)
@@ -717,7 +635,6 @@ def public_source_paths(project: Path) -> tuple[str, ...]:
         *PUBLIC_EXAMPLE_ROOT_FILES,
         *PUBLIC_GITHUB_FILES,
         *PUBLIC_TEST_FILES,
-        *PUBLIC_TEST_FIXTURE_FILES,
         *PUBLIC_TOOL_FILES,
         *PUBLIC_INTEGRATION_FILES,
         "release/framework-boundary/policy.json",

@@ -145,10 +145,6 @@ def compile_operator_graph_package(
             recipe, dict(zip(query_result.request_ids, query_result.queries, strict=True)),
             scope_inputs=package.minute_scope_inputs,
         )
-        _validate_shared_futures_query_bindings(
-            recipe, dict(zip(query_result.request_ids, query_result.queries, strict=True)),
-            fixed_clock=run_clock,
-        )
         from .project_causal_admission import validate_project_causal_recipe
 
         validate_project_causal_recipe(
@@ -182,7 +178,6 @@ def compile_operator_graph_package(
         from .project_strategy_admission import validate_strategy_result_closure
         validate_strategy_result_closure(recipe, result_spec)
         _validate_adjustment_result_closure(recipe, result_spec)
-        _validate_shared_futures_result_closure(recipe, result_spec)
     except Exception as exc:
         raise ResearchPackageError(f"ResultSpec 编译失败: {exc}") from exc
     producers = []
@@ -737,75 +732,3 @@ __all__ = [
     "OperatorGraphPlan",
     "compile_operator_graph_package",
 ]
-
-
-def _validate_shared_futures_parameters(node, *, request_ids=None) -> None:
-    """冻结方向账户声明及市场字段绑定，金融规则由正式领域校验。"""
-    from research_pipeline.domain.shared_futures import validate_shared_futures_spec
-    from research_pipeline.platform.operator_contracts import _plain_json
-    from research_pipeline.platform.shared_futures_contracts import SHARED_FUTURES_OPERATOR_FREQUENCIES
-
-    parameters = node.parameters
-    frequency = SHARED_FUTURES_OPERATOR_FREQUENCIES.get(node.operator_id)
-    if frequency is None:
-        raise ResearchPackageError("共享期货算子身份无效")
-    try:
-        spec = validate_shared_futures_spec(_plain_json(parameters.get("spec")))
-    except Exception as exc:
-        raise ResearchPackageError(f"共享期货 spec 无效: {exc}") from exc
-    if spec["frequency"] != frequency:
-        raise ResearchPackageError("共享期货算子与 spec.frequency 不一致")
-    request_id = parameters.get("market_request_id")
-    if not isinstance(request_id, str) or not request_id or (request_ids is not None and request_id not in request_ids):
-        raise ResearchPackageError("共享期货 market_request_id 必须绑定已声明请求")
-    bindings = parameters.get("event_field_bindings")
-    required = {"kind", "instrument_id", "event_time", "available_at", "source_sequence", "trading_date", "source_ref", "price_units", "capacity", "bar_start", "completed"}
-    allowed = required | {"limit_up_units", "limit_down_units"}
-    if (not isinstance(bindings, Mapping) or required - set(bindings) or set(bindings) - allowed
-            or any(not isinstance(value, str) or not value for value in bindings.values())):
-        raise ResearchPackageError("共享期货 event_field_bindings 缺少正式事件字段或含未知字段")
-    limit = parameters.get("max_event_rows")
-    if type(limit) is not int or limit <= 0:
-        raise ResearchPackageError("共享期货 max_event_rows 必须是正整数")
-
-
-def _validate_shared_futures_query_bindings(recipe, queries, *, fixed_clock) -> None:
-    """只让正式请求的公开列进入事件，并限制到冻结研究时钟。"""
-    from research_pipeline.domain.shared_futures import aware_time
-    from research_pipeline.platform.operator_contracts import _plain_json
-    from research_pipeline.platform.shared_futures_contracts import SHARED_FUTURES_OPERATOR_FREQUENCIES
-
-    clock = aware_time(fixed_clock, "fixed_clock")
-    for node in recipe.nodes:
-        if node.operator_id not in SHARED_FUTURES_OPERATOR_FREQUENCIES:
-            continue
-        query = queries[node.parameters["market_request_id"]]
-        if str(getattr(query.purpose, "value", query.purpose)) != "feature":
-            raise ResearchPackageError("共享期货市场请求必须是 feature，不能消费 AUDIT 或未来标签")
-        if not set(node.parameters["event_field_bindings"].values()) <= set(query.field_ids):
-            raise ResearchPackageError("共享期货事件字段未被 QueryIR 显式请求")
-        spec = _plain_json(node.parameters["spec"])
-        for section in ("instruments", "rules", "sessions", "commands", "targets", "roll_plans"):
-            for row in spec[section]:
-                if aware_time(row["available_at"], "available_at") > clock:
-                    raise ResearchPackageError("共享期货声明来源晚于固定研究时钟")
-                if "event_time" in row and aware_time(row["event_time"], "event_time") > clock:
-                    raise ResearchPackageError("共享期货决策晚于固定研究时钟")
-
-
-def _validate_shared_futures_result_closure(recipe, result_spec) -> None:
-    """共享账户必须封存完整十表，不能使用旧净仓字段替代方向桶。"""
-    from research_pipeline.platform.shared_futures_contracts import (
-        SHARED_FUTURES_ARTIFACT_TYPE, SHARED_FUTURES_OPERATOR_FREQUENCIES,
-        shared_futures_result_tables,
-    )
-
-    for node in recipe.nodes:
-        if node.operator_id not in SHARED_FUTURES_OPERATOR_FREQUENCIES:
-            continue
-        expected = {(item["schema_id"], item["path_prefix"]) for item in shared_futures_result_tables(node.node_id)}
-        selected = [table for table in result_spec.tables if table.source_node_id == node.node_id]
-        actual = {(table.schema_id, table.path_prefix) for table in selected
-                  if table.source_port == "simulation" and table.artifact_type == SHARED_FUTURES_ARTIFACT_TYPE}
-        if actual != expected or len(selected) != len(expected):
-            raise ResearchPackageError("共享期货 ResultSpec 必须按新版 schema 和路径完整封存九表及 context")

@@ -4,7 +4,11 @@ QuantWitness 是面向个人、由 AI 协作开展量化研究与回测的框架
 
 主链为：**研究声明 → 准备与准入 → 计算或回测 → Result → 报告与开发反馈**。项目日线与一分钟策略使用本地 LEAN，日频模型使用 Qlib；RD-Agent 是可选的因子与模型提案层。报告、比较、分析、导出和 Dashboard 直接读取正式 Result。
 
-[入门教程](docs/workspace-quickstart.md) · [数据接入](docs/catalog.md) · [研究包](docs/research_package.md) · [LEAN 执行](docs/lean-execution.md) · [RD-Agent](integrations/rdagent/README.md) · [文档导航](docs/index.md) · [模块职责](docs/architecture.md) · [框架约定](docs/framework-contracts.md)
+[入门教程](docs/workspace-quickstart.md) · [数据接入](docs/catalog.md) · [研究包](docs/research_package.md) · [LEAN 执行](docs/lean-execution.md) · [RD-Agent](integrations/rdagent/README.md) · [文档导航](docs/index.md) · [模块职责](docs/architecture.md) · [架构图集](docs/architecture/README.md) · [框架约定](docs/framework-contracts.md)
+
+[![QuantWitness 总体概览：研究声明、准备与准入、执行、Result 与报告](docs/architecture/overview.svg)](https://ljjtim.github.io/QuantWitness/overview.html)
+
+点击图片打开交互概览；[在线图册](https://ljjtim.github.io/QuantWitness/)提供模块职责、数据追溯、研究流程、调用时序和运行状态六种视角。离线可直接打开 `docs/architecture/index.html`。
 
 ## 一次研究怎样完成
 
@@ -67,7 +71,9 @@ LEAN的simulation输出为orders、intents、daily、trace四张执行表和metr
 
 ## 当前范围
 
-日线与一分钟策略统一由LEAN撮合和记账，Qlib组合使用同一日频执行路径，冻结目标在执行开盘交付。Python层保留当前金融规则、类型与历史Result读取；旧现货和期货撮合执行入口不再导出。公开分钟行情、特征及标签只接受 `interval_minutes=1`，日线直接使用日频源。历史Result按其冻结合同读取，旧计划和checkpoint不跨实现身份恢复。
+日线与一分钟策略统一由LEAN撮合和记账，Qlib组合使用同一日频执行路径，冻结目标在执行开盘交付。Python层提供当前金融规则、类型与Result读取；旧现货和期货撮合执行入口不再导出。公开分钟行情、特征及标签只接受 `interval_minutes=1`，日线直接使用日频源。
+
+框架只支持当前版本合同，不提供旧版本兼容层或自动迁移。旧Result、计划、checkpoint和旧发布资源不在当前版本的支持范围内；升级后按当前声明重新准入。Git历史、已发布Release和用户研究结果保留，金融规则中按生效日及可见日期选择的历史记录继续用于PIT计算。
 
 框架支持声明式研究、日频模型和已准入的中国股票／ETF 日线与一分钟 LEAN 策略。期货文档保留历史结果与来源语义，当前没有可运行的期货策略入口。期权、完整融券、组合保证金优惠和实物交割尚不属于通用能力。
 

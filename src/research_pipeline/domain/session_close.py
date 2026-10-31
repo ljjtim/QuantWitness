@@ -105,7 +105,6 @@ class FuturesSessionCloseCalendarBinding:
             raise FuturesSessionCloseError("session-close calendar revision 无效")
         _hash(self.calendar_bundle_hash, "calendar bundle_hash")
         if self.calendar_bundle_ref not in {
-            "research_pipeline.domain.session_policies/minute_reference_sessions.v5.json",
             "research_pipeline.domain.session_policies/minute_reference_sessions.v6.json",
         }:
             raise FuturesSessionCloseError("session-close calendar 来源无效")
@@ -224,23 +223,6 @@ class FuturesSessionClosePolicyBundle:
             raise FuturesSessionCloseError("session-close 绑定日历无法验证") from exc
         for calendar in calendars:
             bound_calendar = current_calendar
-            if calendar.calendar_bundle_hash != current_calendar.bundle_hash:
-                from importlib.resources import as_file
-
-                resource_name = calendar.calendar_bundle_ref.split("/", 1)[1]
-                resource = files("research_pipeline.domain").joinpath(
-                    "session_policies/" + resource_name
-                )
-                try:
-                    with as_file(resource) as calendar_path:
-                        bound_calendar = load_session_policy_bundle(
-                            calendar_path,
-                            expected_bundle_hash=calendar.calendar_bundle_hash,
-                        )
-                except (OSError, SessionCalendarError) as exc:
-                    raise FuturesSessionCloseError(
-                        "session-close 绑定日历无法验证"
-                    ) from exc
             calendar_policies = tuple(
                 item
                 for item in bound_calendar.policies

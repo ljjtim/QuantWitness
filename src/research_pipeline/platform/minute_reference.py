@@ -34,8 +34,6 @@ MINUTE_CAPABILITY_REQUIRED_CONSUMERS = (
 )
 CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH = "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
 _PUBLISHED_MINUTE_MANIFESTS = {
-    "73a37c34c20e6cc25fd249098e396c6d676b9ee79e496755c61010d42f0cf033": "minute_capability_manifest.v1.json",
-    "a2d3bdebba11b28e72076a29cf9d6e10ca0650822822da387460abb62a560cf9": "minute_capability_manifest.v2.json",
     CURRENT_MINUTE_CAPABILITY_MANIFEST_HASH: "minute_capability_manifest.v3.json",
 }
 
@@ -512,9 +510,9 @@ def load_minute_capability_manifest(
     return manifest
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=1)
 def load_published_minute_capability_manifest(manifest_hash: str) -> MinuteCapabilityManifest:
-    """按已发布身份读取历史能力，用于封存结果复核；新准入仍要求当前版本。"""
+    """按当前发布身份读取分钟能力。"""
     name = _PUBLISHED_MINUTE_MANIFESTS.get(manifest_hash)
     if name is None:
         raise MinuteCapabilityManifestError("分钟能力身份不属于已发布版本")
@@ -528,7 +526,7 @@ def load_published_minute_capability_manifest(manifest_hash: str) -> MinuteCapab
 def require_published_minute_capability_binding(
     *, consumer_id: str, manifest_hash: str, contract_version: str, binding_hash: str,
 ) -> MinuteCapabilityManifest:
-    """复验封存绑定及对应的已发布清单，不接受自行拼装的历史身份。"""
+    """复验绑定及对应的当前发布清单。"""
     manifest = load_published_minute_capability_manifest(manifest_hash)
     expected = manifest.downstream_identity(consumer_id)
     if contract_version != expected["contract_version"] or binding_hash != expected["binding_hash"]:

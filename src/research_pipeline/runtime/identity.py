@@ -20,7 +20,6 @@ from .errors import RuntimeIntegrityError
 from .graph import DagSpec
 
 
-AUDIT_ENVIRONMENT_V1_VERSION = "research-audit-environment-v1"
 AUDIT_ENVIRONMENT_VERSION = "research-audit-environment-v2"
 CACHE_COMPATIBILITY_VERSION = "research-cache-compatibility-v1"
 EXECUTION_IDENTITY_VERSION = "research-execution-identity-v2"
@@ -93,12 +92,9 @@ class AuditEnvironmentManifest:
             or any(type(value) is not int or value < 0 for value in self.python_version)
         ):
             raise RuntimeIntegrityError("AuditEnvironmentManifest Python 版本无效")
-        if self.contract_version not in {AUDIT_ENVIRONMENT_V1_VERSION, AUDIT_ENVIRONMENT_VERSION}:
+        if self.contract_version != AUDIT_ENVIRONMENT_VERSION:
             raise RuntimeIntegrityError("AuditEnvironmentManifest 版本不受支持")
-        if self.contract_version == AUDIT_ENVIRONMENT_V1_VERSION:
-            if self.worker_profile_digest is not None:
-                raise RuntimeIntegrityError("v1 AuditEnvironmentManifest 不支持 Worker profile")
-        elif self.worker_profile_digest is not None:
+        if self.worker_profile_digest is not None:
             _require_digest(self.worker_profile_digest, "worker_profile_digest")
         _require_digest(self.build_manifest_digest, "build_manifest_digest")
         _require_digest(self.build_artifact_digest, "build_artifact_digest")
@@ -125,10 +121,9 @@ class AuditEnvironmentManifest:
             "build_artifact_digest": self.build_artifact_digest,
             "dependency_distribution_digests": dict(self.dependency_distribution_digests),
             "environment_input_digests": dict(self.environment_input_digests),
+            "worker_profile_digest": self.worker_profile_digest,
             "contract_version": self.contract_version,
         }
-        if self.contract_version != AUDIT_ENVIRONMENT_V1_VERSION:
-            payload["worker_profile_digest"] = self.worker_profile_digest
         return payload
 
     @property
@@ -141,11 +136,10 @@ class AuditEnvironmentManifest:
             "python_implementation", "python_version", "python_cache_tag", "platform_system",
             "platform_release", "platform_machine", "byteorder", "build_artifact_digest",
             "build_manifest_digest", "dependency_distribution_digests",
-            "environment_input_digests", "contract_version",
+            "environment_input_digests", "worker_profile_digest", "contract_version",
         }
-        contract_version = payload.get("contract_version")
-        if contract_version == AUDIT_ENVIRONMENT_VERSION:
-            expected.add("worker_profile_digest")
+        if payload.get("contract_version") != AUDIT_ENVIRONMENT_VERSION:
+            raise RuntimeIntegrityError("AuditEnvironmentManifest 版本不受支持")
         version = payload.get("python_version")
         dependencies = payload.get("dependency_distribution_digests")
         environment = payload.get("environment_input_digests")
@@ -517,7 +511,7 @@ def derive_partition_seed(root_seed: int, node_id: str, partition_key: str) -> i
 
 
 def environment_fingerprint() -> str:
-    """兼容旧调用方的最小环境摘要；新运行应持久化 AuditEnvironmentManifest。"""
+    """项目算子父子进程用于核对实际环境的摘要。"""
     build_digest = hashlib.sha256(b"research-pipeline-source-runtime").hexdigest()
     return AuditEnvironmentManifest.capture(build_artifact_digest=build_digest).manifest_digest
 

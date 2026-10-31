@@ -677,7 +677,7 @@ def test_result_spec_rejects_path_escape_and_multiple_primary() -> None:
     with pytest.raises(ResultContractError, match="恰好"):
         ResultSpec.build((primary, ResultTableSpec(
             "second", "primary", "simulation", "simulation", "research.simulation.v1",
-            "research.simulation.test.v1", "simulation",
+            "project.test-output.v1", "simulation",
         )))
 
 
