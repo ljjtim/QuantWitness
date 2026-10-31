@@ -18,6 +18,8 @@ python -I tools/verify_ml_install.py --output /path/to/new-ml-acceptance
 
 输出目录必须不存在。`acceptance.json` 应记录安装位置、pip check、三个模型的训练和跨进程无标签恢复；这项检查不访问数据库。把该收据与构建回执一并保存。运行此工具的源码与安装的 wheel 须属于同一交付候选。
 
+模型安装验收分别记录 Windows 与 Linux 的结果。组合执行使用 Windows 上显式安装并冻结的 LEAN，不以 Linux 模型安装成功推断组合执行可用。RD-Agent 安装验收检查候选运行失败诊断，并从成功 Result 读取指标与手算值核对；失败候选不提供金融指标。
+
 远端 CI 使用完整公开源码仓库的 `.github/workflows/ci.yml`，记录运行地址、源码提交、平台、任务结论以及失败日志。只有对应提交实际运行成功，才能写为远端验收通过。发布版本与执行 CI 是不同操作，CI 验收不要求发布 PyPI 包。
 
 ## 首次使用

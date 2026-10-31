@@ -26,6 +26,8 @@ python -m research_pipeline run --plan work/plan --data-db <只读数据库> --a
 python -m research_pipeline report --result <Result目录> --result-store work/results --output work/report.md --format markdown --json
 ```
 
+完整源码可从 [QuantWitness 公开仓库](https://github.com/ljjtim/QuantWitness)获取。在公开仓库根目录执行安装和示例命令；使用本数据仓库时先进入 `research_pipeline/`。
+
 核心要求 Python 3.10+。RD-Agent 集成要求 Python 3.11+；Qlib 与 LEAN 按各自指南安装。公开包不包含个人数据库或真实行情，第一次运行可使用[合成研究示例](examples/README.md)。
 
 Windows x64 用户可从[LEAN 合成日线与一分钟回测](examples/lean_quickstart/README.md)开始：先生成完整包和 Parquet 输入，再创建独立 LEAN 安装，最后执行正式准入、回测与报告。该流程使用完整公开源码；wheel 只提供 Python 框架，不包含独立 LEAN 引擎。当前安装脚本要求 PowerShell 7。

@@ -13,7 +13,7 @@
 
 ## 职责与边界
 
-个人确认问题、公式和范围，可选RD-Agent生成候选。开发反馈来自成功Result的开发指标；最终test/holdout不进入循环。Qlib提供模型与处理器，分钟项目策略由LEAN执行。实际消费者处理PIT、标签、账户和交易约束。
+个人确认问题、公式和范围，可选RD-Agent生成候选。开发反馈来自成功Result的开发指标；最终test/holdout不进入循环。Qlib提供模型与处理器，日线与一分钟项目策略由LEAN执行。实际消费者处理PIT、标签、账户和交易约束。
 
 Workspace execute一次解析和编译声明，准备对象直接交给准入；独立lint用于主动诊断。持久计划仍用于后续执行与恢复，跨进程读取实际输入。Runtime提交合格checkpoint，Result原子发布，ResultContext直接服务报告、比较、分析和导出。报告失败不重跑模型或金融节点。
 
@@ -31,7 +31,7 @@ Workspace execute一次解析和编译声明，准备对象直接交给准入；
 
 ## 查看与维护
 
-离线直接打开[index.html](index.html)，无需联网或安装依赖。每张图的结构与说明保存在sources/*.json，同一份图源生成SVG和HTML，避免双份口径漂移。生成命令在仓库根执行：
+离线直接打开[index.html](index.html)，无需联网或安装依赖。生成器固定读取 `sources/overview.json`、`architecture.json`、`dataflow.json`、`workflow.json`、`sequence.json` 和 `lifecycle.json` 六份图源，同一份图源生成SVG和HTML。旧详细图源 `sources/detailed/` 不属于当前图册，也不是生成依赖。生成命令在仓库根执行：
 
 ```powershell
 node research_pipeline/docs/architecture/render.mjs

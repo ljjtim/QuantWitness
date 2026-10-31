@@ -13,12 +13,12 @@ GitHub网页创建PR时，明确选择：
 - head repository：自己的fork，例如`ljjtim-research-ai/quantwitness`
 - compare：包含本次修改的功能分支
 
-在独立公开源码仓库执行，下面以当前集成分支为例；其他贡献替换账号和分支名：
+在独立公开源码仓库执行，将示例中的账号、分支名和 PR 标题替换为本次贡献：
 
 ```powershell
 git fetch origin main
-git push fork codex/qlib-real-portfolio-delivery
-gh pr create --repo ljjtim/QuantWitness --base main --head ljjtim-research-ai:codex/qlib-real-portfolio-delivery --title "Qlib 与 RD-Agent 集成及组合报告" --body-file pr-description.md
+git push fork codex/documentation-update
+gh pr create --repo ljjtim/QuantWitness --base main --head ljjtim-research-ai:codex/documentation-update --title "更新公开文档" --body-file pr-description.md
 ```
 
 示例假定`origin`指向上游、`fork`指向自己的fork。执行前用`git remote -v`核对；若命名不同，使用自己的remote名称。`pr-description.md`保存行为变化、金融/PIT影响、实际验证和限制，放在仓库外并传入真实路径，不随源码提交。

@@ -2,9 +2,9 @@
 
 项目策略声明 `execution_backend=lean`，在正式 ResearchPackage 主链中使用本地 LEAN。频率为 `1d` 或 `1m`。数据经过同一 Catalog、PIT 与交易范围准入，选股继续由已准入的因果 Feature 产生。LEAN 负责账户、订单和撮合；项目策略通过冻结的 Python bundle 接收事件并返回交易意图。
 
-安装与完整包转换命令见[LEAN 接入](../integrations/lean/README.md)。外部插件、宿主和安装脚本位于 `integrations/lean/engine/`，使用固定的本地 LEAN 安装；运行不依赖 Docker。
+安装与完整包转换命令见[LEAN 接入](../integrations/lean/README.md)。安装脚本位于 `integrations/lean/`，外部插件和宿主位于 `integrations/lean/engine/`，使用固定的本地 LEAN 安装；运行不依赖 Docker。
 
-Windows x64 和 PowerShell 7 的首次安装可从[合成回测示例](../examples/lean_quickstart/README.md)开始，先生成策略包与 Parquet 输入，再安装并执行。使用完整公开源码或解压的 sdist；wheel 只提供 Python 框架。`run.ps1` 的 `DataDb` 与 `InputSnapshotManifest` 必须二选一，归档分支不连接数据库。
+Windows x64 和 PowerShell 7 的首次安装可从[合成回测示例](../examples/lean_quickstart/README.md)开始，先生成策略包与 Parquet 输入，再安装并执行。使用完整公开源码或解压的 sdist；wheel 只提供 Python 框架。`run.ps1` 的 `DataDb` 与 `InputSnapshotManifest` 必须二选一，归档分支不连接数据库。当前公开 LEAN 安装流程仅支持 Windows x64 与 PowerShell 7；Linux 核心或模型验收不代表 LEAN 安装可用。
 
 ## 声明与输入
 

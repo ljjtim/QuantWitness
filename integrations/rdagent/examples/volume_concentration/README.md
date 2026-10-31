@@ -64,7 +64,7 @@ Linux共享目录中执行正式集成入口，RD固定源码路径与环境安�
 "$RD_AGENT_PYTHON" -m quantwitness_rdagent resume --request "$RD_REQUEST"
 ```
 
-预期candidate-0000执行失败并保留候选诊断；candidate-0001完成正式执行，反馈没有收益筛选指标。每个候选走公开RP项目构建、准入、run和report。
+预期candidate-0000触发`NameError`，命令与执行状态均为`failed`，保留候选算子诊断且没有Result引用；candidate-0001完成正式执行，反馈没有收益筛选指标。每个候选走公开RP项目构建、准入、run和report。公式数值由开发期手算用例检查，成功Result直接交给报告与反馈。
 
 完成后可运行同目录 `check_recovery.py --request "$RD_REQUEST" --output "$RECOVERY_RECEIPT"`，检查公共resume及编码前快照恢复不增加候选或execution，原run与Result文件集合和内容保持不变。正式事实以各候选Result为准。
 

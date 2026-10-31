@@ -74,6 +74,8 @@ python -m pytest -q tests/test_public_examples.py::test_public_qlib_development_
 
 [qlib_risk](qlib_risk/README.md)在同一模型研究上接入风险目标，直接交付Result中的风险输入、优化诊断与LEAN日频执行事实。
 
+`development`和`model`无需LEAN，可在支持模型依赖的Windows或Linux环境运行。`portfolio`及`qlib_risk`需要显式提供完整LEAN安装；当前安装入口支持Windows x64和PowerShell 7，按[LEAN安装说明](../integrations/lean/README.md)准备后传入`--lean-home`。自有数据也可在`input-config.json`的`lean_execution.lean_home`中声明安装路径。
+
 ## 运行产物
 
 构建目录保存 Operator bundles 与完整包副本；合成环境目录保存临时 DuckDB、Catalog 与 Lock。研究运行目录保存计划、工件和 Result；报告直接从 Result 读取。所有输出均使用调用方指定目录。

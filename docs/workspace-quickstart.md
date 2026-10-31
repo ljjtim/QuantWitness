@@ -13,7 +13,7 @@
 
 ## 1. 准备环境
 
-按 [README 的源码获取步骤](../README.md)取得完整公开源码，示例位于其中的 `examples/`；仅安装 wheel 不包含示例源码。在 QuantWitness 源码根目录执行本页 PowerShell 命令；单仓库用户先进入 `research_pipeline/`。从源码可用 `python -m pip install -e ".[dev]" "pyarrow==21.0.0"` 准备依赖；示例 bundle 明确锁定 PyArrow 21.0.0，`dev` 包含本页负例检查所需的 pytest。分发与安装范围见[安装说明](release.md)。
+从 [QuantWitness 公开仓库](https://github.com/ljjtim/QuantWitness)取得完整公开源码，示例位于其中的 `examples/`；仅安装 wheel 不包含示例源码。在 QuantWitness 源码根目录执行本页 PowerShell 命令；单仓库用户先进入 `research_pipeline/`。从源码可用 `python -m pip install -e ".[dev]" "pyarrow==21.0.0"` 准备依赖；示例 bundle 明确锁定 PyArrow 21.0.0，`dev` 包含本页负例检查所需的 pytest。分发与安装范围见[安装说明](release.md)。
 
 ## 2. 准备合成输入
 

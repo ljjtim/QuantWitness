@@ -16,11 +16,11 @@ wheel 是可安装程序包，sdist 是用于构建的源码包，完整公开�
 
 sdist 和源码 zip 均按显式清单附带当前公开操作文档、文档链接所需的根目录说明、项目扩展合同及示例说明。源码 zip 另含核心测试及 RD 集成的执行恢复、隔离和错误分类专项；RD sdist 附带同一集成的公开测试。wheel 只安装运行所需的包代码和资源。分钟参考规则随包包含当前默认 v6 和已发布历史版本（原始版本及 v5），安装后可加载默认规则并复核历史结果；未发布的中间版本不列入正式分发。
 
-本文的发布构建、最低版本验收、干净 wheel 验收及公开 CI 命令从独立公开源码仓库的根目录执行，也可在完整单仓的 `research_pipeline/` 下执行发布构建和验收。发布工具、`tests/test_release_metadata_ssot.py` 及可执行合成示例随独立公开源码仓库提供，不包含在 sdist 和源码 zip 中；压缩包中的示例说明用于查阅，执行示例须使用独立公开源码仓库。
+本文的发布构建、最低版本验收、干净 wheel 验收及公开 CI 命令从独立公开源码仓库的根目录执行，也可在完整单仓的 `research_pipeline/` 下执行发布构建和验收。发布工具、`tests/test_release_metadata_ssot.py` 及通用研究示例的可执行源码随独立公开源码仓库提供。sdist 和源码 zip 另外包含 `integrations/lean/` 安装源码与 `examples/lean_quickstart/` 的可执行合成示例，可按该示例 README 安装并运行 LEAN；wheel 只提供 Python 框架。LEAN 安装流程要求 Windows x64 与 PowerShell 7，Linux 核心或模型验收不代表支持 Linux LEAN 安装。
 
 文档由 `tools/release_allowlist.py` 的 `CORE_DOC_FILES` 与 `MANIFEST.in` 显式列入，不递归收录历史文档。个人研究项目源码、真实研究数据、私有 Catalog 声明和 Lock、内部整改基线及维护脚本均不进入三类发行产物。需要 Catalog 的命令由调用方提供自己的持久 Lock。
 
-公开示例与可选集成的使用说明随核心文档一起分发，包含[待著而救日级合同](../integrations/rdagent/docs/dai-daily-research.md)，保持本地文档链接可读；对应示例脚本和可选集成代码仍需完整公开源码。日频现金节点的本地准入说明及其引用的[模型资源复核](../release/model-resource-review.md)、[因果执行性能复核](../release/causal-performance-review.md)单独列入文档清单，其余内部发布证据不随包分发。
+公开示例与可选集成的使用说明随核心文档一起分发，包含[待著而救日级合同](../integrations/rdagent/docs/dai-daily-research.md)，保持本地文档链接可读；除 LEAN 安装与 `lean_quickstart` 外，对应示例脚本和可选集成代码仍需完整公开源码。日频现金节点的本地准入说明及其引用的[模型资源复核](../release/model-resource-review.md)、[因果执行性能复核](../release/causal-performance-review.md)单独列入文档清单，其余内部发布证据不随包分发。
 
 恢复专项使用已安装的核心和 RD 发行，不访问数据库或模型/API。安装核心测试依赖和 RD 发行后，从公开源码根或源码 zip 解压根运行：
 
@@ -101,6 +101,8 @@ v1 的原始 METADATA/RECORD 摘要与 v2 不兼容；验证器拒绝 v1 锁，�
 ## 公开仓库 CI
 
 `tests/test_workspace.py`、`tests/test_cli_failure_details.py` 及依赖身份、恢复边界回归随公开源码分发。公开 CI 在源码环境及隔离 wheel 环境执行相关用例，覆盖 Workspace 布局、运行与恢复委托、复用参数转发、无效组合拒绝及 Result 直接交付。
+
+模型安装验收覆盖 Windows 与 Linux；组合执行在 Windows 上显式安装 LEAN 后进行。RD-Agent 发行安装验收检查失败候选的运行诊断，以及成功 Result 指标与手算值的一致性。各项是否通过以候选提交的实际 CI 记录为准。
 
 公开CI的平台与版本范围以该候选实际工作流为准。项目Worker的进程额度覆盖Supervisor、启动器与后代，Windows虚拟环境按实际进程树声明，见[资源预算](project_resource_budgets.md)。
 

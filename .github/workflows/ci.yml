@@ -153,7 +153,42 @@ jobs:
           wheel, = (root / "ml-core-dist").glob("*.whl")
           subprocess.run([str(python), "-m", "pip", "install", str(wheel) + "[ml]", "pyarrow==21.0.0"], check=True)
           subprocess.run([str(python), "-I", "tools/verify_ml_install.py", "--output", str(root / "ml-acceptance")], check=True)
+      - name: 准备组合验收的LEAN安装来源
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $python = "$env:RUNNER_TEMP/ml-installed-env/Scripts/python.exe"
+          & $python examples/lean_quickstart/build.py --frequency 1d --output "$env:RUNNER_TEMP/lean-install-source"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          import os, pathlib, sys, yaml
+          sys.path.insert(0, str(pathlib.Path('examples/qlib_portfolio').resolve()))
+          import synthetic
+          from lean_scope import write_synthetic_scope
+          from prepare import CLOCK
+          from research_pipeline.domain.minute_scope_input import load_minute_scope_input
+          package = pathlib.Path(os.environ['RUNNER_TEMP']) / 'lean-install-source/package'
+          reference = write_synthetic_scope(package, days=[day.isoformat() for day in synthetic.sessions()],
+              entities=list(synthetic.instruments()), clock=CLOCK)
+          scope = load_minute_scope_input(package, reference)
+          path = package / 'spec/research.yaml'
+          research = yaml.safe_load(path.read_text(encoding='utf-8'))
+          parameters = next(node['parameters'] for node in research['graph']['nodes']
+              if 'strategy_declaration' in node['parameters'])
+          parameters['minute_scope'] = reference
+          parameters['instruments'] = scope.rules.to_dict()['instruments']
+          path.write_text(yaml.safe_dump(research, allow_unicode=True, sort_keys=False), encoding='utf-8')
+          '@ | & $python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: 安装组合验收的LEAN引擎
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          ./integrations/lean/install.ps1
+          -LeanHome "$env:RUNNER_TEMP/lean-installation"
+          -FromPackage "$env:RUNNER_TEMP/lean-install-source/package"
       - name: 验收预测到组合和独立金融报告
+        if: runner.os == 'Windows'
         shell: python {0}
         run: |
           import os, pathlib, subprocess, sys
@@ -161,6 +196,7 @@ jobs:
           python = root / "ml-installed-env" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
           subprocess.run([
               str(python), "examples/qlib_portfolio/run.py", "--mode", "portfolio",
+              "--lean-home", str(root / "lean-installation"),
               "--output", str(root / "qlib-portfolio"),
               "--research-series-id", "synthetic-ci-portfolio",
               "--research-series-root", str(root / "qlib-research-series"),

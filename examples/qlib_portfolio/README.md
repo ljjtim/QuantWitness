@@ -4,7 +4,9 @@
 
 `development`用于研究迭代：只训练模型并评价validation，保留时间切分和真实拟合范围，不生成test预测，不读取holdout索引或打开最终holdout。`model`执行相同模型代码，继续逐时点选择、开发test评价与一次性最终holdout。三种模式共享数据生成器、特征公式、模型声明和生产指标定义。`portfolio`在完整模型研究之外，把开发test预测按冻结的最高三只等权规则接入LEAN日频执行。
 
-安装框架的`ml`依赖后，在公开源码根执行：
+`development`和`model`无需LEAN，可在支持模型依赖的Windows或Linux环境运行。`portfolio`需要完整LEAN安装；当前安装入口支持Windows x64和PowerShell 7，准备方法见[LEAN安装说明](../../integrations/lean/README.md)。合成组合必须通过`--lean-home`显式提供安装目录；自有数据也可通过`lean_execution.lean_home`提供，安装身份在准备阶段冻结。
+
+安装框架的`ml`依赖后，在公开源码根执行。三个命令分别展示不同入口，最终评价的选择规则见下文：
 
 ```powershell
 python examples/qlib_portfolio/run.py --mode development --output I:/quantwitness/qlib-development

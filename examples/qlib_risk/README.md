@@ -2,7 +2,7 @@
 
 本例在公开合成ETF模型ResearchPackage上增加风险组合目标，并通过LEAN日频引擎执行。输入为封存Parquet，证券和行情均为合成；正式验收使用一次调仓，原持仓绑定引擎真实的初始全现金状态。
 
-在QuantWitness公开源码根安装依赖并执行：
+本例始终执行LEAN组合，需要显式提供完整安装目录。当前安装入口支持Windows x64和PowerShell 7，按[LEAN安装说明](../../integrations/lean/README.md)准备后，在QuantWitness公开源码根安装依赖并执行：
 
 ```powershell
 python -m pip install -e ".[ml]" "scipy==1.15.3" "cvxpy==1.7.5" "clarabel==0.11.1"

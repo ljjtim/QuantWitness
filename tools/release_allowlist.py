@@ -44,6 +44,7 @@ UNIT_CORE_TEST_FILES = (
     "integrations/rdagent/tests/test_failure_classification.py",
 )
 PUBLIC_ROOT_FILES = (
+    ".gitattributes",
     ".gitignore",
     "ARCHITECTURE.md",
     "CHANGELOG.md",
