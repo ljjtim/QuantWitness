@@ -90,10 +90,21 @@ def test_public_source_inventory_reuses_package_inventory() -> None:
     } <= public
     for project_name in PUBLIC_EXAMPLE_PROJECTS:
         prefix = f"examples/{project_name}/"
+        if project_name in {"custom_metric", "turnover_factor"}:
+            assert {f"{prefix}{name}" for name in (
+                "run.py", "inputs.py", "source/operator.py", "README.md",
+            )} <= public
+            continue
         if project_name == "lean_quickstart":
             assert {f"{prefix}{name}" for name in (
                 "build.py", "inputs.py", "lean_scope.py", "strategy.py",
                 "verify.py", "expected.yaml", "README.md",
+            )} <= public
+            continue
+        if project_name == "lean_futures":
+            assert {f"{prefix}{name}" for name in (
+                "build.py", "inputs.py", "scope.py", "strategy.py",
+                "synthetic.py", "verify.py", "README.md",
             )} <= public
             continue
         assert f"{prefix}package/package.yaml" in public

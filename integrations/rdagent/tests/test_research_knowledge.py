@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from factor_space_fixture import price_space
 
 from quantwitness_rdagent import research_knowledge as knowledge
 from quantwitness_rdagent.contracts import write_json
@@ -19,7 +20,7 @@ def test_only_empty_holdout_structure_is_allowed():
 def facts():
     development = {"start": "2020-01-01", "end": "2020-01-10", "as_of": "2020-01-11T00:00:00+08:00"}
     metric = dict(zip(knowledge._METRIC_FIELDS, ("mse", "squared_ratio", "daily", "lower_is_better", "none", "validation mse")))
-    design = {"mode": "development", "calendar_id": "calendar", "snapshot_scope": "synthetic", "price_basis": "raw",
+    design = {"factor_space": price_space(), "mode": "development", "calendar_id": "calendar", "snapshot_scope": "synthetic", "price_basis": "raw",
         "entities": ["A"], "research_sessions": ["2020-01-02"]}
     scope = knowledge._scope(design, development)
     record = {"record_id": "session/a/result", "usable_for_proposal": True, "kind": "negative", "status": "no_improvement",

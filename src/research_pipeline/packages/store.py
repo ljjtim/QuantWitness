@@ -34,6 +34,22 @@ class PackageDocuments:
         return _load_minute_scopes(self.root, spec)
 
 
+class _DeferredMinuteScopes(Mapping):
+    """首次消费规则时加载，同次声明读取共享加载结果。"""
+
+    def __init__(self, documents):
+        self.documents = documents
+
+    def __getitem__(self, key):
+        return self.documents.minute_scope_inputs[key]
+
+    def __iter__(self):
+        return iter(self.documents.minute_scope_inputs)
+
+    def __len__(self):
+        return len(self.documents.minute_scope_inputs)
+
+
 def read_package_documents(root: str | Path) -> PackageDocuments:
     """各文件只解析一次，保留所有读取错误供 lint 聚合。"""
     directory = Path(root).resolve()
@@ -48,6 +64,8 @@ def read_package_documents(root: str | Path) -> PackageDocuments:
 
 def load_research_package(root: str | Path, *, documents: PackageDocuments | None = None) -> ResearchPackage:
     directory = Path(root).resolve()
+    if documents is None:
+        documents = read_package_documents(directory)
     package = _load_yaml(directory, "package.yaml", documents=documents)
     source_payload = _load_yaml(directory, "sources/sources.yaml", documents=documents)
     localization_payload = _load_yaml(directory, "localization.yaml", documents=documents)
@@ -64,9 +82,7 @@ def load_research_package(root: str | Path, *, documents: PackageDocuments | Non
     )
     metric_contract = _load_metric_contract(package["metric_contract"])
     claim_contract = _load_claim_contract(package["claim_contract"])
-    scope_inputs = (documents.minute_scope_inputs if documents is not None
-                    else _load_minute_scopes(directory, spec_payload))
-    return ResearchPackage.build(
+    result = ResearchPackage.build(
         package_slug=package["package_slug"],
         display_name=package["display_name"],
         package_version=package["package_version"],
@@ -76,8 +92,9 @@ def load_research_package(root: str | Path, *, documents: PackageDocuments | Non
         metric_contract=metric_contract,
         claim_contract=claim_contract,
         spec_payload=spec_payload,
-        minute_scope_inputs=scope_inputs,
     )
+    object.__setattr__(result, "minute_scope_inputs", _DeferredMinuteScopes(documents))
+    return result
 
 
 def _load_minute_scopes(directory, spec):

@@ -25,6 +25,7 @@ from .project_bundle import (
     ProjectOperatorDeclaration,
     ProjectOperatorPermissionProfile,
     compile_project_operator_bundle,
+    build_project_model_adapter,
     load_project_operator_declaration,
     project_source_hash,
     verify_project_operator_bundle,
@@ -55,6 +56,7 @@ from research_pipeline.platform.operator_contracts import (
 )
 
 __all__ = [
+    "build_project_model_adapter",
     "EXTENSION_CONTRACT_VERSION", "EXTENSION_MANIFEST_VERSION", "OPERATOR_CONTRACT_VERSION",
     "OPERATOR_GRAPH_ADMISSION_VERSION", "OPERATOR_GRAPH_RECIPE_VERSION", "STRATEGY_CONTRACT_VERSION",
     "PROJECT_OPERATOR_ABI_VERSION", "PROJECT_OPERATOR_BUNDLE_VERSION",

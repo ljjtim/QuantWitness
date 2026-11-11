@@ -1,7 +1,7 @@
 """联合研究只向上游组件提供正式开发事实。"""
 import math
 
-from .factor_research import DAI_FACTOR_CONTRACT, factor_contract
+from .factor_research import factor_space
 
 
 def validate_joint_feedback(records):
@@ -30,11 +30,10 @@ def development_population(design, tables):
         raise ValueError("联合评价仅接受正式开发样本")
     if set(tables) & {"test_predictions", "holdout_predictions", "holdout_receipt"}:
         raise ValueError("联合评价不得读取最终留出事实")
-    contract = factor_contract(design)
-    prefixes = ("dai_following__",) if contract == DAI_FACTOR_CONTRACT else ("historical_return__", "volatility__")
+    columns = factor_space(design)["population_feature_columns"]
     samples = []
     for row in tables["samples"]:
-        feature_values = [value for key, value in row.items() if key.startswith(prefixes) or (contract == DAI_FACTOR_CONTRACT and key == "dai_following")]
+        feature_values = [row.get(column) for column in columns]
         if not feature_values or any(type(value) not in (int, float) or not math.isfinite(value) for value in feature_values):
             raise ValueError("联合评价要求冻结特征均有完整值")
         samples.append({key: row[key] for key in ("sample_id", "target", "label_start_time", "label_end_time", "label_available_time")})

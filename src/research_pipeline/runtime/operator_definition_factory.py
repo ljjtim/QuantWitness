@@ -50,6 +50,7 @@ _ADAPTER_MODULES_BY_SYMBOL = {
     "execute_research_features_intraday_v1": "research_pipeline.runtime.adapters.minute_research",
     "execute_research_labels_intraday_v1": "research_pipeline.runtime.adapters.minute_research",
     "execute_research_model_fit_v2": "research_pipeline.runtime.adapters.model",
+    "execute_research_model_import_v1": "research_pipeline.runtime.adapters.model",
     "execute_research_model_fold_metrics_v2": "research_pipeline.runtime.adapters.model",
     "execute_research_model_locked_holdout_v2": "research_pipeline.runtime.adapters.model",
     "execute_research_model_predict_v2": "research_pipeline.runtime.adapters.model",
@@ -66,6 +67,8 @@ _ADAPTER_MODULES_BY_SYMBOL = {
 # 不把整个 registry、整个包或相邻执行族当成当前节点的实现。
 _COMMON_ADAPTER_DEPENDENCIES = (
     "research_pipeline.runtime.adapters.common",
+    "research_pipeline.runtime.logical_table_verification",
+    "research_pipeline.data_plane.verification_lifecycle",
     "research_pipeline.runtime.operator_runtime",
     "research_pipeline.platform.canonical",
     "research_pipeline.data_plane.research_data_bundle",
@@ -309,6 +312,7 @@ def _definition(
     implementation_id: str,
     *,
     inputs: tuple[tuple[str, str], ...],
+    optional_inputs: tuple[str, ...] = (),
     outputs: tuple[tuple[str, str], ...],
     parameters: tuple[ParameterSpec, ...],
     resource_profile: dict[str, int],
@@ -334,7 +338,7 @@ def _definition(
     specification = OperatorSpec.build(
         operator_id=operator_id,
         operator_version=operator_version,
-        input_ports=tuple(PortSpec(*item) for item in inputs),
+        input_ports=tuple(PortSpec(*item, required=item[0] not in optional_inputs) for item in inputs),
         output_ports=tuple(PortSpec(*item) for item in outputs),
         parameters=parameters,
         strategy_roles=roles,
@@ -365,3 +369,4 @@ def _definition(
         resource_hint_ref=f"resource.{operator_id}@{operator_version}",
         partition_keys=partition_keys,
     )
+

@@ -162,7 +162,7 @@ def test_existing_lean_preparation_defers_content_check_to_execution(installatio
     spec.loader.exec_module(prepare)
     lock = freeze_lean_runtime(installation)
     parameters = dict(execution_backend="lean", lean_runtime=lock, initial_cash_units=100000000,
-                      strategy_declaration={"bundle_id": "bundle"})
+                      strategy_declaration={"bundle_id": "bundle", "asset_class": "cn_stock"})
     node = dict(operator_id="project.strategy", operator_version="1.0.0", parameters=parameters,
                 inputs=[{"input_port": port} for port in ("bars", "snapshot", "signals")])
     source = tmp_path / "package"

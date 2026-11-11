@@ -1,12 +1,29 @@
-# 正式研究包的两轮参数研究
+# 正式研究包的参数研究
 
-本例在2400条虚构分钟数据上比较两日与三日成交量集中度窗口。每轮使用一个独立ResearchPackage，通过原有Workspace完成准入、执行、Result和报告。RD-Agent读取正式开发指标后进入下一轮，不调用模型或数据库。
+本例比较2日和3日成交量集中度窗口。
+输入为2400条虚构分钟记录。
+每轮通过Workspace准入、执行并发布Result。
+RD-Agent只读取正式开发目标值。
+固定提案器不调用模型或数据库。
 
-研究目标是两个虚构证券在2025年1月8日至10日的滚动集中度均值；方向设为最小化，仅用于演示候选选择。较小集中度不代表更高收益、更低风险或更优投资策略。前两日输入用于窗口预热，不进入目标均值；两候选目标样本均为六条。
+## 目标
 
-## 执行
+目标是2只虚构证券的滚动集中度均值。
+评价日期为2025年1月8日至10日。
+前2日输入用于预热。
+两候选使用相同的6条目标样本。
+最小化集中度仅用于演示候选选择。
+较小数值不表示更好的投资效果。
 
-使用安装了QuantWitness核心、可选RD集成（含`materials`依赖）及固定上游RD源码的同一Linux环境。环境准备见集成安装指南。本例路径均由当前运行主机解释，不使用Windows/Linux执行桥；项目公式复现入口仍支持跨系统桥。
+参考值：3日窗口为0.004609909162671379。
+2日窗口为0.004617528112477554。
+按声明目标选择3日窗口。
+
+## 运行
+
+前置条件：已安装核心、materials依赖和固定RD-Agent。
+在同一Linux环境从公开源码根执行命令。
+RESEARCH_OUTPUT指向尚不存在的目录。
 
 ```bash
 python integrations/rdagent/examples/package_campaign/prepare.py --output "$RESEARCH_OUTPUT"
@@ -15,26 +32,28 @@ python -m quantwitness_rdagent campaign-inspect --request "$RESEARCH_OUTPUT/requ
 python -m quantwitness_rdagent campaign-resume --request "$RESEARCH_OUTPUT/request.json"
 ```
 
-`RESEARCH_OUTPUT`必须是尚不存在的目录。`prepare`生成教学Parquet、Catalog、来源材料、ResearchPackage和固定算子 bundle。没有数据库文件或联网步骤，合成来源无需真实论文审阅。
+准备生成Parquet、Catalog、来源材料和完整包。
+请求使用research_kind=package。
+候选只覆盖基包已有且类型兼容的节点参数。
+输入、开发范围和指标语义在会话开始时冻结。
 
-本例参考目标值为三日窗口`0.004609909162671379`、两日窗口`0.004617528112477554`；按声明的最小化目标选择三日窗口。
+outcome.json保存在session目录。
+selected_result_ref指向选定开发Result。
+恢复继续原execution，不重算已发布结果。
+技术中断保留预约，诊断保存在候选目录。
+最终test/holdout不能作为自动循环反馈。
 
-结果在`session/outcome.json`，两轮Result位于`session/candidates/<候选>/workspace/.research/executions/`。`selected_result_ref`指向选定开发候选。恢复会继续原execution，已发布结果不会重新计算。技术中断保留已预约评价，诊断写入候选目录的`execution-diagnostic.json`；按Runtime建议等待或恢复，不会另开运行。正式执行失败或开发指标不合格记录为失败候选。
+## Qlib参数示例
 
-## 研究声明
-
-请求使用`research_kind=package`，候选只覆盖基包已有节点参数。基包、归档、Catalog、扩展在会话开始时冻结。目标明确声明表、schema、数值列、日期列、可见时点列、固定筛选、聚合与方向；提案器只接收目标值和候选状态。
-
-完整Qlib六节点图中的最终test/holdout计算不能作为自动循环候选。开发循环与最终一次性评估分别执行。新增研究复用自己的已批准ResearchPackage及指标定义；本例证明参数研究及恢复行为，不证明任意论文或任意项目可以无人审核运行。
-
-## Qlib模型参数研究
-
-安装核心`ml`依赖后，可将上述准备命令替换为：
+安装核心ml依赖后替换准备命令。
 
 ```bash
 python integrations/rdagent/examples/package_campaign/prepare_qlib.py --output "$RESEARCH_OUTPUT"
 ```
 
-该起点使用十只虚构ETF、最终评估边界前79个价格会话。两个候选分别重新训练Ridge模型，正则化强度为0.1与1.0；各候选独立封存模型、处理器、正式Result。开发目标是相同validation样本的均方误差，只有执行成功且满足开发范围的指标进入下一轮。模型调用预算为零，RD-Agent使用固定提案器完成调度。
-
-模型开发图只允许2.0.0版本的split、fit、predict和fold-metrics，split必须显式声明`evaluation_scope=development`。selection和locked-holdout继续留在最终研究中。每个变体同时声明模型参数、研究设计与身份，不能复用其他候选的训练结果。
+示例使用10只虚构ETF和79个价格会话。
+两个Ridge候选的正则化强度为0.1和1.0。
+各候选独立训练，封存模型、处理器和Result。
+目标是相同validation样本的均方误差。
+开发图显式声明evaluation_scope=development。
+最终selection与locked-holdout留在独立研究中。

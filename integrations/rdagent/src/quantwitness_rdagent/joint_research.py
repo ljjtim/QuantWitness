@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import re
 
-from .factor_research import FactorResearch, ResearchBudgetExhausted, ResearchCalls, _freeze, _read, expression_direction, validate_factor_research, DAI_FACTOR_CONTRACT, DAI_EXPRESSION_CONTRACT, canonical_expression, factor_contract, factor_directions, feature_expression_slot
+from .factor_research import FactorResearch, ResearchBudgetExhausted, ResearchCalls, _freeze, _read, expression_direction, validate_factor_research, canonical_expression, factor_space, factor_directions, feature_expression_slot
 from .model_research import ModelResearch, validate_model_research
 from .joint_feedback import validate_joint_feedback
 
@@ -14,7 +14,7 @@ def validate_joint_research(payload):
     if not isinstance(payload, dict) or not fields <= set(payload) or set(payload) - fields - {"research_schedule"}:
         raise ValueError("联合研究请求字段不完整")
     value = json.loads(json.dumps(payload, allow_nan=False))
-    if value["contract_version"] != "rd-joint-research-v1" or value["research_kind"] != "joint_research":
+    if value["contract_version"] != "rd-joint-research-v2" or value["research_kind"] != "joint_research":
         raise ValueError("联合研究合同无效")
     if not isinstance(value["campaign_id"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value["campaign_id"]):
         raise ValueError("campaign_id必须为简单标识")
@@ -33,8 +33,11 @@ def validate_joint_research(payload):
     if (not isinstance(budget, dict) or set(budget) != {"rounds", "evaluations", "model_calls", "output_tokens", "max_output_tokens_per_call"}
             or any(type(x) is not int or x < 1 for x in budget.values()) or budget["max_output_tokens_per_call"] > 8192):
         raise ValueError("联合研究预算无效")
-    if "research_schedule" in value and (value["research_schedule"] != ["baseline", "factor", "model"] or budget["rounds"] != 3):
-        raise ValueError("固定研究计划必须为三轮baseline、factor、model")
+    if "research_schedule" in value:
+        schedule = value["research_schedule"]
+        if (not isinstance(schedule, list) or len(schedule) != budget["rounds"] or not schedule
+                or schedule[0] != "baseline" or any(not isinstance(item, str) or item not in {"factor", "model"} for item in schedule[1:])):
+            raise ValueError("研究计划须以baseline开始，其余每轮明确因子或模型分支")
     return value
 
 
@@ -44,11 +47,11 @@ def select_joint_direction(context, complete):
     from .direction_selection import validate_references
     from rdagent.oai.llm_utils import APIBackend
     from rdagent.utils.agent.tpl import T
-    contract = factor_contract(context)
+    space = factor_space(context)
     scheduled = context.get("scheduled_action")
     if scheduled is not None and scheduled not in {"factor", "model"}:
         raise ValueError("本轮计划只能限定因子或模型分支")
-    allowed = {*(("factor", direction) for direction in factor_directions(contract)),
+    allowed = {*(("factor", direction) for direction in factor_directions(space)),
                ("model", "generated_model"), ("stop", "stop")}
     if scheduled is not None:
         allowed = {choice for choice in allowed if choice[0] in {scheduled, "stop"}}
@@ -59,17 +62,10 @@ def select_joint_direction(context, complete):
         hypothesis_and_feedback=json.dumps(context, ensure_ascii=False),
         last_hypothesis_and_feedback=json.dumps(records[-1:], ensure_ascii=False))
     system = ("依据已验证开发知识选择因子或模型方向。只返回JSON，字段action、direction、knowledge_refs、reason。"
-              "action为factor、model或stop；factor方向为momentum、mean_deviation、relative_volatility、range_position；"
-              "model方向为generated_model；stop方向为stop。knowledge_refs引用实际采用的record_id，reason说明开发证据如何支持选择。"
-              "因子仅使用close及1至5期窗口，模型仅使用受支持的前馈有向无环网络。"
-              "模型消费已验证因子中开发指标最好的表达式，标签、处理器与训练设置固定。"
-              "不可扩展数据、预算或使用最终test/holdout。不同分支的负结果也应保留。")
-    if contract == DAI_FACTOR_CONTRACT:
-        system = ("依据已验证开发知识选择已确认日级因子或模型方向。只返回JSON，字段action、direction、knowledge_refs、reason。"
-                  "action为factor、model或stop；factor方向只允许lag或mean，model方向为generated_model，stop方向为stop。"
-                  + DAI_EXPRESSION_CONTRACT +
-                  "模型消费开发指标最好的已验证因子，写入dai_following槽；仅改变受支持的前馈网络结构。"
-                  "knowledge_refs引用实际采用的record_id；特征资格、标签、处理器、切分与训练设置冻结，不使用test/holdout或扩大预算。")
+              "action为factor、model或stop；factor方向从冻结研究空间选择，model方向为generated_model，stop方向为stop。"
+              "模型消费开发指标最好的已验证因子，写入声明槽；只改变受支持的前馈网络。"
+              "knowledge_refs引用实际采用的record_id；样本资格、标签、处理器、切分与训练设置冻结，不使用test/holdout或扩大预算。"
+              + json.dumps(space, ensure_ascii=False))
     if scheduled is not None:
         system += f"本轮冻结计划限定{scheduled}分支，action只能为{scheduled}或stop，direction必须属于该分支；不得返回另一分支。"
     with research_backend(complete, context["max_output_tokens"]):
@@ -93,8 +89,7 @@ class JointFactorResearch(FactorResearch):
 class JointModelResearch(ModelResearch):
     def context(self):
         result = super().context()
-        if factor_contract(self.design) == DAI_FACTOR_CONTRACT:
-            result.update(factor_contract=DAI_FACTOR_CONTRACT, factor_feature_slot="dai_following")
+        result.update(factor_space=factor_space(self.design), factor_feature_slot=feature_expression_slot(self.design))
         if hasattr(self, "call_owner"):
             result.update(joint_knowledge=self.call_owner.knowledge_view(), joint_direction=self.call_owner.active_direction)
         return result
@@ -104,7 +99,7 @@ class JointModelResearch(ModelResearch):
         payload = super()._candidate_payload(proposal)
         overrides = payload["candidates"][0]["parameter_overrides"]
         design = deepcopy(next(item["value"] for item in overrides if item["node_id"] == "feature" and item["parameter_name"] == "design"))
-        design["feature_expressions"] = {feature_expression_slot(design): canonical_expression(proposal["factor_expression"], contract=factor_contract(design))}
+        design["feature_expressions"][feature_expression_slot(design)] = canonical_expression(proposal["factor_expression"], space=factor_space(design))
         identity = typed_canonical_hash(design)
         for item in overrides:
             if item["parameter_name"] == "design":
@@ -145,8 +140,8 @@ class JointResearch:
         if factor.design != model.design or factor.metric_description != model.metric_description:
             raise ValueError("联合分支必须共用同一正式设计与指标定义")
         slot = feature_expression_slot(factor.design)
-        if set(factor.design.get("feature_expressions", {})) != {slot}:
-            raise ValueError("联合模型必须绑定当前合同的唯一表达式槽：" + slot)
+        if slot not in factor.design.get("feature_expressions", {}):
+            raise ValueError("联合模型必须绑定声明表达式槽：" + slot)
         history = self.history()
         if history and history[0]["status"] == "evaluated" and not (self.root / "development-population.json").exists():
             self._check_population(0, history[0])
@@ -178,7 +173,7 @@ class JointResearch:
         if direction_path.exists():
             direction = _read(direction_path)
         elif index == 0:
-            direction = {"action": "factor", "direction": expression_direction(self.payload["factor_request"]["baseline"]["expression"], contract=factor_contract(self.payload["factor_request"])),
+            direction = {"action": "factor", "direction": expression_direction(self.payload["factor_request"]["baseline"]["expression"], space=factor_space(self.payload["factor_request"])),
                          "knowledge_refs": [], "reason": "confirmed_document_baseline"}
             _freeze(direction_path, direction)
         else:
@@ -187,8 +182,7 @@ class JointResearch:
                     "development": self.payload["factor_request"]["package_template"]["development"],
                     "objective": {**self.payload["factor_request"]["package_template"]["objective"], "metric_definition": self.branches["factor"].metric_description},
                     "max_output_tokens": self.payload["budget"]["max_output_tokens_per_call"]}
-                if factor_contract(self.payload["factor_request"]) == DAI_FACTOR_CONTRACT:
-                    context["factor_contract"] = DAI_FACTOR_CONTRACT
+                context["factor_space"] = factor_space(self.payload["factor_request"])
                 if "research_schedule" in self.payload:
                     context["scheduled_action"] = self.payload["research_schedule"][index]
                 direction = select_joint_direction(context, ResearchCalls(self, f"{index:04d}-direction"))
@@ -205,7 +199,7 @@ class JointResearch:
             result = {"action": "stop", "status": "stopped", "reason": "evaluation_budget"}
         else:
             result = dict(self.branches[kind].propose(index))
-            if kind == "factor" and result.get("action") not in {"stop", "reject"} and expression_direction(result["expression"], contract=factor_contract(self.payload["factor_request"])) != direction["direction"]:
+            if kind == "factor" and result.get("action") not in {"stop", "reject"} and expression_direction(result["expression"], space=factor_space(self.payload["factor_request"])) != direction["direction"]:
                 result = {"action": "reject", "reason": "factor_direction_mismatch"}
             if kind == "model" and result.get("action") not in {"stop", "reject"}:
                 candidates = [row for row in self.history() if row.get("kind") == "factor" and row["status"] == "evaluated"]

@@ -14,6 +14,7 @@ import psutil
 
 
 SPAWN_RUNTIME_BYTES = 512 * 1024**2
+_TEMP_SAMPLE_SECONDS = 0.05
 _THREAD_ENV = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS")
 
@@ -90,6 +91,7 @@ def _worker_main(connection, worker_ref: str) -> None:
     for name in _THREAD_ENV:
         os.environ[name] = "1"
     sys.dont_write_bytecode = True
+    session_inputs = {}
     try:
         _forbid_databases()
         module_name, symbol = worker_ref.split(":")
@@ -99,12 +101,14 @@ def _worker_main(connection, worker_ref: str) -> None:
             if task is None:
                 return
             try:
+                task["_worker_session_inputs"] = session_inputs
                 result = worker(task)
                 connection.send(("ok", result, os.getpid()))
             except BaseException as exc:
                 connection.send(("error", exc, os.getpid()))
                 return
     finally:
+        session_inputs.clear()
         connection.close()
 
 
@@ -167,23 +171,26 @@ def _directory_bytes(root: Path) -> int:
 
 def run_fit_tasks(tasks: Sequence[Mapping[str, object]], *, worker_ref: str,
                   capacity: Mapping[str, object], max_memory_bytes: int,
-                  max_temp_bytes: int, output_root: str | Path,
+                  max_temp_bytes: int | None, output_root: str | Path,
                   deadline_monotonic: float | None = None,
                   execution_report_path: str | Path | None = None) -> list[object]:
     """有界提交独立任务；本批完成项全部成功后补交，结果按任务序返回。"""
-    if type(max_temp_bytes) is not int or max_temp_bytes < 0:
+    if max_temp_bytes is not None and (type(max_temp_bytes) is not int or max_temp_bytes < 0):
         raise ValueError("模型临时空间预算必须是非负整数")
     root = Path(output_root)
     report = {**capacity, "status": "running", "started_tasks": 0, "completed_tasks": 0,
               "worker_pids": [], "peak_child_rss_bytes": 0, "peak_temp_bytes": 0,
               "peak_inflight": 0, "peak_total_rss_bytes": 0,
-              "peak_processes": 1, "start_method": "spawn"}
+              "peak_processes": 1, "start_method": "spawn",
+              "temp_sample_interval_seconds": _TEMP_SAMPLE_SECONDS, "temp_samples": 0}
     workers, active, observed = [], {}, {}
     results = [None] * len(tasks)
     started = time.monotonic()
     context = mp.get_context("spawn")
+    last_temp_sample = None
 
-    def require_resources():
+    def require_resources(*, force_temp=False):
+        nonlocal last_temp_sample
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
             raise TimeoutError("模型 candidate×fold 执行超过节点 deadline")
         rss = 0
@@ -207,13 +214,17 @@ def run_fit_tasks(tasks: Sequence[Mapping[str, object]], *, worker_ref: str,
             raise MemoryError("模型父进程与子进程总内存超过节点额度")
         if processes > int(capacity["process_slots"]):
             raise ValueError(f"模型 spawn 实测进程树 {processes} 超过节点进程槽 {capacity['process_slots']}")
-        temp = _directory_bytes(root)
-        report["peak_temp_bytes"] = max(report["peak_temp_bytes"], temp)
-        if temp > max_temp_bytes:
-            raise ValueError("模型拟合输出与临时文件超过节点 temp 预算")
+        now = time.monotonic()
+        if force_temp or last_temp_sample is None or now - last_temp_sample >= _TEMP_SAMPLE_SECONDS:
+            temp = _directory_bytes(root)
+            last_temp_sample = now
+            report["temp_samples"] += 1
+            report["peak_temp_bytes"] = max(report["peak_temp_bytes"], temp)
+            if max_temp_bytes is not None and temp > max_temp_bytes:
+                raise ValueError("模型拟合输出与临时文件超过节点 temp 预算")
 
     try:
-        require_resources()
+        require_resources(force_temp=True)
         for _ in range(int(capacity["actual_workers"])):
             require_resources()
             parent, child = context.Pipe()
@@ -271,6 +282,7 @@ def run_fit_tasks(tasks: Sequence[Mapping[str, object]], *, worker_ref: str,
                 if not completed:
                     time.sleep(0.01)
             # 同批结果全部成功后才补交，不能由一个成功结果掩盖另一项失败。
+            require_resources(force_temp=True)
             for index, value in completed:
                 results[active.pop(index)] = value
                 report["completed_tasks"] += 1
@@ -282,7 +294,7 @@ def run_fit_tasks(tasks: Sequence[Mapping[str, object]], *, worker_ref: str,
                 process.join(timeout=0.02)
             if process.exitcode != 0:
                 raise RuntimeError("模型 spawn worker 退出失败")
-        require_resources()
+        require_resources(force_temp=True)
         report["status"] = "succeeded"
         return results
     except BaseException as exc:

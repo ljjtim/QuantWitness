@@ -39,8 +39,8 @@ def test_gru_candidate_contract_is_explicit_and_does_not_change_table_candidates
 
 def test_gru_rejects_table_dataset_and_unsupported_settings():
     bad = gru_candidate()
-    bad["model"]["kwargs"]["GPU"] = 0
-    with pytest.raises(QlibModelError, match="CPU"):
+    bad["model"]["kwargs"]["GPU"] = -2
+    with pytest.raises(QlibModelError, match="GPU"):
         normalize_candidates([bad])
     bad = gru_candidate()
     bad["model"]["kwargs"]["metric"] = "rmse"
@@ -74,5 +74,5 @@ def test_gru_dependency_preflight_rejects_unsupported_torch_version(monkeypatch)
     import research_pipeline.research.modeling.walk_forward as modeling
     original = modeling._distribution_version
     monkeypatch.setattr(modeling, "_distribution_version", lambda name: "2.6.0" if name == "torch" else original(name))
-    with pytest.raises(ModelDependencyError, match="torch==2.5.1"):
+    with pytest.raises(ModelDependencyError, match="torch==2.9.1"):
         model_dependency_preflight([gru_candidate()], thread_count=1)

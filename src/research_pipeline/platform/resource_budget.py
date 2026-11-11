@@ -12,11 +12,13 @@ from .errors import RuntimeContractError
 class ResourceBudget:
     memory_bytes: int
     cpu_slots: int
-    temp_bytes: int
+    temp_bytes: int | None  # None表示不设临时空间上限；0仍为零额度。
     wall_seconds: int  # 有效运行预算中，0表示不限制节点累计时长。
 
     def __post_init__(self) -> None:
         for name, value in self.to_dict().items():
+            if name == "temp_bytes" and value is None:
+                continue
             minimum = 0 if name in {"temp_bytes", "wall_seconds"} else 1
             if (
                 not isinstance(value, int)
@@ -26,7 +28,7 @@ class ResourceBudget:
                 requirement = "非负整数" if name in {"temp_bytes", "wall_seconds"} else "正整数"
                 raise RuntimeContractError(f"资源预算 {name} 必须是{requirement}")
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, int | None]:
         return {
             "memory_bytes": self.memory_bytes,
             "cpu_slots": self.cpu_slots,

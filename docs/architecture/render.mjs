@@ -20,7 +20,7 @@ function run(args) {
   if (result.status !== 0) throw new Error('图册生成失败，退出码：' + result.status);
 }
 run([join(root, 'render-previews.mjs'), ...kinds]);
-for (const kind of kinds) {
+for (const kind of kinds.filter(k => k !== 'overview')) {
   const target = join(root, outputs[kind] + '.html');
   run([join(archify, 'bin', 'archify.mjs'), 'render', kind === 'overview' ? 'architecture' : kind, join(root, 'sources', 'detailed', kind + '.json'), target, '--quality', 'showcase']);
   let html = readFileSync(target, 'utf8');
@@ -31,7 +31,7 @@ for (const kind of kinds) {
   const verticalAnchor = 'var nodeCenter = nodeRect.top - containerRect.top + nodeRect.height / 2;';
   html = html.replace(verticalAnchor,     "if (!mobile) { var nodeMidX = nodeRect.left - containerRect.left + nodeRect.width / 2; chip.style.left = (nodeMidX < containerRect.width / 2 ? Math.max(padding, containerRect.width - chip.offsetWidth - padding) : padding) + 'px'; }\n        " + verticalAnchor);
   const style = '<style id="quantwitness-reader-style">li{overflow-wrap:anywhere}svg text,svg tspan{font-family:"Microsoft YaHei","微软雅黑",sans-serif!important;font-weight:400}svg .node-label,svg .title{font-weight:700}.qw-navigation{display:flex;gap:12px;flex-wrap:wrap;margin:24px auto;padding:16px 24px;max-width:1200px;font:14px/1.8 "Microsoft YaHei","微软雅黑",sans-serif}.qw-navigation a{color:inherit}.qw-navigation [aria-current="page"]{font-weight:700}</style>';
-  const links = Object.keys(outputs).map(k => '<a href="'+outputs[k]+'.html"'+(k===kind?' aria-current="page"':'')+'>'+titles[k]+'</a>').join('');
-  html = html.replace('</head>', style + '</head>').replace('</body>', '<nav class="qw-navigation" aria-label="六张详细交互图"><a href="index.html">图册首页</a>'+links+'<a href="'+outputs[kind]+'.svg">查看简图</a></nav></body>');
+  const links = Object.keys(outputs).filter(k => k !== 'overview').map(k => '<a href="'+outputs[k]+'.html"'+(k===kind?' aria-current="page"':'')+'>'+titles[k]+'</a>').join('');
+  html = html.replace('</head>', style + '</head>').replace('</body>', '<nav class="qw-navigation" aria-label="架构图册"><a href="index.html">图册首页</a>'+links+'<a href="'+outputs[kind]+'.svg">查看简图</a></nav></body>');
   writeFileSync(target, html.replace(/^[ \t]+$/gm, ''), 'utf8');
 }

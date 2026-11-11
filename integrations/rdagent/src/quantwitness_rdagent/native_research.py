@@ -18,7 +18,7 @@ from .native_backend import research_backend
 _CONTEXT_FIELDS = {
     "confirmed_spec", "fields", "max_window", "expression_contract",
     "history", "max_output_tokens", "current", "development", "objective",
-    "knowledge", "direction", "joint_knowledge", "joint_direction", "factor_contract",
+    "knowledge", "direction", "joint_knowledge", "joint_direction", "factor_space",
 }
 _RECORD_FIELDS = {"candidate_id", "hypothesis", "reason", "expression", "metrics", "reflection", "status", "limitations"}
 _REFLECTION_FIELDS = {"observations", "hypothesis_evaluation", "new_hypothesis", "reason", "decision"}
@@ -73,10 +73,10 @@ def _context(value, *, reflection=False):
         raise ValueError("max_window必须为正整数")
     if not isinstance(result.get("expression_contract"), (str, dict)) or not result["expression_contract"]:
         raise ValueError("expression_contract必须明确表达式与开发指标合同")
-    if "factor_contract" in result:
-        from .factor_research import DAI_FACTOR_CONTRACT, factor_contract
-        if factor_contract(result) == DAI_FACTOR_CONTRACT and fields != ["dai"]:
-            raise ValueError("日级因子上下文只声明dai字段")
+    from .factor_research import factor_space
+    space = factor_space(result)
+    if any(result[key] != space[key] for key in ("fields", "max_window", "expression_contract")):
+        raise ValueError("因子上下文与冻结研究空间不同")
     history = result.get("history")
     if not isinstance(history, list):
         raise ValueError("history必须为开发实验列表")
@@ -139,7 +139,7 @@ def _native_components():
             facts = {key: self.context[key] for key in (
                 "confirmed_spec", "fields", "max_window", "expression_contract",
             )}
-            for key in ("development", "objective", "direction", "factor_contract"):
+            for key in ("development", "objective", "direction", "factor_space"):
                 if key in self.context:
                     facts[key] = self.context[key]
             return (
@@ -230,6 +230,8 @@ def _native_components():
                 not isinstance(k, str) or not isinstance(v, str) for k, v in task["variables"].items()
             ):
                 raise ValueError("因子variables必须为名称到说明的映射")
+            from .factor_research import canonical_expression, factor_space
+            task["expression"] = canonical_expression(task["expression"], space=factor_space(trace.scen.context))
             expression = "".join(task["expression"].split())
             prior = trace.scen.context["history"] + trace.scen.context.get("knowledge", [])
             if expression in {"".join(row.get("expression", "").split()) for row in prior}:
@@ -241,8 +243,8 @@ def _native_components():
                 validate_references(task["knowledge_refs"], trace.scen.context["knowledge"])
                 if not set(task["knowledge_refs"]) <= set(direction["knowledge_refs"]):
                     raise ValueError("实验必须引用所选方向的知识")
-                from .factor_research import expression_direction, factor_contract
-                if expression_direction(task["expression"], contract=factor_contract(trace.scen.context)) != direction["direction"]:
+                from .factor_research import expression_direction, factor_space
+                if expression_direction(task["expression"], space=factor_space(trace.scen.context)) != direction["direction"]:
                     raise ValueError("表达式与所选方向不一致")
                 result["knowledge_refs"] = task["knowledge_refs"]
             return result

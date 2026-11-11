@@ -76,7 +76,7 @@ def build(output,frequency):
     tables=[dict(table_id="source_snapshot",role="primary",source_node_id="snapshot",source_port="snapshot",
         artifact_type="data.adjustment-factor-snapshot.v1",schema_id="data.adjustment-factor-snapshot.payload.v1",path_prefix="snapshot")]
     save(package/"package.yaml",dict(package_slug="lean_quickstart_"+frequency,display_name="公开LEAN合成买卖示例",package_version="1.0.0",builder_id="operator_graph_plan_v1",
-        metric_contract=dict(contract_id="public.lean.quickstart.metrics",version="1.0.0",metrics=["project.lean.total_return@1.0.0"],semantics={"project.lean.total_return@1.0.0":"last_equity_div_initial_equity_minus_one"}),
+        metric_contract=dict(contract_id="public.lean.quickstart.metrics",version="1.0.0",metrics=["project.lean.total_return@2.0.0"],semantics={"project.lean.total_return@2.0.0":"last_equity_div_initial_equity_minus_one"}),
         claim_contract=dict(allowed_claim_levels=["research_observation"],max_claim_level="research_observation")))
     save(package/"sources/sources.yaml",{"sources":[dict(source_id="public_synthetic",source_type="dataset",title="公开确定性合成ETF行情",
         url="https://github.com/ljjtim/QuantWitness",accessed_at="2024-01-12",content_hash=typed_canonical_hash({"days":synthetic.DAYS,"prices":synthetic.PRICES}),license_id="Apache-2.0",status="available",limitation="虚构证券与合成价格，仅验证执行合同",

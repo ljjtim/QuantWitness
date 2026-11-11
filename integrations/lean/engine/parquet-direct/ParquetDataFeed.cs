@@ -19,6 +19,8 @@ public sealed class ParquetDataFeed : FileSystemDataFeed
     private IBarStore _store;
     private IAlgorithm _algorithm;
     private string _output;
+    private Dictionary<DateTime, SpotExecutionWindow> _executionWindows;
+    private DateTime? _terminalObservationAt;
 
     public override void Initialize(IAlgorithm algorithm, AlgorithmNodePacket job, IResultHandler resultHandler,
         IMapFileProvider mapFileProvider, IFactorFileProvider factorFileProvider, IDataProvider dataProvider,
@@ -31,9 +33,14 @@ public sealed class ParquetDataFeed : FileSystemDataFeed
         _output = Config.Get("results-destination-folder");
         var manifest = Config.Get("parquet-input-manifest");
         using var spec = JsonDocument.Parse(File.ReadAllText(manifest));
+        if (spec.RootElement.TryGetProperty("terminal_observation_at", out var terminal))
+            _terminalObservationAt = DateTimeOffset.Parse(terminal.GetString()).ToOffset(TimeSpan.FromHours(8)).DateTime;
         _store = spec.RootElement.TryGetProperty("source_kind", out var kind) && kind.GetString() == "direct_daily_stream"
             ? DirectDailyStreamStore.Open(manifest)
             : kind.ValueKind == JsonValueKind.String && kind.GetString() == "jqdata_monthly_parquet" ? new MonthlyParquetStore(manifest) : new DailyParquetStore(manifest);
+        if (_store is DirectDailyStreamStore stream)
+            _executionWindows = stream.ExecutionWindows;
+        else _executionWindows = SpotExecutionWindow.Read(spec.RootElement, false);
     }
 
     public override Subscription CreateSubscription(SubscriptionRequest request)
@@ -41,37 +48,102 @@ public sealed class ParquetDataFeed : FileSystemDataFeed
         // 用户定义证券集合仍由上游产生，实际股票行情使用冻结的直接输入。
         if (request.IsUniverseSubscription) return base.CreateSubscription(request);
         var config = request.Configuration;
-        if (_algorithm.IsWarmingUp || config.Type != typeof(TradeBar) || config.SecurityType != SecurityType.Equity
-            || config.Symbol.ID.Market != "jqchina" || config.Resolution != (_store is DirectDailyStreamStore direct && direct.Frequency == "1d" ? Resolution.Daily : Resolution.Minute)
+        var future = _store is DirectDailyStreamStore { IsFuture: true };
+        if (_algorithm.IsWarmingUp || config.Type != typeof(TradeBar) || config.SecurityType != (future ? SecurityType.Future : SecurityType.Equity)
+            || (!future && config.Symbol.ID.Market != "jqchina") || config.Resolution != (_store is DirectDailyStreamStore direct && direct.Frequency == "1d" ? Resolution.Daily : Resolution.Minute)
             || config.FillDataForward || config.DataNormalizationMode != DataNormalizationMode.Raw)
-            throw new NotSupportedException("直接读取仅支持无预热、无填充的Raw股票日线或一分钟行情");
+            throw new NotSupportedException($"直接读取要求无预热、无填充的Raw日线或一分钟TradeBar：{config.Symbol} "
+                + $"{config.Type.Name}/{config.SecurityType}/{config.Resolution}/{config.DataNormalizationMode}/fill={config.FillDataForward}");
         // 同步枚举器让上游同步器推进各证券，避免后台预取把所有日期同时保留。
         return SubscriptionUtils.Create(request, Read(request).GetEnumerator(), _algorithm.Settings.DailyPreciseEndTime);
     }
 
     private IEnumerable<BaseData> Read(SubscriptionRequest request)
     {
+        if (_store is DirectDailyStreamStore { IsFuture: true } futures)
+        {
+            foreach (var data in ReadFutures(request, futures)) yield return data;
+            yield break;
+        }
         if (_store is DirectDailyStreamStore direct && direct.Frequency == "1d")
         {
             foreach (var data in ReadDaily(request)) yield return data;
+            if (_terminalObservationAt is DateTime at && at >= request.StartTimeLocal && at <= request.EndTimeLocal)
+                yield return new SessionBoundary(at, request.Configuration.Symbol);
             yield break;
         }
         var ticker = request.Configuration.Symbol.Value;
         foreach (var date in request.TradableDaysInDataTimeZone)
         {
+            if (!_executionWindows.TryGetValue(date.Date, out var window)) continue;
+            yield return new SessionBoundary(window.StartAt, request.Configuration.Symbol);
             var rows = _store.GetRows(date.Date, ticker);
             foreach (var row in rows)
             {
                 var end = row.End ?? row.Start.AddMinutes(1);
-                if (end < request.StartTimeLocal || end > request.EndTimeLocal) continue;
+                if (end < request.StartTimeLocal || end > request.EndTimeLocal
+                    || end < window.StartAt || end > window.EndAt) continue;
                 _store.EmittedRows++;
                 yield return new TradeBar(row.Start, request.Configuration.Symbol,
                     row.Open / _store.PriceDivisor, row.High / _store.PriceDivisor,
                     row.Low / _store.PriceDivisor, row.Close / _store.PriceDivisor,
                     row.Volume, end - row.Start);
             }
-            if (_store is DirectDailyStreamStore)
-                yield return new SessionBoundary(date.Date.AddHours(15), request.Configuration.Symbol);
+            if (window.EndAt != window.StartAt)
+                yield return new SessionBoundary(window.EndAt, request.Configuration.Symbol);
+        }
+        if (_terminalObservationAt is DateTime terminalAt && terminalAt >= request.StartTimeLocal && terminalAt <= request.EndTimeLocal)
+            yield return new SessionBoundary(terminalAt, request.Configuration.Symbol);
+    }
+
+    private IEnumerable<BaseData> ReadFutures(SubscriptionRequest request, DirectDailyStreamStore store)
+    {
+        var symbol = request.Configuration.Symbol;
+        var code = store.ContractCode(symbol);
+        var divisor = store.Divisor(code);
+        BarRow[] previous = Array.Empty<BarRow>();
+        foreach (var day in store.Dates)
+        {
+            var header = store.Header(day);
+            var session = header.GetProperty("sessions").EnumerateArray()
+                .Where(x => x.GetProperty("instrument_id").GetString() == code).ToArray();
+            var rows = store.Rows(day, code);
+            var events = new List<BaseData>();
+            var dayText = day.ToString("yyyy-MM-dd");
+            if (session.Length > 0)
+            {
+                var begin = DateTimeOffset.Parse(session[0].GetProperty("start_at").GetString()).DateTime;
+                var end = DateTimeOffset.Parse(session[0].GetProperty("end_at").GetString()).DateTime;
+                events.Add(new FutureSessionEvent(begin, symbol, "open", dayText));
+                if (store.Frequency == "1d")
+                {
+                    foreach (var row in previous)
+                    {
+                        events.Add(new CompletedDailyData(new TradeBar(row.Start, symbol, row.Open / divisor,
+                            row.High / divisor, row.Low / divisor, row.Close / divisor, row.Volume, row.End.Value - row.Start), begin));
+                        store.EmittedRows++;
+                    }
+                    foreach (var row in rows) events.Add(new DailyOpenBar(begin, symbol, row.Open / divisor));
+                    if (rows.Length == 0 && previous.Length > 0)
+                        events.Add(new DailyCloseMark(begin, previous[^1].End.Value, symbol, previous[^1].Close / divisor));
+                    events.Add(new FutureSessionEvent(begin.AddTicks(10), symbol, "post_open", dayText));
+                }
+                else foreach (var row in rows)
+                {
+                    events.Add(new TradeBar(row.Start, symbol, row.Open / divisor, row.High / divisor,
+                        row.Low / divisor, row.Close / divisor, row.Volume, row.End.Value - row.Start));
+                    store.EmittedRows++;
+                }
+                events.Add(new FutureSessionEvent(end, symbol, "close", dayText));
+                previous = rows;
+            }
+            foreach (var settlement in header.GetProperty("settlements").EnumerateArray()
+                .Where(x => x.GetProperty("instrument_id").GetString() == code))
+                events.Add(new FutureSessionEvent(DateTimeOffset.Parse(settlement.GetProperty("available_at").GetString()).DateTime,
+                    symbol, "settlement", settlement.GetProperty("trading_date").GetString()));
+            foreach (var value in events.OrderBy(x => x.EndTime)
+                .ThenBy(x => x is FutureSessionEvent e && e.Kind == "settlement" ? 0 : x is FutureSessionEvent ? 1 : 2))
+                if (value.EndTime >= request.StartTimeLocal && value.EndTime <= request.EndTimeLocal) yield return value;
         }
     }
 
@@ -81,8 +153,10 @@ public sealed class ParquetDataFeed : FileSystemDataFeed
         BarRow[] previous = Array.Empty<BarRow>();
         foreach (var date in request.TradableDaysInDataTimeZone)
         {
+            if (!_executionWindows.ContainsKey(date.Date)) continue;
             var rows = _store.GetRows(date.Date, symbol.Value);
             var openAt = date.Date.AddHours(9.5);
+            yield return new SessionBoundary(openAt, symbol);
             // 完整D日OHLCV只能在D+1开盘进入策略；尾日日线没有后续session，不交付。
             foreach (var row in previous)
             {

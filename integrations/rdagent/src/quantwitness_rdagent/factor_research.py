@@ -16,90 +16,73 @@ def _read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-EXPRESSION_CONTRACT = (
-    "$close / Ref($close, N) - 1 或 $close / Mean($close, N) - 1，N为1至5；"
-    "Std($close, N) / Mean($close, N) 或 "
-    "($close - Min($close, N)) / (Max($close, N) - Min($close, N))，N为2至5且各处窗口相同；"
-    "Std为样本标准差，区间最高最低相等时缺失；只用决策前一已完成会话及更早收盘价"
-)
+def validate_factor_space(value):
+    """核对冻结研究空间；公式含义与可见性由项目算子负责。"""
+    fields = {"space_id", "fields", "max_window", "expression_contract", "feature_slot", "candidates", "population_feature_columns"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("factor_space必须完整声明研究空间")
+    result = json.loads(json.dumps(value, allow_nan=False))
+    for key in ("space_id", "expression_contract", "feature_slot"):
+        if not isinstance(result[key], str) or not result[key].strip():
+            raise ValueError("研究空间身份、定义和槽不能为空")
+    for key in ("fields", "population_feature_columns"):
+        items = result[key]
+        if (not isinstance(items, list) or not items or any(not isinstance(x, str) or not x.strip() for x in items)
+                or len(set(items)) != len(items)):
+            raise ValueError("研究空间字段和资格列必须明确且不重复")
+    if type(result["max_window"]) is not int or result["max_window"] < 1:
+        raise ValueError("研究空间最大窗口必须为正整数")
+    candidates = result["candidates"]
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("研究空间必须声明有限候选")
+    seen = set()
+    for row in candidates:
+        if (not isinstance(row, dict) or set(row) != {"expression", "direction"}
+                or any(not isinstance(row[k], str) or not row[k].strip() for k in row)
+                or row["direction"] == "stop"):
+            raise ValueError("候选必须声明表达式和研究方向")
+        compact = "".join(row["expression"].split())
+        if compact in seen:
+            raise ValueError("研究空间表达式不能重复")
+        seen.add(compact)
+    return result
 
 
-CLOSE_FACTOR_CONTRACT = "close-price-v1"
-DAI_FACTOR_CONTRACT = "dai-daily-v1"
-DAI_EXPRESSION_CONTRACT = (
-    "$dai为已确认分钟事件规则及20交易会话聚合形成的日级值；"
-    "仅允许基线$dai、Ref($dai, N)，N为1至5，或Mean($dai, N)，N为2至5。"
-    "D日09:30只使用前一交易会话及更早完整输入；零值合法，缺失不前填、不压缩日历。"
-    "全部候选共用最多25交易会话完整历史的合格掩码，资格在Fillna之前判断。"
-)
-
-
-def factor_contract(value):
-    """已确认日级合同显式声明，既有价格合同保持默认。"""
-    contract = value.get("factor_contract", CLOSE_FACTOR_CONTRACT)
-    if contract not in {CLOSE_FACTOR_CONTRACT, DAI_FACTOR_CONTRACT}:
-        raise ValueError("不支持的因子合同")
-    return contract
+def factor_space(value):
+    return validate_factor_space(value.get("factor_space"))
 
 
 def feature_expression_slot(design):
-    return "dai_following" if factor_contract(design) == DAI_FACTOR_CONTRACT else "historical_return"
+    return factor_space(design)["feature_slot"]
 
 
-def factor_directions(contract):
-    return ("lag", "mean") if contract == DAI_FACTOR_CONTRACT else ("momentum", "mean_deviation", "relative_volatility", "range_position")
+def factor_directions(space):
+    return tuple(dict.fromkeys(row["direction"] for row in validate_factor_space(space)["candidates"]))
 
 
-def canonical_expression(expression, *, contract=CLOSE_FACTOR_CONTRACT):
-    """表达式仅在本次明确声明的因子合同中解释。"""
+def canonical_expression(expression, *, space):
+    """仅接受显式候选，返回项目冻结的原始表达式。"""
     if not isinstance(expression, str):
         raise ValueError("研究表达式必须为文本")
     compact = "".join(expression.split())
-    if contract == DAI_FACTOR_CONTRACT:
-        if compact == "$dai":
-            return "$dai"
-        match = re.fullmatch(r"Ref\(\$dai,([1-5])\)", compact)
-        if match:
-            return f"Ref($dai, {match[1]})"
-        match = re.fullmatch(r"Mean\(\$dai,([2-5])\)", compact)
-        if match:
-            return f"Mean($dai, {match[1]})"
-        raise ValueError("日级因子仅允许$dai、Ref($dai, 1..5)或Mean($dai, 2..5)")
-    if contract != CLOSE_FACTOR_CONTRACT:
-        raise ValueError("不支持的因子合同")
-    match = re.fullmatch(r"\$close/(Ref|Mean)\(\$close,([1-5])\)-1(?:\.0)?", compact)
-    if match:
-        return f"$close / {match[1]}($close, {match[2]}) - 1"
-    match = re.fullmatch(r"Std\(\$close,([2-5])\)/Mean\(\$close,\1\)", compact)
-    if match:
-        return f"Std($close, {match[1]}) / Mean($close, {match[1]})"
-    match = re.fullmatch(r"\(\$close-Min\(\$close,([2-5])\)\)/\(Max\(\$close,\1\)-Min\(\$close,\1\)\)", compact)
-    if match:
-        return f"($close - Min($close, {match[1]})) / (Max($close, {match[1]}) - Min($close, {match[1]}))"
-    raise ValueError("表达式必须符合已复核的收盘动量、均价偏离、相对波动或区间位置定义")
+    for row in validate_factor_space(space)["candidates"]:
+        if "".join(row["expression"].split()) == compact:
+            return row["expression"]
+    raise ValueError("表达式不属于冻结研究空间")
 
 
-def expression_direction(expression, *, contract=CLOSE_FACTOR_CONTRACT):
-    """方向由规范公式决定，不以模型给出的名称替代。"""
-    expression = canonical_expression(expression, contract=contract)
-    if contract == DAI_FACTOR_CONTRACT:
-        return "baseline" if expression == "$dai" else "lag" if expression.startswith("Ref(") else "mean"
-    if expression.startswith("$close / Ref("):
-        return "momentum"
-    if expression.startswith("$close / Mean("):
-        return "mean_deviation"
-    if expression.startswith("Std("):
-        return "relative_volatility"
-    return "range_position"
+def expression_direction(expression, *, space):
+    expression = canonical_expression(expression, space=space)
+    return next(row["direction"] for row in space["candidates"] if row["expression"] == expression)
 
 
 def validate_factor_research(payload):
     fields = {"contract_version", "research_kind", "campaign_id", "session_root", "package_template",
-              "confirmed_spec", "baseline", "budget", "proposer"}
-    if not isinstance(payload, dict) or not fields <= set(payload) or set(payload) - fields - {"knowledge", "factor_contract"}:
+              "confirmed_spec", "baseline", "budget", "proposer", "factor_space"}
+    if not isinstance(payload, dict) or not fields <= set(payload) or set(payload) - fields - {"knowledge"}:
         raise ValueError("因子研究请求字段不完整")
     value = json.loads(json.dumps(payload, allow_nan=False))
-    contract = factor_contract(value)
+    space = factor_space(value)
     if "knowledge" in value:
         knowledge = value["knowledge"]
         if (not isinstance(knowledge, dict) or set(knowledge) != {"index", "output", "max_records"}
@@ -107,7 +90,7 @@ def validate_factor_research(payload):
                 or not isinstance(knowledge["output"], str) or not knowledge["output"]
                 or type(knowledge["max_records"]) is not int or not 1 <= knowledge["max_records"] <= 32):
             raise ValueError("knowledge必须声明输入、输出索引路径及1至32条检索上限")
-    if value["contract_version"] != "rd-factor-research-v1" or value["research_kind"] != "factor_research":
+    if value["contract_version"] != "rd-factor-research-v2" or value["research_kind"] != "factor_research":
         raise ValueError("不支持的因子研究合同")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value["campaign_id"]):
         raise ValueError("campaign_id必须是简单标识")
@@ -120,9 +103,7 @@ def validate_factor_research(payload):
     baseline = value["baseline"]
     if not isinstance(baseline, dict) or set(baseline) != {"expression", "hypothesis", "reason"}:
         raise ValueError("基准必须声明公式、假设与理由")
-    baseline["expression"] = canonical_expression(baseline["expression"], contract=contract)
-    if contract == DAI_FACTOR_CONTRACT and baseline["expression"] != "$dai":
-        raise ValueError("日级因子研究基线必须为已确认的$dai")
+    baseline["expression"] = canonical_expression(baseline["expression"], space=space)
     if any(not isinstance(baseline[k], str) or not baseline[k].strip() for k in ("hypothesis", "reason")):
         raise ValueError("基准假设与理由不能为空")
     confirmation = value["confirmed_spec"]
@@ -228,7 +209,7 @@ class ResearchCalls:
 class FactorResearch:
     def __init__(self, payload, *, model_env_file=None):
         self.payload = validate_factor_research(payload)
-        self.factor_contract = factor_contract(self.payload)
+        self.factor_space = factor_space(self.payload)
         self.root = Path(self.payload["session_root"]).resolve()
         self.model_env_file = model_env_file
         live = self.payload["proposer"]["mode"] == "live"
@@ -256,12 +237,15 @@ class FactorResearch:
         package = load_research_package(source["path"])
         nodes = {n["node_id"]: n for n in package.spec_payload["graph"]["nodes"]}
         if not {"feature", "label", "summary", "model_fit"} <= set(nodes):
-            raise ValueError("首例要求日频Qlib研究包的feature/label/summary/model_fit节点")
+            raise ValueError("因子会话要求日频Qlib研究包的feature/label/summary/model_fit节点")
         self.design = json.loads(json.dumps(nodes["feature"]["parameters"]["design"], default=dict))
-        if factor_contract(self.design) != self.factor_contract:
-            raise ValueError("因子请求与正式设计的合同不同")
-        if self.factor_contract == DAI_FACTOR_CONTRACT and self.design.get("feature_expressions") != {"dai_following": "$dai"}:
-            raise ValueError("日级模板必须声明唯一dai_following槽及$dai基线")
+        if factor_space(self.design) != self.factor_space:
+            raise ValueError("因子请求与正式设计的研究空间不同")
+        slot = self.factor_space["feature_slot"]
+        if slot not in self.design.get("feature_expressions", {}):
+            raise ValueError("因子槽必须已存在于正式设计")
+        if self.design["feature_expressions"][slot] != self.payload["baseline"]["expression"]:
+            raise ValueError("正式设计的基线表达式与请求不同")
         from research_pipeline.platform.metric_contracts import MetricDefinition
         definitions_from_package = tuple(MetricDefinition.from_dict(item) for item in package.spec_payload.get("metric_definitions", ()))
         definitions = [definition for definition in definitions_from_package
@@ -332,11 +316,9 @@ class FactorResearch:
             if "reflection" in row:
                 item["reflection"] = row["reflection"]
             history.append(item)
-        context = {"confirmed_spec": self.materials["text"], "fields": ["close"], "max_window": 5,
-                "expression_contract": EXPRESSION_CONTRACT,
+        context = {"confirmed_spec": self.materials["text"], "fields": self.factor_space["fields"], "max_window": self.factor_space["max_window"],
+                "expression_contract": self.factor_space["expression_contract"], "factor_space": self.factor_space,
                 "development": template["development"], "objective": {**template["objective"], "metric_definition": self.metric_description}, "history": history}
-        if factor_contract(self.payload) == DAI_FACTOR_CONTRACT:
-            context.update(factor_contract=DAI_FACTOR_CONTRACT, fields=["dai"], expression_contract=DAI_EXPRESSION_CONTRACT)
         if "knowledge" in self.payload:
             from .direction_selection import knowledge_view
             context["knowledge"] = knowledge_view(self.knowledge_records)
@@ -379,13 +361,13 @@ class FactorResearch:
                     fields.update({"direction", "knowledge_refs"})
                 if set(proposal) != fields:
                     raise ValueError("提案字段无效")
-                proposal["expression"] = canonical_expression(proposal["expression"], contract=factor_contract(self.payload))
+                proposal["expression"] = canonical_expression(proposal["expression"], space=factor_space(self.payload))
                 if any(not isinstance(proposal[k], str) or not proposal[k].strip() for k in ("hypothesis", "reason")):
                     raise ValueError("提案说明无效")
                 prior = self.history()
                 if index > 0 and "knowledge" in self.payload:
                     prior += self.knowledge_records
-                if proposal["expression"] in {canonical_expression(row["expression"], contract=factor_contract(self.payload)) for row in prior if row.get("expression")}:
+                if proposal["expression"] in {canonical_expression(row["expression"], space=factor_space(self.payload)) for row in prior if row.get("expression")}:
                     raise ValueError("提案表达式已评价")
             except ValueError:
                 proposal = {"action": "reject", "reason": "unsupported_or_repeated_expression"}
@@ -397,7 +379,7 @@ class FactorResearch:
         from research_pipeline.platform import typed_canonical_hash
         payload = deepcopy(self.payload["package_template"])
         design = deepcopy(self.design)
-        design["feature_expressions"] = {feature_expression_slot(design): canonical_expression(proposal["expression"], contract=factor_contract(self.payload))}
+        design["feature_expressions"][feature_expression_slot(design)] = canonical_expression(proposal["expression"], space=factor_space(self.payload))
         identity = typed_canonical_hash(design)
         overrides = [{"node_id": "model_fit", "parameter_name": "research_identity_hash", "value": identity}]
         for name in ("feature", "label", "summary"):

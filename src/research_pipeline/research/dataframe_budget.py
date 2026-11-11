@@ -121,16 +121,24 @@ class PandasFrameBudget:
         self.retained_bytes += result_bytes
         return result
 
-    def reserve_frame(self, frame: pd.DataFrame, *, label: str) -> int:
+    def reserve_frame(self, frame: pd.DataFrame, *, label: str, deep: bool = True) -> int:
         """把调用方已经持有的 DataFrame 纳入同一节点工作集。"""
 
-        frame_bytes = pandas_frame_bytes(frame)
-        self._require(
-            self.retained_bytes + frame_bytes,
-            f"{label} 的完整 DataFrame 常驻",
-        )
-        self.retained_bytes += frame_bytes
+        frame_bytes = int(frame.memory_usage(index=True, deep=deep).sum())
+        self.reserve_bytes(frame_bytes, label=f"{label} 的完整 DataFrame 常驻")
         return frame_bytes
+
+    def reserve_bytes(self, byte_size: int, *, label: str) -> int:
+        """登记已知大小的实际分配；共享对象由其持有方登记一次。"""
+        self.require_additional(byte_size, label=label)
+        self.retained_bytes += byte_size
+        return byte_size
+
+    def release_bytes(self, byte_size: int) -> None:
+        """释放先前登记的分配，不重新扫描共享对象。"""
+        if type(byte_size) is not int or byte_size < 0 or byte_size > self.retained_bytes:
+            raise PandasFrameBudgetError("pandas 工作集释放计数不闭合")
+        self.retained_bytes -= byte_size
 
     def concat_reserved_frames(
         self,

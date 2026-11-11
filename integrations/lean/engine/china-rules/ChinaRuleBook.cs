@@ -8,6 +8,7 @@ public sealed class ChinaRuleBook
 {
     private Dictionary<string, ChinaRule[]> _rules;
     private readonly HashSet<DateOnly> _sessions;
+    private readonly DateOnly[] _orderedSessions;
     private readonly Func<DateOnly, IEnumerable<ChinaRule>>? _dailyLoader;
     private DateOnly? _loadedDay;
     public IReadOnlyCollection<DateOnly> TradingDates => _sessions;
@@ -27,6 +28,7 @@ public sealed class ChinaRuleBook
     {
         _sessions = tradingDates.ToHashSet();
         if (_sessions.Count == 0) throw new ArgumentException("交易日历不能为空");
+        _orderedSessions = _sessions.OrderBy(day => day).ToArray();
         _rules = rules.GroupBy(x => x.InstrumentId).ToDictionary(x => x.Key, x => x.OrderByDescending(r => r.AvailableAt).ToArray());
         if (_rules.Count == 0) throw new ArgumentException("历史规则不能为空");
     }
@@ -35,6 +37,7 @@ public sealed class ChinaRuleBook
     {
         _sessions = tradingDates.ToHashSet();
         if (_sessions.Count == 0) throw new ArgumentException("交易日历不能为空");
+        _orderedSessions = _sessions.OrderBy(day => day).ToArray();
         _rules = new();
         _dailyLoader = dailyLoader;
     }
@@ -45,7 +48,13 @@ public sealed class ChinaRuleBook
         var day = DateOnly.FromDateTime(ShanghaiTime(utc).DateTime);
         if (!_sessions.Contains(day) || _loadedDay == day) return;
         if (_loadedDay.HasValue && day < _loadedDay) throw new InvalidOperationException("规则消费时钟不能倒退");
-        var rows = _dailyLoader(day).ToList();
+        var rows = new Dictionary<string, List<ChinaRule>>();
+        foreach (var row in _dailyLoader(day))
+        {
+            if (!rows.TryGetValue(row.InstrumentId, out var group))
+                rows.Add(row.InstrumentId, group = new List<ChinaRule>());
+            group.Add(row);
+        }
         // 仅保留最近已可见的历史估费依据，不把它当成当日交易规则。
         foreach (var previous in _rules.Values)
         {
@@ -53,12 +62,14 @@ public sealed class ChinaRuleBook
                 && (r.ValidFrom == null || r.ValidFrom.Value.UtcDateTime <= utc)
                 && r.EffectiveFrom < day).OrderByDescending(r => r.EffectiveTo)
                 .ThenByDescending(r => r.AvailableAt).ThenByDescending(r => r.ValidFrom).FirstOrDefault();
-            if (fee != null && !rows.Any(r => r.InstrumentId == fee.InstrumentId
-                && r.EffectiveFrom == fee.EffectiveFrom && r.EffectiveTo == fee.EffectiveTo
-                && r.AvailableAt == fee.AvailableAt && r.ValidFrom == fee.ValidFrom && r.ValidTo == fee.ValidTo)) rows.Add(fee);
+            if (fee == null) continue;
+            if (!rows.TryGetValue(fee.InstrumentId, out var current))
+                rows.Add(fee.InstrumentId, current = new List<ChinaRule>());
+            if (!current.Any(r => r.EffectiveFrom == fee.EffectiveFrom && r.EffectiveTo == fee.EffectiveTo
+                && r.AvailableAt == fee.AvailableAt && r.ValidFrom == fee.ValidFrom && r.ValidTo == fee.ValidTo)) current.Add(fee);
         }
-        _rules = rows.GroupBy(r => r.InstrumentId).ToDictionary(g => g.Key,
-            g => g.OrderByDescending(r => r.AvailableAt).ToArray());
+        _rules = rows.ToDictionary(g => g.Key,
+            g => g.Value.OrderByDescending(r => r.AvailableAt).ToArray());
         _loadedDay = day;
     }
 
@@ -98,16 +109,31 @@ public sealed class ChinaRuleBook
         var today = DateOnly.FromDateTime(ShanghaiTime(utc).DateTime);
         var at = new DateTimeOffset(utc);
         if (!_rules.TryGetValue(instrumentId, out var rows)) throw new InvalidOperationException($"缺少证券规则 {instrumentId}");
-        foreach (var session in _sessions.Where(day => day <= today).OrderByDescending(day => day))
+        var index = Array.BinarySearch(_orderedSessions, today);
+        if (index < 0) index = ~index - 1;
+        for (; index >= 0; index--)
         {
+            var session = _orderedSessions[index];
             // 已结束时段可以供历史估费；尚未开始或尚不可见的规则不能供估费。
-            var candidates = rows.Where(r => r.EffectiveFrom <= session && session <= r.EffectiveTo
-                && r.AvailableAt <= at && (r.ValidFrom == null || r.ValidFrom <= at))
-                .OrderByDescending(r => r.AvailableAt).ThenByDescending(r => r.ValidFrom).ToArray();
-            if (candidates.Length == 0) continue;
-            if (candidates.Skip(1).Any(r => r.AvailableAt == candidates[0].AvailableAt && r.ValidFrom == candidates[0].ValidFrom))
+            ChinaRule? latest = null;
+            var ambiguous = false;
+            foreach (var row in rows)
+            {
+                if (row.EffectiveFrom > session || session > row.EffectiveTo
+                    || row.AvailableAt > at || (row.ValidFrom != null && row.ValidFrom > at)) continue;
+                var order = latest == null ? 1 : row.AvailableAt.CompareTo(latest.AvailableAt);
+                if (order == 0) order = Nullable.Compare(row.ValidFrom, latest!.ValidFrom);
+                if (order > 0)
+                {
+                    latest = row;
+                    ambiguous = false;
+                }
+                else if (order == 0) ambiguous = true;
+            }
+            if (latest == null) continue;
+            if (ambiguous)
                 throw new InvalidOperationException($"估费时点有歧义规则 {instrumentId} {at:O}");
-            return candidates[0];
+            return latest;
         }
         throw new InvalidOperationException($"估费时点之前没有已可见历史规则 {instrumentId} {at:O}");
     }
@@ -154,6 +180,7 @@ public sealed class ChinaRule
         : FundQuantityRule ? "bounded" : throw new ArgumentException("股票规则缺少价格限制模式");
     public bool MarketProtectionRequired => Parameters.TryGetProperty("market_protection_required", out var protection)
         ? protection.GetBoolean() : FundQuantityRule ? false : throw new ArgumentException("股票规则缺少市价保护要求");
+    public bool MarketOrderAllowed => !Parameters.TryGetProperty("market_order_allowed", out var value) || value.GetBoolean();
     public int PriceScale => checked((int)Number("price_scale"));
     public int SettlementDays => checked((int)Number("settlement_days"));
     public decimal PriceTickUnits => OptionalNumber("price_tick_units") ?? 1m;

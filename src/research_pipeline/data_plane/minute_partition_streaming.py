@@ -14,8 +14,11 @@ from research_pipeline.domain import (
     SessionPolicyBundle,
 )
 from research_pipeline.platform.asset_taxonomy import CANONICAL_ASSET_CLASSES
+from research_pipeline.domain.session_calendar import PROJECT_SESSION_BUNDLE_VERSION
+from research_pipeline.domain.time import CN_MARKET_TIMEZONE
 
 from .errors import ProviderExecutionError, SnapshotIntegrityError
+from .temporal import _as_utc_datetime
 
 
 _DAY_MICROSECONDS = 86_400_000_000
@@ -59,6 +62,7 @@ class VerifiedMinutePartitionStream:
         session_bundle: SessionPolicyBundle | None = None,
         session_instruments: Iterable[SessionInstrumentMetadata] = (),
         expected_instrument_days: Iterable[tuple[str, date]] | None = None,
+        source_timezone: str = CN_MARKET_TIMEZONE,
     ) -> None:
         if asset_class not in {*_STOCK_LIKE_ASSETS, "cn_future"}:
             raise SnapshotIntegrityError("分钟分区资产类别不受支持")
@@ -68,11 +72,15 @@ class VerifiedMinutePartitionStream:
             raise SnapshotIntegrityError("分钟分区缺少 session policy")
         if asset_class == "cn_future" and session_bundle is None:
             raise SnapshotIntegrityError("期货分钟分区缺少 session policy bundle")
+        if asset_class == "cn_future" and not source_timezone:
+            raise SnapshotIntegrityError("期货分钟分区缺少准入来源时区")
         self.partition = partition
         self.asset_class = asset_class
         self.interval_minutes = interval_minutes
         self.session_policy_ref = session_policy_ref
         self.session_bundle = session_bundle
+        self.source_timezone = source_timezone
+        self._session_resolver = SessionCalendarResolver(session_bundle) if session_bundle is not None else None
         self.session_instruments = {
             item.instrument_id: item for item in session_instruments
         }
@@ -143,12 +151,72 @@ class VerifiedMinutePartitionStream:
         for batch in batches:
             names = tuple(batch.schema.names)
             code_values = batch.column(names.index("code")).to_numpy(zero_copy_only=False)
-            dt_values = batch.column(names.index("dt")).to_numpy(zero_copy_only=False)
+            times = batch.column(names.index("dt"))
+            if times.type.tz is not None:
+                # 已归一化的aware列先转成来源墙钟，不能把UTC epoch当作naive输入。
+                dt_values = times.to_pandas().dt.tz_convert(
+                    self.source_timezone or CN_MARKET_TIMEZONE).dt.tz_localize(None).to_numpy()
+            else:
+                dt_values = times.to_numpy(zero_copy_only=False)
             volume_values = (
                 batch.column(names.index("volume")).to_numpy(zero_copy_only=False)
                 if "volume" in columns
                 else None
             )
+            if self.asset_class in _STOCK_LIKE_ASSETS:
+                # 逐批验证行约束，只在证券日边界维护跨批计数。
+                dt_us_values = np.asarray(dt_values, dtype="datetime64[us]").view("int64")
+                if batch.column(names.index("code")).null_count or np.any(
+                    (code_values == "") | (dt_us_values == np.iinfo(np.int64).min)
+                ):
+                    raise ProviderExecutionError("分钟分区 code/dt 不能缺失")
+                if batch.num_rows:
+                    days, clock_us = np.divmod(dt_us_values, _DAY_MICROSECONDS)
+                    failures = []
+
+                    def reject_first(mask, message):
+                        indices = np.flatnonzero(mask)
+                        if indices.size:
+                            failures.append((int(indices[0]), len(failures), message))
+
+                    order_bad = np.zeros(batch.num_rows, dtype=bool)
+                    order_bad[1:] = (code_values[1:] < code_values[:-1]) | (
+                        (code_values[1:] == code_values[:-1])
+                        & (dt_us_values[1:] <= dt_us_values[:-1])
+                    )
+                    if previous_code is not None:
+                        order_bad[0] = code_values[0] < previous_code or (
+                            code_values[0] == previous_code
+                            and int(dt_us_values[0]) <= previous_dt_us
+                        )
+                    reject_first(order_bad, "分钟分区必须按 code,dt 严格递增且不得重复")
+                    in_session = (
+                        ((clock_us >= _STOCK_MORNING_FIRST) & (clock_us <= _STOCK_MORNING_LAST))
+                        | ((clock_us >= _STOCK_AFTERNOON_FIRST) & (clock_us <= _STOCK_AFTERNOON_LAST))
+                    ) & (clock_us % _MINUTE_MICROSECONDS == 0)
+                    reject_first(~in_session, "分钟 bar_end 不属于批准的股票 completed-bar 时段")
+                    if volume_values is not None:
+                        reject_first(~np.isfinite(volume_values) | (volume_values < 0),
+                                     "分钟分区 volume 必须是有限非负数")
+                    if failures:
+                        raise ProviderExecutionError(min(failures)[2])
+                    boundaries = np.flatnonzero(
+                        (code_values[1:] != code_values[:-1]) | (days[1:] != days[:-1])
+                    ) + 1
+                    starts = np.r_[0, boundaries]
+                    stops = np.r_[boundaries, batch.num_rows]
+                    for start, stop in zip(starts, stops):
+                        day_key = (str(code_values[start]),
+                                   (datetime(1970, 1, 1) + timedelta(days=int(days[start]))).date())
+                        if current_day != day_key:
+                            finish_day()
+                            current_day = day_key
+                        current_day_count += int(stop - start)
+                    previous_code = str(code_values[-1])
+                    previous_dt_us = int(dt_us_values[-1])
+                    observed_rows += batch.num_rows
+                yield batch if names == columns else batch.select(list(columns))
+                continue
             for index in range(batch.num_rows):
                 code = str(code_values[index])
                 dt_us = int(np.datetime64(dt_values[index], "us").astype("int64"))
@@ -207,18 +275,19 @@ class VerifiedMinutePartitionStream:
         instrument = self.session_instruments.get(code)
         if instrument is None or self.session_bundle is None:
             raise ProviderExecutionError(f"期货 session policy 未覆盖标的: {code}")
-        instant = datetime(1970, 1, 1) + timedelta(microseconds=dt_us)
+        # raw dt 是来源墙钟整数，不是UTC Unix时点。
+        instant = _as_utc_datetime(datetime(1970, 1, 1) + timedelta(microseconds=dt_us),
+                                   self.source_timezone, "minute bar_end")
         try:
-            session = SessionCalendarResolver(
-                self.session_bundle
-            ).resolve_completed_bar_end(
+            session = self._session_resolver.resolve_completed_bar_end(
                 instrument,
                 instant,
-                policy_revision=1,
+                policy_revision=None if self.session_bundle.contract_version == PROJECT_SESSION_BUNDLE_VERSION else 1,
             )
         except SessionCalendarError as exc:
             raise ProviderExecutionError("分钟 bar_end 不属于批准的期货 session") from exc
-        if session.policy_id != self.session_policy_ref:
+        if (self.session_bundle.contract_version != PROJECT_SESSION_BUNDLE_VERSION
+                and session.policy_id != self.session_policy_ref):
             raise ProviderExecutionError("分钟 bar_end 命中的 session policy 不一致")
         return session.trading_date
 

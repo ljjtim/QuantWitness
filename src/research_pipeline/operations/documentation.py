@@ -13,6 +13,15 @@ from research_pipeline.platform.canonical import fingerprint
 REQUIRED_DOCS = frozenset(
     {
         "architecture.md",
+        "completed-model-input.md",
+        "admission-execution.md",
+        "bar_tca.md",
+        "direct-inputs.md",
+        "equity_minute_raw_volume_pit.md",
+        "minute_market_rules.md",
+        "minute_operators.md",
+        "minute_reference_scope.md",
+        "minute_simulation.md",
         "ai_workflow.md",
         "catalog.md",
         "cli.md",
@@ -32,6 +41,8 @@ REQUIRED_DOCS = frozenset(
         "minute-project-scope.md",
         "strategy-protocol.md",
         "lean-execution.md",
+        "lean-futures.md",
+        "lean-futures-results.md",
         "operations.md",
         "release.md",
         "external-acceptance.md",
@@ -50,8 +61,6 @@ REQUIRED_DOCS = frozenset(
         "financial_simulation.md",
         "robust_research.md",
         "minute-resource-budget.md",
-        "explicit_orders.md",
-        "shared_futures.md",
     }
 )
 

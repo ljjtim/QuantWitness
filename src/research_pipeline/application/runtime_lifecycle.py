@@ -414,7 +414,10 @@ def _recommend_action(
                 if isinstance(target_error, Mapping)
                 else None
             )
-            if isinstance(failure_context, Mapping):
+            if (
+                isinstance(failure_context, Mapping)
+                and failure_context.get("contract_version") == "data-plane-request-failure-v1"
+            ):
                 return _readmit_action(
                     "data-plane request "
                     f"{failure_context.get('request_id')} / "
@@ -715,7 +718,7 @@ def _resource_pool_projection(
         capacity=ResourceVector(
             memory_bytes=int(capacity["memory_bytes"]),
             cpu_slots=int(capacity["cpu_slots"]),
-            scratch_bytes=int(capacity["temp_bytes"]),
+            scratch_bytes=capacity["temp_bytes"],
             process_slots=int(governance["process_slots"]),
         ),
         stale_after_seconds=float(governance["stale_seconds"]),

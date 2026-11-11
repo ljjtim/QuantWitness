@@ -46,6 +46,10 @@ class RunScopedArtifactVerification:
         self._full_verification_counts[key] += 1
         return verified
 
+    def lookup(self, namespace: str, identity: str) -> object | None:
+        """查询当前运行已经完成的验收，不触发新的验证。"""
+        return self._verified.get(self._key(namespace, identity))
+
     def remember(self, namespace: str, identity: str, verified: _T) -> _T:
         """记录刚在本调用栈完成完整检查并原子发布的结果。"""
 

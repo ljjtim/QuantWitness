@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -15,22 +16,41 @@ import threading
 import time
 from typing import Iterator, Mapping
 import uuid
+import weakref
 
 import psutil
 
 from research_pipeline.platform import canonical_json, typed_canonical_hash
+from research_pipeline.platform.redaction import redact_text
 from research_pipeline.platform.process_resources import (
     _measure_scratch_scopes, _nonoverlapping_roots, _project_process_usage,
     _register_attempt_sampler, _unregister_attempt_sampler,
+    _owned_process_descendants,
 )
 
 from .contracts import ResourceBudget
-from .errors import RuntimeAdmissionError, RuntimeIntegrityError
+from .errors import RuntimeAdmissionError, RuntimeIntegrityError, RuntimeWorkerError
 
 
 RESOURCE_GOVERNOR_VERSION = "research-resource-governor-v3"
 RESOURCE_OBSERVATION_VERSION = "research-resource-observation-v4"
 RESOURCE_CALIBRATION_VERSION = "research-resource-calibration-v2"
+
+_LOCAL_STATE_GUARD = threading.RLock()
+_LOCAL_STATE_LOCKS = weakref.WeakValueDictionary()
+_MAINTAINED_LEASES: dict[tuple[str, str], tuple[ResourceLease, list[BaseException]]] = {}
+
+
+@contextmanager
+def _local_state_lock(path: Path):
+    with _LOCAL_STATE_GUARD:
+        lock = _LOCAL_STATE_LOCKS.setdefault(os.path.normcase(str(path)), threading.RLock())
+    if not lock.acquire(timeout=10.0):
+        raise RuntimeAdmissionError("资源治理进程内状态锁超时")
+    try:
+        yield
+    finally:
+        lock.release()
 
 _DATA_SCALE_COMPONENTS = (
     "scan_bytes",
@@ -48,11 +68,11 @@ def _utc_now() -> str:
 class ResourceVector:
     memory_bytes: int
     cpu_slots: int
-    scratch_bytes: int
+    scratch_bytes: int | None
     process_slots: int
 
     def __post_init__(self) -> None:
-        if any(type(value) is not int or value < 0 for value in self.to_dict().values()):
+        if any(type(value) is not int or value < 0 for key, value in self.to_dict().items() if not (key == "scratch_bytes" and value is None)):
             raise RuntimeAdmissionError("资源向量必须由非负整数组成")
         if not any(self.to_dict().values()):
             raise RuntimeAdmissionError("资源向量不能全为零")
@@ -78,10 +98,10 @@ class ResourceVector:
         }
 
     def plus(self, other: "ResourceVector") -> "ResourceVector":
-        return ResourceVector(*(self.to_dict()[key] + other.to_dict()[key] for key in self.to_dict()))
+        return ResourceVector(*(None if self.to_dict()[key] is None or other.to_dict()[key] is None else self.to_dict()[key] + other.to_dict()[key] for key in self.to_dict()))
 
     def fits_within(self, capacity: "ResourceVector") -> bool:
-        return all(self.to_dict()[key] <= capacity.to_dict()[key] for key in self.to_dict())
+        return all(capacity.to_dict()[key] is None or (self.to_dict()[key] is not None and self.to_dict()[key] <= capacity.to_dict()[key]) for key in self.to_dict())
 
 
 @dataclass(frozen=True)
@@ -255,7 +275,15 @@ class ResourceUsageSampler:
         self._thread: threading.Thread | None = None
         self._baseline_descendants: frozenset[tuple[int, float]] | None = None
         self._sampling_lock = threading.RLock()
-        self._last_project_sample_at = 0.0
+        self._last_project_sample_at = float("-inf")
+        self._last_generic_sample_at = float("-inf")
+        self._project_sample_key = None
+        self._project_scratch_key = None
+        self._project_process_sample = None
+        self._project_scratch_sample = None
+        self._last_scratch_sample_at = float("-inf")
+        self._governor_scratch_sizes = None
+        self._last_worker_scratch_at = float("-inf")
 
     def __enter__(self) -> "ResourceUsageSampler":
         self._started = time.monotonic()
@@ -270,77 +298,117 @@ class ResourceUsageSampler:
             self._stop.set()
             if self._thread is not None:
                 self._thread.join(timeout=max(1.0, self.interval_seconds * 4))
-            self._sample()
+            with self._sampling_lock:
+                self._last_project_sample_at = float("-inf")
+                self._last_generic_sample_at = float("-inf")
+                self._sample(force_scratch=True)
             self.wall_milliseconds = max(1, round((time.monotonic() - self._started) * 1000))
         finally:
             _unregister_attempt_sampler(self)
 
     def _run(self) -> None:
         while not self._stop.wait(self.interval_seconds):
-            with self._sampling_lock:
-                # 通信监督刚取得的完整读数已经计入节点峰值，不再立刻重复扫描。
-                if time.monotonic() - self._last_project_sample_at >= self.interval_seconds:
-                    self._sample()
+            # 同周期读数已计入峰值时，后台不再争用监督器的采样锁。
+            if time.monotonic() - max(self._last_project_sample_at, self._last_generic_sample_at) >= self.interval_seconds:
+                self._sample()
 
     def sample_project_usage(self, worker_pid: int | None, observed_descendants: dict[int, float],
                              scratch_roots: tuple[Path, ...], *,
-                             windows_job_name: str | None = None) -> tuple[int, int, int]:
+                             windows_job_name: str | None = None, force: bool = False,
+                             force_scratch: bool = False) -> tuple[int, int, int]:
         """复用监督器本轮真实测量，治理峰值和 Worker 硬门禁共享同一读数。"""
         with self._sampling_lock:
             try:
-                if windows_job_name is None:
-                    rss, count = _project_process_usage(worker_pid, observed_descendants)
-                else:
-                    rss, count = _project_process_usage(
-                        worker_pid, observed_descendants, windows_job_name=windows_job_name)
-                sizes = _measure_scratch_scopes((*self.scratch_roots, *scratch_roots))
-                governor_size = sum(sizes[path] for path in _nonoverlapping_roots(self.scratch_roots))
-                worker_size = sum(sizes[path] for path in _nonoverlapping_roots(scratch_roots))
+                roots = tuple(Path(root).resolve() for root in scratch_roots)
+                worker_started = None
+                if worker_pid is not None:
+                    try:
+                        worker_started = psutil.Process(worker_pid).create_time()
+                    except psutil.NoSuchProcess:
+                        pass
+                key = (worker_pid, worker_started, id(observed_descendants), windows_job_name)
+                scratch_key = (key, roots)
+                now = time.monotonic()
+                changed = key != self._project_sample_key
+                if force or changed or self._project_process_sample is None or now - self._last_project_sample_at >= self.interval_seconds:
+                    if windows_job_name is None:
+                        self._project_process_sample = _project_process_usage(worker_pid, observed_descendants)
+                    else:
+                        self._project_process_sample = _project_process_usage(
+                            worker_pid, observed_descendants, windows_job_name=windows_job_name)
+                    self._last_project_sample_at = now
+                rss, count = self._project_process_sample
+                # 节点历史目录按秒采样；子任务边界只强制当前实际工作范围。
+                governor_due = self._governor_scratch_sizes is None or now - self._last_scratch_sample_at >= 1.0
+                worker_due = force or force_scratch or scratch_key != self._project_scratch_key or self._project_scratch_sample is None or now - self._last_worker_scratch_at >= 1.0
+                if governor_due:
+                    sizes = _measure_scratch_scopes((*self.scratch_roots, *roots))
+                    self._governor_scratch_sizes = {path: sizes[path] for path in self.scratch_roots}
+                    self._last_scratch_sample_at = now
+                    self._project_scratch_sample = {path: sizes[path] for path in roots}
+                    self._last_worker_scratch_at = now
+                elif worker_due:
+                    self._project_scratch_sample = _measure_scratch_scopes(roots)
+                    self._last_worker_scratch_at = now
+                    for path in self.scratch_roots:
+                        if path in self._project_scratch_sample:
+                            self._governor_scratch_sizes[path] = self._project_scratch_sample[path]
+                sizes = self._project_scratch_sample
+                self._project_sample_key = key
+                self._project_scratch_key = scratch_key
+                governor_size = sum(self._governor_scratch_sizes[path] for path in _nonoverlapping_roots(self.scratch_roots))
+                worker_size = sum(sizes[path] for path in _nonoverlapping_roots(roots))
             except (psutil.Error, OSError, RuntimeError):
                 self.measurement_status = "measurement_unavailable"
                 raise
             self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
             self.max_processes = max(self.max_processes, count)
             self.peak_scratch_bytes = max(self.peak_scratch_bytes, governor_size)
-            self._last_project_sample_at = time.monotonic()
             return rss, count, worker_size
 
-    def _sample(self) -> None:
+    def _sample(self, *, force_scratch=False) -> None:
         with self._sampling_lock:
-            self._sample_unlocked()
+            self._sample_unlocked(force_scratch=force_scratch)
 
-    def _sample_unlocked(self) -> None:
+    def _sample_unlocked(self, *, force_scratch=False) -> None:
+        if time.monotonic() - max(self._last_project_sample_at, self._last_generic_sample_at) >= self.interval_seconds:
+            try:
+                root = psutil.Process(os.getpid())
+                descendants = _owned_process_descendants(root)
+                identities = {}
+                for item in descendants:
+                    try:
+                        identities[(item.pid, item.create_time())] = item
+                    except psutil.NoSuchProcess:
+                        continue
+                if self._baseline_descendants is None:
+                    self._baseline_descendants = frozenset(identities)
+                processes = [
+                    root,
+                    *(
+                        item
+                        for identity, item in identities.items()
+                        if identity not in self._baseline_descendants
+                    ),
+                ]
+                rss = root.memory_info().rss
+                for item in processes[1:]:
+                    try:
+                        rss += item.memory_info().rss
+                    except psutil.NoSuchProcess:
+                        continue
+                self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+                self.max_processes = max(self.max_processes, len(processes))
+                self._last_generic_sample_at = time.monotonic()
+            except (psutil.Error, OSError, RuntimeError):
+                self.measurement_status = "measurement_unavailable"
         try:
-            root = psutil.Process(os.getpid())
-            descendants = root.children(recursive=True)
-            identities = {}
-            for item in descendants:
-                try:
-                    identities[(item.pid, item.create_time())] = item
-                except psutil.NoSuchProcess:
-                    continue
-            if self._baseline_descendants is None:
-                self._baseline_descendants = frozenset(identities)
-            processes = [
-                root,
-                *(
-                    item
-                    for identity, item in identities.items()
-                    if identity not in self._baseline_descendants
-                ),
-            ]
-            rss = root.memory_info().rss
-            for item in processes[1:]:
-                try:
-                    rss += item.memory_info().rss
-                except psutil.NoSuchProcess:
-                    continue
-            self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
-            self.max_processes = max(self.max_processes, len(processes))
-        except (psutil.Error, OSError, RuntimeError):
-            self.measurement_status = "measurement_unavailable"
-        try:
+            now = time.monotonic()
+            if not force_scratch and now - self._last_scratch_sample_at < 1.0:
+                return
             sizes = _measure_scratch_scopes(self.scratch_roots)
+            self._last_scratch_sample_at = now
+            self._governor_scratch_sizes = sizes
             current_scratch_bytes = sum(sizes[path] for path in _nonoverlapping_roots(self.scratch_roots))
             self.peak_scratch_bytes = max(self.peak_scratch_bytes, current_scratch_bytes)
         except (OSError, RuntimeError):
@@ -351,16 +419,19 @@ class ResourceUsageSampler:
 def read_resource_governor_state(
     config: ResourceGovernorConfig,
 ) -> dict[str, object] | None:
-    """只读共享资源池状态，不加写锁、不清理租约、也不写回文件。"""
+    """在状态事务锁内只读共享资源池，不清理租约或写回文件。"""
 
     reader = ResourceGovernor.__new__(ResourceGovernor)
     reader.config = config
     reader._state_path = config.state_dir / "resource-governor.json"
     if not reader._state_path.is_file():
         return None
-    state = reader._read_state()
-    reader._validate_or_initialize(state)
-    return reader._snapshot_state(state)
+    # Windows读取句柄与原子替换互斥；与写事务共用锁，不执行写回。
+    with _local_state_lock(config.state_dir), ProcessFileLock(config.state_dir / "resource-governor.lock", timeout_seconds=10.0,
+                         timeout_error=RuntimeAdmissionError("资源治理状态锁超时")):
+        state = reader._read_state()
+        reader._validate_or_initialize(state)
+        return reader._snapshot_state(state)
 
 
 class ResourceGovernor:
@@ -444,13 +515,37 @@ class ResourceGovernor:
             time.sleep(self.config.poll_interval_seconds)
 
     def heartbeat(self, lease: ResourceLease) -> None:
+        self.check_lease_health(lease)
         with self._locked_state() as state:
             record = state["leases"].get(lease.lease_id)
             if record is None or record.get("status") != "active":
                 raise RuntimeAdmissionError("资源租约未知或已失效")
             if not _same_lease_identity(record, lease):
                 raise RuntimeIntegrityError("资源租约进程身份不一致")
-            record["heartbeat_epoch"] = time.time()
+            now = time.time()
+            while record is not None:
+                if not _process_identity_alive(int(record["pid"]), float(record["process_started_at"])):
+                    raise RuntimeAdmissionError("资源租约祖先进程已退出")
+                record["heartbeat_epoch"] = now
+                parent_id = record["parent_lease_id"]
+                record = state["leases"].get(parent_id) if parent_id is not None else None
+
+    def check_lease_health(self, lease: ResourceLease) -> None:
+        """在计算交接和监督轮询时传播本进程已发现的租约故障。"""
+        with _LOCAL_STATE_GUARD:
+            current = lease
+            while current is not None:
+                entry = _MAINTAINED_LEASES.get((str(self.config.state_dir), current.lease_id))
+                if entry is not None and entry[1]:
+                    error = entry[1][0]
+                    detail = redact_text(" ".join(str(error).split()))[:1000]
+                    raise RuntimeWorkerError(
+                        f"资源租约 heartbeat 失败: {type(error).__name__}: {detail}",
+                        error_code="resource_lease_failed",
+                    ) from error
+                parent_id = current.parent_lease_id
+                parent = _MAINTAINED_LEASES.get((str(self.config.state_dir), parent_id))
+                current = parent[0] if parent is not None else None
 
     def release(self, lease: ResourceLease, *, reason: str = "released") -> bool:
         with self._locked_state() as state:
@@ -585,6 +680,9 @@ class ResourceGovernor:
     def maintained_lease(self, lease: ResourceLease) -> Iterator[ResourceLease]:
         stop = threading.Event()
         error: list[BaseException] = []
+        key = (str(self.config.state_dir), lease.lease_id)
+        with _LOCAL_STATE_GUARD:
+            _MAINTAINED_LEASES[key] = (lease, error)
 
         def maintain() -> None:
             interval = min(self.config.stale_after_seconds / 3, 5.0)
@@ -592,22 +690,41 @@ class ResourceGovernor:
                 try:
                     self.heartbeat(lease)
                 except BaseException as exc:  # 后台失效必须由主线程看见。
-                    error.append(exc)
+                    with _LOCAL_STATE_GUARD:
+                        error.append(exc)
+                    logging.getLogger(__name__).error(
+                        "资源租约续约失败: %s: %s", type(exc).__name__,
+                        redact_text(" ".join(str(exc).split()))[:1000],
+                    )
                     stop.set()
 
         thread = threading.Thread(target=maintain, name=f"resource-heartbeat-{lease.sequence}", daemon=True)
         thread.start()
         try:
-            yield lease
+            try:
+                yield lease
+            finally:
+                stop.set()
+                # 等待正在进行的有界本地锁与进程锁事务完成，再释放租约。
+                thread.join(timeout=21.0)
+                if thread.is_alive():
+                    with _LOCAL_STATE_GUARD:
+                        error.append(RuntimeIntegrityError("资源租约 heartbeat 线程未在事务限时内退出"))
+        except BaseException as exc:
             if error:
-                raise RuntimeIntegrityError("资源租约 heartbeat 失败") from error[0]
+                # 主执行异常仍为最终错误，心跳原错作为明确原因保留。
+                raise exc from error[0]
+            raise
         finally:
-            stop.set()
-            thread.join(timeout=max(1.0, self.config.poll_interval_seconds * 4))
+            with _LOCAL_STATE_GUARD:
+                _MAINTAINED_LEASES.pop(key, None)
+        if error:
+            detail = redact_text(" ".join(str(error[0]).split()))[:1000]
+            raise RuntimeIntegrityError(f"资源租约 heartbeat 失败: {type(error[0]).__name__}: {detail}") from error[0]
 
     @contextmanager
     def _locked_state(self) -> Iterator[dict[str, object]]:
-        with ProcessFileLock(self._lock_path, timeout_seconds=10.0, timeout_error=RuntimeAdmissionError("资源治理状态锁超时")):
+        with _local_state_lock(self.config.state_dir), ProcessFileLock(self._lock_path, timeout_seconds=10.0, timeout_error=RuntimeAdmissionError("资源治理状态锁超时")):
             state = self._read_state()
             self._validate_or_initialize(state)
             yield state
@@ -838,7 +955,7 @@ class ResourceGovernor:
         if combined.process_slots + 1 > parent_vector.process_slots:
             return False
         return all(
-            combined.to_dict()[key] <= parent_vector.to_dict()[key]
+            parent_vector.to_dict()[key] is None or (combined.to_dict()[key] is not None and combined.to_dict()[key] <= parent_vector.to_dict()[key])
             for key in ("memory_bytes", "cpu_slots", "scratch_bytes")
         )
 
@@ -911,7 +1028,7 @@ class ResourceGovernor:
                 continue
             parent_vector = ResourceVector.from_dict(parent["vector"])
             scalar_fits = all(
-                child_total.to_dict()[key] <= parent_vector.to_dict()[key]
+                parent_vector.to_dict()[key] is None or (child_total.to_dict()[key] is not None and child_total.to_dict()[key] <= parent_vector.to_dict()[key])
                 for key in ("memory_bytes", "cpu_slots", "scratch_bytes")
             )
             # 父进程自身占一个 process slot，子进程只能使用剩余额度。
@@ -942,7 +1059,7 @@ def _sum_vectors(values: Iterator[ResourceVector] | list[ResourceVector]) -> Res
     items = list(values)
     if not items:
         return None
-    totals = {key: sum(item.to_dict()[key] for item in items) for key in items[0].to_dict()}
+    totals = {key: None if any(item.to_dict()[key] is None for item in items) else sum(item.to_dict()[key] for item in items) for key in items[0].to_dict()}
     return ResourceVector(**totals)
 
 
@@ -1005,3 +1122,29 @@ __all__ = [
     "read_resource_governor_state",
     "resource_data_bucket",
 ]
+
+
+def _require_sampled_resources(
+    sampler: ResourceUsageSampler, *, budget: ResourceBudget,
+    reservation: ResourceVector,
+) -> None:
+    if sampler.measurement_status != "available":
+        raise RuntimeWorkerError(
+            "节点资源测量不可用，不能发布成功 checkpoint",
+            error_code="resource_measurement_unavailable",
+            failure_payload={"code": "resource_measurement_unavailable"},
+        )
+    limits = {
+        "memory_bytes": (sampler.peak_rss_bytes, min(budget.memory_bytes, reservation.memory_bytes)),
+        "temp_bytes": (sampler.peak_scratch_bytes, min((value for value in (budget.temp_bytes, reservation.scratch_bytes) if value is not None), default=None)),
+        "process_slots": (sampler.max_processes, reservation.process_slots),
+    }
+    if budget.wall_seconds:
+        limits["wall_milliseconds"] = (sampler.wall_milliseconds, budget.wall_seconds * 1000)
+    exceeded = {name: {"actual": actual, "limit": limit} for name, (actual, limit) in limits.items() if limit is not None and actual > limit}
+    if exceeded:
+        raise RuntimeWorkerError(
+            "节点资源使用超过执行预算或租约",
+            error_code="resource_exceeded",
+            failure_payload={"code": "resource_exceeded", "exceeded": exceeded},
+        )

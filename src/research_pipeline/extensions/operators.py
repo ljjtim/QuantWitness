@@ -416,9 +416,11 @@ class TrustedOperatorRegistry:
                 spec = node_specs[node.node_id]
                 expected_ports = {item.port: item.artifact_type for item in spec.input_ports}
                 actual_ports = {item.input_port for item in node.inputs}
-                if actual_ports != set(expected_ports):
+                required_ports = {item.port for item in spec.input_ports if item.required}
+                if not required_ports <= actual_ports <= set(expected_ports):
                     raise OperatorContractError(
-                        f"node {node.node_id} 输入端口不匹配；期望={sorted(expected_ports)}，实际={sorted(actual_ports)}"
+                        f"node {node.node_id} 输入端口不匹配；必需={sorted(required_ports)}，"
+                        f"允许={sorted(expected_ports)}，实际={sorted(actual_ports)}"
                     )
                 for binding in node.inputs:
                     if binding.source_node_id not in node_by_id:

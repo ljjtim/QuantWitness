@@ -21,7 +21,7 @@ QuantWitness 管理外层研究配置、数据时点、执行和验证；调用 
 
 ## RQAlpha 与其他依赖
 
-RQAlpha 是账户与执行职责设计的参考之一，当前原生仿真不调用其执行引擎。本项目不据此主张拥有 RQAlpha 的代码版权或商标，也不把其许可替换为 QuantWitness 的许可。未来引入源码片段或直接依赖时，应按实际引入的版本重新记录。
+RQAlpha 是账户与执行职责设计的参考之一，当前 LEAN 执行不调用其执行引擎。本项目不据此主张拥有 RQAlpha 的代码版权或商标，也不把其许可替换为 QuantWitness 的许可。未来引入源码片段或直接依赖时，应按实际引入的版本重新记录。
 
 NumPy、pandas、PyArrow、DuckDB、PyTorch、XGBoost 等依赖适用各自发行版本的许可。本文列出与研究算法和 AI 接入直接相关的来源，不替代安装环境中全部依赖的许可清单。
 
@@ -35,4 +35,4 @@ Qlib、RD-Agent、RQAlpha 及 Microsoft 等名称仅用于说明来源和兼容�
 
 ## Archify 交互图册
 
-六张详细交互图使用 Archify 3.0.1 渲染器与浏览器端组件，按 MIT 许可证分发，完整文本见 `licenses/ARCHIFY-MIT.txt`。上游项目为 `tt-a1i/archify`；版权归 tt-a1i (Archify) 与 Cocoon AI。HTML 内嵌字体的 SIL Open Font License 声明随文件保留。README 的简图使用项目自己的预览渲染器。
+五张详细交互图使用 Archify 3.0.1 渲染器与浏览器端组件，按 MIT 许可证分发，完整文本见 `licenses/ARCHIFY-MIT.txt`。上游项目为 `tt-a1i/archify`；版权归 tt-a1i (Archify) 与 Cocoon AI。HTML 内嵌字体的 SIL Open Font License 声明随文件保留。README 的简图使用项目自己的预览渲染器。

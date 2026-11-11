@@ -16,6 +16,10 @@ def execute_research_model_split_manifest_v2(
         execute_model_split_artifact,
         feature_root=_input_external_root(context, "features"),
         label_root=_input_external_root(context, "labels"),
+        prediction_index_root=(
+            _input_external_root(context, "prediction_index")
+            if "prediction_index" in context.inputs else None
+        ),
         parameters=_parameters(context),
         fixed_clock=_environment(context).fixed_clock,
         max_memory_bytes=context.effective_resource_budget.memory_bytes,
@@ -39,6 +43,7 @@ def execute_research_model_fit_v2(
         max_temp_bytes=context.effective_resource_budget.temp_bytes,
         deadline_monotonic=context.node_context.attempt_deadline_monotonic,
         execution_report_path=context.work_dir / "model-fit-execution.json",
+        resource_check=context.node_context.check_resources,
     )
     return value
 
@@ -106,3 +111,11 @@ def execute_research_model_locked_holdout_v2(
         max_memory_bytes=context.effective_resource_budget.memory_bytes,
     )
     return value
+
+
+def execute_research_model_import_v1(context: OperatorRuntimeContext):
+    from ..model_import import execute_model_import_artifacts
+    parameters = _parameters(context)
+    return execute_model_import_artifacts(
+        source_manifest=parameters["source_manifest_json"], external_store=context.external_store,
+    )

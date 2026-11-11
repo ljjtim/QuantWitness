@@ -240,6 +240,38 @@ def test_signal_empty_day_has_no_rows_or_files(tmp_path):
     assert list(context.work_dir.iterdir()) == []
 
 
+@pytest.mark.parametrize("statistics", [True, False])
+def test_reused_signal_reader_opens_only_intersecting_files(tmp_path, monkeypatch, statistics):
+    from research_pipeline.runtime import strategy_signal_inputs as module
+
+    paths = []
+    for day in (2, 3, 4):
+        path = tmp_path / f"day-{day}.parquet"
+        pq.write_table(pa.Table.from_pylist(feature_rows(day)), path, write_statistics=statistics)
+        paths.append(path.name)
+    commit = SimpleNamespace(artifact_type="research.feature-set.v1", files=paths, semantic_hash="signals")
+    context = SimpleNamespace(inputs={"signals": SimpleNamespace(external_commit=commit)},
+                              effective_resource_budget=SimpleNamespace(memory_bytes=1024**2))
+    monkeypatch.setattr(module, "_input_external_root", lambda *args: tmp_path)
+    reader = module.StrategySignalReader(context, columns=("rank", "candidate_count"))
+    original = module.ds.dataset
+    scans = []
+
+    def dataset(path, **kwargs):
+        scans.append(str(path))
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(module.ds, "dataset", dataset)
+    monkeypatch.setattr(module.pq, "ParquetFile", lambda *args: pytest.fail("日交付不能重复读取全年结构"))
+    for day in (2, 4):
+        with open_strategy_signal_inputs(context, declaration=selected_declaration(), instruments=(A,),
+                day=date(2024, 1, day), signal_reader=reader) as signals:
+            assert [item.input_id for item in signals.visible(_dt(day, 9, 30))] == [
+                f"selection:signal:2024-01-{day:02d}:{slot}" for slot in range(3)]
+            assert signals.next_row is None
+    assert len(scans) == (2 if statistics else 6)
+
+
 def test_day_signal_duplicate_across_row_groups_rejected(tmp_path):
     context, _ = source_context(tmp_path, feature_rows() * 2, row_group_size=3)
     with open_strategy_signal_inputs(context, declaration=selected_declaration(), instruments=(A,),

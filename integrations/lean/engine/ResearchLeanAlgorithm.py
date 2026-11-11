@@ -1,4 +1,4 @@
-"""将已准入的A股日线和一分钟策略接到LEAN原生账户与订单。"""
+"""将已准入的现货与期货策略接到LEAN原生账户与订单。"""
 from copy import deepcopy
 from datetime import datetime
 import importlib
@@ -183,8 +183,6 @@ class ResearchLeanAlgorithm(QCAlgorithm):
             self._trace = (self._output / 'strategy-trace.jsonl').open('w', encoding='utf-8')
             self._callback_events = (self._output / 'callback-events.jsonl').open('w', encoding='utf-8')
             self._host = LeanStrategyHost(self, str(self._output))
-            self.schedule.on(self.date_rules.every_day(self._host.ClockSymbol),
-                             self.time_rules.at(9, 30), self._session_open)
             self._ready = True
         except Exception as error:
             self._status('failed', str(error))
@@ -193,15 +191,21 @@ class ResearchLeanAlgorithm(QCAlgorithm):
     def _status(self, status, error=None):
         if status == 'failed':
             self._failed = True
+            error = getattr(self, '_failure_reason', None) or error
+            if hasattr(self, '_host') and not getattr(self, '_failure_reason', None):
+                error = f'{self._host.NowText} {error}'
+            self._failure_reason = error
+            if hasattr(self, '_host'):
+                self._host.SaveFailureAccount(error)
         payload = dict(status=status, host_finished=self._host_finished,
                        event_seq=self._seq, execution_model=(
                            'lean_next_session_open_v1' if getattr(self, '_spec', {}).get('frequency') == '1d'
                            else 'lean_next_completed_close_v1'),
-                       artifact_type='research.lean-simulation.v1', error=error)
+                       artifact_type='research.lean-simulation.v2', error=error)
         write_json(self._output / 'engine-status.json', payload)
 
     def _session_open(self):
-        day = self.time.date().isoformat()
+        day = str(self._host.TradingDateText) if self._host.IsFuture else self.time.date().isoformat()
         if self._session_day == day:
             return
         self._host.OpenSession()
@@ -209,7 +213,8 @@ class ResearchLeanAlgorithm(QCAlgorithm):
         if not self._initialized:
             self._call_strategy('initialize')
             self._initialized = True
-        self._call_strategy('before_trading')
+        if self._host.IsFuture or self._host.SessionOpensNow:
+            self._call_strategy('before_trading')
 
     def _visible_inputs(self, day, now):
         daily = (json.loads(str(self._host.DailySignals(day))) if self._host.HasDirectInputs
@@ -266,7 +271,7 @@ class ResearchLeanAlgorithm(QCAlgorithm):
             # 同步订单反馈在当前调用结束后交付，避免递归改写策略状态。
             for _ in range(32):
                 self._feedback_pending = False
-                day = self.time.date().isoformat()
+                day = str(self._host.TradingDateText) if self._host.IsFuture else self.time.date().isoformat()
                 now = str(self._host.NowText)
                 selection = self._visible_inputs(day, datetime.fromisoformat(now))
                 codes = sorted({row['instrument']['instrument_id'] for row in selection if row['instrument'] is not None})
@@ -311,22 +316,58 @@ class ResearchLeanAlgorithm(QCAlgorithm):
             self._in_dispatch = False
 
     def on_data(self, data):
+        try:
+            self._handle_data(data)
+        except Exception as error:
+            self._status('failed', str(error))
+            raise
+
+    def _handle_data(self, data):
+        if self._host.IsFuture:
+            self._host.AdvanceFutureClock()
+            if not self._host.TradingDateText:
+                return
+            if self._host.FutureObservationOnly:
+                self._host.FinishFutureOpportunity()
+                return
+            if self._session_day != str(self._host.TradingDateText):
+                self._session_open()
+            count = self._host.ObserveBars(data)
+            self._host.FinishFutureOpportunity()
+            if count and self._host.FutureStrategyAllowed:
+                self._call_strategy('bar')
+            if self._host.FutureDayCanClose:
+                self._closing = True
+                try:
+                    self._host.CloseOrders()
+                    self._call_strategy('after_trading')
+                    self._host.CloseSession()
+                finally:
+                    self._closing = False
+            return
+        if self._host.TerminalObservationNow:
+            self._host.ObserveTerminalAccount()
+            return
+        if self._host.ExecutionWindowStartsNow:
+            self._session_open()
+        self._host.AdvanceSpotClock()
         if data.bars.count == 0 and not (
-                self.time.hour == 15 and self.time.minute == 0
+                self._host.ExecutionWindowEndsNow
                 or self._host.IsDaily and self.time.hour == 9 and self.time.minute == 30):
             return
         if self._session_day != self.time.date().isoformat():
-            raise RuntimeError('行情事件之前必须先交付当日09:30盘前阶段')
+            raise RuntimeError('行情事件之前必须先交付当日执行窗口起点')
         count = self._host.ObserveBars(data)
         if self._host.IsDaily and self.time.hour == 9 and self.time.minute == 30 and self.time.second == 1:
             self._host.CloseOrders()
         if count:
             self._call_strategy('bar')
-        if self.time.hour == 15 and self.time.minute == 0:
+        if self._host.ExecutionWindowEndsNow:
             self._closing = True
             try:
-                self._host.CloseOrders()
-                self._call_strategy('after_trading')
+                if self._host.SessionClosesNow:
+                    self._host.CloseOrders()
+                    self._call_strategy('after_trading')
                 self._host.CloseSession()
                 self._trace.flush()
             finally:
@@ -334,9 +375,12 @@ class ResearchLeanAlgorithm(QCAlgorithm):
 
     def on_order_event(self, order_event):
         self._host.OnOrderEvent(order_event)
-        if self._ready and self._host.IsDaily and self._session_day != self.time.date().isoformat():
+        if self._host.TerminalObservationNow:
+            return
+        if self._ready and not self._host.IsFuture and self._host.IsDaily and self._session_day != self.time.date().isoformat():
             self._session_open()
-        if self._ready and self._session_day is not None and not self._closing and order_event.status in (
+        if self._ready and self._session_day is not None and not self._closing and not (
+                self._host.IsFuture and self._host.FutureObservationOnly) and order_event.status in (
                 OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED, OrderStatus.CANCELED, OrderStatus.INVALID):
             self._call_strategy('execution_feedback')
 
@@ -345,7 +389,8 @@ class ResearchLeanAlgorithm(QCAlgorithm):
             self._callback_events.close()
             self._trace.close()
             if self._failed or self._host.HasRuntimeError or str(self._host.EngineStatus) not in {'Running', 'Completed'}:
-                raise RuntimeError('LEAN 未正常完成，不能发布成功终态')
+                raise RuntimeError(str(self._host.RuntimeErrorText) or getattr(self, '_failure_reason', None)
+                                   or 'LEAN 未正常完成，不能发布成功终态')
             (self._output / 'strategy-state.json').write_bytes(json_bytes(self._state))
             self._host.Finish()
             self._host_finished = True

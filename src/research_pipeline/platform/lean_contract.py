@@ -11,15 +11,20 @@ class LeanResultContractError(MainlineError):
     error_code = "result_contract_invalid"
 
 
-LEAN_ARTIFACT_TYPE = "research.lean-simulation.v1"
+LEAN_ARTIFACT_TYPE = "research.lean-simulation.v2"
+LEAN_RESULT_VERSION = "research-lean-simulation-v2"
 LEAN_SIGNAL_SOURCE_SCHEMA_ID = "research.lean-signal-source.v1"
-LEAN_METRICS_SCHEMA_ID = "research.lean.metrics.v1"
+LEAN_METRICS_SCHEMA_ID = "research.lean.metrics.v2"
 LEAN_METRICS_PATH = "lean/metrics"
 LEAN_SCHEMA_IDS = MappingProxyType({
-    name: f"research.lean.{name}.v1"
-    for name in ("orders", "intents", "daily", "trace")
+    name: f"research.lean.{name}.v2"
+    for name in ("orders", "intents", "daily", "trace", "fills", "positions", "account_events", "lifecycle")
 })
 LEAN_PATHS = MappingProxyType({name: f"lean/{name}" for name in LEAN_SCHEMA_IDS})
+LEAN_JSONL_FILES = MappingProxyType({
+    name: "strategy-trace.jsonl" if name == "trace" else f"{name}.jsonl"
+    for name in LEAN_SCHEMA_IDS
+})
 LEAN_SUPPORT_PATHS = (
     "lean/strategy-input.json",
     "lean/engine-status.json",

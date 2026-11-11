@@ -1,10 +1,30 @@
 # 查看真实运行进度
 
+## 开始前
+
+- 取得本次运行的 `run-root` 目录。
+- 使用与运行计划相符的框架版本。
+
+计算步骤图（DAG）规定节点依赖。
+检查点（checkpoint）保存通过验收的节点输出。
+正式结果包（Result）标志研究输出已经发布。
+剩余时间估计（ETA）只描述当前可计量阶段。
+
+## 查看流程
+
+1. 运行本页的 `inspect` 命令。
+2. 读取 `liveness.progress.stage` 和 `status`。
+3. 对照节点计数与工作批计数。
+4. 用状态表判断继续等待或检查诊断。
+
+进程心跳表示进程仍响应。
+完成计数表示系统已经确认一项工作完成。
+
 ```powershell
 python -m research_pipeline inspect --run-root <运行目录> --json
 ```
 
-`liveness.progress` 来自运行目录中的 `runtime-liveness.json`。节点自己的 `liveness` 也带同一观察投影。该文件记录进程存活、阶段和实际完成量；计划、checkpoint、Result、金融身份及恢复资格继续使用原有正式证据。
+`liveness.progress` 来自运行目录中的 `runtime-liveness.json`。节点自己的 `liveness` 也带同一观察投影。该文件记录进程存活、阶段和实际完成量。计划、checkpoint、Result、金融身份及恢复资格继续使用原有正式证据。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -21,15 +41,19 @@ python -m research_pipeline inspect --run-root <运行目录> --json
 ## 状态含义
 
 - `advancing`：当前因果批已有确认完成事件，距离最近进展尚未达到停滞阈值。
-- `stalled`：进程仍在执行，但距离最近确认完成已超过 60 秒和近期最长单位耗时三倍中的较大值。它表示计数暂未前进，不等同于死锁或运行失败。
+- `stalled`：进程仍在执行，但距离最近确认完成已超过 60 秒和近期最长单位耗时3 倍中的最大值。它表示计数暂未前进，不等同于死锁或运行失败。
 - `unknown`：没有当前工作批的有效完成事件，或当前阶段没有可计量的内部工作。例如模型拟合期间只显示阶段与 DAG 计数，不生成模型训练百分比。
 - `waiting`：等待资源。
-- `completed`：当前工作批全部完成；输出组装、checkpoint、Result 发布可能仍在继续，不代表整个研究已完成。
+- `completed`：当前工作批全部完成。输出组装、checkpoint、Result 发布可能仍在继续，不代表整个研究已完成。
 - `inactive`：owner 已停止或进程身份已不存活。
 
 ## 已知限制
 
-ETA 仅估计当前因果批阶段，不含后续输出组装、其他 DAG 节点及报告。该区间反映已观察耗时范围，不是置信区间；工作负载变化时可能超出；当前批用时超过已观察最长批时，停止显示ETA，直到下一次完成事件取得新样本。停滞、等待、停止及缺少足够样本时不展示 ETA。DAG 节点的工作量不同，只提供节点吞吐，不推算整次运行 ETA。首个长批返回前保持 `unknown`，不根据心跳猜测内部进度。
+ETA 仅估计当前因果批阶段，不含后续输出组装、其他 DAG 节点及报告。该区间反映已观察耗时范围，不是置信区间。工作负载变化时可能超出。
+
+当前批用时超过已观察最长批时，停止显示ETA，直到下一次完成事件取得新样本。停滞、等待、停止及缺少足够样本时不展示 ETA。DAG 节点的工作量不同，只提供节点吞吐，不推算整次运行 ETA。
+
+首个长批返回前保持 `unknown`，不根据心跳猜测内部进度。
 
 当前计数不表示数据读取行数、字节数或模型迭代次数。因果批中的读取、计算与核心封口合计为一个完成单位。
 
@@ -40,7 +64,15 @@ $env:PYTHONPATH = "research_pipeline/src;research_pipeline/tests"
 python -m pytest research_pipeline/tests/test_runtime_progress.py -q
 ```
 
-该测试文件使用临时 JSON、checkpoint、合成 Parquet 与本地 Worker，覆盖计数、吞吐、ETA、停滞判断、节点切换、失败重试与 checkpoint 复用；不访问数据库。
+测试文件使用临时 JSON、checkpoint、合成 Parquet 和本地 Worker。用例覆盖计数、吞吐、ETA 和停滞判断。用例还覆盖节点切换、失败重试和 checkpoint 复用。不访问数据库。
 
 
-策略仿真准备阶段使用`request_binding`表示冻结行情请求和规则来源的绑定检查；完整范围覆盖由包准入完成，运行不再重复遍历。行情循环仍单独记录`source_next`、`price_conversion`、`pit_binding`、`context_write`及`dispatch_and_session_close`。
+LEAN节点的输入准备、引擎执行及结果写出耗时保存在实际节点摘要中。阶段耗时只用于诊断，不等同于整次研究完成比例。详情见[LEAN执行](lean-execution.md)。
+
+## 错误处理
+
+| 现象 | 处理方式 |
+| --- | --- |
+| `unknown` | 检查当前阶段。首批完成前可能没有有效计数。 |
+| `stalled` | 检查日志和资源状态，禁止仅凭状态判定死锁。 |
+| `completed` 但研究仍运行 | 等待输出组装、检查点和 Result 发布。 |

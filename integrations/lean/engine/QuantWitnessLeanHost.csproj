@@ -9,6 +9,8 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="LeanStrategyHost.cs" />
+    <Compile Include="LeanFutureHost.cs" />
+    <Compile Include="LeanFutureLifecycle.cs" />
     <ProjectReference Include="parquet-direct/ParquetInput.csproj" />
     <Reference Include="QuantConnect.Algorithm"><HintPath>$(LeanBin)/QuantConnect.Algorithm.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath><Private>false</Private></Reference>

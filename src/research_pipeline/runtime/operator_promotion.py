@@ -32,6 +32,7 @@ BUILTIN_ARTIFACT_TYPE_IDENTITIES = frozenset({
     "data.minute-bars.v1",
     "research.feature-set.v1",
     "research.label.v1",
+    "research.model-prediction-index.v1",
     "research.minute-features.v1",
     "research.minute-labels.v1",
     "research.minute-observation.v1",
@@ -49,13 +50,15 @@ BUILTIN_ARTIFACT_TYPE_IDENTITIES = frozenset({
 
 # 公共定义集合经审查固定；有意修改实现需同步复核本常量。
 BUILTIN_OPERATOR_DEFINITION_SET_HASH = (
-    "b6816452eca17a2778a983b9e96c4dc49c233c036fd5a49882ab7b0e9214bcd7"
+    "67b63ae11d43e68905d3f4120139e81a0db6100840f0258c2606c1a877b522f0"
 )
 
 
 # 该清单固定 00A 验收后的既有公共合同，不从 manifest 或 baseline 自动生成。
 BUILTIN_OPERATOR_IDENTITIES: frozenset[OperatorIdentity] = frozenset(
     {
+        ("research.model.import", "1.0.0", "research.model.import.v1",
+         "research_pipeline.runtime.model_import"),
         (
             "data.catalog.admission",
             "1.0.0",

@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
+import tempfile
 import uuid
 from typing import Any, Callable, Iterable
 
@@ -51,12 +53,14 @@ class _SnapshotLayoutWriter:
     """缓冲仅持有已复制的有界 Arrow 数据，同时只打开一个文件。"""
 
     def __init__(self, staging: Path, schema: Any, policy: PhysicalSnapshotPolicy,
-                 event_time_field: str, temporal_source: bool) -> None:
+                 event_time_field: str, temporal_source: bool, *, event_ordered: bool = False) -> None:
         self.staging = staging
         self.schema = schema
         self.policy = policy
         self.event_time_field = event_time_field
         self.temporal_source = temporal_source
+        self.event_ordered = event_ordered
+        self.spool: Any = None
         self.small = True
         self.pending: list[Any] = []
         self.buffer_rows = 0
@@ -186,10 +190,44 @@ class _SnapshotLayoutWriter:
         for key, indices in _month_groups(table.column(self.event_time_field)):
             # 块内按月份聚合，月内下标保持来源顺序；不随证券切换开新文件。
             month = table if indices is None else table.take(indices)
+            partition = f"year={key[0]:04d}/month={key[1]:02d}"
+            if not self.event_ordered:
+                # 主键交错月份时先顺序追加IPC块；按月归并后再编码Parquet。
+                # 仅保留当前块，不为每个月长期持有writer或Arrow缓冲。
+                if self.spool is None:
+                    self.spool = tempfile.TemporaryDirectory(prefix="rp-snapshot-months-")
+                path = Path(self.spool.name) / f"{key[0]:04d}-{key[1]:02d}.ipc"
+                with path.open("ab") as handle:
+                    for batch in month.to_batches():
+                        payload = batch.serialize()
+                        handle.write(struct.pack("<Q", payload.size))
+                        handle.write(payload)
+                continue
             for batch in month.to_batches():
-                self._feed_partition(batch, f"year={key[0]:04d}/month={key[1]:02d}")
+                self._feed_partition(batch, partition)
             # 月份副本不跨块积压，使块、月份副本和 writer 输入最多三份共存。
             self._flush()
+
+    def _finish_month_spool(self) -> None:
+        import pyarrow as pa
+
+        if self.spool is None:
+            return
+        for path in sorted(Path(self.spool.name).glob("*.ipc")):
+            year, month = path.stem.split("-")
+            with path.open("rb") as handle:
+                while header := handle.read(8):
+                    size = struct.unpack("<Q", header)[0]
+                    batch = pa.ipc.read_record_batch(handle.read(size), self.schema)
+                    self._feed_partition(batch, f"year={year}/month={month}")
+            self.close_file()
+            path.unlink()
+        self.close_spool()
+
+    def close_spool(self) -> None:
+        if self.spool is not None:
+            self.spool.cleanup()
+            self.spool = None
 
     def _drain_month_block(self) -> None:
         if self.pending:
@@ -240,6 +278,7 @@ class _SnapshotLayoutWriter:
             self._open("primary-key-stream" if self.temporal_source else "small")
         elif not self.temporal_source:
             self._drain_month_block()
+            self._finish_month_spool()
         self.close_file()
 
 
@@ -289,7 +328,11 @@ def publish_parquet_snapshot(
     minimum: str | None = None
     maximum: str | None = None
     gate = QualityGateSession(plan, temporal_source=temporal_source)
-    layout = _SnapshotLayoutWriter(staging, schema, policy, plan.event_time_field, temporal_source)
+    layout = _SnapshotLayoutWriter(
+        staging, schema, policy, plan.event_time_field, temporal_source,
+        event_ordered=bool(plan.query.sort and plan.query.sort[0].field_id == plan.event_time_field
+                           and not plan.query.sort[0].descending),
+    )
     try:
         for batch in batches:
             gate.validate_batch(batch)
@@ -402,6 +445,7 @@ def publish_parquet_snapshot(
             session.remember("parquet_snapshot", str(target), manifest)
         return target
     except BaseException:
+        layout.close_spool()
         if layout.writer is not None:
             layout.writer.close()
             layout.writer = None

@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 from typing import Callable, Iterable, Iterator, Mapping
 from research_pipeline.platform import canonical_json, typed_canonical_hash
-from research_pipeline.data_plane import MinuteResampleBudget, MinuteScanBudget, PartitionedDatasetResolver, PartitionedDatasetRef, build_minute_resample_plan, build_minute_scan_plan, execute_minute_resample, inspect_parquet_partition
+from research_pipeline.data_plane import MinuteResampleBudget, PartitionedDatasetResolver, PartitionedDatasetRef, build_minute_resample_plan, execute_minute_resample, inspect_parquet_partition
 from research_pipeline.domain import SessionPolicyBundle, load_session_policy_bundle
 from research_pipeline.research.minute_operators import MINUTE_OPERATOR_ARTIFACT_VERSION
 from ..operator_runtime import OperatorRuntimeContext, RuntimeCompletionMetadata, RuntimeNodeOutputs, RuntimeNodeValue
@@ -52,80 +52,21 @@ def _minute_request(context: OperatorRuntimeContext) -> tuple[str, object]:
 
 
 def _minute_scan_plan(context: OperatorRuntimeContext):
-    request_id, admitted = _minute_request(context)
-    return request_id, _build_minute_scan_plan_for_request(
-        context,
-        request_id=request_id,
-        admitted=admitted,
-        parameters=_parameters(context),
-    )
-
-
-def _build_minute_scan_plan_for_request(
-    context: OperatorRuntimeContext,
-    *,
-    request_id: str,
-    admitted,
-    parameters: Mapping[str, object],
-):
-    asset_class = str(admitted.minute_asset_class)
-    source_directory = {
-        "cn_stock": "stock",
-        "cn_etf": "fund",
-        "cn_index": "index",
-        "cn_future": "futures",
-    }.get(asset_class)
-    if source_directory is None:
-        raise ValueError(f"分钟 scan 资产类别不受支持: {asset_class}")
-    budget = MinuteScanBudget(
-        max_selected_file_bytes=int(parameters["max_source_bytes"]),
-        max_batch_bytes=int(parameters["max_batch_bytes"]),
-    )
-    plan = build_minute_scan_plan(
-        admitted,
-        source=_minute_root(context) / source_directory,
-        allowed_root=_minute_root(context),
-        budget=budget,
-    )
-    archived = _environment(context).manifest.get("input_snapshot_manifest")
-    if archived is not None:
-        from research_pipeline.data_plane.archived_inputs import validate_archived_minute_scan
-
-        validate_archived_minute_scan(archived, request_id, plan, _minute_root(context))
-    if plan.query_max_rows > int(parameters["max_returned_rows"]):
-        raise ValueError("分钟 QueryIR 返回行预算超过算子声明")
-    if plan.minute_capability_manifest_hash != parameters["scope_binding_hash"]:
-        raise ValueError("分钟 scan 能力 manifest 绑定与 QueryIR 不一致")
-    return plan
+    request_id, _ = _minute_request(context)
+    return request_id, _minute_scan_plan_from_environment(context, request_id)
 
 
 def _minute_scan_plan_from_environment(
     context: OperatorRuntimeContext,
     request_id: str,
 ):
-    admitted = _environment(context).admitted_plans.get(request_id)
-    if admitted is None:
-        raise ValueError(f"分钟输入缺少已准入 QueryIR: {request_id}")
-    matches = [
-        parameters
-        for parameters in _environment(context).node_parameters.values()
-        if (
-            (
-                parameters.get("request_ids") == [request_id]
-                or parameters.get("request_ids") == (request_id,)
-            )
-            and "max_source_bytes" in parameters
-            and "max_batch_bytes" in parameters
-        )
-    ]
-    if len(matches) != 1:
-        raise ValueError("分钟输入无法唯一定位 scan 节点参数")
-    return _build_minute_scan_plan_for_request(
-        context,
-        request_id=request_id,
-        admitted=admitted,
-        parameters=matches[0],
-    )
+    """取得准入阶段冻结、运行入口已核对来源的同一份扫描计划。"""
+    environment = _environment(context)
+    plan = environment.minute_scan_plans.get(request_id)
+    admitted = environment.admitted_plans.get(request_id)
+    if plan is None or admitted is None or plan.admitted_plan_hash != admitted.plan_hash:
+        raise ValueError(f"分钟输入缺少一致的冻结扫描计划: {request_id}")
+    return plan
 
 
 def _session_instruments(scan_plan, bundle):
@@ -257,7 +198,7 @@ def _operator_bar_batches(
     return dataset, partition_streams()
 
 
-def _normalized_bar_batch(batch, snapshot_hash, partition_key):
+def _normalized_bar_batch(batch, snapshot_hash, partition_key, *, columns=None):
     """在列式边界统一分钟字段；仅交付时才转换为Python行。"""
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -283,23 +224,24 @@ def _normalized_bar_batch(batch, snapshot_hash, partition_key):
 
     completed = pc.fill_null(column("completed"), False)
     end = local_time("dt")
-    arrays = {
-        "instrument": pc.cast(column("code"), pa.string()),
-        "bar_start": local_time("bar_start"),
-        "bar_end": end,
-        "available_time": end,
-        "trading_date": pc.cast(column("trading_date"), pa.date32()),
-        "session_id": pc.cast(column("session_id"), pa.string()),
-        "interval_minutes": pc.cast(column("interval_minutes"), pa.int64()),
-        **{name: column(name) for name in ("open", "high", "low", "close", "volume")},
-        "money": column("money", pa.float64()),
-        "avg": column("avg"),
-        "open_interest": column("open_interest", pa.float64()),
-        "completed": completed,
-        "quality_status": pc.if_else(completed, "pass", pc.cast(column("bar_status"), pa.string())),
-        "source_snapshot_hash": constant(snapshot_hash),
-        "source_partition_id": constant(partition_key),
+    fields = {
+        "instrument": lambda: pc.cast(column("code"), pa.string()),
+        "bar_start": lambda: local_time("bar_start"),
+        "bar_end": lambda: end,
+        "available_time": lambda: end,
+        "trading_date": lambda: pc.cast(column("trading_date"), pa.date32()),
+        "session_id": lambda: pc.cast(column("session_id"), pa.string()),
+        "interval_minutes": lambda: pc.cast(column("interval_minutes"), pa.int64()),
+        **{name: (lambda name=name: column(name)) for name in ("open", "high", "low", "close", "volume")},
+        "money": lambda: column("money", pa.float64()),
+        "avg": lambda: column("avg"),
+        "open_interest": lambda: column("open_interest", pa.float64()),
+        "completed": lambda: completed,
+        "quality_status": lambda: pc.if_else(completed, "pass", pc.cast(column("bar_status"), pa.string())),
+        "source_snapshot_hash": lambda: constant(snapshot_hash),
+        "source_partition_id": lambda: constant(partition_key),
     }
+    arrays = {name: factory() for name, factory in fields.items() if columns is None or name in columns}
     for name in ("factor", "adjustment_ratio", "adjustment_mode", "factor_snapshot_hash"):
         if name in batch.schema.names:
             arrays[name] = column(name)

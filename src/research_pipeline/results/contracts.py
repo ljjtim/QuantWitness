@@ -86,6 +86,10 @@ class ResultTableSpec:
             _require_id(getattr(self, field), f"result table {field}")
         if self.role not in _TABLE_ROLES:
             raise ResultContractError("result table role 不受支持")
+        if self.schema_id.startswith("research.lean."):
+            from research_pipeline.platform.lean_contract import LEAN_SCHEMA_IDS, LEAN_METRICS_SCHEMA_ID
+            if self.schema_id not in {*LEAN_SCHEMA_IDS.values(), LEAN_METRICS_SCHEMA_ID}:
+                raise ResultContractError("Result 表使用不受支持的退役 schema")
         if self.schema_id.startswith((
             "research.strategy.", "research.simulation.", "research.bar-tca.",
             "research.shared-futures.", "research.minute-financial-context.",
@@ -94,6 +98,7 @@ class ResultTableSpec:
             raise ResultContractError("Result 表使用不受支持的退役 schema")
         if self.artifact_type in {
             "research.daily-simulation.v1", "research.shared-futures-simulation.v1",
+            "research.lean-simulation.v1",
         }:
             raise ResultContractError("Result 表使用不受支持的退役工件类型")
         object.__setattr__(self, "path_prefix", _safe_prefix(self.path_prefix))

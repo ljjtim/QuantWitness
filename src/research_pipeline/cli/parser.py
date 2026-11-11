@@ -179,6 +179,7 @@ def _add_admission_arguments(
     command.add_argument("--package", required=required)
     command.add_argument("--catalog-lock")
     command.add_argument("--data-db", help="source profile 的显式只读 DuckDB")
+    command.add_argument("--minute-data-root", help="分钟请求必需：实际分钟 Parquet 根目录，准入时冻结月文件")
     command.add_argument("--input-snapshot-manifest", help="显式封存输入清单；与数据库来源互斥")
     command.add_argument(
         "--source-db",
@@ -270,7 +271,7 @@ def _add_run_reuse_arguments(command: argparse.ArgumentParser) -> None:
         "--reuse-failed-run-root",
         help=(
             "显式复用一个终态失败 run 中已成功且完整复验通过的 checkpoint；"
-            "默认要求新旧 DAG 与环境完全一致；配合 --require-reused-node 可改变其余 DAG，指定节点及上游身份必须一致"
+            "默认要求新旧 DAG 与环境完全一致；配合 --require-reused-node 可读取owner已退出的中断run并改变其余 DAG，指定节点及上游身份必须一致"
         ),
     )
 
@@ -295,6 +296,8 @@ def _add_runtime_resource_arguments(command: argparse.ArgumentParser) -> None:
         type=int,
         help="本次 CLI 总 CPU 槽位；默认 4",
     )
+    command.add_argument("--no-temp-limit", action="store_true",
+                         help="取消本次运行的临时空间上限，仍记录实际使用")
     command.add_argument(
         "--resource-scratch-bytes",
         type=int,

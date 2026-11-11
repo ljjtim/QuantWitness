@@ -58,15 +58,16 @@ def finalize_observations(events_path):
 
 def result_observations(result, run_root):
     """按正式表绑定定位唯一执行工件，并读取已封存日耗时。"""
+    from research_pipeline.platform.lean_contract import LEAN_SCHEMA_IDS, LEAN_RESULT_VERSION
     result = Path(result)
     manifest=json.loads((result/'result.json').read_text(encoding='utf-8'))
-    daily=[table for table in manifest['tables'] if table['schema_id']=='research.lean.daily.v1']
+    daily=[table for table in manifest['tables'] if table['schema_id']==LEAN_SCHEMA_IDS['daily']]
     if len(daily)!=1:
         raise ValueError('正式Result必须有唯一LEAN daily表')
     table=daily[0]
     artifact=run_root/'external-artifacts/objects'/table['artifact_key']
     payload=json.loads((artifact/'result.json').read_text(encoding='utf-8'))
-    if payload.get('contract_version')!='research-lean-simulation-v1':
+    if payload.get('contract_version')!=LEAN_RESULT_VERSION:
         raise ValueError('正式LEAN工件类型不一致')
     observation=dict(artifact_key=table['artifact_key'],stage_seconds=payload['preparation'].get('stage_seconds',{}))
     days=[]
@@ -89,6 +90,20 @@ def result_observations(result, run_root):
     observation['result_finalize_attempts']=finalize_observations(run_root/'events.jsonl')
     return observation
 
+
+def build_report_request(manifest):
+    """从本次正式Result构造八张执行表和指标表的报告绑定。"""
+    from research_pipeline.evidence.lean_report import LEAN_REPORT_VERSION, REPORT_SCHEMAS, validate_lean_report_request
+
+    tables = {}
+    for name, schema in REPORT_SCHEMAS.items():
+        matches = [table for table in manifest['tables'] if table['schema_id'] == schema]
+        if len(matches) != 1:
+            raise ValueError('正式Result必须唯一绑定LEAN报告表：' + name)
+        tables[name] = matches[0]['table_id']
+    return validate_lean_report_request(dict(contract_version=LEAN_REPORT_VERSION, result_id=manifest['result_id'],
+        tables=tables, budget=dict(max_rows=100000, memory_bytes=268435456)))
+
 def execute(args):
     data_db = getattr(args, 'data_db', None)
     snapshot_manifest = getattr(args, 'input_snapshot_manifest', None)
@@ -108,7 +123,7 @@ def execute(args):
     started=time.perf_counter()
     record=dict(status='running',started_at=datetime.now(timezone.utc).isoformat(),
                 python=sys.executable,source_package=str(args.from_package),stage_seconds={},stage_resources={},commands={},
-                budgets=dict(run_memory_bytes=12*2**30))
+                budgets=dict(run_memory_bytes=None))
     def save():
         (root/'acceptance-timing.json').write_text(json.dumps(record,ensure_ascii=False,indent=2),encoding='utf-8')
     def stage(name, action, *, command):
@@ -137,7 +152,7 @@ def execute(args):
             finished.set()
             sampler.join()
             record['stage_seconds'][name]=time.perf_counter()-at
-            limit=12*2**30 if name=='run' else None
+            limit=record['budgets']['run_memory_bytes'] if name=='run' else None
             resources.update(memory_budget_bytes=limit,
                 sampled_memory_within_budget=resources['peak_tree_rss_bytes']<=limit if limit else None)
             record['stage_resources'][name]=resources
@@ -155,24 +170,26 @@ def execute(args):
         preparation=importlib.util.module_from_spec(spec)
         spec.loader.exec_module(preparation)
         os.environ.update(environment)
+        preparation_options = {"refresh_runtime": True} if getattr(args, 'refresh_runtime', False) else {}
         conversion,prepared_package=stage('prepare',lambda: preparation.prepare_package(
-            args.from_package,root/'conversion',args.lean_home),command=['prepare',str(args.from_package)])
-        if conversion['run_budget']['memory_bytes'] != 12*2**30:
-            raise ValueError('原包run内存必须已经声明12GiB，入口不扩大原包预算')
+            args.from_package,root/'conversion',args.lean_home, **preparation_options),command=['prepare',str(args.from_package)])
+        budget=conversion['run_budget']
+        record['budgets']['run_memory_bytes']=budget['memory_bytes']
         bundles=[value for bundle in conversion['bundles'] for value in ('--extension-bundle',bundle)]
         package=conversion['package']
         declaration=prepared_package.spec_payload
         common=['--package',package,*bundles,'--catalog-lock',str(args.catalog_lock)]
         admission_argv=['package','admit',*common,*source_argv,'--output',str(root/'plan')]
+        if getattr(args, 'minute_root', None):
+            admission_argv.extend(['--minute-data-root', str(args.minute_root)])
         _,prepared_plan=stage('admit',lambda: prepare_package(
             parser.parse_args(admission_argv),package=prepared_package),command=admission_argv)
-        budget=conversion['run_budget']
         run_argv=['run','--plan',str(root/'plan'),*source_argv,
             '--artifact-root',str(root/'artifacts'),
             '--run-root',str(root/'run'),'--result-store',str(root/'results'),
             '--clock',str(declaration['fixed_clock']),'--root-seed',str(declaration['root_seed']),
             '--resource-state-dir',str(root/'resource-state'),'--resource-cpu-slots',str(budget['cpu_slots']),
-            '--resource-memory-bytes',str(12*2**30),'--resource-scratch-bytes',str(budget['temp_bytes']),
+            '--resource-memory-bytes',str(budget['memory_bytes']),'--resource-scratch-bytes',str(budget['temp_bytes']),
             '--resource-process-slots',str(budget['process_slots']),'--resource-timeout-seconds','120']
         if getattr(args, 'minute_root', None):
             run_argv.extend(['--minute-data-root', str(args.minute_root)])
@@ -184,10 +201,7 @@ def execute(args):
         result=run['result_directory']
         record['result_directory']=result
         manifest=json.loads((Path(result)/'result.json').read_text(encoding='utf-8'))
-        table_ids={role:next(table['table_id'] for table in manifest['tables']
-            if table['schema_id']==f'research.lean.{role}.v1') for role in ('daily','orders','metrics')}
-        request=dict(contract_version='lean-research-report-v1',result_id=manifest['result_id'],
-            tables=table_ids,budget=dict(max_rows=100000,memory_bytes=268435456))
+        request=build_report_request(manifest)
         (root/'html-report-request.json').write_text(json.dumps(request,ensure_ascii=False,indent=2),encoding='utf-8')
         report_argv=[
             ['report','--result',result,'--result-store',str(root/'results'),
@@ -233,6 +247,7 @@ if __name__=='__main__':
     source.add_argument('--input-snapshot-manifest', type=Path)
     parser.add_argument('--minute-root', type=Path)
     parser.add_argument('--persist-inputs', action='store_true')
+    parser.add_argument('--refresh-runtime', action='store_true')
     execute(parser.parse_args())
 
 

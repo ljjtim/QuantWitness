@@ -90,5 +90,7 @@ if(!$?) { throw 'LEAN插件安装失败' }
 $stages.total=$timer.Elapsed.TotalSeconds
 $record=[ordered]@{status='pass';lean_home=$LeanHome;python=$python;upstream_revision=$revision;stage_seconds=$stages;project_wheel=$wheel;from_package=$FromPackage;upstream_compatibility_patches=@('pythonnet_shutdown_gil','windows_venv_site_packages_filter')}
 $record|ConvertTo-Json -Depth 6|Set-Content (Join-Path $LeanHome 'clean-installation.json') -Encoding utf8
+& $python -B -c "import sys; sys.path.insert(0, sys.argv[1]); from sync_installation import record_installed; record_installed(sys.argv[2], sys.argv[3])" $PSScriptRoot $project $LeanHome
+if($LASTEXITCODE -ne 0) { throw '安装源码记录失败' }
 Write-Output "干净安装完成：$LeanHome"
 

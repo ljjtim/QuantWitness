@@ -5,6 +5,7 @@ import json
 import sqlite3
 
 import pytest
+from factor_space_fixture import price_space
 
 from quantwitness_rdagent.native_backend import ResearchTextBackend
 from quantwitness_rdagent.native_research import propose_factor, reflect_factor
@@ -15,10 +16,12 @@ native = pytest.mark.skipif(not NATIVE_AVAILABLE, reason="需要固定RD-Agent�
 
 
 def context():
+    space = price_space()
+    space["candidates"].append({"expression": "Mean($close, 3) / Ref($close, 3) - 1", "direction": "smoothed_momentum"})
     return {
         "confirmed_spec": "使用当前收盘已知价格研究下一期收益；只修改历史收益表达式。",
-        "fields": ["close"], "max_window": 5,
-        "expression_contract": {"operators": ["Ref", "Mean"], "metric": "开发预测MAE", "unit": "ratio"},
+        "factor_space": space, "fields": ["close"], "max_window": 5,
+        "expression_contract": space["expression_contract"],
         "max_output_tokens": 512,
         "history": [{
             "candidate_id": "baseline", "hypothesis": "五日动量可以预测收益",

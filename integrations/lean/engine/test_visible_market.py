@@ -42,6 +42,8 @@ class SnapshotHost:
     """复现 Host 的按证券、按当前完成时刻返回报价的边界。"""
 
     NowText = NOW
+    IsFuture = False
+    RuntimeErrorText = ''
 
     def __init__(self, rows):
         self.rows = rows

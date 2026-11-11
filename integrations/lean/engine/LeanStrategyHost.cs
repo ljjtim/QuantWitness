@@ -14,17 +14,27 @@ using QuantWitness.LeanInput;
 namespace QuantWitness.Lean.Research;
 
 // 只翻译原策略需要的账户、报价和委托，交易计算仍由LEAN及中国模型处理。
-public sealed class LeanStrategyHost
+public sealed partial class LeanStrategyHost
 {
     private readonly QCAlgorithm _algorithm;
     private readonly Dictionary<string, Symbol> _symbols = new();
     private readonly Dictionary<Symbol, string> _codes = new();
     private readonly Dictionary<string, JsonElement> _instruments = new();
+    private readonly Dictionary<string, StockLifecycle> _lifecycle = new();
+    private readonly HashSet<Symbol> _zeroMarked = new();
+    private readonly DateTimeOffset? _terminalObservationAt;
+    private bool _terminalObserved;
     private readonly HashSet<Symbol> _touched = new();
     private readonly Dictionary<int, decimal> _spent = new();
     private readonly Dictionary<int, decimal> _filled = new();
     private readonly Dictionary<DateTime, int> _sessions = new();
-    private readonly HashSet<DateTime> _closedSessions = new();
+    private readonly HashSet<DateTime> _completedWindows = new();
+    private readonly Dictionary<DateTime, SpotExecutionWindow> _executionWindows;
+    private readonly ChinaRuleBook _spotRuleBook;
+    private DateTimeOffset? _lastObservationAt;
+    private string _lastEquitySemantics;
+    private bool _lastSessionComplete;
+    private bool _failureAccountSaved;
     private readonly StreamWriter _orders;
     private readonly StreamWriter _intents;
     private readonly StreamWriter _daily;
@@ -47,9 +57,57 @@ public sealed class LeanStrategyHost
     public Symbol ClockSymbol => _symbols.Values.First();
     public string EngineStatus => _algorithm.Status.ToString();
     public bool HasRuntimeError => _algorithm.RunTimeError != null;
-    public string NowText => Now.ToString("yyyy-MM-ddTHH:mm:sszzz");
+    public string RuntimeErrorText => _algorithm.RunTimeError?.ToString() ?? "";
+    public string NowText => Now.ToString("yyyy-MM-ddTHH:mm:ss.FFFFFFFzzz");
     private DateTimeOffset Now => new(DateTime.SpecifyKind(_algorithm.Time, DateTimeKind.Unspecified), TimeSpan.FromHours(8));
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
+
+    public sealed record StockLifecycle(DateOnly DelistedDate, DateTimeOffset AvailableAt, string SourceRef)
+    {
+        public DateTimeOffset EffectiveAt => new(DelistedDate.AddDays(1).ToDateTime(TimeOnly.MinValue), TimeSpan.FromHours(8));
+        public bool IsEffective(DateTimeOffset at) => at >= EffectiveAt && at >= AvailableAt;
+    }
+
+    private StockLifecycle ConfirmedLifecycle(Symbol symbol, DateTimeOffset at) =>
+        _lifecycle.TryGetValue(_codes[symbol], out var ending) && ending.IsEffective(at) ? ending : null;
+
+    public bool IsDelisted(Symbol symbol, DateTime utc) => ConfirmedLifecycle(symbol, new DateTimeOffset(utc)) != null;
+
+    private object ZeroMark(Symbol symbol, StockLifecycle ending) => new {
+        instrument_id = _codes[symbol], price = 0m, source = "delisted_zero",
+        price_source_at = ending.EffectiveAt,
+        price_available_at = ending.AvailableAt > ending.EffectiveAt ? ending.AvailableAt : ending.EffectiveAt,
+        is_current_session = false, is_current_session_close = false,
+        delisted_date = ending.DelistedDate.ToString("yyyy-MM-dd"), source_ref = ending.SourceRef
+    };
+
+    private void ApplySpotLifecycle()
+    {
+        foreach (var pair in _lifecycle)
+        {
+            if (!pair.Value.IsEffective(Now)) continue;
+            var symbol = _symbols[pair.Key];
+            var security = _algorithm.Securities[symbol];
+            // 这是持仓估值假设，不向行情缓存或历史窗口写入零价bar。
+            security.Holdings.UpdateMarketPrice(0m);
+            security.IsTradable = false;
+            _algorithm.Portfolio.InvalidateTotalPortfolioValue();
+            if (!_zeroMarked.Add(symbol)) continue;
+            File.AppendAllText(Path.Combine(_output, "lifecycle.jsonl"), JsonSerializer.Serialize(new {
+                at = Now, instrument_id = pair.Key, kind = "delisted_zero_mark",
+                quantity = security.Holdings.Quantity, cash_delta = 0m, valuation_mark = ZeroMark(symbol, pair.Value)
+            }, JsonOptions) + Environment.NewLine);
+            _algorithm.Transactions.CancelOpenOrders(symbol, "退市生效后停止交易，保留股份并按零估值");
+        }
+    }
+
+    public void AdvanceSpotClock()
+    {
+        if (IsFuture) return;
+        ApplySpotLifecycle();
+        Actions.Advance(Now);
+        ApplySpotLifecycle();
+    }
 
     public LeanStrategyHost(QCAlgorithm algorithm, string directory)
     {
@@ -58,8 +116,10 @@ public sealed class LeanStrategyHost
         using var data = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "input.json")));
         using var strategy = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "strategy-input.json")));
         var settings = strategy.RootElement;
+        IsFuture = settings.GetProperty("declaration").TryGetProperty("asset_class", out var asset)
+            && asset.GetString() == "cn_future";
         _priceScale = data.RootElement.GetProperty("price_scale").GetInt32();
-        if (_priceScale is not (2 or 3)) throw new ArgumentException("现货价格精度仅支持二位或三位");
+        if (!IsFuture && _priceScale is not (2 or 3)) throw new ArgumentException("现货价格精度仅支持二位或三位");
         _priceDivisor = (decimal)Math.Pow(10, _priceScale);
         var direct = data.RootElement.TryGetProperty("source_kind", out var sourceKind) && sourceKind.GetString() == "direct_daily_stream"
             ? DirectDailyStreamStore.Open(Path.Combine(directory, "input.json")) : null;
@@ -70,19 +130,33 @@ public sealed class LeanStrategyHost
         _lookback = binding.GetProperty("lookback_bars").GetInt32();
         if (_lookback <= 0) throw new ArgumentException("历史窗口必须为正整数");
         foreach (var entry in settings.GetProperty("instruments").EnumerateObject()) _instruments.Add(entry.Name, entry.Value.Clone());
+        if (!IsFuture && settings.TryGetProperty("lifecycle", out var lifecycle))
+            foreach (var row in lifecycle.EnumerateObject())
+                _lifecycle.Add(row.Name, new StockLifecycle(
+                    DateOnly.ParseExact(row.Value.GetProperty("delisted_date").GetString(), "yyyy-MM-dd"),
+                    DateTimeOffset.Parse(row.Value.GetProperty("available_at").GetString()),
+                    row.Value.GetProperty("source_ref").GetString()));
         var dates = data.RootElement.GetProperty("dates").EnumerateArray().Select(x => DateTime.Parse(x.GetString())).ToArray();
+        if (!IsFuture && data.RootElement.TryGetProperty("terminal_observation_at", out var terminal))
+            _terminalObservationAt = DateTimeOffset.Parse(terminal.GetString());
+        if (!IsFuture) _executionWindows = direct?.ExecutionWindows ?? SpotExecutionWindow.Read(data.RootElement, IsDaily);
         for (var i = 0; i < dates.Length; i++) _sessions.Add(dates[i], i);
         algorithm.SetStartDate(dates[0]); algorithm.SetEndDate(dates[^1]);
+        if (_terminalObservationAt.HasValue) algorithm.SetEndDate(_terminalObservationAt.Value.ToOffset(TimeSpan.FromHours(8)).Date);
         algorithm.SetTimeZone("Asia/Shanghai");
         var initialCash = settings.GetProperty("initial_cash_units").GetInt64();
         if (initialCash < 0) throw new ArgumentException("初始现金不能为负");
         algorithm.SetAccountCurrency("CNY", initialCash / 100m);
         algorithm.SetBenchmark(t => 1m);
         algorithm.SetRiskFreeInterestRateModel(new ConstantRiskFreeRateInterestRateModel(0m));
-        algorithm.SetAvailableDataTypes(new Dictionary<SecurityType, List<TickType>> { [SecurityType.Equity] = new() { TickType.Trade } });
+        algorithm.SetAvailableDataTypes(new Dictionary<SecurityType, List<TickType>> {
+            [IsFuture ? SecurityType.Future : SecurityType.Equity] = new() { TickType.Trade } });
         _orders = new StreamWriter(Path.Combine(directory, "orders.jsonl"));
         _intents = new StreamWriter(Path.Combine(directory, "intents.jsonl"));
         _daily = new StreamWriter(Path.Combine(directory, "daily.jsonl"));
+        if (IsFuture) { InitializeFutures(data.RootElement, settings); return; }
+        foreach (var name in new[] { "fills", "positions", "account_events", "lifecycle" })
+            File.WriteAllText(Path.Combine(directory, name + ".jsonl"), "");
         Market.Add("jqchina", 999);
         foreach (var code in data.RootElement.GetProperty("symbols").EnumerateArray().Select(x => x.GetString()))
         {
@@ -97,10 +171,9 @@ public sealed class LeanStrategyHost
             ticker => _symbols.First(x => x.Value.Value == ticker || x.Key == ticker).Value, actions);
         Actions.MarketPriceSourceTime = symbol =>
             (_algorithm.Securities[symbol].GetLastData() as DailyCloseMark)?.SourceTime;
-        var start = new DateTimeOffset(dates[0].AddHours(9.5), TimeSpan.FromHours(8));
-        foreach (var action in actions.Where(x => x.RecordAt < start))
-            Actions.SeedEntitlement(new InitialEntitlement(action.ActionId, action.Revision, 0m, action.RecordAt,
-                "研究窗口初始空仓，不继承历史回测登记持仓"), start);
+        Actions.IsDelisted = (symbol, at) => ConfirmedLifecycle(symbol, at) != null;
+        var start = new DateTimeOffset(_executionWindows[dates[0]].StartAt, TimeSpan.FromHours(8));
+        Actions.SeedInitialEmptyPortfolio(start);
         ChinaRuleBook book;
         if (direct != null)
             book = new ChinaRuleBook(dates.Select(DateOnly.FromDateTime),
@@ -116,26 +189,55 @@ public sealed class LeanStrategyHost
             }
             book = new ChinaRuleBook(dates.Select(DateOnly.FromDateTime), ruleRows);
         }
+        _spotRuleBook = book;
         Models = new ChinaAStockModels(book,
             symbol => _codes[symbol], symbol => Actions.LockedBonusQuantity(symbol),
             symbol => _instruments[_codes[symbol]].GetProperty("asset_class").GetString());
+        Models.IsDelisted = IsDelisted;
         var parameters = settings.GetProperty("parameters");
         Models.ConfigureExecution(parameters.GetProperty("slippage_bps").GetDecimal(),
             parameters.GetProperty("slippage_ticks").GetInt32(), parameters.GetProperty("participation_cap_ppm").GetInt32());
         Models.Install(algorithm);
         Models.BeforeDailyOpen = (utc, id) =>
         {
-            Actions.Advance(new DateTimeOffset(utc));
+            AdvanceSpotClock();
             return _algorithm.Transactions.GetOpenOrders().Any(order => order.Id == id);
         };
     }
 
-    public void OpenSession() => Actions.Advance(Now);
+    public void OpenSession() { if (IsFuture) AdvanceFutureClock(); else AdvanceSpotClock(); }
+    public bool ExecutionWindowStartsNow => !IsFuture && _executionWindows.TryGetValue(_algorithm.Time.Date, out var window)
+        && _algorithm.Time == window.StartAt;
+    public bool ExecutionWindowEndsNow => !IsFuture && _executionWindows.TryGetValue(_algorithm.Time.Date, out var window)
+        && _algorithm.Time == window.EndAt;
+    public bool TerminalObservationNow => !IsFuture && _terminalObservationAt == Now;
+
+    public void ObserveTerminalAccount()
+    {
+        if (!TerminalObservationNow || _terminalObserved) throw new InvalidOperationException("终点账户观察时点不匹配或重复");
+        AdvanceSpotClock();
+        var marks = ValuationMarks();
+        var value = Actions.GetValuation(Now);
+        _lastObservationAt = Now;
+        _lastEquitySemantics = IsDaily ? "latest_visible_mark_not_session_close" : "execution_window_mark";
+        _lastSessionComplete = false;
+        File.AppendAllText(Path.Combine(_output, "account_events.jsonl"), JsonSerializer.Serialize(new {
+            reason = "terminal", valuation_at = Now, cash = _algorithm.Portfolio.CashBook["CNY"].Amount,
+            equity = value.TotalEquity, additional_equity = value.AdditionalEquity,
+            equity_semantics = _lastEquitySemantics, valuation_marks = marks
+        }, JsonOptions) + Environment.NewLine);
+        _terminalObserved = true;
+    }
+    public bool SessionOpensNow => !IsFuture && _executionWindows.TryGetValue(_algorithm.Time.Date, out var window)
+        && _algorithm.Time == window.SessionOpenAt;
+    public bool SessionClosesNow => !IsFuture && _executionWindows.TryGetValue(_algorithm.Time.Date, out var window)
+        && _algorithm.Time == window.SessionCloseAt;
     public bool HasDirectInputs => _direct != null;
     public string DailySignals(string date)
     {
         var day = DateTime.ParseExact(date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
-        if (_direct == null || day != _algorithm.Time.Date)
+        if (_direct == null || (!IsFuture && day != _algorithm.Time.Date)
+            || (IsFuture && date != TradingDateText))
             throw new InvalidOperationException("只能请求当前模拟交易日的直接信号");
         return _direct.Signals(day);
     }
@@ -196,15 +298,17 @@ public sealed class LeanStrategyHost
     private object Quote(string code, VisibleBar visible)
     {
         var bar = visible.Bar;
+        var scale = IsFuture ? FuturePriceScale(code) : _priceScale;
+        var divisor = (decimal)Math.Pow(10, scale);
         long Units(decimal price)
         {
-            if (price * _priceDivisor != decimal.Truncate(price * _priceDivisor)) throw new InvalidOperationException("报价超过声明价格精度");
-            return checked((long)(price * _priceDivisor));
+            if (price * divisor != decimal.Truncate(price * divisor)) throw new InvalidOperationException("报价超过声明价格精度");
+            return checked((long)(price * divisor));
         }
         var at = new DateTimeOffset(DateTime.SpecifyKind(visible.AvailableAt, DateTimeKind.Unspecified), TimeSpan.FromHours(8));
         var identity = $"lean:{code}:{at:O}";
         return new { instrument = _instruments[code], available_at = at,
-            price = new { units = Units(bar.Close), scale = _priceScale, currency = "CNY" }, input_id = identity, price_input_id = identity,
+            price = new { units = Units(bar.Close), scale, currency = "CNY" }, input_id = identity, price_input_id = identity,
             bar_start = new DateTimeOffset(DateTime.SpecifyKind(bar.Time, DateTimeKind.Unspecified), TimeSpan.FromHours(8)),
             bar_end = new DateTimeOffset(DateTime.SpecifyKind(bar.EndTime, DateTimeKind.Unspecified), TimeSpan.FromHours(8)),
             values = new Dictionary<string, long> { ["open"] = Units(bar.Open), ["high"] = Units(bar.High),
@@ -221,6 +325,7 @@ public sealed class LeanStrategyHost
 
     public void OnOrderEvent(OrderEvent e)
     {
+        if (IsFuture) { FutureOrderEvent(e); return; }
         Models.OnOrderEvent(e);
         var order = _algorithm.Transactions.GetOrderById(e.OrderId);
         if (e.FillQuantity != 0)
@@ -247,6 +352,8 @@ public sealed class LeanStrategyHost
 
     public string Snapshot(string codesJson)
     {
+        if (IsFuture) return FutureSnapshot(codesJson);
+        AdvanceSpotClock();
         var needed = JsonSerializer.Deserialize<string[]>(codesJson).ToHashSet();
         foreach (var symbol in Actions.ValuationSymbols) needed.Add(_codes[symbol]);
         var positions = new List<object>();
@@ -255,8 +362,10 @@ public sealed class LeanStrategyHost
             var holding = _algorithm.Portfolio[symbol];
             if (holding.Quantity == 0) continue;
             var code = _codes[symbol]; needed.Add(code);
+            var ending = ConfirmedLifecycle(symbol, Now);
             positions.Add(new { instrument=_instruments[code], quantity=holding.Quantity,
-                sellable_quantity=Models.SellableQuantity(_algorithm.Securities[symbol],_algorithm.UtcTime) });
+                sellable_quantity=ending != null ? 0m : Models.SellableQuantity(_algorithm.Securities[symbol],_algorithm.UtcTime),
+                valuation_mark=ending == null ? null : ZeroMark(symbol, ending) });
         }
         var active = _algorithm.Transactions.GetOpenOrders().OrderBy(x => x.Id).Select(order => new {
             instrument=_instruments[_codes[order.Symbol]], order_id=order.Id.ToString(),
@@ -286,6 +395,7 @@ public sealed class LeanStrategyHost
 
     public void ValidateIntent(string intentJson)
     {
+        if (IsFuture) { ValidateFutureIntent(intentJson); return; }
         using var doc = JsonDocument.Parse(intentJson);
         var intent = doc.RootElement;
         var kind = intent.GetProperty("kind").GetString();
@@ -301,6 +411,7 @@ public sealed class LeanStrategyHost
             throw new NotSupportedException("当前仅支持金额买入、数量买卖、撤单及 market DAY");
         var code = intent.GetProperty("instrument").GetProperty("instrument_id").GetString();
         if (!_symbols.ContainsKey(code)) throw new ArgumentException("委托证券不在冻结范围内");
+        if (ConfirmedLifecycle(_symbols[code], Now) != null) throw new InvalidOperationException("退市生效后不能提交交易委托");
         if (kind == "quantity")
         {
             var quantity = intent.GetProperty("quantity").GetDecimal();
@@ -317,6 +428,7 @@ public sealed class LeanStrategyHost
 
     public void Submit(string intentJson)
     {
+        if (IsFuture) { SubmitFutureIntent(intentJson); return; }
         ValidateIntent(intentJson);
         using var doc=JsonDocument.Parse(intentJson); var intent=doc.RootElement;
         var kind=intent.GetProperty("kind").GetString();
@@ -362,14 +474,23 @@ public sealed class LeanStrategyHost
     }
 
     public void CloseOrders() => _algorithm.Transactions.CancelOpenOrders();
-    private string EquitySemantics => IsDaily ? "latest_visible_mark_not_session_close" : "session_close_mark";
+    private IEnumerable<Symbol> ValuationSymbols => _algorithm.Portfolio.Where(x => x.Value.Quantity != 0).Select(x => x.Key)
+        .Concat(Actions.ValuationSymbols).Distinct().OrderBy(x => _codes[x], StringComparer.Ordinal);
+    private string EquitySemantics => IsDaily ? "latest_visible_mark_not_session_close"
+        : SessionClosesNow && ValuationSymbols.All(symbol =>
+            ConfirmedLifecycle(symbol, Now) != null || _algorithm.Securities[symbol].GetLastData() is TradeBar bar && bar.Period > TimeSpan.Zero
+            && bar.EndTime == _algorithm.Time) ? "session_close_mark" : "execution_window_mark";
 
     private object ValuationMark(Symbol symbol)
     {
+        var ending = ConfirmedLifecycle(symbol, Now);
+        if (ending != null) return ZeroMark(symbol, ending);
         var security = _algorithm.Securities[symbol];
         var data = security.GetLastData();
-        if (data == null || data.EndTime > _algorithm.Time)
-            throw new InvalidOperationException("估值缺少当时可见的市场价格");
+        _spotRuleBook.Resolve(_codes[symbol], _algorithm.UtcTime);
+        if (data == null || data.EndTime > _algorithm.Time || (!IsDaily && SessionClosesNow && (data.EndTime.Date != _algorithm.Time.Date
+            || data is not TradeBar minute || minute.Period == TimeSpan.Zero)))
+            throw new InvalidOperationException($"{_codes[symbol]} {_algorithm.Time:yyyy-MM-ddTHH:mm:ss} 估值缺少当日可见市场价格");
         var at = new DateTimeOffset(DateTime.SpecifyKind(data.EndTime, DateTimeKind.Unspecified), TimeSpan.FromHours(8));
         var sourceAt = data is DailyCloseMark previous ? previous.SourceTime : data.EndTime;
         var source = data is DailyOpenBar ? "session_open"
@@ -384,43 +505,83 @@ public sealed class LeanStrategyHost
                 && data.EndTime.TimeOfDay == TimeSpan.FromHours(15) };
     }
 
-    private object[] ValuationMarks() => _algorithm.Portfolio.Where(x => x.Value.Quantity != 0).Select(x => x.Key)
-        .Concat(Actions.ValuationSymbols).Distinct().OrderBy(x => _codes[x], StringComparer.Ordinal)
-        .Select(ValuationMark).ToArray();
+    private object[] ValuationMarks() => ValuationSymbols.Select(ValuationMark).ToArray();
 
     public void CloseSession()
     {
-        if (!_closedSessions.Add(_algorithm.Time.Date)) throw new InvalidOperationException("交易日不能重复收盘");
-        Actions.CaptureRecord(Now);
+        if (IsFuture) { CloseFutureSession(); return; }
+        if (!ExecutionWindowEndsNow) throw new InvalidOperationException("账户观察必须位于声明执行窗口终点");
+        if (_completedWindows.Contains(_algorithm.Time.Date)) throw new InvalidOperationException("执行窗口不能重复结束");
+        if (SessionClosesNow) Actions.CaptureRecord(Now);
+        else Actions.Advance(Now);
+        ApplySpotLifecycle();
+        var marks = ValuationMarks();
         foreach(var pair in _algorithm.Portfolio.Where(x=>x.Value.Quantity!=0)) _touched.Add(pair.Key);
         var positions=new List<object>();
         foreach(var symbol in _touched.OrderBy(x=>_codes[x],StringComparer.Ordinal))
         {
             var holding=_algorithm.Portfolio[symbol]; if(holding.Quantity==0) continue;
-            var bar=_algorithm.Securities[symbol].Cache.GetData<TradeBar>();
-            if(bar==null || (!IsDaily && bar.EndTime.Date!=_algorithm.Time.Date) || bar.EndTime>_algorithm.Time)
-                throw new InvalidOperationException("持仓日终缺少当日可见价格");
             positions.Add(new {instrument_id=_codes[symbol],quantity=holding.Quantity,
-                price=_algorithm.Securities[symbol].Price,valuation_mark=ValuationMark(symbol)});
+                price=ConfirmedLifecycle(symbol, Now) != null ? 0m : _algorithm.Securities[symbol].Price,
+                valuation_mark=ValuationMark(symbol)});
         }
-        var value=Actions.GetValuation(); var elapsed=_clock.Elapsed.TotalSeconds;
+        var value=Actions.GetValuation(Now); var elapsed=_clock.Elapsed.TotalSeconds;
+        _lastEquitySemantics = EquitySemantics;
+        _lastSessionComplete = SessionClosesNow;
         _daily.WriteLine(JsonSerializer.Serialize(new {date=_algorithm.Time.ToString("yyyy-MM-dd"),rows=_dayRows,
             cash=_algorithm.Portfolio.CashBook["CNY"].Amount,equity=value.TotalEquity,additional_equity=value.AdditionalEquity,
-            equity_semantics=EquitySemantics,valuation_at=Now,valuation_marks=ValuationMarks(),
+            equity_semantics=_lastEquitySemantics,valuation_at=Now,valuation_marks=marks,
+            session_complete=_lastSessionComplete,
             positions,active_orders=_algorithm.Transactions.GetOpenOrders().Count,day_wall_seconds=elapsed-_previousClose},JsonOptions));
         _daily.Flush();_dayRows=0;_previousClose=elapsed;
+        _lastObservationAt = Now;
+        _completedWindows.Add(_algorithm.Time.Date);
     }
 
     public void Finish()
     {
-        if (HasRuntimeError || _closedSessions.Count != _sessions.Count)
-            throw new InvalidOperationException("存在运行错误或冻结交易日未完成日终，不能结束Host");
+        if (IsFuture) { FinishFutures(); return; }
+        if (HasRuntimeError || !_executionWindows.Keys.All(_completedWindows.Contains)
+            || _terminalObservationAt.HasValue && !_terminalObserved)
+            throw new InvalidOperationException("存在运行错误或声明执行窗口未完成，不能结束Host");
+        ApplySpotLifecycle();
         _orders.Dispose();_intents.Dispose();_daily.Dispose();
-        var value=Actions.GetValuation();
+        var value=Actions.GetValuation(_lastObservationAt);
         File.WriteAllText(Path.Combine(_output,"account.json"),JsonSerializer.Serialize(new {cash=_algorithm.Portfolio.CashBook["CNY"].Amount,
             equity=value.TotalEquity,additional_equity=value.AdditionalEquity,rows=_rows,
-            equity_semantics=EquitySemantics,valuation_at=Now,valuation_marks=ValuationMarks(),
+            equity_semantics=_lastEquitySemantics,valuation_at=_lastObservationAt,valuation_marks=ValuationMarks(),
+            session_complete=_lastSessionComplete,
+            terminal_observation_at=_terminalObserved ? _terminalObservationAt : null,
             positions=_algorithm.Portfolio.Where(x=>x.Value.Quantity!=0).ToDictionary(x=>_codes[x.Key],x=>x.Value.Quantity),
+            active_orders=OpenOrderState(),
             transitions=Actions.Transitions,algorithm_wall_seconds=_clock.Elapsed.TotalSeconds},new JsonSerializerOptions{WriteIndented=true}));
+    }
+
+    private object[] OpenOrderState() => _algorithm.Transactions.GetOpenOrders().OrderBy(x => x.Id).Select(order => (object)new {
+        order_id=order.Id, instrument_id=_codes[order.Symbol], status=order.Status.ToString(), quantity=order.Quantity,
+        filled_quantity=_filled.GetValueOrDefault(order.Id),
+        remaining_quantity=Math.Abs(order.Quantity)-_filled.GetValueOrDefault(order.Id)
+    }).ToArray();
+
+    public void SaveFailureAccount(string reason)
+    {
+        if (IsFuture || _failureAccountSaved) return;
+        // 失败材料只保存账簿事实，不调用估值，也不把缺价持仓解释为零资产。
+        var transitions = Actions?.Transitions ?? Array.Empty<ActionTransition>();
+        var registered = Actions == null ? Array.Empty<object>() : Actions.RegisteredEntitlements.Select(row => (object)new {
+                action_id=row.ActionId, revision=row.Revision, instrument_id=_codes[row.Symbol],
+                registered_quantity=row.RegisteredQuantity,
+                cash_entitlement=row.CashEntitlement, bonus_quantity=row.BonusQuantity,
+                ex_applied=row.ExApplied, cash_paid=row.CashPaid,
+                shares_arrived=row.SharesArrived, shares_sellable=row.SharesSellable
+        }).ToArray();
+        File.WriteAllText(Path.Combine(_output,"failure-account.json"), JsonSerializer.Serialize(new {
+            status="failed", artifact_type="research.lean-failure-account-diagnostic", is_result=false,
+            failed_at=Now, reason, cash=_algorithm.Portfolio.CashBook["CNY"].Amount,
+            positions=_algorithm.Portfolio.Where(x=>x.Value.Quantity!=0).ToDictionary(x=>_codes[x.Key],x=>x.Value.Quantity),
+            registered_entitlements=registered, active_orders=OpenOrderState(), transitions,
+            corporate_actions_source="actions.json", orders_source="orders.jsonl"
+        }, new JsonSerializerOptions {WriteIndented=true}));
+        _failureAccountSaved = true;
     }
 }

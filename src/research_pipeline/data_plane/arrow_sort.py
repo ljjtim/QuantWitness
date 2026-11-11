@@ -110,7 +110,8 @@ def sorted_record_batches(batches, root, *, sort_columns, memory_bytes, temp_byt
             "preserve_insertion_order": "false",
         })
         # 在连接创建后将额度设置到实际暂存文件管理器。
-        connection.execute("SET max_temp_directory_size = ?", [f"{temp_bytes}B"])
+        connection.execute("SET max_temp_directory_size = ?",
+                           ["-1" if temp_bytes is None else f"{temp_bytes}B"])
         connection.register("input_batches", reader)
         def quoted(name):
             return '"' + name.replace('"', '""') + '"'

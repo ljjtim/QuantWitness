@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from research_pipeline.platform.asset_taxonomy import MINUTE_TARGET_ASSET_CLASSES
+from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -77,10 +79,16 @@ def _scalar_parameters_bytes(
     parameters: tuple[tuple[str, type, object], ...],
 ) -> bytes:
     # 类型标签区分 True/1/1.0；浮点十六进制还区分正零和负零。
-    return _identity_value_bytes({
-        key: float.fromhex(value) if kind is float else value
-        for key, kind, value in parameters
-    })
+    return b'{"type":"object","value":{' + b",".join(
+        _scalar_parameter_bytes(key, kind, value) for key, kind, value in parameters
+    ) + b"}}"
+
+
+@lru_cache(maxsize=8192)
+def _scalar_parameter_bytes(key, kind, value):
+    # 不同逐日参数模板中的相同字段共用原codec字节，避免整份模板重复编码。
+    encoded = _identity_value_bytes({key: float.fromhex(value) if kind is float else value})
+    return encoded[len(b'{"type":"object","value":{'):-2]
 
 
 @lru_cache(maxsize=256)
@@ -290,7 +298,7 @@ class MinuteRuleSnapshotBundle:
     sources: tuple[MinuteRuleSource, ...]
     instruments: tuple[SessionInstrumentMetadata, ...]
     rules: tuple[MinuteRuleSnapshot, ...]
-    bundle_hash: str
+    bundle_hash: str | None = None
     contract_version: str = MINUTE_RULE_BUNDLE_VERSION
 
     def __post_init__(self) -> None:
@@ -336,10 +344,16 @@ class MinuteRuleSnapshotBundle:
         instruments = {item.instrument_id: item for item in self.instruments}
         if len(instruments) != len(self.instruments):
             raise MinuteRuleSnapshotError("规则 instrument_id 重复")
-        if self.rules != tuple(sorted(self.rules, key=lambda item: (item.instrument_id, item.rule_id, item.revision))):
-            raise MinuteRuleSnapshotError("规则快照必须排序")
-        keys = {(item.instrument_id, item.rule_id, item.revision) for item in self.rules}
-        if len(keys) != len(self.rules):
+        previous_key = None
+        duplicate = False
+        for rule in self.rules:
+            key = (rule.instrument_id, rule.rule_id, rule.revision)
+            if previous_key is not None:
+                if key < previous_key:
+                    raise MinuteRuleSnapshotError("规则快照必须排序")
+                duplicate |= key == previous_key
+            previous_key = key
+        if duplicate:
             raise MinuteRuleSnapshotError("规则快照身份重复")
         if any(not set(item.source_ids) <= source_ids for item in self.rules):
             raise MinuteRuleSnapshotError("规则引用了未知来源")
@@ -356,8 +370,12 @@ class MinuteRuleSnapshotBundle:
             ).append(rule.revision)
         if self.contract_version == PROJECT_RULE_BUNDLE_VERSION:
             for instrument in self.instruments:
-                if instrument.asset_class not in {"cn_stock", "cn_etf"}:
-                    raise MinuteRuleSnapshotError("项目规则当前仅支持股票与ETF")
+                if instrument.asset_class not in MINUTE_TARGET_ASSET_CLASSES:
+                    raise MinuteRuleSnapshotError("项目规则仅支持股票、ETF与真实期货合约")
+                if instrument.asset_class == "cn_future" and (
+                        instrument.instrument_class not in {"future", "future_contract"}
+                        or any(token in instrument.instrument_id.upper() for token in ("8888", "9999", "CONTINUOUS"))):
+                    raise MinuteRuleSnapshotError("项目期货规则须使用真实合约")
                 required = set(next(item.required_rule_ids for item in manifest.coverages
                                     if item.instrument.asset_class == instrument.asset_class))
                 rules = revisions_by_instrument.get(instrument.instrument_id, {})
@@ -368,8 +386,7 @@ class MinuteRuleSnapshotBundle:
                     revisions = sorted(revisions)
                     if revisions != list(range(1, max(revisions) + 1)):
                         raise MinuteRuleSnapshotError(f"规则版本流不完整: {instrument.instrument_id} {rule_id}")
-            if self.bundle_hash != self._identity_hash():
-                raise MinuteRuleSnapshotError("规则 bundle hash 不一致")
+            self._bind_identity()
             return
         expected_instruments = {
             item.instrument.instrument_id: item for item in manifest.coverages
@@ -388,8 +405,13 @@ class MinuteRuleSnapshotBundle:
             actual_rule_ids = set(revisions_by_instrument.get(instrument_id, {}))
             if actual_rule_ids != set(coverage.required_rule_ids):
                 raise MinuteRuleSnapshotError("规则矩阵缺少能力 manifest 声明的覆盖")
-        if self.bundle_hash != self._identity_hash():
+        self._bind_identity()
+
+    def _bind_identity(self) -> None:
+        actual_hash = self._identity_hash()
+        if self.bundle_hash is not None and self.bundle_hash != actual_hash:
             raise MinuteRuleSnapshotError("规则 bundle hash 不一致")
+        object.__setattr__(self, "bundle_hash", actual_hash)
 
     def _identity_hash(self) -> str:
         # 可变嵌套参数仍由通用 codec 按当前完整内容校验和编码。
@@ -482,11 +504,74 @@ class MinuteRuleResolver:
                     (source_id, self._sources[source_id]) for source_id in rule.source_ids
                 )
         self._rules = {key: tuple(revisions) for key, revisions in rules.items()}
+        ids_by_instrument = {}
+        for instrument_id, rule_id in self._rules:
+            ids_by_instrument.setdefault(instrument_id, []).append(rule_id)
+        self._rule_ids = {code: tuple(sorted(ids)) for code, ids in ids_by_instrument.items()}
+        self._effective_indexes = {}
         self._visible_rules = {}
 
     def revisions(self, *, rule_id: str, instrument_id: str) -> tuple[MinuteRuleSnapshot, ...]:
         """读取同一证券规则的完整版本流；可见性由消费时点决定。"""
         return self._rules.get((instrument_id, rule_id), ())
+
+    def rule_ids(self, *, instrument_id: str) -> tuple[str, ...]:
+        """返回证券的固定规则类型集合。"""
+        return self._rule_ids.get(instrument_id, ())
+
+    def candidates(self, *, rule_id: str, instrument_id: str,
+                   effective_on: date) -> tuple[MinuteRuleSnapshot, ...]:
+        """按有效区间边界定位当天版本，不展开逐日副本或提前选择可见版本。"""
+        if type(effective_on) is not date:
+            raise MinuteRuleSnapshotError("effective_on 必须是明确交易日，不能传 datetime")
+        key = (instrument_id, rule_id)
+        if key not in self._effective_indexes:
+            revisions = self._rules.get(key, ())
+            intervals = {}
+            for rule in revisions:
+                interval = (rule.effective_from.toordinal(), rule.effective_to.toordinal())
+                intervals.setdefault(interval, []).append(rule)
+            ordered = sorted(intervals)
+            if all(left[1] < right[0] for left, right in zip(ordered, ordered[1:])):
+                # 普通逐日历史与同区间修订只存一份区间；重叠区间仍保留完整冲突语义。
+                self._effective_indexes[key] = (
+                    tuple(start for start, _ in ordered),
+                    tuple(tuple(intervals[item]) for item in ordered),
+                    tuple(end for _, end in ordered),
+                )
+            else:
+                self._effective_indexes[key] = self._overlapping_index(revisions)
+        boundaries, spans, ends = self._effective_indexes[key]
+        ordinal = effective_on.toordinal()
+        index = bisect_right(boundaries, ordinal) - 1
+        return spans[index] if index >= 0 and (ends is None or ordinal <= ends[index]) else ()
+
+    @staticmethod
+    def _overlapping_index(revisions):
+        """有效区间重叠时保留每个边界的全部候选，交给可见性解析判断。"""
+        changes = {}
+        for index, rule in enumerate(revisions):
+            changes.setdefault(rule.effective_from.toordinal(), []).append((index, True))
+            changes.setdefault(rule.effective_to.toordinal() + 1, []).append((index, False))
+        boundaries = tuple(sorted(changes))
+        active, spans = set(), []
+        for boundary in boundaries:
+            for index, adding in changes[boundary]:
+                if adding:
+                    active.add(index)
+                else:
+                    active.remove(index)
+            spans.append(tuple(revisions[index] for index in sorted(active)))
+        return boundaries, tuple(spans), None
+
+    def available_times(self, *, instrument_id: str, effective_on: date,
+                        start: datetime, end: datetime) -> tuple[datetime, ...]:
+        """只返回当天有效规则在消费区间内新可见的时点。"""
+        return tuple(sorted({rule.available_at
+            for rule_id in self.rule_ids(instrument_id=instrument_id)
+            for rule in self.candidates(rule_id=rule_id, instrument_id=instrument_id,
+                                        effective_on=effective_on)
+            if rule.available_at is not None and start < rule.available_at <= end}))
 
     def resolve(self, *, rule_id: str, instrument_id: str, effective_on: date, as_of: datetime) -> MinuteRuleBinding:
         current = _aware(as_of, "as_of")
@@ -501,9 +586,8 @@ class MinuteRuleResolver:
         has_candidates = False
         rule = None
         next_at = None
-        for item in self._rules.get(key, ()):
-            if not item.effective_from <= effective_on <= item.effective_to:
-                continue
+        for item in self.candidates(rule_id=rule_id, instrument_id=instrument_id,
+                                    effective_on=effective_on):
             has_candidates = True
             # 不可见修订既不参与选版，也不产生区间冲突。
             if item.status != "unsupported" and (

@@ -1,6 +1,8 @@
 param([Parameter(Mandatory=$true)][string]$LeanHome)
 $ErrorActionPreference='Stop'
 $LeanHome=(Resolve-Path -LiteralPath $LeanHome).Path
+$syncRecord=Join-Path $LeanHome 'source-sync.json'
+if(Test-Path -LiteralPath $syncRecord) { Remove-Item -LiteralPath $syncRecord }
 $python=Join-Path $LeanHome 'python-env/Scripts/python.exe'
 $project=(Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $stamp=Get-Date -Format 'yyyyMMdd-HHmmss-fff'
@@ -20,5 +22,7 @@ if($LASTEXITCODE -ne 0) { throw "wheel构建失败：$root/build.log" }
 $wheel=(Get-ChildItem (Join-Path $root 'wheels') -Filter '*.whl'|Select-Object -First 1).FullName
 & $python -B -m pip install --no-deps --force-reinstall $wheel *> (Join-Path $root 'install.log')
 if($LASTEXITCODE -ne 0) { throw "wheel安装失败：$root/install.log" }
+& $python -B -m pip check *> (Join-Path $root 'dependencies.log')
+if($LASTEXITCODE -ne 0) { throw "安装依赖不满足，请按当前依赖创建安装：$root/dependencies.log" }
 [ordered]@{status='pass';wheel=$wheel;python=$python;source_snapshot=$source;installed_at=(Get-Date -Format o)}|ConvertTo-Json|Set-Content (Join-Path $LeanHome 'package-installation.json') -Encoding utf8
 Write-Output "源码wheel已更新；安装锁须重新转换准入：$wheel"

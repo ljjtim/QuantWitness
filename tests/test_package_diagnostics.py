@@ -218,11 +218,12 @@ def test_complete_lint_delegates_to_original_compiler_and_report(complete, capsy
 
 
 @pytest.mark.parametrize("scope", ["core", "project"])
-def test_resource_summary_reads_real_implementation_scope(scope, monkeypatch):
+@pytest.mark.parametrize("frozen", [False, True])
+def test_resource_summary_reads_real_implementation_scope(scope, frozen, monkeypatch):
     from research_pipeline.extensions.project_admission import ProjectOperatorImplementationToken
     from research_pipeline.runtime import operator_definitions
 
-    node = SimpleNamespace(node_id="analysis", operator_id="shared.analysis", operator_version="1.0.0")
+    node = SimpleNamespace(node_id="analysis", operator_id="shared.analysis", operator_version="1.0.0", resource_profile=None)
     profile = {"memory_bytes": 1024, "temp_bytes": 0, "cpu_slots": 1, "process_slots": 1, "wall_seconds": 30}
     specification = SimpleNamespace(
         operator_id=node.operator_id, operator_version=node.operator_version,
@@ -236,8 +237,33 @@ def test_resource_summary_reads_real_implementation_scope(scope, monkeypatch):
         operator_specs=[specification],
         binding=lambda *args: SimpleNamespace(implementation_token=token),
     )
-    summary = command._declared_resource_summary(
-        SimpleNamespace(recipe=SimpleNamespace(nodes=[node])), registry,
-    )
+    plan = SimpleNamespace(recipe=SimpleNamespace(nodes=[node]))
+    expected = dict(profile)
+    if frozen:
+        from research_pipeline.runtime import ResourceBudget
+        budget = ResourceBudget(512, 1, 0, 20)
+        plan.dag = SimpleNamespace(nodes=[SimpleNamespace(node_id="analysis", resource_budget=budget)])
+        expected.update(budget.to_dict())
+    summary = command._declared_resource_summary(plan, registry)
     assert summary["nodes"][0]["implementation_scope"] == scope
-    assert summary["nodes"][0]["resource_profile"] == profile
+    assert summary["nodes"][0]["resource_profile"] == expected
+    assert summary["basis"] == ("frozen_dag.resource_budget" if frozen else "operator_definition.resource_profile")
+
+
+@pytest.mark.parametrize('frozen', [False, True])
+def test_resource_summary_uses_node_partial_profile(frozen, monkeypatch):
+    from research_pipeline.runtime import operator_definitions, ResourceBudget
+    profile = {'memory_bytes':1024, 'temp_bytes':512, 'cpu_slots':1, 'process_slots':2, 'wall_seconds':30}
+    override = {'memory_bytes':4096, 'process_slots':4}
+    node = SimpleNamespace(node_id='analysis',operator_id='shared.analysis',operator_version='1.0.0',resource_profile=override)
+    spec = SimpleNamespace(operator_id=node.operator_id,operator_version=node.operator_version,resource_profile=profile)
+    definition = SimpleNamespace(implementation_ref=SimpleNamespace(implementation_scope='core'))
+    monkeypatch.setattr(operator_definitions,'build_mainline_operator_manifest',lambda:SimpleNamespace(require_operator=lambda *a:definition))
+    registry = SimpleNamespace(operator_specs=[spec],binding=lambda *a:SimpleNamespace(implementation_token=object()))
+    plan = SimpleNamespace(recipe=SimpleNamespace(nodes=[node]))
+    if frozen:
+        plan.dag=SimpleNamespace(nodes=[SimpleNamespace(node_id='analysis',resource_budget=ResourceBudget(4096,1,512,30))])
+    summary=command._declared_resource_summary(plan,registry)
+    assert summary['nodes'][0]['resource_profile'] == {**profile,**override}
+    assert summary['summary']['max_memory_bytes']==4096
+    assert summary['summary']['max_process_slots']==4

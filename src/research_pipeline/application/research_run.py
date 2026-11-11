@@ -82,9 +82,11 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness, *, prepared_plan
         raise ValueError("execution_engine 迁移参数已删除；正式运行只使用统一 Runtime")
     _require_data_run_arguments(args)
     minute_scope_inputs = {}
+    minute_scan_plans = {}
     if prepared_plan is None:
         manifest, admitted, dag, recipe, registry = load_operator_graph_research_plan(
             target=args.plan, loaded_minute_scopes=minute_scope_inputs,
+            loaded_minute_scan_plans=minute_scan_plans,
         )
     else:
         if (prepared_plan.directory != Path(args.plan).resolve()
@@ -95,6 +97,15 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness, *, prepared_plan
             prepared_plan.recipe, prepared_plan.registry,
         )
         minute_scope_inputs.update(prepared_plan.minute_scope_inputs)
+        minute_scan_plans.update(prepared_plan.minute_scan_plans)
+    if minute_scan_plans:
+        minute_root = getattr(args, "minute_data_root", None)
+        if minute_root is None or Path(minute_root).resolve() != Path(manifest["minute_data_root"]).resolve():
+            raise ValueError("运行 minute-data-root 必须与准入来源一致")
+        if prepared_plan is None:
+            from research_pipeline.data_plane.minute_scan import verify_minute_scan_source
+            for scan_plan in minute_scan_plans.values():
+                verify_minute_scan_source(scan_plan, allowed_root=minute_root)
     _validate_frozen_input_source(args, manifest)
     implementation_manifest_hash = admitted_implementation_manifest_hash(registry)
     if args.root_seed != manifest["root_seed"] or args.clock != manifest["fixed_clock"]:
@@ -152,6 +163,7 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness, *, prepared_plan
     runtime_result = _execute_unified_operator_runtime(
         args=args,
         minute_scope_inputs=minute_scope_inputs,
+        minute_scan_plans=minute_scan_plans,
         manifest=manifest,
         admitted=admitted,
         dag=dag,
@@ -353,6 +365,7 @@ def _execute_unified_operator_runtime(
     resource_capacity,
     owner: RuntimeLiveness | None = None,
     minute_scope_inputs=None,
+    minute_scan_plans=None,
 ):
     """把现行算子实现交给唯一统一 Runtime。"""
     runtime_root = Path(args.run_root).resolve()
@@ -387,12 +400,14 @@ def _execute_unified_operator_runtime(
         resource_timeout_seconds=getattr(args, "resource_timeout_seconds", None),
         strategy_spec_hashes=strategy_spec_hashes,
         minute_scope_inputs=minute_scope_inputs or {},
+        minute_scan_plans=minute_scan_plans or {},
     )
 
     audit, dependencies = _build_runtime_audit_environment()
     resource_governor = _build_resource_governor(args, resource_capacity)
     service = RuntimeExecutionService(
         no_node_timeout=getattr(args, "no_node_timeout", False),
+        no_temp_limit=getattr(args, "no_temp_limit", False),
         audit_environment=audit,
         numerical_backend_names=tuple(sorted(dependencies)),
         resource_capacity=resource_capacity,
@@ -614,6 +629,8 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
             "stale_seconds": args.resource_stale_seconds,
         }
     )
+    if getattr(args, "no_temp_limit", False):
+        payload["no_temp_limit"] = True
     if getattr(args, "no_node_timeout", False):
         payload["no_node_timeout"] = True
     if getattr(args, "persist_inputs", False):
@@ -644,7 +661,7 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
     }
     if version == "research-operator-dag-invocation-v16":
         expected.add("reuse_run_roots")
-        for optional in ("input_snapshot_manifest", "required_reused_nodes", "reuse_failed_run_root", "no_node_timeout", "persist_inputs"):
+        for optional in ("input_snapshot_manifest", "required_reused_nodes", "reuse_failed_run_root", "no_node_timeout", "no_temp_limit", "persist_inputs"):
             if optional in payload:
                 expected.add(optional)
         if "input_snapshot_manifest" in payload and (
@@ -657,6 +674,8 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
             raise ValueError("完成态与失败节点复用来源互斥")
     else:
         raise ValueError("正式 operator DAG invocation 版本、路径或 hash 无效")
+    if "no_temp_limit" in payload and payload["no_temp_limit"] is not True:
+        raise ValueError("no_temp_limit必须为true")
     if "no_node_timeout" in payload and payload["no_node_timeout"] is not True:
         raise ValueError("无限时运行声明必须为true")
     if "persist_inputs" in payload and payload["persist_inputs"] is not True:
@@ -753,6 +772,7 @@ def inspect_operator_graph(run_root: str | Path) -> dict[str, object]:
     audit, dependencies = _build_runtime_audit_environment()
     service = RuntimeExecutionService(
         no_node_timeout=getattr(args, "no_node_timeout", False),
+        no_temp_limit=getattr(args, "no_temp_limit", False),
         audit_environment=audit,
         numerical_backend_names=tuple(sorted(dependencies)),
         project_registry=(
@@ -1052,7 +1072,7 @@ def _runtime_resource_capacity(args) -> ResourceCapacity:
     return ResourceCapacity(
         memory_bytes=memory_bytes,
         cpu_slots=cpu_slots,
-        temp_bytes=scratch_bytes,
+        temp_bytes=None if getattr(args, "no_temp_limit", False) else scratch_bytes,
         max_workers=cpu_slots,
     )
 

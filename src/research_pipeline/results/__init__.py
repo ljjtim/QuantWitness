@@ -32,14 +32,15 @@ def __getattr__(name: str) -> object:
             "RESULT_REFERENCE_FILE": RESULT_REFERENCE_FILE,
             "ResultAssembler": ResultAssembler,
         }
-    elif name in {"RESULT_COMMITTED_NAME", "RESULT_MANIFEST_NAME", "ResultSnapshot", "ResultStore"}:
-        from .store import RESULT_COMMITTED_NAME, RESULT_MANIFEST_NAME, ResultSnapshot, ResultStore
+    elif name in {"RESULT_COMMITTED_NAME", "RESULT_MANIFEST_NAME", "ResultSnapshot", "ResultStore", "DatasetFilter"}:
+        from .store import RESULT_COMMITTED_NAME, RESULT_MANIFEST_NAME, ResultSnapshot, ResultStore, DatasetFilter
 
         values = {
             "RESULT_COMMITTED_NAME": RESULT_COMMITTED_NAME,
             "RESULT_MANIFEST_NAME": RESULT_MANIFEST_NAME,
             "ResultSnapshot": ResultSnapshot,
             "ResultStore": ResultStore,
+            "DatasetFilter": DatasetFilter,
         }
     elif name in {"ResultMetric", "load_result_metrics", "metrics_from_snapshot"}:
         from .metrics import ResultMetric, load_result_metrics, metrics_from_snapshot
@@ -61,6 +62,7 @@ def __getattr__(name: str) -> object:
     return values[name]
 
 __all__ = [
+    "DatasetFilter",
     "QLIB_MODEL_INVENTORY_SCHEMA_ID",
     "RESULT_BUNDLE_VERSION",
     "RESULT_COMMITTED_NAME", "RESULT_INPUT_REVISION_VERSION",

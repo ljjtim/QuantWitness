@@ -113,7 +113,7 @@ class MinuteRuntimeBudget:
     max_returned_rows: int
     max_batch_bytes: int
     max_rss_bytes: int
-    max_temp_bytes: int
+    max_temp_bytes: int | None
     max_output_bytes: int
     max_workers: int
     max_wall_seconds: float
@@ -121,10 +121,12 @@ class MinuteRuntimeBudget:
     def __post_init__(self) -> None:
         values = (
             self.max_source_bytes, self.max_returned_rows, self.max_batch_bytes,
-            self.max_rss_bytes, self.max_temp_bytes, self.max_output_bytes, self.max_workers,
+            self.max_rss_bytes, self.max_output_bytes, self.max_workers,
         )
         if any(type(value) is not int or value <= 0 for value in values):
             raise RuntimeAdmissionError("minute_runtime_budget_invalid: 整数预算必须为正数")
+        if self.max_temp_bytes is not None and (type(self.max_temp_bytes) is not int or self.max_temp_bytes < 0):
+            raise RuntimeAdmissionError("minute temp预算必须为非负整数或null")
         if not isinstance(self.max_wall_seconds, (int, float)) or self.max_wall_seconds <= 0:
             raise RuntimeAdmissionError("minute_runtime_budget_invalid: wall time 预算必须为正数")
 
@@ -533,10 +535,10 @@ class MinutePartitionRuntime:
         resource_timeout_seconds: float | None,
     ) -> tuple[ExternalArtifactCommit, MinutePartitionMetrics]:
         # 临时空间是并发共享额度；单分区验收须与分配的额度一致。
-        temp_limit = budget.max_temp_bytes // worker_count
+        temp_limit = None if budget.max_temp_bytes is None else budget.max_temp_bytes // worker_count
         if resource_governor is None or worker_count == 1:
             if parent_resource_lease is not None:
-                temp_limit = min(temp_limit, parent_resource_lease.vector.scratch_bytes)
+                temp_limit = _minimum_temp_limit(temp_limit, parent_resource_lease.vector.scratch_bytes)
             return self._run_one_unleased(
                 spec, manifest, action, store, checkpoint_root, budget,
                 worker_count, phase_hook, max_temp_bytes=temp_limit,
@@ -544,7 +546,7 @@ class MinutePartitionRuntime:
         child = ResourceVector(
             max(1, parent_resource_lease.vector.memory_bytes // worker_count),
             max(1, parent_resource_lease.vector.cpu_slots // worker_count),
-            max(1, parent_resource_lease.vector.scratch_bytes // worker_count),
+            None if parent_resource_lease.vector.scratch_bytes is None else parent_resource_lease.vector.scratch_bytes // worker_count,
             0,
         )
         lease = resource_governor.acquire(
@@ -558,7 +560,7 @@ class MinutePartitionRuntime:
                 return self._run_one_unleased(
                     spec, manifest, action, store, checkpoint_root, budget,
                     worker_count, phase_hook,
-                    max_temp_bytes=min(temp_limit, lease.vector.scratch_bytes),
+                    max_temp_bytes=_minimum_temp_limit(temp_limit, lease.vector.scratch_bytes),
                 )
         finally:
             resource_governor.release(lease)
@@ -574,7 +576,7 @@ class MinutePartitionRuntime:
         worker_count: int,
         phase_hook: MinutePartitionPhaseHook | None,
         *,
-        max_temp_bytes: int,
+        max_temp_bytes: int | None,
     ) -> tuple[ExternalArtifactCommit, MinutePartitionMetrics]:
         staging = store.prepare()
         start = time.monotonic()
@@ -707,16 +709,20 @@ class MinutePartitionRuntime:
         return commit, metrics
 
     @staticmethod
-    def _budget_failure(metric: str, actual: int | float, limit: int | float) -> None:
+    def _budget_failure(metric: str, actual: int | float, limit: int | float | None) -> None:
         raise MinuteRuntimeBudgetError(
             f"minute_runtime_budget_exceeded: metric={metric}; actual={actual}; limit={limit}; "
             "请缩小日期/标的/参数范围或显式提高预算"
         )
 
     @classmethod
-    def _require_limit(cls, metric: str, actual: int | float, limit: int | float) -> None:
-        if actual > limit:
+    def _require_limit(cls, metric: str, actual: int | float, limit: int | float | None) -> None:
+        if limit is not None and actual > limit:
             cls._budget_failure(metric, actual, limit)
+
+
+def _minimum_temp_limit(*limits):
+    return min((value for value in limits if value is not None), default=None)
 
 
 __all__ = [

@@ -48,6 +48,7 @@ def bundle_catalog(package):
 
 def rebuild_bundle(path, manifest, spec, output, registered_specs, *, source_root=None):
     from research_pipeline.extensions import compile_project_operator_bundle
+    from research_pipeline.platform.lean_contract import LEAN_ARTIFACT_TYPE
 
     preflight = manifest.to_dict().get("parameter_preflight")
     options = {} if not preflight else {
@@ -61,12 +62,12 @@ def rebuild_bundle(path, manifest, spec, output, registered_specs, *, source_roo
         project_id=manifest.project_id, operator_spec=spec,
         entry_module=raw["entry"]["module"], entry_function=raw["entry"]["function"],
         dependency_lock=dict(manifest.dependency_lock), registered_operator_specs=registered_specs,
-        project_artifact_types=("research.lean-simulation.v1",),
+        project_artifact_types=(LEAN_ARTIFACT_TYPE,),
         permissions=manifest.permissions, reuse_scope=manifest.reuse_scope, **options,
     )
 
 
-def prepare_package(from_package, output, lean_home):
+def prepare_package(from_package, output, lean_home, *, refresh_runtime=False):
     from research_pipeline.extensions import (
         OperatorSpec, ParameterSpec, ParameterType, PortSpec,
     )
@@ -95,8 +96,12 @@ def prepare_package(from_package, output, lean_home):
     initial_cash = strategy["parameters"].get("initial_cash_units")
     if type(initial_cash) is not int or initial_cash <= 0:
         raise ValueError("LEAN研究初始资金必须为正整数分")
-    if {i["input_port"] for i in strategy["inputs"]} not in ({"bars", "snapshot"}, {"bars", "snapshot", "signals"}):
-        raise ValueError("转换要求原策略直接绑定bars、snapshot及可选signals")
+    ports = {i["input_port"] for i in strategy["inputs"]}
+    is_future = strategy["parameters"]["strategy_declaration"]["asset_class"] == "cn_future"
+    required_ports = {"bars"} if is_future else {"bars", "snapshot"}
+    optional_ports = {"signals", "futures"} if is_future else {"signals"}
+    if not required_ports <= ports or ports - required_ports - optional_ports:
+        raise ValueError("转换要求行情及对应资产的必要输入；期货可绑定结算列式来源")
     catalog = bundle_catalog(package)
     path, manifest = catalog[strategy["operator_id"], strategy["operator_version"]]
     if manifest.bundle_hash != strategy["parameters"]["strategy_declaration"]["bundle_id"]:
@@ -114,13 +119,36 @@ def prepare_package(from_package, output, lean_home):
         runtime = validate_lean_runtime(strategy["parameters"]["lean_runtime"], verify_files=False)
         if Path(runtime["installation_root"]).resolve() != lean_home:
             raise ValueError("研究声明绑定的 LEAN 安装与本次 lean-home 不一致")
+        if refresh_runtime:
+            runtime = freeze_lean_runtime(lean_home)
         if declaration_frequency == frequency:
             output.mkdir(parents=True)
-            summary = {"package": str(package), "bundles": [str(path) for path, _ in catalog.values()],
+            destination, prepared = package, source_package
+            bundles = [path for path, _ in catalog.values()]
+            if refresh_runtime and runtime != strategy["parameters"]["lean_runtime"]:
+                destination = output / "package"
+                shutil.copytree(package, destination)
+                strategy["parameters"]["lean_runtime"] = runtime
+                write_mapping(destination / "spec/research.yaml", research)
+                bundles = []
+                for bundle, _ in catalog.values():
+                    copied = output / "bundles" / bundle.name
+                    shutil.copytree(bundle, copied)
+                    bundles.append(copied)
+                prepared = ResearchPackage.build(
+                    package_slug=source_package.package_slug, display_name=source_package.display_name,
+                    package_version=source_package.package_version, builder_id=source_package.builder_id,
+                    sources=source_package.sources, localizations=source_package.localizations,
+                    metric_contract=source_package.metric_contract, claim_contract=source_package.claim_contract,
+                    spec_payload=research,
+                    minute_scope_inputs={name: replace(scope, root=destination)
+                                         for name, scope in source_package.minute_scope_inputs.items()},
+                )
+            summary = {"package": str(destination), "bundles": [str(path) for path in bundles],
                        "from_package": str(package), "execution_backend": "lean", "run_budget": budget,
                        "database_access": "not_opened", "research_executed": False}
             write_mapping(output / "conversion.json", summary)
-            return summary, source_package
+            return summary, prepared
     registry = build_mainline_operator_registry()
     runtime = (runtime if strategy["parameters"].get("execution_backend") == "lean"
                else freeze_lean_runtime(lean_home))
@@ -172,8 +200,9 @@ def prepare_package(from_package, output, lean_home):
                 and table["source_port"] == signal["source_output_port"]
                 and table["artifact_type"] == "research.feature-set.v1"):
             table["schema_id"] = LEAN_SIGNAL_SOURCE_SCHEMA_ID
+    has_primary = any(table["role"] == "primary" for table in research["result"]["tables"])
     research["result"]["tables"].extend({
-        "table_id": "lean_" + name, "role": "diagnostic", "source_node_id": strategy["node_id"],
+        "table_id": "lean_" + name, "role": "primary" if name == "daily" and not has_primary else "diagnostic", "source_node_id": strategy["node_id"],
         "source_port": "simulation", "artifact_type": LEAN_ARTIFACT_TYPE,
         "schema_id": schema, "path_prefix": LEAN_PATHS[name],
     } for name, schema in LEAN_SCHEMA_IDS.items())
@@ -189,7 +218,10 @@ def prepare_package(from_package, output, lean_home):
     write_mapping(destination / "spec/research.yaml", research)
     from research_pipeline.research.lean_metrics import lean_metric_definitions
     metadata = deepcopy(payloads["package.yaml"])
-    for definition in lean_metric_definitions():
+    for definition in lean_metric_definitions(
+        equity_semantics="latest_visible_mark_not_session_close" if frequency == "1d" else "session_close_mark",
+        futures=strategy["parameters"]["strategy_declaration"].get("asset_class") == "cn_future",
+    ):
         if definition.metric_ref not in metadata["metric_contract"]["metrics"]:
             metadata["metric_contract"]["metrics"].append(definition.metric_ref)
         metadata["metric_contract"]["semantics"][definition.metric_ref] = definition.measurement_semantics.aggregation

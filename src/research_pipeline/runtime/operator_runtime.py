@@ -249,6 +249,7 @@ class RuntimeNodeContext:
     attempt_deadline_monotonic: float | None = None
     process_slots: int | None = None
     parallel_workers: int = 1
+    resource_check: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.process_slots is not None and (
@@ -258,9 +259,17 @@ class RuntimeNodeContext:
         if type(self.parallel_workers) is not int or self.parallel_workers < 1:
             raise RuntimeIntegrityError("节点并行额度必须是正整数")
 
+    def check_resources(self) -> None:
+        """在同步交接点检查剩余时长及已采样的累计资源峰值。"""
+        self.remaining_resource_budget()
+        if self.resource_check is not None:
+            self.resource_check()
+
     def remaining_resource_budget(self) -> ResourceBudget:
         """返回当前节点 attempt 剩余的统一资源上限。"""
 
+        if self.resource_governor is not None and self.resource_lease is not None:
+            self.resource_governor.check_lease_health(self.resource_lease)
         if self.attempt_deadline_monotonic is None:
             return self.effective_resource_budget
         remaining = self.attempt_deadline_monotonic - time.monotonic()

@@ -189,7 +189,10 @@ def _dual_table_runtime_fixture(tmp_path: Path) -> tuple[Path, Path]:
             "statistics",
             "data.columnar-bundle.v1",
             "statistics",
-            pa.table({"metric": ["alpha"], "value": [1.25]}),
+            pa.table({"metric_ref": ["data.row_count@1.0.0"], "value": [1.25],
+                      "unit": ["rows"], "sample_start": ["2026-01-01"],
+                      "sample_end": ["2026-06-30"], "sample_size": [120],
+                      "status": ["computed"]}),
         ),
         (
             "diagnostics",
@@ -943,3 +946,54 @@ def test_result_metric_decoder_rejects_multiple_rows_for_one_metric(tmp_path: Pa
     )
     with pytest.raises(ResultContractError, match="恰好有一行"):
         metrics_from_snapshot(snapshot)
+
+
+@pytest.mark.parametrize("changes,field", [
+    ({"status": "ok"}, "status"),
+    ({"sample_start": None}, "sample_start"),
+    ({"value": float("nan")}, "value"),
+    ({"sample_size": 0}, "sample_size"),
+    ({"unit": "ratio"}, "unit"),
+])
+def test_publish_rejects_invalid_metrics_before_controls_and_rename(tmp_path, monkeypatch, changes, field):
+    """无效指标不能形成正式 Result；已复制产物不再整套扫描。"""
+    original = ResultStore._materialize_files
+    def materialize(self, staging, bundle, runtime_root):
+        original(self, staging, bundle, runtime_root)
+        table = bundle.tables[0]
+        path = staging / next(iter(table.files))
+        rows = pq.read_table(path).to_pylist()
+        rows[0].update(changes)
+        pq.write_table(pa.Table.from_pylist(rows), path)
+    monkeypatch.setattr(ResultStore, "_materialize_files", materialize)
+    def controls(*args):
+        raise AssertionError("无效指标不得写发布控制文件")
+    monkeypatch.setattr(ResultStore, "_write_controls", controls)
+    with pytest.raises(ResultContractError, match=rf"字段 {field}: 实际 .*类型 .*期望"):
+        _finalize(tmp_path)
+    assert not list((tmp_path / "results").rglob("COMMITTED"))
+
+
+def test_metric_field_diagnostic_includes_timestamp_actual_type():
+    from datetime import datetime
+    from research_pipeline.results.metrics import validate_metric_row
+    definition = build_mainline_metric_registry().require("data.row_count@1.0.0")
+    row = dict(value=1.0, sample_size=1, unit="rows", sample_start=datetime(2026, 1, 1),
+               sample_end="2026-01-02", status="computed")
+    with pytest.raises(ResultContractError, match="sample_start: 实际 .*类型 datetime.*期望 非空字符串"):
+        validate_metric_row(row, definition)
+
+
+@pytest.mark.parametrize("row_count", [0, 2])
+def test_publish_rejects_missing_or_duplicate_declared_metrics(tmp_path, monkeypatch, row_count):
+    original = ResultStore._materialize_files
+    def materialize(self, staging, bundle, runtime_root):
+        original(self, staging, bundle, runtime_root)
+        path = staging / next(iter(bundle.tables[0].files))
+        table = pq.read_table(path)
+        changed = table.slice(0, 0) if row_count == 0 else pa.concat_tables([table, table])
+        pq.write_table(changed, path)
+    monkeypatch.setattr(ResultStore, "_materialize_files", materialize)
+    with pytest.raises(ResultContractError, match="metric_ref 行数无效.*期望每项恰好有一行"):
+        _finalize(tmp_path)
+    assert not list((tmp_path / "results").rglob("COMMITTED"))

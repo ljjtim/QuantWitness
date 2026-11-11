@@ -68,6 +68,8 @@ def _typed_canonical_digest(value: object, *, allow_iterators: bool) -> str:
 _SCALAR_BATCH_MAX_ITEMS = 256
 _SCALAR_BATCH_MAX_CHARACTERS = 16384
 _SCALAR_MAPPING_MAX_ITEMS = 64
+_WIDE_SCALAR_MAPPING_MAX_ITEMS = 256
+_WIDE_SCALAR_BUFFER_MAX_CHARACTERS = 16384
 _COMPACT_MAX_NODES = 256
 _COMPACT_MAX_CHARACTERS = 65536
 _STRING_TOKEN_PREFIX_LENGTH = len('{"type":"str","value":')
@@ -90,6 +92,8 @@ class _TypedCanonicalEncoder:
         self._source_snapshot: tuple[str, ...] | None = None
         self._source_part: str | None = None
         self._scalar_tokens: dict[tuple[type, str | int], str] = {}
+        self._wide_keys = None
+        self._wide_prefixes = ()
 
     def parts(self, value: object) -> Iterator[str]:
         root = self._root_pending
@@ -101,6 +105,12 @@ class _TypedCanonicalEncoder:
                 _scalar_or_scalar_sequence(item) for item in value.values()
             ):
                 yield self._mapping_part(value)
+                return
+            if (_SCALAR_MAPPING_MAX_ITEMS < len(value) <= _WIDE_SCALAR_MAPPING_MAX_ITEMS
+                    and all(_bounded_plain_scalar(item) for item in value.values())
+                    and all(type(key) is str and len(key) <= _SCALAR_TOKEN_MAX_CHARACTERS
+                            for key in value)):
+                yield from self._wide_scalar_mapping_parts(value)
                 return
             # 独立小对象沿单次 JSON 快路径；集合内的嵌套记录复用标量 token。
             if root and len(value) <= _SCALAR_MAPPING_MAX_ITEMS and all(
@@ -143,6 +153,31 @@ class _TypedCanonicalEncoder:
         if type(key) is str and len(key) <= _SCALAR_TOKEN_MAX_CHARACTERS:
             return self._scalar_part(key)[_STRING_TOKEN_PREFIX_LENGTH:-1]
         return canonical_json(key)
+
+    def _wide_scalar_mapping_parts(self, value: Mapping) -> Iterator[str]:
+        """宽标量行按固定字符额度交付，复用原有键与标量类型编码。"""
+        buffer = ['{"type":"object","value":{']
+        characters = len(buffer[0])
+        keys = tuple(value)
+        if keys != self._wide_keys:
+            self._wide_keys = keys
+            self._wide_prefixes = tuple(
+                (key, ("," if position else "") + canonical_json(key) + ":")
+                for position, key in enumerate(sorted(keys))
+            )
+        for key, prefix in self._wide_prefixes:
+            token = prefix + self._scalar_part(value[key])
+            if characters + len(token) > _WIDE_SCALAR_BUFFER_MAX_CHARACTERS:
+                yield "".join(buffer)
+                buffer = []
+                characters = 0
+            buffer.append(token)
+            characters += len(token)
+        if characters + 2 > _WIDE_SCALAR_BUFFER_MAX_CHARACTERS:
+            yield "".join(buffer)
+            buffer = []
+        buffer.append("}}")
+        yield "".join(buffer)
 
     def _bounded_container_part(self, value: object) -> str | None:
         """小嵌套结构共用一个有界缓冲；大集合和惰性来源仍逐段交付。"""
@@ -268,6 +303,15 @@ def _scalar_or_scalar_sequence(value: object) -> bool:
             if characters > _SCALAR_BATCH_MAX_CHARACTERS:
                 return False
     return True
+
+
+def _bounded_plain_scalar(value: object) -> bool:
+    """只纳入已有token上限内的原生标量，其他类型保留原路径。"""
+    if value is None or type(value) in (bool, float):
+        return True
+    if type(value) is str:
+        return len(value) <= _SCALAR_TOKEN_MAX_CHARACTERS
+    return type(value) is int and value.bit_length() <= _SCALAR_TOKEN_MAX_INTEGER_BITS
 
 
 

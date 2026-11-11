@@ -1,12 +1,15 @@
 # 文档导航
 
-研究主链是声明 → 准备与准入 → 执行 → Result → 报告或开发反馈。普通 Workspace execute 完成一次准备与准入，独立 package lint 用于主动诊断。
+研究主链是声明 → 准备与准入 → 执行 → Result → 报告或开发反馈。
+普通 Workspace execute 完成一次准备与准入，独立 package lint 用于主动诊断。
 
 ## 开始研究
 
-1. [第一项合成研究](workspace-quickstart.md)：准备输入、执行、报告、参数变体与恢复。
+1. [换手率因子入门](workspace-quickstart.md)：理解因子、历史窗口、未来标签和分组结果。
 2. [创建自己的研究](getting-started.md)：问题、样本、数据可见性、算法与指标。
 3. [基本数据接入](catalog.md)：字段、物理来源、Catalog Lock 和可见日期。
+
+   [直接输入与保存](direct-inputs.md)说明数据库读取和输入归档。
 4. [Result 与研究结论](evidence.md)：正式输出、声明限制、直接报告、比较与导出。
 5. [LEAN 首次回测](../examples/lean_quickstart/README.md)：Windows 独立安装、合成日线与一分钟、正式结果与报告。
 
@@ -22,24 +25,29 @@
 | 因子、模型和联合探索 | [因子](../integrations/rdagent/docs/factor-research.md) · [模型](../integrations/rdagent/docs/model-research.md) · [联合](../integrations/rdagent/docs/joint-research.md) |
 | 可选环境 | [RD-Agent](../integrations/rdagent/README.md) · [安装验收](../integrations/rdagent/docs/installation.md) |
 
-开发反馈来自成功 Result 的开发指标，最终 test/holdout 不参与循环选择。固定公式先确认定义并进行算法测试。
+开发反馈来自成功 Result 的开发指标，最终 test/holdout 不参与循环选择。
+固定公式先确认定义并执行算法测试。
 
 ## 模型、组合与交易
 
 | 问题 | 文档 |
 | --- | --- |
-| 训练、选择和最终评价 | [模型研究](walk_forward_model.md) · [研究系列与留出集](holdout-series.md) |
+| 训练、选择和最终评价 | [模型研究](walk_forward_model.md) · [已训练模型输入](completed-model-input.md) · [研究系列与留出集](holdout-series.md) |
 | 特征表达式与基线 | [Qlib 表达式](qlib-expressions.md) · [量价与选定 Alpha](qlib-factor-baselines.md) |
 | 模型交付与报告 | [模型文件](qlib-model-results.md) · [模型和组合报告](qlib-report.md) |
 | 风险约束组合 | [组合风险目标](qlib-portfolio-risk.md) |
-| 项目分钟策略 | [LEAN 执行](lean-execution.md) · [策略协议](strategy-protocol.md) |
-| 历史分钟范围 | [项目范围](minute-project-scope.md) · [规则来源](minute_rule_provenance.md) |
+| 项目分钟策略 | [LEAN 执行](lean-execution.md) · [策略协议](strategy-protocol.md) · [一分钟规则与执行](minute_simulation.md) |
+| 准入与选股、账户的分工 | [准入与执行边界](admission-execution.md) |
+| 分钟数据与规则 | [项目范围](minute-project-scope.md) · [参考范围](minute_reference_scope.md) · [规则快照](minute_market_rules.md) · [规则来源](minute_rule_provenance.md) |
+| 分钟计算与可见性 | [分钟算子](minute_operators.md) · [股票原始成交量与 PIT](equity_minute_raw_volume_pit.md) |
 | 订单、成交和账户 | [金融计算](financial_simulation.md) · [策略协议](strategy-protocol.md) |
-| 公司行动和信用账户 | [现货与信用](spot_account.md) |
-| 金融合同参考 | [共享期货](shared_futures.md) · [历史显式订单](explicit_orders.md) |
+| 期货账户、结算与换月 | [中国期货LEAN执行](lean-futures.md) · [期货结果合同](lean-futures-results.md) · [公开合成示例](../examples/lean_futures/README.md) |
+| 股票、ETF 账户和公司行动 | [现货账户与权益](spot_account.md) |
+| 库级成交成本归因 | [Bar TCA](bar_tca.md) |
 | 统计与选择偏差 | [稳健研究](robust_research.md) |
 
-数据可见性、标签、holdout、可用资金和交易规则在生产读取及状态转换处执行。算法正确性在开发时通过确定性案例、手算与必要差分验收。
+数据可见性、标签、holdout、可用资金和交易规则在生产读取及状态转换处执行。
+算法正确性在开发时通过确定性案例、手算与必要差分验收。
 
 ## 系统、恢复与资源
 
@@ -56,7 +64,8 @@
 - [安装与发布](release.md)、[独立使用验收](external-acceptance.md)。
 - [第三方许可](../THIRD_PARTY_NOTICES.md)、[许可证](../LICENSE)与[安全报告](../SECURITY.md)。
 
-能力以当前 capabilities 命令和机器清单为准。local_only 表示已记录的本地适用范围，不能扩展成全市场、全历史或任意环境认证。
+能力以当前 capabilities 命令和机器清单为准。
+local_only 表示已记录的本地适用范围，不能扩展成全市场、全历史或任意环境认证。
 
 ## 常用名称
 

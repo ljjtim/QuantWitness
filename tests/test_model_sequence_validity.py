@@ -214,6 +214,7 @@ def test_result_preserves_model_files_for_prediction_recovery(sequence_result, t
         for row in _read(root / port, "models").to_dict("records"):
             config = json.loads((root / port / row["config_path"]).read_text(encoding="utf-8"))
             files = [config["model_path"], config["weights_path"],
+                     *config.get("upstream_sources", []),
                      *[path for paths in config["processor_files"].values() for path in paths],
                      *config["sequence"]["files"].values()]
             for path in files:
@@ -222,6 +223,7 @@ def test_result_preserves_model_files_for_prediction_recovery(sequence_result, t
                 shutil.copyfile(root / port / path, target)
             config["model_path"] = port + "/" + config["model_path"]
             config["weights_path"] = port + "/" + config["weights_path"]
+            config["upstream_sources"] = [port + "/" + path for path in config.get("upstream_sources", [])]
             config["effective_fit_kwargs"]["save_path"] = config["weights_path"]
             config["processor_files"] = {name: [port + "/" + path for path in paths] for name, paths in config["processor_files"].items()}
             config["sequence"]["files"] = {name: port + "/" + path for name, path in config["sequence"]["files"].items()}

@@ -16,6 +16,9 @@ from .errors import RuntimeIntegrityError
 FINALIZE_STATUS_VERSION = "research-result-finalize-status-v1"
 _FINALIZE_STATUSES = frozenset({"pending", "succeeded", "failed"})
 _ERROR_FIELDS = frozenset({"error_code", "exception_type", "message"})
+_RESOURCE_DIMENSIONS = frozenset(
+    {"memory_bytes", "temp_bytes", "process_slots", "wall_milliseconds"}
+)
 _FAILURE_CONTEXT_FIELDS = frozenset(
     {
         "contract_version",
@@ -34,7 +37,25 @@ _FAILURE_CONTEXT_FIELDS = frozenset(
 
 
 def _valid_failure_context(value: object) -> bool:
-    if not isinstance(value, Mapping) or set(value) != _FAILURE_CONTEXT_FIELDS:
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("code") == "resource_exceeded":
+        exceeded = value.get("exceeded")
+        return (
+            set(value) == {"code", "exceeded"}
+            and isinstance(exceeded, Mapping)
+            and bool(exceeded)
+            and set(exceeded) <= _RESOURCE_DIMENSIONS
+            and all(
+                isinstance(usage, Mapping)
+                and set(usage) == {"actual", "limit"}
+                and type(usage["actual"]) is int
+                and type(usage["limit"]) is int
+                and usage["actual"] > usage["limit"] >= 0
+                for usage in exceeded.values()
+            )
+        )
+    if set(value) != _FAILURE_CONTEXT_FIELDS:
         return False
     output = value.get("output_budget")
     execution = value.get("execution_budget")
@@ -60,8 +81,8 @@ def _valid_failure_context(value: object) -> bool:
         and set(execution) == {"memory_bytes", "temp_bytes", "cpu_slots"}
         and type(execution.get("memory_bytes")) is int
         and execution["memory_bytes"] > 0
-        and type(execution.get("temp_bytes")) is int
-        and execution["temp_bytes"] >= 0
+        and (execution.get("temp_bytes") is None or (type(execution.get("temp_bytes")) is int
+             and execution["temp_bytes"] >= 0))
         and type(execution.get("cpu_slots")) is int
         and execution["cpu_slots"] > 0
         and isinstance(completed, list)

@@ -24,10 +24,13 @@ from .operator_runtime import RuntimeNodeOutputs, RuntimeNodeValue, OperatorRunt
 from .project_causal import CausalReadTrace
 from .project_operator_runtime import ProjectRuntimeInput, execute_project_worker_attempt
 from .project_output import ProjectOutputRoot
+from research_pipeline.extensions.project_bundle import _freeze_payload
 
 
 def execute_project_causal_node(service, *, node_context, run_id, attempt_id, environment, progress=None):
     parameters = service.project_parameters_by_node[node_context.node.node_id]
+    if parameters.get("worker_lifecycle") == "stateless_session":
+        parameters = _freeze_payload(parameters)
     if "worker_lifecycle" in parameters and parameters["worker_lifecycle"] != "stateless_session":
         raise RuntimeIntegrityError("未知的worker_lifecycle")
     plan = parse_causal_plan(parameters["causal_plan"])
@@ -39,13 +42,16 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
     formal_type = "research.feature-set.v1" if plan.kind == "feature" else "research.label.v1"
     if {port.port: port.artifact_type for port in token.manifest.operator_spec.output_ports}.get(plan.output_port) != formal_type:
         raise RuntimeIntegrityError("项目 causal_plan 输出端口或类型未绑定")
-    causal_inputs = _causal_inputs(node_context, environment, plan)
+    causal_inputs = _causal_inputs(node_context, environment, plan, minute_scope=parameters.get("minute_scope"))
     inputs, identities, timezones = causal_inputs
     direct_sources = getattr(causal_inputs, "direct_sources", {})
     external = node_context.external_store
     committed_by_port = {}
     inherited = ()
     state = None
+    from .artifact_lifecycle import CausalBatchLifecycle
+    lifecycle = CausalBatchLifecycle(node_context.work_dir, external)
+    pending_state_batch = None
     # 项目可依赖当前键集合，保持所有扩展的既有调用边界。
     max_keys = 8192
     if node_context.effective_resource_budget.memory_bytes < 256 * 1024**2:
@@ -57,12 +63,16 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
     if progress is not None:
         progress.start_work_progress(_work_batch_count(plan, max_keys))
     with session_scope as worker_session:
+        static_plan = _freeze_payload({key: value for key, value in plan.to_dict().items() if key != "work_items"})
+        if worker_session is not None:
+            identities, timezones, direct_sources = map(_freeze_payload, (identities, timezones, direct_sources))
         for index, item in enumerate(plan.iter_work_items(max_keys=max_keys)):
             state_input = state if plan.state_scope == "carry" else None
             lineage = inherited if state_input is not None else ()
             CausalReadTrace(plan, item, lineage, source_partition_identities=identities)
             work_plan = replace(plan, work_items=(item,))
-            worker_plan = work_plan.to_dict()
+            worker_plan = (_freeze_payload({**static_plan, "work_items": [item.to_dict()]})
+                           if worker_session is not None else work_plan.to_dict())
             work_root = node_context.work_dir / f"causal-{index:06d}"
             work_root.mkdir()
             result = execute_project_worker_attempt(
@@ -72,6 +82,7 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
                 parameters={**parameters, "causal_plan": worker_plan},
                 fixed_clock=node_context.fixed_clock, root_seed=node_context.root_seed,
                 budget=node_context.remaining_resource_budget(), state_in=state_input,
+                resource_check=node_context.remaining_resource_budget,
                 process_slots=node_context.process_slots,
                 worker_session=worker_session,
                 causal_context={"plan": worker_plan, "inherited_lineage": list(lineage),
@@ -84,6 +95,7 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
             # 核心在提交前再次验证状态来源与本次允许窗口，再用已有 attach 合同一一合并。
             checked = CausalReadTrace(plan, item, facts["lineage"], source_partition_identities=identities) if plan.state_scope == "carry" else None
             core_facts = pd.DataFrame(facts["records"])
+            batch_commits = []
             for output in result.outputs:
                 parquet = pq.ParquetFile(output.path)
                 metadata = parquet.metadata
@@ -110,10 +122,36 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
                         source.daily_time is not None for source in plan.sources) else None,
                 )
                 committed_by_port.setdefault(output.port, []).append(committed)
+                batch_commits.append(committed)
+                parquet.close()
             state = result.state
             inherited = tuple(facts["lineage"]) if state is not None else ()
             if checked is not None:
                 checked.core_time_facts()
+            # 工作副本删除前验收完整节点范围，正式提交与失败材料不在释放范围内。
+            from research_pipeline.platform.process_resources import _project_sampling_scope
+            from .resource_governor import ResourceUsageSampler, ResourceVector, _require_sampled_resources
+            with _project_sampling_scope(work_root) as sampler:
+                if sampler is None:
+                    sampler = ResourceUsageSampler(node_context.work_dir)
+                sampler._sample(force_scratch=True)
+                _require_sampled_resources(
+                    sampler, budget=node_context.effective_resource_budget,
+                    reservation=ResourceVector.from_budget(node_context.effective_resource_budget,
+                        process_slots=node_context.process_slots or sampler.max_processes),
+                )
+            completed = result.process_cleanup_status in {"complete", "session_active"}
+            if pending_state_batch is not None:
+                previous_root, previous_commits, previous_index = pending_state_batch
+                lifecycle.release(previous_root, commits=previous_commits, batch_index=previous_index,
+                    task_completed=completed, core_accepted=True, resources_accepted=True)
+                pending_state_batch = None
+            if state is None:
+                lifecycle.release(work_root, commits=batch_commits, batch_index=index,
+                    task_completed=completed, core_accepted=True, resources_accepted=True)
+            else:
+                # 下一批仍按原state_in路径读取；仅在下一批成功消费后释放此目录。
+                pending_state_batch = (work_root, batch_commits, index)
             if progress is not None:
                 progress.complete_work_batch(index + 1)
     values = {}
@@ -197,9 +235,9 @@ def _write_daily_causal_artifact(staging, commits, external, plan, environment):
             external.verify(commit.semantic_hash)
             for relative in commit.files:
                 if relative.endswith(".parquet"):
-                    parquet = pq.ParquetFile(external.objects_root / commit.semantic_hash / relative)
-                    source_schemas.append(parquet.schema_arrow)
-                    frame = parquet.read().to_pandas()
+                    with pq.ParquetFile(external.objects_root / commit.semantic_hash / relative) as parquet:
+                        source_schemas.append(parquet.schema_arrow)
+                        frame = parquet.read().to_pandas()
                     time_columns = (
                         ("observation_time", "available_time", "decision_time", "max_source_observation_time", "max_source_available_time")
                         if plan.kind == "feature" else
@@ -210,21 +248,18 @@ def _write_daily_causal_artifact(staging, commits, external, plan, environment):
                             frame[column] = pd.to_datetime(frame[column], utc=True, errors="raise")
                     yield frame
 
+    def partition_schema(name, index, schema):
+        source_schema = source_schemas[index]
+        if b"research_pipeline_causal_lineage" not in (source_schema.metadata or {}):
+            return schema
+        fields = [field.with_metadata(source_schema.field(field.name).metadata) for field in schema]
+        return pa.schema(fields, metadata={**(schema.metadata or {}), **(source_schema.metadata or {})})
+
     _write_partitioned_artifact(
         staging, partitioned_tables={table_name: frames()}, tables=lambda: {}, status="pass",
         extra={"contract_version": "project-causal-daily-v1", "semantics_hash": semantics.semantics_hash,
-               "causal_plan": plan.to_dict()},
+               "causal_plan": plan.to_dict()}, partition_schema=partition_schema,
     )
-    # 模型分区身份按记录计算；外层提交仍对保留日期证据后的完整文件封存。
-    for index, source_schema in enumerate(source_schemas):
-        if b"research_pipeline_causal_lineage" not in (source_schema.metadata or {}):
-            continue
-        target = staging / table_name / f"part-{index:05d}.parquet"
-        table = pq.ParquetFile(target).read()
-        fields = [field.with_metadata(source_schema.field(field.name).metadata) for field in table.schema]
-        schema = pa.schema(fields, metadata={**(table.schema.metadata or {}), **(source_schema.metadata or {})})
-        pq.write_table(table.cast(schema), target)
-
 
 class _CausalInputs(tuple):
     """保留原三项输入交接，并携带核心直接来源引用。"""
@@ -235,7 +270,7 @@ class _CausalInputs(tuple):
         return value
 
 
-def _causal_inputs(node_context, environment, plan):
+def _causal_inputs(node_context, environment, plan, *, minute_scope=None):
     from research_pipeline.data_plane.direct_sources import DirectDatasetRef
     from research_pipeline.runtime.adapters.common import _input_data_bundle, _input_external_root
 
@@ -255,7 +290,8 @@ def _causal_inputs(node_context, environment, plan):
         partitions = {partition for item in plan.work_items for partition in item.source_partitions[source.port]}
         if node_context.inputs[source.port].artifact_ref.artifact_type in {"data.minute-bars.v1", "data.minute-bars.1m.v1"}:
             runtime_input, source_ids, timezone = prepare_causal_minute_input(
-                node_context, environment, source, raw, admitted, partition_ids=partitions
+                node_context, environment, source, raw, admitted, partition_ids=partitions,
+                minute_scope=minute_scope,
             )
             inputs.append(runtime_input)
             identities[source.port] = source_ids
@@ -292,7 +328,7 @@ def _causal_inputs(node_context, environment, plan):
 
 
 def prepare_causal_minute_input(
-    node_context, environment, source, raw, admitted, *, partition_ids: Sequence[str]
+    node_context, environment, source, raw, admitted, *, partition_ids: Sequence[str], minute_scope=None
 ):
     """当前准入扫描计划必须生成同一个原始分钟引用，不能借用其他来源。"""
     from research_pipeline.runtime.adapters.minute_io import _minute_scan_plan_from_environment
@@ -305,6 +341,12 @@ def prepare_causal_minute_input(
         raise RuntimeIntegrityError("项目因果分钟输入与当前准入扫描计划不一致")
     if dataset.lineage.get("admitted_plan_hash") != admitted.plan_hash:
         raise RuntimeIntegrityError("项目因果分钟输入的准入计划身份不一致")
+    scope_input = None
+    if scan.minute_asset_class == "cn_future":
+        if minute_scope is None or scan.minute_scope != minute_scope:
+            raise RuntimeIntegrityError("期货分钟因果节点与冻结扫描 minute_scope 不一致")
+        from .project_causal_minute import frozen_minute_scope_input
+        scope_input = frozen_minute_scope_input(environment, minute_scope, dataset)
     selected = tuple(sorted(set(partition_ids)))
     by_key = {partition.partition_key: partition for partition in dataset.partitions}
     if not selected or not set(selected) <= set(by_key):
@@ -319,6 +361,7 @@ def prepare_causal_minute_input(
         "partitioned_dataset": dataset.to_dict(),
         "allowed_roots": {"minute_data": str(root)},
         "column_map": {column: column_map[column] for column in source.columns},
+        "minute_scope_input": scope_input,
     }).encode("utf-8")
     value = node_context.inputs[source.port]
     item = ProjectRuntimeInput.from_verified(

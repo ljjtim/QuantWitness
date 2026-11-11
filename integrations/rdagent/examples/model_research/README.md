@@ -1,5 +1,25 @@
-# 生成式模型教学研究
+# 合成模型结构研究
 
-从冻结单层回归开始，由 RD-Agent 模型提案组件给出非线性跳连结构，完成编译修复、Qlib 训练、正式 Result和开发反思。数据与响应均为教学合成内容。
+本例使用虚构ETF与固定特征。
+基线是单层回归网络。
+后续候选包含非线性隐层与原输入跳连。
+固定响应覆盖结构修复、训练和开发反思。
 
-操作、依赖和恢复见[生成式模型研究](../../docs/model-research.md)。`prepare.py` 只准备输入和请求；`model-run` 执行实际研究。所有输出目录显式指定。
+## 运行
+
+前置条件见[模型研究](../../docs/model-research.md)。
+在公开源码根执行命令。
+WORK指向仓库外目录。
+
+```bash
+python integrations/rdagent/examples/model_research/prepare.py --output "$WORK/model"
+python -m quantwitness_rdagent model-run --request "$WORK/model/request.json"
+python -m quantwitness_rdagent model-inspect --request "$WORK/model/request.json"
+python -m quantwitness_rdagent model-resume --request "$WORK/model/request.json"
+```
+
+准备只生成材料，不训练或调用模型。
+运行保存网络源码、处理器、权重和正式Result。
+请求使用rd-model-research-v2。
+训练设置与开发范围随会话冻结。
+最终test/holdout不进入提案或反思。

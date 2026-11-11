@@ -30,6 +30,7 @@ public sealed partial class ChinaAStockModels
     public ChinaAStockFeeModel FeeModel { get; }
     public ChinaAStockBrokerageModel BrokerageModel { get; }
     public Func<DateTime, int, bool>? BeforeDailyOpen { get; set; }
+    public Func<Symbol, DateTime, bool>? IsDelisted { get; set; }
 
     public ChinaAStockModels(ChinaRuleBook ruleBook, Func<Symbol, string> instrumentId, Func<Symbol, decimal> lockedBonusQuantity,
         Func<Symbol, string>? assetClass = null)
@@ -69,6 +70,7 @@ public sealed partial class ChinaAStockModels
 
     public decimal SellableQuantity(Security security, DateTime utcTime)
     {
+        if (IsDelisted?.Invoke(security.Symbol, utcTime) == true) return 0m;
         var day = _book.TradingDate(utcTime);
         var locked = _lockedBonusQuantity(security.Symbol);
         if (locked < 0 || locked != decimal.Truncate(locked)) throw new InvalidOperationException("外部锁定股份必须为非负整数");
@@ -85,6 +87,7 @@ public sealed partial class ChinaAStockModels
 
     internal string? Validate(Security security, Order order, DateTime utc, decimal? requested = null, decimal? limitPrice = null)
     {
+        if (IsDelisted?.Invoke(security.Symbol, utc) == true) return "退市生效后不能交易";
         if (!Supported(order.Type)) return $"不支持的订单类型：{order.Type}；仅支持 Market、Limit、MarketOnOpen";
         if (security.Type != SecurityType.Equity || security.QuoteCurrency.Symbol != "CNY") return "仅支持人民币 A 股现货";
         var rule = Rule(security.Symbol, utc);
@@ -92,7 +95,8 @@ public sealed partial class ChinaAStockModels
             return "A股股票必须使用T+1规则";
         rule.RequireVisibleReference(utc);
         if (rule.Paused) return "当时处于停牌状态";
-
+        if (order.Type == OrderType.Market && !rule.MarketOrderAllowed)
+            return "当时市场规则不允许市价申报";
         var signed = requested ?? order.Quantity;
         if (signed == 0 || Math.Sign(signed) != Math.Sign(order.Quantity)) return "不支持零数量或修改买卖方向";
         var buy = signed > 0;
@@ -182,6 +186,15 @@ public sealed partial class ChinaAStockModels
     {
         if (fill.FillQuantity == 0) return fill;
         var utc = Now(security);
+        if (IsDelisted?.Invoke(security.Symbol, utc) == true)
+        {
+            fill.FillQuantity = 0;
+            fill.FillPrice = 0;
+            fill.Status = order.Status;
+            fill.OrderFee = OrderFee.Zero;
+            fill.Message = "退市生效后不能交易";
+            return fill;
+        }
         var bar = security.Cache.GetData<TradeBar>();
         var dailyOpen = bar is DailyOpenBar;
         if (bar == null || (!dailyOpen && bar.Period != TimeSpan.FromMinutes(1)) || bar.IsFillForward)
@@ -194,7 +207,8 @@ public sealed partial class ChinaAStockModels
         if (order.Type == OrderType.MarketOnOpen && (rule.AvailableAt.UtcDateTime > start || rule.ValidFrom?.UtcDateTime > start))
             throw new InvalidOperationException("MOO 开盘消费不能使用分钟内才出现的规则");
         if (order.Type == OrderType.MarketOnOpen) rule.RequireVisibleReference(start);
-        var reason = Validate(security, order, utc);
+        var validationReason = Validate(security, order, utc);
+        var reason = validationReason;
         // 订单只能使用提交或修改之后开始的分钟，不能回填已完成分钟成交。
         if (order.Time > start || (order.LastUpdateTime.HasValue && order.LastUpdateTime.Value > start))
             reason = "订单提交或修改晚于该分钟开始，等待下一完整分钟";
@@ -217,6 +231,7 @@ public sealed partial class ChinaAStockModels
         if (protection.HasValue && ((order.Direction == OrderDirection.Buy && fill.FillPrice > protection)
             || (order.Direction == OrderDirection.Sell && fill.FillPrice < protection)))
             reason = "原生候选成交价超出市价保护价";
+        reason = validationReason ?? reason;
         if (reason != null)
         {
             fill.FillQuantity = 0;

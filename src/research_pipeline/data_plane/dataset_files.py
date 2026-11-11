@@ -448,20 +448,54 @@ class VerifiedDataset:
         expression = _filter_expression(
             filters, allowed_columns=allowed_columns, schema=self.schema,
         )
-        for path in self._require_current_binding():
-            scanner = ds.dataset(str(path), format="parquet").scanner(
-                columns=list(columns),
-                filter=expression,
-                batch_size=batch_size,
-                batch_readahead=0,
-                fragment_readahead=1,
-                use_threads=False,
-                fragment_scan_options=ds.ParquetFragmentScanOptions(pre_buffer=False),
-            )
-            for batch in scanner.to_batches():
-                if int(batch.nbytes) > self.max_batch_bytes:
-                    raise SnapshotIntegrityError("扫描 RecordBatch 超过批准内存上限")
-                yield batch
+        files = self._require_current_binding()
+        fragments = self._ordered_fragments(files)
+        for fragment in fragments:
+            selected = fragment.split_by_row_group(filter=expression, schema=self.schema)
+            if not selected:
+                continue
+            for part in selected:
+                scanner = ds.Scanner.from_fragment(
+                    part, schema=self.schema,
+                    columns=list(columns),
+                    filter=expression,
+                    batch_size=batch_size,
+                    batch_readahead=0,
+                    fragment_readahead=1,
+                    use_threads=False,
+                    fragment_scan_options=ds.ParquetFragmentScanOptions(pre_buffer=False),
+                )
+                for batch in scanner.to_batches():
+                    if int(batch.nbytes) > self.max_batch_bytes:
+                        raise SnapshotIntegrityError("扫描 RecordBatch 超过批准内存上限")
+                    yield batch
+
+    def _ordered_fragments(self, files):
+        """在当前验证生命周期保存已核验文件的footer，文件顺序保持不变。"""
+        import pyarrow.dataset as ds
+
+        def build():
+            fragments = []
+            stamps = []
+            for path in files:
+                fragment = next(ds.dataset(str(path), format="parquet").get_fragments())
+                fragment.ensure_complete_metadata()
+                fragments.append(fragment)
+                stat = path.stat()
+                stamps.append((stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+            return tuple(fragments), tuple(stamps)
+
+        session = current_artifact_verification()
+        identity = "|".join((str(files[0].parent), self._reference.manifest_hash,
+                             *(str(path) for path in files)))
+        fragments, stamps = (build() if session is None else session.resolve(
+            "parquet_fragment_index", identity, build,
+        ))
+        for path, expected in zip(files, stamps):
+            stat = path.stat()
+            if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns) != expected:
+                raise SnapshotIntegrityError("dataset artifact 文件在扫描会话内发生变化")
+        return fragments
 
     def _require_current_binding(self) -> tuple[Path, ...]:
         """复用冻结文件列表，同时保留引用和分区选择约束。"""
@@ -493,6 +527,67 @@ class VerifiedDataset:
 
     def __reduce__(self):
         raise TypeError("VerifiedDataset 不允许 pickle；worker 必须重新解析不可变工件引用")
+
+class _TemporalBatch:
+    """单次核心消费内的有界历史，不延长来源绑定生命周期。"""
+
+    iter_batches_at = VerifiedDataset.iter_batches_at
+    iter_temporal_fact_batches = VerifiedDataset.iter_temporal_fact_batches
+    _record_batch = VerifiedDataset._record_batch
+
+    def __init__(self, dataset, table):
+        self.manifest = dataset.manifest
+        self.schema = table.schema
+        self.max_batch_rows = dataset.max_batch_rows
+        self.max_batch_bytes = dataset.max_batch_bytes
+        self._table = table
+
+    def _iter_ordered_file_batches(self, *, columns, filters, allowed_columns, batch_size):
+        import pyarrow.dataset as ds
+
+        expression = _filter_expression(
+            filters, allowed_columns=allowed_columns, schema=self.schema,
+        )
+        for batch in ds.dataset(self._table).scanner(
+            columns=list(columns), filter=expression, batch_size=batch_size,
+            batch_readahead=0, fragment_readahead=1, use_threads=False,
+        ).to_batches():
+            if batch.nbytes > self.max_batch_bytes:
+                raise SnapshotIntegrityError("扫描 RecordBatch 超过批准内存上限")
+            yield batch
+
+
+def read_temporal_batch(dataset, *, plan, filters, max_bytes, batch_size):
+    """一次读取完整批内历史，随后复用正式时态选择与谓词处理。"""
+    import pyarrow as pa
+
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise SnapshotIntegrityError("批内时态历史内存预算必须为正整数")
+    if dataset.manifest.get("temporal_source") is not True:
+        raise SnapshotIntegrityError("批内历史要求正式时态来源")
+    if dataset.manifest.get("admitted_plan_hash") != plan.plan_hash:
+        raise SnapshotIntegrityError("批内历史与 admitted plan 不一致")
+    if type(batch_size) is not int or not 0 < batch_size <= dataset.max_batch_rows:
+        raise SnapshotIntegrityError("扫描 batch_size 超过批准上限")
+    fields = plan.temporal_selection.required_scan_fields
+    # 证券列不一定属于修订实体键；沿用正式选择前可下推的字段集合。
+    stable_filters = tuple(item for item in filters
+                           if item.field in plan.temporal_selection.stable_filter_fields)
+    batches = []
+    total_bytes = 0
+    for batch in dataset._iter_ordered_file_batches(
+        columns=fields, filters=stable_filters, allowed_columns=fields, batch_size=batch_size,
+    ):
+        if batch.nbytes > dataset.max_batch_bytes:
+            raise SnapshotIntegrityError("扫描 RecordBatch 超过批准内存上限")
+        total_bytes += batch.get_total_buffer_size()
+        if total_bytes > max_bytes:
+            raise SnapshotIntegrityError("批内完整时态历史超过节点分配的内存预算")
+        batches.append(batch)
+    schema = pa.schema([dataset.schema.field(field) for field in fields])
+    return _TemporalBatch(dataset, pa.Table.from_batches(batches, schema=schema))
+
+
 class ParquetArtifactResolver:
     """由 supervisor 固定允许根，项目声明不能改变。"""
 

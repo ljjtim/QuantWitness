@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Mapping
 
 import pyarrow as pa
-import pyarrow.compute as pc
+
+from research_pipeline.results import DatasetFilter
 
 REPORT_REQUEST_VERSION = "qlib-research-report-v1"
 _GRAPHS = {"group_return", "pred_ic", "pred_autocorr"}
@@ -112,16 +113,17 @@ def read_prediction_frame(context, request: Mapping):
     dates = {key: date.fromisoformat(value) for key, value in request["window"].items()}
     batches, rows, used = [], 0, 0
     batch_size = max(1, min(8192, budget["max_rows"] + 1, budget["memory_bytes"] // 1024))
-    for batch in context.snapshot.iter_table_batches(schema_id, columns=columns, batch_size=batch_size):
-        if batch.nbytes + used * 8 > budget["memory_bytes"]:
+    filters = (
+        DatasetFilter("observation_session", "ge", dates["start"]),
+        DatasetFilter("observation_session", "le", dates["end"]),
+        *(DatasetFilter(name, "eq", value) for name, value in selection.items()
+          if not (name == "fold_id" and value == "*")),
+    )
+    for selected in context.snapshot.iter_table_batches(
+        schema_id, columns=columns, batch_size=batch_size, filters=filters,
+    ):
+        if selected.nbytes + used * 8 > budget["memory_bytes"]:
             raise ValueError("报告读取超出 memory_bytes，请缩小窗口或增加预算")
-        mask = pc.and_(pc.greater_equal(batch.column("observation_session"), dates["start"]),
-                       pc.less_equal(batch.column("observation_session"), dates["end"]))
-        for name, value in selection.items():
-            if name == "fold_id" and value == "*":
-                continue
-            mask = pc.and_(mask, pc.equal(batch.column(name), value))
-        selected = batch.filter(mask)
         rows += selected.num_rows
         used += selected.nbytes
         if rows > budget["max_rows"] or used * 8 > budget["memory_bytes"]:

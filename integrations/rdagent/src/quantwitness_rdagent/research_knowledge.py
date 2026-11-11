@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 
 from .contracts import write_json
-from .factor_research import DAI_FACTOR_CONTRACT, canonical_expression, factor_contract, feature_expression_slot, validate_factor_research
+from .factor_research import canonical_expression, factor_space, feature_expression_slot, validate_factor_research
 from .package_campaign import _check_development_package, project_development_metric
 
-VERSION = "rd-research-knowledge-v2"
+VERSION = "rd-research-knowledge-v3"
 _METRIC_FIELDS = ("metric_id", "unit", "frequency", "direction", "annualization_policy", "measurement_semantics")
 _DOMAIN_FIELDS = ("calendar_id", "snapshot_scope", "price_basis")
 _REFLECTION_FIELDS = ("observations", "hypothesis_evaluation", "new_hypothesis", "reason", "decision")
@@ -49,8 +49,7 @@ def _scope(design, development):
         raise ValueError("资产和会话范围不得重复")
     if any(not start <= date.fromisoformat(day) <= end for day in sessions):
         raise ValueError("研究会话超出开发范围")
-    if factor_contract(design) == DAI_FACTOR_CONTRACT:
-        result["factor_contract"] = DAI_FACTOR_CONTRACT
+    result["factor_space"] = factor_space(design)
     result.update(entities=sorted(entities), research_sessions=sorted(sessions))
     return result
 
@@ -88,7 +87,7 @@ def _formal_record(root, candidate, record, template, base_design):
     _check_development_package(package, template["development"])
     design = _package_design(package)
     expected = deepcopy(base_design)
-    expected["feature_expressions"] = {feature_expression_slot(base_design): canonical_expression(record["expression"], contract=factor_contract(base_design))}
+    expected["feature_expressions"][feature_expression_slot(base_design)] = canonical_expression(record["expression"], space=factor_space(base_design))
     if design != expected:
         raise ValueError("轮次表达式或研究范围与正式变体包不符")
     execution = Path(_read(experiment / "candidates" / candidate / "execution-ref.json")["execution_root"])
@@ -196,7 +195,7 @@ def _build_index(session_root):
             "source": {"record_ref": str(path), "request_ref": str(root / "request.json")}}
         if "expression" in record:
             try:
-                entry["expression"] = canonical_expression(record["expression"], contract=factor_contract(design))
+                entry["expression"] = canonical_expression(record["expression"], space=factor_space(design))
             except ValueError:
                 if status == "evaluated":
                     raise
@@ -239,7 +238,7 @@ def _compatible(record, development, objective, metric_description, scope):
     if _time(record["as_of"]) > _time(development["as_of"]):
         return False
     prior = record["design_scope"]
-    if factor_contract(prior) != factor_contract(scope):
+    if factor_space(prior) != factor_space(scope):
         return False
     if any(prior[key] != scope[key] for key in _DOMAIN_FIELDS):
         return False

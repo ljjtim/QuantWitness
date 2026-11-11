@@ -256,16 +256,21 @@ def _compile_trusted_context(package, args):
 
 
 def _declared_resource_summary(plan, registry) -> dict[str, object]:
-    """只汇总 OperatorDefinition 已声明预算，不猜运行规模或修改研究语义。"""
+    """准备后使用冻结 DAG，lint 使用算子声明；不猜规模或改预算。"""
     if registry is None:
         raise ValueError("package lint 缺少算子注册表")
     from research_pipeline.extensions.project_admission import ProjectOperatorImplementationToken
     from research_pipeline.runtime.operator_definitions import build_mainline_operator_manifest
 
+    from research_pipeline.runtime.operator_registry import effective_node_resource_profile
     manifest = build_mainline_operator_manifest()
     specifications = {
         (item.operator_id, item.operator_version): item
         for item in registry.operator_specs
+    }
+    dag = getattr(plan, "dag", None)
+    frozen_budgets = {} if dag is None else {
+        node.node_id: node.resource_budget.to_dict() for node in dag.nodes
     }
     nodes = []
     for node in plan.recipe.nodes:
@@ -287,13 +292,16 @@ def _declared_resource_summary(plan, registry) -> dict[str, object]:
                 "operator_id": node.operator_id,
                 "operator_version": node.operator_version,
                 "implementation_scope": implementation_scope,
-                "resource_profile": dict(specification.resource_profile),
+                "resource_profile": {
+                    **effective_node_resource_profile(node, specification),
+                    **(frozen_budgets[node.node_id] if dag is not None else {}),
+                },
             }
         )
     profiles = [item["resource_profile"] for item in nodes]
     return {
         "status": "declared",
-        "basis": "operator_definition.resource_profile",
+        "basis": "frozen_dag.resource_budget" if dag is not None else "operator_definition.resource_profile",
         "nodes": nodes,
         "summary": {
             "max_memory_bytes": max(int(item["memory_bytes"]) for item in profiles),

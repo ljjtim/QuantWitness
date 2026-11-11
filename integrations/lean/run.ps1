@@ -21,11 +21,15 @@ if(!$LeanHome) { $LeanHome=$Output+'-installation' }
 if(!(Test-Path -LiteralPath $LeanHome)) {
  & (Join-Path $PSScriptRoot 'install.ps1') -LeanHome $LeanHome -FromPackage $FromPackage -DownloadCache $DownloadCache -NugetCache $NugetCache
 }
-if($RefreshPackage) { & (Join-Path $PSScriptRoot 'refresh-package.ps1') -LeanHome $LeanHome }
 $python=Join-Path $LeanHome 'python-env/Scripts/python.exe'
 $env:PYTHONDONTWRITEBYTECODE='1'
 Remove-Item Env:PYTHONPATH,Env:PYTHONHOME -ErrorAction SilentlyContinue
-$runArguments=@('--from-package',$FromPackage,'--lean-home',$LeanHome,'--catalog-lock',$CatalogLock,'--output',$Output)
+$syncArguments=@('--lean-home',$LeanHome)
+if($RefreshPackage) { $syncArguments+='--force-package' }
+if($NugetCache) { $syncArguments+=@('--nuget-cache',$NugetCache) }
+& $python -B -X utf8 (Join-Path $PSScriptRoot 'sync_installation.py') @syncArguments
+if($LASTEXITCODE -ne 0) { throw 'LEAN源码同步失败，未启动研究' }
+$runArguments=@('--from-package',$FromPackage,'--lean-home',$LeanHome,'--catalog-lock',$CatalogLock,'--output',$Output,'--refresh-runtime')
 if($DataDb) { $runArguments+=@('--data-db',$DataDb) }
 else { $runArguments+=@('--input-snapshot-manifest',$InputSnapshotManifest) }
 if($MinuteRoot) { $runArguments+=@('--minute-root',$MinuteRoot) }

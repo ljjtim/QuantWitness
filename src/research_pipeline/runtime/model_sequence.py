@@ -21,14 +21,25 @@ def sequence_step(parameters):
     return value
 
 
-def build_runtime_windows(features, targets, *, calendar, columns, step_len, budget):
+def _require_window_build_budget(features, targets, *, step_len, budget):
     # 成员行、宽表与构建期间的索引副本都计入同一节点预算。
-    budget.require_additional(3 * pandas_frame_bytes(features) + len(targets) * step_len * 160,
+    budget.require_additional(2 * pandas_frame_bytes(features) + len(targets) * step_len * 32,
                               label="序列窗口构建工作集")
+
+
+def build_runtime_windows(features, targets, *, calendar, columns, step_len, budget, _feature_context=None):
+    if _feature_context is None:
+        _require_window_build_budget(features, targets, step_len=step_len, budget=budget)
     windows = build_sequence_windows(features, targets, calendar_sessions=calendar,
-                                     feature_columns=columns, step_len=step_len)
+                                     feature_columns=columns, step_len=step_len,
+                                     _feature_context=_feature_context)
     last_day = pd.to_datetime(targets.observation_session).max().date()
-    windows = replace(windows, context=windows.context.loc[windows.context.observation_session <= last_day].copy())
+    visible_context = windows.context.observation_session <= last_day
+    if not visible_context.all():
+        budget.require_additional(pandas_frame_bytes(windows.context),
+                                  label="序列context末端裁剪工作集")
+        windows = replace(windows, context=windows.context.loc[visible_context].copy())
+    del visible_context
     for name in WINDOW_TABLES:
         budget.reserve_frame(getattr(windows, name), label=f"sequence {name}")
     return windows
@@ -65,7 +76,7 @@ def load_runtime_windows(root, metadata, budget, loader):
 
 
 def validate_sequence_candidates(candidates, windows):
-    lengths = {item["dataset"]["step_len"] for item in candidates if item["model"]["class"] in {"GRU", "LSTM", "TransformerModel"}}
+    lengths = {item["dataset"]["step_len"] for item in candidates if item["model"]["class"] in {"GRU", "LSTM", "TransformerModel", "GATs", "ProjectQlibModel"}}
     if lengths and (windows is None or lengths != {windows.step_len}):
         raise ModelMainlineError("全部序列候选必须匹配split冻结的sequence_step_len")
     if windows is not None and not lengths:
@@ -73,7 +84,7 @@ def validate_sequence_candidates(candidates, windows):
 
 
 def sequence_for_candidate(windows, candidate, budget):
-    if candidate["model"]["class"] not in {"GRU", "LSTM", "TransformerModel"}:
+    if candidate["model"]["class"] not in {"GRU", "LSTM", "TransformerModel", "GATs", "ProjectQlibModel"}:
         return None
     if windows is None or candidate["dataset"]["step_len"] != windows.step_len:
         raise ModelMainlineError("序列候选与序列工件不一致")
@@ -89,12 +100,23 @@ def sequence_for_candidate(windows, candidate, budget):
         network_bytes = 1000 * width * 4 + layers * (32 * heads * windows.step_len ** 2 + 64 * windows.step_len * (width + 2048))
     else:
         hidden = kwargs.get("hidden_size", 64)
-        gate_count = 4 if model_class == "LSTM" else 3
+        gate_count = 4 if model_class == "LSTM" or kwargs.get("base_model") == "LSTM" else 3
         parameter_count = gate_count * hidden * (feature_count + hidden + 2) + (layers - 1) * gate_count * hidden * (2 * hidden + 2) + hidden + 1
         network_bytes = windows.step_len * layers * hidden * (64 if gate_count == 4 else 32)
+    batch_contract = candidate.get("dataset", {}).get("batch_contract", "daily_cross_section" if model_class in {"GATs", "ProjectQlibModel"} else "sample")
+    if batch_contract == "daily_cross_section":
+        maximum_nodes = int(windows.targets.groupby("observation_session").size().max())
+        depth = candidate.get("dataset", {}).get("graph_layers", 1)
+        hidden = kwargs.get("hidden_size", 64)
+        # 每层拼接两端hidden，保留前后向激活与注意力张量，不只计N²分数。
+        network_bytes += maximum_nodes * windows.step_len * layers * hidden * 64
+        network_bytes += depth * maximum_nodes ** 2 * (2 * hidden + 4) * 16
+    else:
+        network_bytes *= kwargs.get("batch_size", 1)
     # 采样器展开日期×证券索引；模型参数同时计入梯度、Adam状态与最优权重副本。
-    dense_bytes = len(windows.calendar_sessions) * windows.context.entity_id.nunique() * (feature_count + 2) * 8
+    dense_bytes = len(windows.context) * (feature_count + 2) * 8
+    index_bytes = windows.context.observation_session.nunique() * windows.context.entity_id.nunique() * 8
     frame_bytes = sum(pandas_frame_bytes(getattr(windows, name)) for name in WINDOW_TABLES)
-    budget.require_additional(int(6 * frame_bytes + 4 * dense_bytes + 32 * parameter_count + network_bytes),
+    budget.require_additional(int(2 * dense_bytes + index_bytes + 32 * parameter_count + network_bytes),
                               label=f"Qlib序列数据集与{model_class}训练工作集")
     return windows

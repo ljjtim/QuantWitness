@@ -35,6 +35,7 @@ class ResearchRunEnvironment:
     resource_timeout_seconds: float | None
     strategy_spec_hashes: Mapping[str, str]
     minute_scope_inputs: Mapping[str, object] = field(default_factory=dict)
+    minute_scan_plans: Mapping[str, object] = field(default_factory=dict)
 
 
 def _environment(context: OperatorRuntimeContext) -> ResearchRunEnvironment:
@@ -212,7 +213,10 @@ def _input_external_root(context: OperatorRuntimeContext, port: str) -> Path:
     commit = context.external_store.verify(value.external_commit.semantic_hash)
     if commit != value.external_commit:
         raise ValueError(f"统一 Runtime 输入目录工件发生漂移: {port}")
-    return context.external_store.objects_root / commit.semantic_hash
+    root = context.external_store.objects_root / commit.semantic_hash
+    from ..logical_table_verification import bind_verified_table_input
+    bind_verified_table_input(root, commit)
+    return root
 
 
 def _input_external_payload(

@@ -42,14 +42,14 @@ class ExecutionMode(str, Enum):
 class ResourceCapacity:
     memory_bytes: int
     cpu_slots: int
-    temp_bytes: int
+    temp_bytes: int | None
     max_workers: int
 
     def __post_init__(self) -> None:
         positive = (self.memory_bytes, self.cpu_slots, self.max_workers)
         if any(type(value) is not int or value <= 0 for value in positive):
             raise RuntimeAdmissionError("运行内存、CPU 和 worker 容量必须是正整数")
-        if type(self.temp_bytes) is not int or self.temp_bytes < 0:
+        if self.temp_bytes is not None and (type(self.temp_bytes) is not int or self.temp_bytes < 0):
             raise RuntimeAdmissionError("运行 scratch/temp 容量必须是非负整数")
 
     def to_dict(self) -> dict[str, int]:
@@ -59,6 +59,28 @@ class ResourceCapacity:
             "temp_bytes": self.temp_bytes,
             "max_workers": self.max_workers,
         }
+
+
+def require_node_capacity(
+    budget: ResourceBudget, capacity: ResourceCapacity, *, node_id: str | None = None,
+) -> None:
+    """逐维核对声明预算，保留节点身份及所有超限数值。"""
+    exceeded = {
+        dimension: {"requested": getattr(budget, dimension), "capacity": getattr(capacity, dimension)}
+        for dimension in ("memory_bytes", "cpu_slots", "temp_bytes")
+        if getattr(capacity, dimension) is not None and (getattr(budget, dimension) is None or getattr(budget, dimension) > getattr(capacity, dimension))
+    }
+    if not exceeded:
+        return
+    details = "; ".join(
+        f"{dimension}: requested={values['requested']}, capacity={values['capacity']}"
+        for dimension, values in exceeded.items()
+    )
+    error = RuntimeAdmissionError(
+        f"节点声明预算超过运行总容量: node_id={node_id}, {details}"
+    )
+    error.failure_payload = {"node_id": node_id, "exceeded": exceeded}
+    raise error
 
 
 @dataclass(frozen=True, order=True)
@@ -128,20 +150,19 @@ class ReservationLedger:
     def _fits(self, budget: ResourceBudget) -> bool:
         used_memory = sum(item.memory_bytes for item in self._active.values())
         used_cpu = sum(item.cpu_slots for item in self._active.values())
-        used_temp = sum(item.temp_bytes for item in self._active.values())
+        used_temp = sum(item.temp_bytes or 0 for item in self._active.values())
         return (
             len(self._active) < self._limit_workers()
             and used_memory + budget.memory_bytes <= self.capacity.memory_bytes
             and used_cpu + budget.cpu_slots <= self.capacity.cpu_slots
-            and used_temp + budget.temp_bytes <= self.capacity.temp_bytes
+            and (self.capacity.temp_bytes is None or (budget.temp_bytes is not None and used_temp + budget.temp_bytes <= self.capacity.temp_bytes))
         )
 
-    def require_single_node_admission(self, budget: ResourceBudget) -> None:
-        if budget.memory_bytes > self.capacity.memory_bytes or budget.cpu_slots > self.capacity.cpu_slots or budget.temp_bytes > self.capacity.temp_bytes:
-            raise RuntimeAdmissionError("节点声明预算超过运行总容量")
+    def require_single_node_admission(self, budget: ResourceBudget, *, node_id: str | None = None) -> None:
+        require_node_capacity(budget, self.capacity, node_id=node_id)
 
     def reserve(self, candidate: ReadyCandidate) -> None:
-        self.require_single_node_admission(candidate.budget)
+        self.require_single_node_admission(candidate.budget, node_id=candidate.node_id)
         if candidate.key in self._active:
             raise RuntimeAdmissionError("资源 reservation 重复")
         if not self._fits(candidate.budget):
@@ -158,7 +179,7 @@ class ReservationLedger:
         shadow = ReservationLedger(self.capacity, self.mode)
         shadow._active = dict(self._active)
         for candidate in sorted(candidates, key=lambda item: (item.topological_level, item.node_id, item.partition_key or "")):
-            shadow.require_single_node_admission(candidate.budget)
+            shadow.require_single_node_admission(candidate.budget, node_id=candidate.node_id)
             if shadow._fits(candidate.budget):
                 shadow.reserve(candidate)
                 selected.append(candidate)

@@ -14,6 +14,10 @@ from types import MappingProxyType
 
 import psutil
 
+from research_pipeline.platform.process_resources import (
+    _owned_process_descendants, _measure_scratch_scopes, _nonoverlapping_roots,
+)
+
 from .errors import RuntimeAdmissionError, RuntimeIntegrityError, RuntimeWorkerError
 from .operator_runtime import OperatorRuntimeContext
 from .resource_governor import ResourceUsageSampler
@@ -69,37 +73,65 @@ class DagUsageSampler(ResourceUsageSampler):
         super().__init__(*args, **kwargs)
         self.process = None
         self.max_processes = 0
+        self.observed_descendants = {}
+        self._process_identity = None
+        self._process_exited = False
+        self._dag_scratch_roots = None
 
     def bind(self, pid):
-        self.process = psutil.Process(pid)
-        self._sample()
+        with self._sampling_lock:
+            self.process = psutil.Process(pid)
+            self._process_identity = (pid, self.process.create_time())
+            self._process_exited = False
+            self._last_generic_sample_at = float("-inf")
+            self._sample(force_process=True)
 
-    def _sample(self):
-        if self.process is not None:
-            try:
-                processes = [self.process, *self.process.children(recursive=True)]
-                rss = 0
-                count = 0
-                for process in processes:
-                    try:
-                        rss += process.memory_info().rss
-                        count += 1
-                    except psutil.NoSuchProcess:
-                        pass
-                self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
-                self.max_processes = max(self.max_processes, count)
-            except psutil.NoSuchProcess:
-                pass
-            except (psutil.Error, OSError):
-                self.measurement_status = "measurement_unavailable"
-        try:
-            size = sum(path.stat().st_size for root in self.scratch_roots
-                       if root.exists() for path in root.rglob("*") if path.is_file())
-            self.peak_scratch_bytes = max(self.peak_scratch_bytes, size)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            self.measurement_status = "measurement_unavailable"
+    def _sample(self, *, force_scratch=False, force_process=False):
+        with self._sampling_lock:
+            now = time.monotonic()
+            if self.process is not None:
+                try:
+                    alive = self.process.is_running()
+                    identity = (self.process.pid, self.process.create_time())
+                    changed = identity != self._process_identity or alive == self._process_exited
+                    if force_process or changed or now - self._last_generic_sample_at >= self.interval_seconds:
+                        processes = {}
+                        if alive:
+                            processes[identity] = self.process
+                            for process in _owned_process_descendants(self.process):
+                                try:
+                                    child_identity = (process.pid, process.create_time())
+                                    self.observed_descendants[child_identity] = process
+                                except psutil.NoSuchProcess:
+                                    continue
+                        processes.update(self.observed_descendants)
+                        rss = count = 0
+                        for process_identity, process in processes.items():
+                            try:
+                                if process.is_running():
+                                    rss += process.memory_info().rss
+                                    count += 1
+                                else:
+                                    self.observed_descendants.pop(process_identity, None)
+                            except psutil.NoSuchProcess:
+                                self.observed_descendants.pop(process_identity, None)
+                        self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+                        self.max_processes = max(self.max_processes, count)
+                        self._process_identity = identity
+                        self._process_exited = not alive
+                        self._last_generic_sample_at = time.monotonic()
+                except (psutil.Error, OSError):
+                    self.measurement_status = "measurement_unavailable"
+            roots = tuple(self.scratch_roots)
+            if force_scratch or roots != self._dag_scratch_roots or now - self._last_scratch_sample_at >= 1.0:
+                try:
+                    sizes = _measure_scratch_scopes(roots)
+                    size = sum(sizes[root] for root in _nonoverlapping_roots(roots))
+                    self.peak_scratch_bytes = max(self.peak_scratch_bytes, size)
+                    self._dag_scratch_roots = roots
+                    self._last_scratch_sample_at = time.monotonic()
+                except OSError:
+                    self.measurement_status = "measurement_unavailable"
 
 
 class _Channel:
@@ -129,6 +161,9 @@ class _ExternalProxy:
     def verify(self, *args, **kwargs):
         return self.channel.request("external.verify", *args, **kwargs)
 
+    def import_verified(self, source_store, commit):
+        return self.channel.request("external.import_verified", str(source_store.root), commit)
+
     def verify_snapshot(self, *args, **kwargs):
         return self.channel.request("external.verify_snapshot", *args, **kwargs)
 
@@ -156,6 +191,9 @@ class _VerificationProxy:
             raise RuntimeIntegrityError("Supervisor 与计算进程的快照事实不一致")
         self.cache[(namespace, identity)] = result
         return result
+
+    def lookup(self, namespace, identity):
+        return self.cache.get((namespace, identity))
 
     def __reduce__(self):
         raise TypeError("Worker 验证通道不能再次序列化")
@@ -228,10 +266,15 @@ class SpawnCall:
         _, run_id, attempt_id, operation, args, kwargs = message
         if (run_id, attempt_id) != (self.run_id, self.attempt_id):
             raise RuntimeIntegrityError("spawn 请求不属于当前 run/attempt")
+        if operation == "external.import_verified":
+            from .external_artifact import ExternalArtifactStore
+            source_root, commit = args
+            source = ExternalArtifactStore(source_root, create=False)
+            return self.external.import_verified(source, commit)
         if operation in {"external.prepare", "external.commit", "external.verify", "external.verify_snapshot"}:
             if operation == "external.commit":
-                self.sampler._sample()
-                if self.sampler.peak_scratch_bytes > self.node_context.effective_resource_budget.temp_bytes:
+                self.sampler._sample(force_scratch=True)
+                if self.node_context.effective_resource_budget.temp_bytes is not None and self.sampler.peak_scratch_bytes > self.node_context.effective_resource_budget.temp_bytes:
                     raise RuntimeWorkerError("节点 external 暂存超过 temp 预算", error_code="resource_exceeded")
             result = getattr(self.external, operation.split(".")[1])(*args, **kwargs)
             if operation == "external.prepare":
@@ -240,6 +283,18 @@ class SpawnCall:
         if operation != "verify":
             raise RuntimeIntegrityError("未知 spawn Supervisor 请求")
         namespace, identity, descriptor = args
+        if namespace == "logical_table_input":
+            from .external_artifact import ExternalArtifactCommit
+            from .logical_table_verification import verified_table_descriptor
+            commit = ExternalArtifactCommit.from_dict(descriptor["commit"])
+            root = self.external.objects_root / commit.semantic_hash
+            if str(root.resolve()) != identity or descriptor["root"] != identity:
+                raise RuntimeIntegrityError("表逻辑验证描述不属于当前正式工件")
+            if self.external.verify(commit.semantic_hash) != commit:
+                raise RuntimeIntegrityError("表逻辑验证工件身份不一致")
+            from research_pipeline.data_plane.verification_lifecycle import activate_artifact_verification
+            with activate_artifact_verification(self.verification):
+                return verified_table_descriptor(root, commit)
         if namespace == "parquet_snapshot":
             from research_pipeline.data_plane.snapshots import _verify_parquet_snapshot_uncached
             def verify():
@@ -270,17 +325,18 @@ class _Running:
         self.descendants = {}
 
     def poll(self, context):
-        try:
-            root = psutil.Process(self.process.pid)
-            for process in root.children(recursive=True):
-                self.descendants[(process.pid, process.create_time())] = process
-        except psutil.NoSuchProcess:
-            pass
+        governor = self.call.node_context.resource_governor
+        lease = self.call.node_context.resource_lease
+        if governor is not None and lease is not None:
+            governor.check_lease_health(lease)
         sampler = self.call.sampler
+        exited = not self.process.is_alive()
+        sampler._sample(force_process=exited, force_scratch=exited)
+        with sampler._sampling_lock:
+            self.descendants.update(sampler.observed_descendants)
         budget = self.call.node_context.effective_resource_budget
-        sampler._sample()
         if (sampler.peak_rss_bytes > budget.memory_bytes
-                or sampler.peak_scratch_bytes > budget.temp_bytes
+                or (budget.temp_bytes is not None and sampler.peak_scratch_bytes > budget.temp_bytes)
                 or sampler.max_processes > self.call.node_context.process_slots):
             self.stop()
             self.outcome = ("error", "节点超过内存、暂存或进程槽预算", "resource_exceeded", None)
@@ -325,7 +381,7 @@ class _Running:
     def stop(self):
         try:
             root = psutil.Process(self.process.pid)
-            for process in root.children(recursive=True):
+            for process in _owned_process_descendants(root):
                 self.descendants[(process.pid, process.create_time())] = process
         except psutil.NoSuchProcess:
             pass

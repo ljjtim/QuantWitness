@@ -2,6 +2,8 @@ using System.Buffers.Binary;
 using System.Globalization;
 using System.Net.Sockets;
 using System.Text.Json;
+using QuantConnect;
+using QuantWitness.Lean.China;
 
 namespace QuantWitness.LeanInput;
 
@@ -14,11 +16,15 @@ public sealed class DirectDailyStreamStore : IBarStore
     private readonly NetworkStream _stream;
     private readonly string[] _symbols;
     private readonly HashSet<DateTime> _dates;
-    private readonly Dictionary<DateTime, (Dictionary<string, BarRow[]> Rows, JsonElement[] Rules, JsonElement Signals)> _cache = new();
+    private readonly Dictionary<DateTime, (Dictionary<string, BarRow[]> Rows, JsonElement[] Rules, JsonElement Signals, JsonElement Header)> _cache = new();
     private readonly Dictionary<string, int> _loads = new();
     private long _rows;
     public string Frequency { get; }
     public decimal PriceDivisor { get; }
+    public bool IsFuture { get; }
+    public JsonElement Manifest { get; }
+    public Dictionary<DateTime, SpotExecutionWindow> ExecutionWindows { get; }
+    public DateTime[] Dates => _dates.Order().ToArray();
     public long EmittedRows { get; set; }
 
     public static DirectDailyStreamStore Open(string manifest)
@@ -35,14 +41,17 @@ public sealed class DirectDailyStreamStore : IBarStore
     {
         using var doc = JsonDocument.Parse(File.ReadAllText(manifest));
         var spec = doc.RootElement;
+        Manifest = spec.Clone();
+        IsFuture = spec.TryGetProperty("asset_class", out var asset) && asset.GetString() == "cn_future";
         Frequency = spec.GetProperty("frequency").GetString();
         var scale = spec.GetProperty("price_scale").GetInt32();
-        if (Frequency is not ("1d" or "1m") || scale is not (2 or 3))
+        if (Frequency is not ("1d" or "1m") || (!IsFuture && scale is not (2 or 3)))
             throw new NotSupportedException("直接输入仅支持二位或三位价格的日线或一分钟");
         PriceDivisor = (decimal)Math.Pow(10, scale);
         _symbols = spec.GetProperty("symbols").EnumerateArray().Select(x => x.GetString()).ToArray();
         _dates = spec.GetProperty("dates").EnumerateArray().Select(x => DateTime.ParseExact(x.GetString(),
             "yyyy-MM-dd", CultureInfo.InvariantCulture)).ToHashSet();
+        if (!IsFuture) ExecutionWindows = SpotExecutionWindow.Read(spec, Frequency == "1d");
         var endpoint = spec.GetProperty("endpoint");
         if (endpoint.GetProperty("host").GetString() != "127.0.0.1")
             throw new ArgumentException("直接输入连接必须为本机地址");
@@ -70,6 +79,20 @@ public sealed class DirectDailyStreamStore : IBarStore
             return _cache[date.Date].Rules;
         }
     }
+
+    public JsonElement Header(DateTime date)
+    {
+        lock (_gate) { Load(date.Date); return _cache[date.Date].Header; }
+    }
+
+    public decimal Divisor(string code) => IsFuture
+        ? (decimal)Math.Pow(10, Manifest.GetProperty("contracts").GetProperty(code).GetProperty("price_scale").GetInt32())
+        : PriceDivisor;
+
+    public string ContractCode(Symbol symbol) => Manifest.GetProperty("contracts").EnumerateObject()
+        .Single(x => string.Equals(x.Value.GetProperty("market").GetString(), symbol.ID.Market, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(x.Value.GetProperty("product").GetString(), symbol.ID.Symbol, StringComparison.OrdinalIgnoreCase)
+            && DateTime.Parse(x.Value.GetProperty("expiry_date").GetString()).Date == symbol.ID.Date).Name;
 
     public string Signals(DateTime date)
     {
@@ -123,23 +146,36 @@ public sealed class DirectDailyStreamStore : IBarStore
             var low = BinaryPrimitives.ReadInt64LittleEndian(binary[36..]);
             var close = BinaryPrimitives.ReadInt64LittleEndian(binary[44..]);
             var volume = BinaryPrimitives.ReadInt64LittleEndian(binary[52..]);
-            if (start.Date != date || end.Date != date || end <= start
+            if ((!IsFuture && (start.Date != date || end.Date != date)) || end <= start
                 || (Frequency == "1m" && end - start != TimeSpan.FromMinutes(1))
-                || (Frequency == "1d" && (start.TimeOfDay != TimeSpan.FromHours(9.5) || end.TimeOfDay != TimeSpan.FromHours(15)))
+                || (!IsFuture && Frequency == "1d" && (start.TimeOfDay != TimeSpan.FromHours(9.5) || end.TimeOfDay != TimeSpan.FromHours(15)))
                 || open <= 0 || close <= 0 || low <= 0 || low > Math.Min(open, close)
                 || high < Math.Max(open, close) || volume < 0)
                 throw new InvalidDataException("直接输入时间或OHLCV无效");
+            if (IsFuture)
+            {
+                var session = spec.GetProperty("sessions").EnumerateArray().Single(x => x.GetProperty("instrument_id").GetString() == code);
+                if (session.GetProperty("trading_date").GetString() != day
+                    || start < DateTimeOffset.Parse(session.GetProperty("start_at").GetString()).DateTime
+                    || end > DateTimeOffset.Parse(session.GetProperty("end_at").GetString()).DateTime)
+                    throw new InvalidDataException("期货行情超出冻结交易日会话");
+                if (Frequency == "1m" && !session.GetProperty("segments").EnumerateArray().Any(x =>
+                    start >= DateTimeOffset.Parse(x.GetProperty("start_at").GetString()).DateTime
+                    && end <= DateTimeOffset.Parse(x.GetProperty("end_at").GetString()).DateTime))
+                    throw new InvalidDataException("期货分钟跨过休市小节");
+            }
             if (previousCode != null && (StringComparer.Ordinal.Compare(previousCode, code) > 0
                 || previousCode == code && previousStart >= start))
                 throw new InvalidDataException("直接输入未按证券、开始时间稳定排序或存在重复");
             if (Frequency == "1d" && previousCode == code) throw new InvalidDataException("同一证券每天只能有一条日线");
-            if (!collected.TryGetValue(code.Split('.')[0], out var rows)) collected.Add(code.Split('.')[0], rows = new());
+            var ticker = IsFuture ? code : code.Split('.')[0];
+            if (!collected.TryGetValue(ticker, out var rows)) collected.Add(ticker, rows = new());
             rows.Add(new BarRow(start, open, high, low, close, volume, end));
             previousCode = code; previousStart = start;
         }
         _cache.Add(date, (collected.ToDictionary(x => x.Key, x => x.Value.ToArray()),
             spec.GetProperty("rules").EnumerateArray().Select(x => x.Clone()).ToArray(),
-            spec.GetProperty("signals").Clone()));
+            spec.GetProperty("signals").Clone(), spec.Clone()));
         _loads.Add(day, 1); _rows += count;
         // 同步器最多领先当前时钟一个交易日；数组由正在消费它的证券枚举器持有。
         foreach (var old in _cache.Keys.Order().Take(Math.Max(0, _cache.Count - 2)).ToArray()) _cache.Remove(old);

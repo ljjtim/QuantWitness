@@ -86,12 +86,11 @@ def test_sequence_node_must_include_gru(node):
 
 
 @pytest.mark.parametrize("node", ["fit", "holdout"])
-def test_sequence_evaluation_rejects_rank_labels(node):
+def test_sequence_evaluation_accepts_explicit_rank_labels(node):
     candidates = [gru_candidate(), _table_candidate()]
     for candidate in candidates:
         candidate["processors"]["learn"].append({"class": "CSRankNorm", "kwargs": {"fields_group": "label"}})
-    with pytest.raises(ResearchPackageError, match="raw标签"):
-        _check(_recipe(**{node: candidates}))
+    _check(_recipe(**{node: candidates}))
 
 
 def test_table_rank_label_contract_is_unchanged():

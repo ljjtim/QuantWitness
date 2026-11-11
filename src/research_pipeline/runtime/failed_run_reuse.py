@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from typing import Mapping
@@ -20,7 +21,8 @@ from .operator_registry import NODE_IDENTITY_PROJECTION_CURRENT
 from .recovery import RecoveryPlan, plan_rerun_from
 from .required_run_reuse import _ancestor_closure
 from .scheduler import ExecutionMode
-from .store import EventStore
+from .store import EventStore, process_identity_alive
+from .liveness import read_runtime_liveness
 
 
 FAILED_RUN_REUSE_MODE = "failed_run_successful_checkpoints"
@@ -57,10 +59,12 @@ def prepare_failed_run_reuse(
     strict = bool(required_node_ids)
     if strict and node_identity_projection != NODE_IDENTITY_PROJECTION_CURRENT:
         raise RuntimeIntegrityError("要求节点复用只接受现行节点局部身份计划")
+    terminal_failed = record.get("status") == "failed" and projection.run_status == "failed"
+    interrupted = strict and not terminal_failed and record.get("status") in {"created", "planned", "running"} and projection.run_status in {"created", "planned", "running"}
+    stopped_source = _interrupted_source_snapshot(source_root, parent_run_id) if interrupted else None
     if (
         record.get("contract_version") != OPERATOR_DAG_RUN_VERSION
-        or record.get("status") != "failed"
-        or projection.run_status != "failed"
+        or not (terminal_failed or interrupted)
         or not isinstance(parent_run_id, str)
         or not parent_run_id
         or projection.run_id != parent_run_id
@@ -234,8 +238,39 @@ def prepare_failed_run_reuse(
     if strict:
         payload["required_nodes"] = sorted(required)
         payload["source_checkpoints_by_node"] = reused_checkpoints
+    if stopped_source is not None:
+        if (_interrupted_source_snapshot(source_root, parent_run_id) != stopped_source
+                or EventStore(source_root).replay().chain_head != projection.chain_head
+                or _read_run_record(source_root) != record):
+            raise RuntimeIntegrityError("中断来源在复用期间发生变化，拒绝交接")
     _write_or_verify_recovery_plan(recovery_path, payload)
     return payload
+
+
+def _interrupted_source_snapshot(source_root: Path, run_id: object):
+    """只读确认中断来源的实际运行者和事件写者均已退出。"""
+    owner = read_runtime_liveness(source_root)
+    if owner is None or owner.get("run_id") != run_id:
+        raise RuntimeIntegrityError("中断来源缺少绑定当前run的有效owner身份")
+    def require_dead(identity, name):
+        pid, started = identity.get("pid"), identity.get("process_started_at")
+        if (type(pid) is not int or pid <= 0 or type(started) not in (int, float)
+                or not math.isfinite(started) or started <= 0):
+            raise RuntimeIntegrityError(f"中断来源{name}身份无效")
+        if process_identity_alive(pid, started):
+            raise RuntimeIntegrityError(f"中断来源{name}仍存活，拒绝复用")
+    require_dead(owner, "owner")
+    writer_path = source_root / ".writer.lock"
+    writer = None
+    if writer_path.exists():
+        try:
+            writer = json.loads(writer_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeIntegrityError("中断来源事件写者锁身份无法读取") from exc
+        if not isinstance(writer, dict) or not isinstance(writer.get("token"), str) or not writer["token"]:
+            raise RuntimeIntegrityError("中断来源事件写者锁身份无效")
+        require_dead(writer, "事件写者")
+    return owner, writer
 
 
 def _read_run_record(source_root: Path) -> Mapping[str, object]:

@@ -42,9 +42,9 @@ def _inspection_request(payload):
     # 查看冻结声明只比较事实，不运行模型结构编译或重新读取研究来源。
     value = json.loads(json.dumps(payload, allow_nan=False))
     if value.get("research_kind") == "factor_research" and "baseline" in value:
-        from .factor_research import canonical_expression, factor_contract
+        from .factor_research import canonical_expression, factor_space
         value["baseline"]["expression"] = canonical_expression(
-            value["baseline"]["expression"], contract=factor_contract(value))
+            value["baseline"]["expression"], space=factor_space(value))
     if value.get("research_kind") == "joint_research" and "factor_request" in value:
         value["factor_request"] = _inspection_request(value["factor_request"])
     return value

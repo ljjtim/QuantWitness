@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from collections.abc import Callable, Mapping, Sequence
 
 from research_pipeline.data_plane import PartitionedDatasetRef, PartitionedDatasetResolver
 from research_pipeline.platform import typed_canonical_hash
 
 from .errors import RuntimeIntegrityError
+
+
+def frozen_minute_scope_input(environment, reference, dataset):
+    """父进程只从当前环境交接节点明确绑定且与行情同源的日历。"""
+    if dataset.lineage.get("minute_asset_class") != "cn_future":
+        return None
+    if reference is None or dataset.lineage.get("minute_scope") != reference:
+        raise RuntimeIntegrityError("期货分钟节点与扫描 minute_scope 不一致")
+    scope = environment.minute_scope_inputs.get(reference["name"])
+    if (scope is None or scope.reference != reference
+            or dataset.lineage.get("minute_session_bundle_hash") != scope.calendar.bundle_hash):
+        raise RuntimeIntegrityError("期货分钟输入缺少一致的冻结 minute_scope 来源")
+    return {"root": str(Path(scope.root).resolve(strict=True)), "reference": dict(reference)}
 
 
 def build_causal_minute_descriptor(
@@ -34,6 +48,7 @@ def build_causal_minute_descriptor(
             "invocation": dict(invocation),
             "supervisor_verified_partition_id": typed_canonical_hash(verified.reference.to_dict()),
             "dataset": dataset.to_dict(), "allowed_roots": dict(roots),
+            "minute_scope_input": payload.get("minute_scope_input"),
         })
     return {
         "input_kind": "causal_partitions", "invocation": dict(invocation),

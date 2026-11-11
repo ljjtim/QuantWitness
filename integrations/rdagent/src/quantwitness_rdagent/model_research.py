@@ -14,7 +14,7 @@ def validate_model_research(payload):
     if not isinstance(payload, dict) or not fields <= set(payload) or set(payload) - fields - {"coding_knowledge"}:
         raise ValueError("模型研究请求字段不完整")
     value = json.loads(json.dumps(payload, allow_nan=False))
-    if value["contract_version"] != "rd-model-research-v1" or value["research_kind"] != "model_research":
+    if value["contract_version"] != "rd-model-research-v2" or value["research_kind"] != "model_research":
         raise ValueError("模型研究合同无效")
     if not isinstance(value["campaign_id"], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value["campaign_id"]):
         raise ValueError("campaign_id必须为简单标识")

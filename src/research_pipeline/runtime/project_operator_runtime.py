@@ -322,8 +322,8 @@ def project_worker_adapter_hash() -> str:
         "worker_adapter_sha256": hashlib.sha256(worker_path.read_bytes()).hexdigest(),
         "helpers": {
             name: hashlib.sha256(runtime_path.with_name(name).read_bytes()).hexdigest()
-            for name in ("project_table_input.py", "project_output.py", "project_causal.py",
-                         "project_causal_worker.py", "project_causal_execution.py",
+            for name in ("project_table_input.py", "project_output.py", "walk_forward_model_execution.py", "project_causal.py",
+                         "project_causal_worker.py", "project_causal_execution.py", "artifact_lifecycle.py",
                          "project_causal_minute.py", "causal_facts_codec.py", "causal_worker_session.py",
                          "worker_process_session.py", "lean_strategy_execution.py", "lean_strategy_inputs.py", "lean_engine_worker.py",
                          "lean_market_source.py", "lean_day_stream.py",
@@ -332,7 +332,7 @@ def project_worker_adapter_hash() -> str:
         "strategy_contracts": {
             name: hashlib.sha256(runtime_path.parent.parent.joinpath(name).read_bytes()).hexdigest()
             for name in ("domain/strategy_protocol.py", "domain/strategy_declaration.py", "results/contracts.py", "platform/lean_contract.py",
-                         "platform/lean_runtime.py", "platform/daily_projection.py", "data_plane/daily_stream.py", "data_plane/dataset_files.py",
+                         "platform/lean_runtime.py", "platform/daily_projection.py", "extensions/project_bundle.py", "data_plane/daily_stream.py", "data_plane/dataset_files.py",
                          "data_plane/dataset_artifacts.py", "data_plane/direct_sources.py", "data_plane/archive_read.py")
         },
         "resource_contracts": {
@@ -370,6 +370,8 @@ def execute_project_worker_attempt(
     state_in: ProjectWorkerState | None = None,
     causal_context: Mapping[str, object] | None = None,
     worker_session=None,
+    minute_scope_input=None,
+    resource_check=None,
 ) -> ProjectWorkerAttemptResult:
     """只执行一次受控 Worker；checkpoint、重试和缓存统一由正式 Runtime 管理。"""
     if "worker_lifecycle" in parameters and parameters["worker_lifecycle"] != "stateless_session":
@@ -386,11 +388,8 @@ def execute_project_worker_attempt(
         port.artifact_type == "data.minute-bars.v1" for port in spec.input_ports
     ):
         raise RuntimeIntegrityError("stateless_session仅支持非分钟输入")
-    normalized_parameters = validate_parameters(
-        parameters,
-        spec.parameters,
-        "project.parameters",
-    )
+    normalized_parameters = (validate_parameters(parameters, spec.parameters, "project.parameters")
+                             if worker_session is None else worker_session.normalize_parameters(parameters, spec.parameters))
     if worker_session is not None:
         if (causal_context is None or parameters.get("worker_lifecycle") != "stateless_session"
                 or spec.determinism_mode not in {"deterministic", "seeded"}):
@@ -417,9 +416,11 @@ def execute_project_worker_attempt(
         raise RuntimeIntegrityError("项目 Runtime 时钟或 seed 无效")
     by_port = {item.artifact.name: item for item in inputs}
     expected_inputs = {item.port: item.artifact_type for item in spec.input_ports}
-    if set(by_port) != set(expected_inputs) or any(
+    required_inputs = {item.port for item in spec.input_ports if item.required}
+    if not required_inputs <= set(by_port) <= set(expected_inputs) or any(
         by_port[port].artifact.artifact_type != artifact_type
         for port, artifact_type in expected_inputs.items()
+        if port in by_port
     ):
         raise RuntimeIntegrityError("项目算子输入端口或 Artifact 不闭合")
     if partition_key is not None and dataset_roots and verified_partition_id is None:
@@ -472,6 +473,8 @@ def execute_project_worker_attempt(
         state_in=state_in,
         causal_context=causal_context,
         worker_session=worker_session,
+        minute_scope_input=minute_scope_input,
+        resource_check=resource_check,
     )
     outputs, state, measurement_status, cleanup_status, causal_facts, request_traces = result
     return ProjectWorkerAttemptResult(
@@ -506,6 +509,8 @@ def _run_project_worker(
     state_in: ProjectWorkerState | None,
     causal_context: Mapping[str, object] | None,
     worker_session=None,
+    minute_scope_input=None,
+    resource_check=None,
 ) -> tuple[
     tuple[ProjectWorkerOutput, ...],
     ProjectWorkerState | None,
@@ -551,6 +556,7 @@ def _run_project_worker(
                 "invocation": invocation,
                 "supervisor_verified_partition_id": verified_partition_id,
                 "dataset": dict(dataset),
+                "minute_scope_input": minute_scope_input,
                 "allowed_roots": {
                     str(role): str(Path(path).resolve(strict=True))
                     for role, path in sorted(dataset_roots.items())
@@ -662,7 +668,12 @@ def _run_project_worker(
         "contract_version": PROJECT_WORKER_TASK_VERSION,
         "runtime_identity": identity.to_dict(),
         "bundle_relative_path": identity.bundle_hash,
-        "context": context.to_dict(),
+        "context": (context.to_dict() if worker_session is None else {
+            **{key: getattr(context, key) for key in
+               ("project_id", "run_id", "node_id", "attempt_id", "fixed_clock", "root_seed", "abi_version")},
+            "parameters": context.parameters,
+            "effective_resource_budget": dict(context.effective_resource_budget),
+        }),
         "inputs": input_contracts,
         "state_input": state_contract,
         "outputs": [
@@ -675,7 +686,7 @@ def _run_project_worker(
         task["causal_context"] = dict(causal_context)
     result_path = attempt_root / "result.json"
     if worker_session is not None:
-        worker_session.bind(task)
+        task = worker_session.wire_task(task)
     task_path.write_text(canonical_json(task), encoding="utf-8")
     command = [
         sys.executable,
@@ -703,8 +714,16 @@ def _run_project_worker(
     done_path = attempt_root / "session-done.json"
     measurement_status = "available"
     with _project_sampling_scope(attempt_root) as shared_sampler:
+        first_sample = True
+        last_process_sample = last_scratch_sample = float("-inf")
         try:
             while True:
+                if resource_check is not None:
+                    try:
+                        resource_check()
+                    except BaseException:
+                        failure = "project_worker_resource_check_failed"
+                        raise
                 exited = process.poll() is not None
                 finished = exited if worker_session is None else done_path.is_file() or exited
                 try:
@@ -712,14 +731,22 @@ def _run_project_worker(
                         scratch_roots = (attempt_root,) if worker_session is None else (attempt_root, worker_session.root)
                         rss, process_count, size = shared_sampler.sample_project_usage(
                             None if exited else process.pid, observed_descendants, scratch_roots,
+                            force=(finished and exited),
+                            force_scratch=first_sample or finished,
                         )
                     else:
-                        rss, process_count = _project_process_usage(
-                            None if exited else process.pid, observed_descendants
-                        )
-                        size = _measure_attempt_tree_bytes(attempt_root)
-                        if worker_session is not None:
-                            size += _measure_attempt_tree_bytes(worker_session.root)
+                        now = time.monotonic()
+                        if first_sample or finished or now - last_process_sample >= 0.05:
+                            rss, process_count = _project_process_usage(
+                                None if exited else process.pid, observed_descendants
+                            )
+                            last_process_sample = now
+                        if first_sample or finished or now - last_scratch_sample >= 1.0:
+                            size = _measure_attempt_tree_bytes(attempt_root)
+                            if worker_session is not None:
+                                size += _measure_attempt_tree_bytes(worker_session.root)
+                            last_scratch_sample = now
+                    first_sample = False
                 except (psutil.Error, OSError, RuntimeError):
                     measurement_status = "measurement_unavailable"
                     failure = "project_worker_measurement_unavailable"
@@ -728,7 +755,8 @@ def _run_project_worker(
                     failure = "project_worker_timeout"
                 elif process_slots is not None and process_count > process_slots:
                     failure = "project_worker_process_slots_exceeded"
-                elif rss > budget.memory_bytes or size > budget.temp_bytes:
+                    exceeded = {"process_slots": {"actual": process_count, "limit": process_slots}}
+                elif rss > budget.memory_bytes or (budget.temp_bytes is not None and size > budget.temp_bytes):
                     failure = "project_worker_resource_exceeded"
                     exceeded = {
                         name: {"actual": actual, "limit": limit}
@@ -736,7 +764,7 @@ def _run_project_worker(
                             ("memory_bytes", rss, budget.memory_bytes),
                             ("temp_bytes", size, budget.temp_bytes),
                         )
-                        if actual > limit
+                        if limit is not None and actual > limit
                     }
                 if failure or finished:
                     break

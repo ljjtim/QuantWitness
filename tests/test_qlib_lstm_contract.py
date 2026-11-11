@@ -30,7 +30,7 @@ def test_lstm_candidate_uses_the_same_explicit_window_contract():
 @pytest.mark.parametrize("field", ["GPU", "n_jobs", "batch_size"])
 def test_lstm_rejects_non_deterministic_resource_settings(field):
     bad = lstm_candidate()
-    bad["model"]["kwargs"][field] = {"GPU": 0, "n_jobs": 2, "batch_size": 2}[field]
+    bad["model"]["kwargs"][field] = {"GPU": -2, "n_jobs": 2, "batch_size": 0}[field]
     with pytest.raises(QlibModelError):
         normalize_candidates([bad])
 

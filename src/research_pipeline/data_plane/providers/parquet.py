@@ -105,7 +105,7 @@ class ParquetColumnarProvider:
             )
         scratch = require_scratch_root(scratch_root)
         temp_directory: Path | None = None
-        if allocation.temp_bytes:
+        if allocation.temp_bytes != 0:
             temp_directory = scratch / f"duckdb-temp-{uuid.uuid4().hex}"
             temp_directory.mkdir()
         self.files = self._resolve_files()
@@ -129,10 +129,8 @@ class ParquetColumnarProvider:
             else:
                 escaped = str(temp_directory).replace("'", "''")
                 connection.execute(f"SET temp_directory = '{escaped}'")
-                connection.execute(
-                    "SET max_temp_directory_size = "
-                    f"'{allocation.temp_bytes:d}B'"
-                )
+                connection.execute("SET max_temp_directory_size = ?",
+                                   ["-1" if allocation.temp_bytes is None else f"{allocation.temp_bytes}B"])
             placeholders = ",".join("?" for _ in self.files)
             source = f"read_parquet([{placeholders}], hive_partitioning=false)"
             sql, params = compile_duckdb_query(

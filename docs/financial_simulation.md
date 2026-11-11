@@ -1,32 +1,52 @@
 # 金融执行、账户与正式结果
 
-本页说明 ResearchPackage 中股票和 ETF 策略的当前执行边界，以及正式 Result 中保存的金融事实。当前生产策略统一使用本地 LEAN：日线频率为 `1d`，分钟频率为 `1m`，声明 `execution_backend=lean`。股票和 ETF 不再通过旧的 `finance.simulation.daily-cash`、`finance.simulation.intraday` 或其他旧回测入口运行。
+理解现货执行、账户计算与正式金融输出。
 
-完整的安装、策略声明、准入、恢复和资源约束见[LEAN 执行](lean-execution.md)。研究主链仍是 ResearchPackage → 准入 → 执行 → Result；使用 `report`、`analysis` 或 `export-result` 时直接读取正式 Result，不从运行目录猜测账户事实。
+## 开始前
+
+- 输入：已准入的现货研究包和 LEAN 安装。
+- 输出：订单、成交、账户、权益和金融指标。
+- 命令中的尖括号内容是待替换参数。
+
+## 使用顺序
+
+1. 声明现货资产、频率与执行模型。
+2. 冻结行情、历史规则及费用假设。
+3. 执行策略。
+4. 对照实际订单与账户变化。
+5. 用正式指标和估值口径解释结果。
+
+本页说明 ResearchPackage 中股票和 ETF 策略的当前执行边界，以及正式 Result 中保存的金融事实。当前生产策略统一使用本地 LEAN：日线频率为 `1d`，分钟频率为 `1m`，声明 `execution_backend=lean`。
+
+完整的安装、策略声明、准入、恢复和资源约束见[LEAN 执行](lean-execution.md)。研究主链仍是 ResearchPackage → 准入 → 执行 → Result。使用 `report`、`analysis` 或 `export-result` 时直接读取正式 Result，不从运行目录猜测账户事实。
 
 ## LEAN 执行
 
-策略输入必须通过 Catalog、PIT 和交易范围准入。行情使用原始、已完成且合格的 bars；公司行动、交易日历、停牌、价格限制、T+1、费用和其他市场规则使用当时可见的冻结来源。策略只能读取模拟时钟前已经可见的行情、信号和账户状态。
+策略输入必须通过 Catalog、PIT 和交易范围准入。行情使用原始、已完成且合格的 bars。公司行动、交易日历、停牌、价格限制、T+1、费用和其他市场规则使用当时可见的冻结来源。策略只能读取模拟时钟前已经可见的行情、信号和账户状态。
 
 日线使用 `lean_next_session_open_v1`：收盘后形成的信号在下一交易日开盘执行，日线独立开盘价来源必须在 Catalog 中声明。分钟使用 `lean_next_completed_close_v1`：策略在分钟完成后获得该 bar，成交按后续完成分钟 Close 加声明滑点。执行模型、频率和 bars 端口必须一致。
 
-LEAN 负责事件驱动、订单、成交、账户和指标。项目策略通过冻结的 Python bundle 接收事件并返回交易意图；当前订单类型为 DAY 市价单，策略可以提交金额买入、数量买卖或撤单意图。股票价格按 `price_scale=2` 记账，ETF 按 `price_scale=3` 记账，现金统一按人民币分记账。
+LEAN 负责事件驱动、订单、成交、账户和指标。项目策略通过冻结的 Python bundle 接收事件并返回交易意图。当前订单类型为 DAY 市价单，策略可以提交金额买入、数量买卖或撤单意图。股票价格按 `price_scale=2` 记账，ETF 按 `price_scale=3` 记账，现金统一按人民币分记账。
 
-执行期间，系统检查可见性、后续完成 bar、滑点、费用、数量格点、保护价、T+1、可用现金、可卖数量和日终权益。现金红利按登记日持仓确认，到账后进入现金；送股和转增按股份到账及可卖时点处理。缺少必要规则、来源时间晚于使用时点或输入发生冲突时，节点失败关闭。
+执行期间。系统检查可见性、后续完成 bar、滑点、费用、数量格点、保护价、T+1、可用现金、可卖数量和日终权益。现金红利按登记日持仓确认，到账后进入现金。
+
+整数送股和转增按股份到账及可卖时点处理。缺少必要规则、来源时间晚于使用时点或输入发生冲突时，节点失败关闭。
 
 ## 账户和金融规则
 
-`research_pipeline.domain` 与 `research_pipeline.simulation` 仍保存金额、费用、订单、成交、结算、公司行动、现货账本和期货账本等纯金融类型。它们服务于金融算法、公共事实合同和LEAN边界，类型存在不等于存在可运行的旧算子或 CLI 入口。
+`research_pipeline.domain` 与 `research_pipeline.simulation` 仍保存金额、费用、订单、成交、结算、公司行动、现货账本和期货账本这些纯金融类型。它们服务于金融算法、公共事实合同和LEAN边界。
 
-当前股票和 ETF 账户从 ResearchPackage 声明的期初现金和持仓开始。账户状态区分现金、持仓、可卖数量、活动订单和预占金额；账户估值记录 `equity_semantics`、`valuation_at`、价格来源和可见时间。日线估值优先使用当日可见 Open；缺少 Open 时使用已知历史价格，并保留估值来源。分钟结果使用已完成行情进行日终估值。
+当前股票和 ETF 账户从 ResearchPackage 声明的期初现金及空仓开始。账户状态区分现金、持仓、可卖数量、活动订单和预占金额。账户估值记录 `equity_semantics`、`valuation_at`、价格来源和可见时间。
 
-费用和滑点必须由 `research_cost_assumption` 显式声明币种、单位、数值和适用区间。该假设不是历史真实费率；研究窗口未被完整覆盖时，准入失败。交易规则、公司行动和费用分开记录，不能用费用假设代替市场规则来源。
+日线估值优先使用当日可见 Open。缺少 Open 时使用已知历史价格，并保留估值来源。分钟结果使用已完成行情日终估值。
 
-所有信号、规则、公司行动和估值均按可见时间使用。开盘成交不能使用当日收盘价或全天成交量；分钟决策不能使用未完成的 bar；连续合约只可作为历史信号来源，不能直接成为成交标的。
+费用和滑点必须由 `research_cost_assumption` 显式声明币种、单位、数值和适用区间。该假设不是历史真实费率。研究窗口未被完整覆盖时，准入失败。交易规则、公司行动和费用分开记录，不能用费用假设代替市场规则来源。
+
+所有信号、规则、公司行动和估值均按可见时间使用。开盘成交不能使用当日收盘价或全天成交量。分钟决策不能使用未完成的 bar。连续合约只可作为历史信号来源，不能直接成为成交标的。
 
 ## LEAN 正式输出
 
-LEAN simulation 端口的类型为 `research.lean-simulation.v1`，Result 至少保存以下执行表：
+LEAN simulation 端口使用 `research.lean-simulation.v2`。Result 保存 8 张执行表和指标表：
 
 | 路径 | 内容 |
 | --- | --- |
@@ -34,9 +54,13 @@ LEAN simulation 端口的类型为 `research.lean-simulation.v1`，Result 至少
 | `lean/intents` | 策略交易意图与实际提交数量 |
 | `lean/daily` | 逐交易日日终账户与持仓 |
 | `lean/trace` | 实际回调、可见报价、应答和状态 |
+| `lean/fills` | 期货成交腿，现货使用 orders 的成交事件 |
+| `lean/positions` | 期货四桶持仓，现货使用 daily 和终态账户 |
+| `lean/account_events` | 账户事件及必要终态观察 |
+| `lean/lifecycle` | 生命周期、退市归零及期货流程事实 |
 | `lean/metrics` | 金融指标、定义、单位及样本范围 |
 
-同时保存 `lean/account.json`、`lean/strategy-state.json`、`lean/runtime-lock.json`、`lean/strategy-input.json`、引擎终态和 Launcher 摘要。行情、规则、公司行动和信号以计划引用或持久工件保留；归档和迁移时必须保留这些依赖。
+同时保存 `lean/account.json`、`lean/strategy-state.json`、`lean/runtime-lock.json`、`lean/strategy-input.json`、引擎终态和 Launcher 摘要。行情、规则、公司行动和信号以计划引用或持久工件保留。归档和迁移时必须保留这些依赖。
 
 报告使用正式 Result 的订单、成交、日终账户、指标和配置引用。HTML 报告可通过：
 
@@ -46,11 +70,29 @@ python -m research_pipeline report --result '<Result目录>' `
   --output '<报告HTML>' --summary
 ```
 
-旧 `finance.simulation.*` 参数、旧 daily-cash/futures-daily CLI 和旧引擎开关不属于当前用户支持面。历史 Result 继续只读保存，不能用旧入口重跑或覆盖。
-
 ## 当前限制
 
 - 当前策略执行范围是已准入的中国股票和 ETF 日线、分钟 LEAN 会话。
-- 结果是 bar-level research；不表示 tick、盘口、实盘成交质量或全市场覆盖。
-- LEAN 节点失败时按节点重新执行；不能接续跨进程的 LEAN 内部状态。
-- 期货历史数据、连续合约换月、共享资金和多品种组合的来源语义见本目录对应历史文档，不构成当前可运行的期货策略入口。
+- 结果是 bar-level research。不表示 tick、盘口、实盘成交质量或全市场覆盖。
+- LEAN 节点失败时按节点重新执行。不能接续跨进程的 LEAN 内部状态。
+- 人民币期货按[期货执行合同](lean-futures.md)准入与执行。
+- 公司行动支持毛额现金分红和整数送转。个人红利税、非整数股份分配及其他行动类型需要独立合同。
+
+
+## 常用名称
+
+| 名称 | 含义 |
+| --- | --- |
+| ResearchPackage | 数据、算法、样本、指标和预算的完整声明 |
+| Catalog Lock | 已确认的字段、来源和可见性说明 |
+| PIT（按时点可见） | 过去某时刻只使用当时已知的信息 |
+| bar（周期行情） | 一个日线或分钟区间的行情记录 |
+| OHLCV（开高低收量） | 开盘价、最高价、最低价、收盘价和成交量 |
+| Feature（特征） | 决策时已知的研究输入 |
+| Label（标签） | 用于评价预测的未来目标 |
+| bundle（封存包） | 完整代码、依赖或数据声明及其内容身份 |
+| checkpoint（检查点） | 通过验收的节点输出和恢复依据 |
+| Result（正式结果包） | 正式表、运行摘要及配置、实现和输入引用 |
+| minute_scope（分钟范围引用） | 指向同一冻结日历和历史规则的小引用 |
+| Supervisor | 监督运行和提交结果的主进程 |
+| Worker | 执行节点计算的独立进程 |

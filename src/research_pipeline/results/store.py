@@ -15,7 +15,8 @@ import uuid
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from research_pipeline.data_plane import DataPlaneError, PathRolePolicy
+from research_pipeline.data_plane import DataPlaneError, DatasetFilter, PathRolePolicy
+from research_pipeline.data_plane.dataset_files import _filter_expression
 from research_pipeline.platform import canonical_json, typed_canonical_hash
 from .artifact_reader import ExternalArtifactReader, ExternalArtifactSnapshot
 from .contracts import ResultBundle
@@ -148,11 +149,21 @@ class ResultSnapshot:
         *,
         columns: tuple[str, ...] | None = None,
         batch_size: int = 8_192,
+        filters: tuple[DatasetFilter, ...] = (),
     ):
-        """从已验证快照逐分区读取所需列，不默认拼成整表。"""
+        """从已验证快照按文件顺序投影和筛选，不默认拼成整表。"""
 
         if schema_id in self.tables:
             table = self.tables[schema_id]
+            if filters:
+                import pyarrow.dataset as ds
+
+                expression = _filter_expression(filters, allowed_columns=tuple(table.schema.names), schema=table.schema)
+                yield from ds.dataset(table).scanner(
+                    columns=None if columns is None else list(columns), filter=expression,
+                    batch_size=batch_size, batch_readahead=0, fragment_readahead=1, use_threads=False,
+                ).to_batches()
+                return
             if columns is not None:
                 table = table.select(columns)
             yield from table.to_batches(max_chunksize=batch_size)
@@ -161,12 +172,24 @@ class ResultSnapshot:
         manifest = self.table_manifest(schema_id)
         for relative_path in manifest.files:
             try:
-                yield from pq.ParquetFile(
-                    self.directory / relative_path
-                ).iter_batches(
-                    columns=None if columns is None else list(columns),
-                    batch_size=batch_size,
-                )
+                if filters:
+                    import pyarrow.dataset as ds
+
+                    # 单文件扫描保留 manifest 顺序；行组统计只影响读取，不改变快照验证。
+                    dataset = ds.dataset(self.directory / relative_path, format="parquet")
+                    expression = _filter_expression(filters, allowed_columns=tuple(dataset.schema.names), schema=dataset.schema)
+                    yield from dataset.scanner(
+                        columns=None if columns is None else list(columns), filter=expression,
+                        batch_size=batch_size, batch_readahead=0, fragment_readahead=1, use_threads=False,
+                        fragment_scan_options=ds.ParquetFragmentScanOptions(pre_buffer=False),
+                    ).to_batches()
+                else:
+                    yield from pq.ParquetFile(
+                        self.directory / relative_path
+                    ).iter_batches(
+                        columns=None if columns is None else list(columns),
+                        batch_size=batch_size,
+                    )
             except (OSError, pa.ArrowException) as exc:
                 raise ResultContractError(
                     f"ResultBundle 分区读取失败: {relative_path}"
@@ -274,6 +297,16 @@ class ResultStore:
                 bundle,
                 runtime_root,
             )
+            # 文件复制已验证内容，只扫描正式指标表，不重复验证全部产物。
+            from .metrics import metrics_from_snapshot
+
+            metrics_from_snapshot(ResultSnapshot(
+                bundle=bundle,
+                directory=staging,
+                tables={},
+                support_bytes={},
+                verified_schema_ids=frozenset(table.schema_id for table in bundle.tables),
+            ))
             self._write_controls(staging, bundle)
             staged = self._read_controls(staging, require_namespace=False)
             if staged != bundle:

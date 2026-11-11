@@ -1,51 +1,69 @@
 # 基本数据接入：让框架认识你的行情
 
-本教程接入一张已有的日频行情表。完成后，你会得到一份 **Catalog Lock（数据说明的固定版本）**，能查到数据集、字段和来源，并把它交给研究包使用。接入过程只读源数据库，配置与检查结果写到单独的工作目录。
+把已有数据的字段、单位和可见时间交给框架。
 
-第一次使用，先完成[入门教程](workspace-quickstart.md)。那里已经准备好合成数据和数据说明；这里再解释如何换成自己的来源。
+## 开始前
 
-研究包同次准入按数据库路径、数据源名字和环境复用只读连接。各请求仍按自己的证券、日期、字段和过滤条件执行范围统计；遇到结构漂移或准入失败即拒绝，并关闭连接。
+- 输入：已有只读来源、字段含义及独立确认记录。
+- 输出：可持久复用的 Catalog Lock 和研究准入计划。
+- 命令中的尖括号内容是待替换参数。
+
+## 使用顺序
+
+1. 只读查看实际表结构。
+2. 填写字段、单位、时间和修订政策。
+3. 生成独立确认文件。
+4. 生成新的 Catalog Lock 目录。
+5. 把 Lock 和数据源交给研究包。
+
+本教程接入一张已有的日频行情表。完成后，你会得到一份 **Catalog Lock（数据说明的固定版本）**。能查到数据集、字段和来源，并把它交给研究包使用。接入过程只读源数据库，配置与检查结果写到单独的工作目录。
+
+第一次使用，先完成[入门教程](workspace-quickstart.md)。那里已经准备好合成数据和数据说明。这里再解释如何换成自己的来源。
+
+研究包同次准入按数据库路径、数据源名字和环境复用只读连接。各请求仍按自己的证券、日期、字段和过滤条件执行范围统计。遇到结构漂移或准入失败即拒绝，并关闭连接。
 
 ## 日线策略的完整行情与开盘价
 
-股票 `cn_equity.daily_bar` 第3版提供未复权 OHLCV，high/low绑定真实物理列，完整日线保持 `available.daily.v1/next_session_open` 可见性。当天开盘价通过已有 `cn_equity.session_open_state` 的date/code/open投影按 `session_open` 单独取得；开盘请求不能把当天high/low/close/volume作为已知行情。
+股票 `cn_equity.daily_bar` 第3版提供未复权 OHLCV，high/low绑定真实物理列，完整日线保持 `available.daily.v1/next_session_open` 可见性。当天开盘价通过已有 `cn_equity.session_open_state` 的date/code/open投影按 `session_open` 单独取得。开盘请求不能把当天high/low/close/volume作为已知行情。
 
-日线策略在同一个列式data bundle内显式声明 `bars_request_id` 和 `open_request_id`。两个请求的证券和日期范围必须一致，均采用raw口径；框架同时检查物理字段映射和批准Catalog的可见性规则。自建股票或ETF来源可使用自己的dataset ID及source profile，仍须满足相同合同。股票价格精度为2位，ETF为3位，策略声明的资产类型须与证券及Catalog一致。
+日线策略在同一个列式data bundle内显式声明 `bars_request_id` 和 `open_request_id`。两个请求的证券和日期范围必须一致，均采用raw口径。框架同时检查物理字段映射和批准Catalog的可见性规则。
+
+自建股票或ETF来源可使用自己的dataset ID及source profile，仍须满足相同合同。股票价格精度为2位，ETF为3位，策略声明的资产类型须与证券及Catalog一致。
 
 ## 1. 先判断手上的数据能走哪条路
 
 | 手上的数据 | 接入方式 | 还要准备什么 |
 | --- | --- | --- |
 | 已有 DuckDB 日频表 | 本页主教程：观察表结构 → 编写数据说明 → 确认 → 编译 | 字段含义、证券代码、时区、可见时间和修订方式 |
-| 已有 Parquet 文件 | 可以观察结构；正式读取要符合已实现的数据绑定或输入归档格式 | 不能只把数据库路径换成文件路径就假定能运行 |
-| 原始分钟 Parquet | 使用分钟数据及其来源声明 | 完成分钟边界、时区、稳定排序、历史市场规则；见[分钟规则](minute_rule_provenance.md) |
-| CSV、Excel、外部 API | 先在研究流程之外整理为受支持的数据源 | 类型、时间、重复记录与缺失值的处理说明；当前没有通用一键导入按钮 |
+| 已有 Parquet 文件 | 可以观察结构。正式读取要符合已实现的数据绑定或输入归档格式 | 不能只把数据库路径换成文件路径就假定能运行 |
+| 原始分钟 Parquet | 使用分钟数据及其来源声明 | 完成分钟边界、时区、稳定排序、历史市场规则。见[分钟规则](minute_rule_provenance.md) |
+| CSV、Excel、外部 API | 先在研究流程之外整理为受支持的数据源 | 类型、时间、重复记录与缺失值的处理说明。当前没有通用一键导入按钮 |
 
 本页不采集行情，不创建或修改源数据表。若现有字段不够，先补齐来源事实，再单独安排数据整理。
 
 ## 2. 看懂最小的日频表
 
-假设已有 DuckDB 表 `daily_prices`，含下列字段；这是一种可接入的表形状，不要求所有供应商使用同名字段。
+假设已有 DuckDB 表 `daily_prices`，含下列字段。这是一种可接入的表形状，不要求所有供应商使用同名字段。
 
 | 字段 | 例子 | 含义 |
 | --- | --- | --- |
 | `session`，DATE | `2024-01-02` | 行情所属交易日 |
 | `instrument`，VARCHAR | `SYN.A` | 证券唯一标识，例子使用虚构代码 |
-| `close`，DOUBLE | `10.25` | 当日收盘价，单位为元；本例声明未复权 |
-| `available_at`，TIMESTAMPTZ | `2024-01-02T15:10:00+08:00` | 这条记录何时真正可供研究使用；例值仅演示格式 |
+| `close`，DOUBLE | `10.25` | 当日收盘价，单位为元。本例声明未复权 |
+| `available_at`，TIMESTAMPTZ | `2024-01-02T15:10:00+08:00` | 这条记录何时真正可供研究使用。例值仅演示格式 |
 
 `session` 和 `available_at` 不是一回事。1月2日收盘价，不能拿去决定1月2日上午的买入。`available_at` 应来自实际发布或采集记录，不能为了让检查通过而统一填写一个猜测时点。
 
 这张表只够演示收盘价研究的数据接入。交易回测还可能需要开盘价、成交量、交易日历、停牌、涨跌停、费用、公司行动或期货合约规则。接入成功不代表已经具备完整回测数据。
 
-本例按 `(session, instrument)` 唯一，四列均非空，并且**不重放修订版本**。如果供应商会覆盖旧值，这种声明不能用来声称恢复当年的原始版本；需要版本与发布时间事实，或明确限制研究结论。
+本例按 `(session, instrument)` 唯一，4 列均非空，并且**不重放修订版本**。如果供应商会覆盖旧值，这种声明不能用来声称恢复当年的原始版本。需要版本与发布时间事实，或明确限制研究结论。
 
 ## 3. 只读查看表结构
 
-在已安装 QuantWitness 的 PowerShell 中执行。将 `$db` 换成已有数据库，`$setup` 换成自己选定的仓库外目录；目录不存在才创建。
+在已安装 QuantWitness 的 PowerShell 中执行。将 `$db` 换成已有数据库，`$setup` 换成自己选定的仓库外目录。目录不存在才创建。
 
 ```powershell
-$db = 'I:/market-data/prices.duckdb'
+$db = '<已有数据库的绝对路径>'
 $setup = Join-Path (Get-Location).Path '../quantwitness-work/data-setup'
 New-Item -ItemType Directory -Path $setup -Force | Out-Null
 python -m research_pipeline catalog discover --source-kind duckdb --source $db --object daily_prices --profile source --environment prod --output "$setup/inventory.json" --json
@@ -55,9 +73,9 @@ $inventory.columns | Format-Table
 $inventory.schema_revision
 ```
 
-`source` 是数据源的名字，`prod` 是环境名字；两者必须与后面的数据说明一致。这里的“prod”只是绑定名称，命令仍然只读。
+`source` 是数据源的名字，`prod` 是环境名字。两者必须与后面的数据说明一致。这里的“prod”只是绑定名称，命令仍然只读。
 
-结果里的 `columns` 告诉你实际列名、类型和是否允许空值；`schema_revision` 记录这次观察到的结构。**观察表结构不会自动判断价格单位、复权方式或历史可见性。**
+结果里的 `columns` 告诉你实际列名、类型和是否允许空值。`schema_revision` 记录这次观察到的结构。**观察表结构不会自动判断价格单位、复权方式或历史可见性。**
 
 ## 4. 把字段和可见时间写成数据说明
 
@@ -147,7 +165,9 @@ datasets:
 
 </details>
 
-`physical_column` 对应数据库列；`field_id` 和 `logical_name` 供研究声明引用。`rules: {mode: none}` 是本例的数据假设，不应照搬给存在历史修订的数据。模板中的 `decision: approved` 只是声明内容；正式编译仍需要单独的确认文件。
+`physical_column` 对应数据库列。`field_id` 和 `logical_name` 供研究声明引用。`rules: {mode: none}` 是本例的数据假设，不应照搬给存在历史修订的数据。
+
+模板中的 `decision: approved` 只是声明内容。正式编译仍需要单独的确认文件。
 
 ## 5. 确认数据说明，再编译为 Catalog Lock
 
@@ -156,7 +176,7 @@ datasets:
 <details>
 <summary>展开：生成独立确认文件</summary>
 
-将这段代码保存为 `$setup/review_catalog.py`。核对过上面的说明后再执行；输入自己的署名，生成与该说明对应的确认文件。不要复制别人的确认文件去批准修改后的数据说明。
+将这段代码保存为 `$setup/review_catalog.py`。核对过上面的说明后再执行。输入自己的署名，生成与该说明对应的确认文件。不要复制别人的确认文件去批准修改后的数据说明。
 
 ```python
 import sys
@@ -205,11 +225,11 @@ python -m research_pipeline catalog dataset search my.daily_prices --catalog-loc
 python -m research_pipeline catalog field search my.daily.close_raw --catalog-lock $lock --format json
 ```
 
-看到数据集和收盘价字段后，说明数据目录已经建立。这里没有复制行情；`catalog-lock` 保存的是说明与确认记录。日后修改说明，应重新确认并生成一个新目录，不直接编辑已编译的 Lock。
+看到数据集和收盘价字段后，说明数据目录已经建立。这里没有复制行情。`catalog-lock` 保存的是说明与确认记录。日后修改说明，应重新确认并生成一个新目录，不直接编辑已编译的 Lock。
 
 ## 6. 交给研究包：这一步才检查实际输入能否使用
 
-按[创建研究](getting-started.md)准备研究包，令它的数据请求引用 `my.daily_prices` 和上述字段。现成合成示例引用自己的数据集与验证器，不能只换一个数据库路径就当成真实研究。
+按[创建研究](getting-started.md)准备研究包，令它的数据请求引用 `my.daily_prices` 和本页的字段。现成合成示例引用自己的数据集与算法，不能只换一个数据库路径就当成真实研究。
 
 ```powershell
 $package = Join-Path (Get-Location).Path '../quantwitness-work/my-research'
@@ -221,13 +241,15 @@ if ($LASTEXITCODE -ne 0) { throw '未通过数据与时点准入；查看具体�
 
 `$package` 要指向已经填写完整的研究包，`plan` 输出目录应不存在。自定义算法按研究包要求另外提供 bundle。准入通过后，再按研究教程执行 `run → report`。
 
-**常见卡点：** 表名不对就改绑定；类型或结构变化就重新观察和确认；可见时间没有证据就补来源；缺历史市场规则就缩小研究范围或补齐规则。不要通过关闭检查把错误的数据变成“可用”。
+**常见卡点：** 表名不对就改绑定。类型或结构变化就重新观察和确认。可见时间没有证据就补来源。
+
+缺历史市场规则就缩小研究范围或补齐规则。不要通过关闭检查把错误的数据变成“可用”。
 
 ## 接入边界与进阶参考
 
 - 本例演示日频、单数据库、显式行可见时间。多个数据源、分钟归档、因子发布与下一交易日可见规则见下文和[数据读取](data_plane.md)。
-- Catalog 描述可见性，实际数据读取和算法消费者执行这些约定；不能仅靠填写 `available_at` 就宣称所有研究自动无前视。
-- 工作目录含结构观察、说明、确认、Lock 和计划；不要把它们当作通用默认数据随源码分发。源数据库始终只读。
+- Catalog 描述可见性，实际数据读取和算法消费者执行这些约定。不能仅靠填写 `available_at` 就宣称所有研究自动无前视。
+- 工作目录含结构观察、说明、确认、Lock 和计划。不要把它们当作通用默认数据随源码分发。源数据库始终只读。
 
 ## 从发现结果交给准入
 
@@ -236,18 +258,21 @@ python -m research_pipeline catalog dataset search <关键词> --catalog-lock <�
 ```
 
 QuantWitness 不附带任何供应商或个人数据库的默认 Catalog。使用者先通过
-`catalog validate/compile --definition ... --approvals ...` 生成自己的持久 Catalog Lock；搜索、
+`catalog validate/compile --definition ... --approvals ...` 生成自己的持久 Catalog Lock。搜索、
 lint 和 admit 都复用这一个显式目录。框架不会猜本机数据库或私有仓库位置。
 
-`catalog discover/compile/docs` 的输出位置由调用方明确指定，不依赖源码所在的父仓库。
-`discover` 不允许覆盖输入数据源或写入源目录；`compile` 的 release 不能与声明、审批
-输入重叠；`docs` 不能写进不可变的 Catalog Lock。其他工作目录名称不影响输出权限。
+`catalog discover/compile/docs` 的输出位置由调用方明确指定，不依赖源码所在的父仓库。`discover` 不允许覆盖输入数据源或写入源目录。`compile` 的 release 不能与声明、审批
+输入重叠。
+
+`docs` 不能写进不可变的 Catalog Lock。其他工作目录名称不影响输出权限。
 
 机器结果的 `catalog_context.lock_reference` 是本次实际加载、可直接传给
 `package lint/admit --catalog-lock` 的稳定目录。dataset 命中项的 `bindings` 逐项来自这份
 Catalog Lock，包含当前 dataset/binding 版本、`source_profile`、`environment` 和
-`object_name`；`catalog_context.source_profiles` 与 `next_commands` 说明每个 profile 应填入
-哪一个显式只读路径，但不会猜测本机数据库位置。field 搜索返回相同 Catalog 上下文，不在每个
+`object_name`。`catalog_context.source_profiles` 与 `next_commands` 说明每个 profile 应填入
+哪一个显式只读路径，但不会猜测本机数据库位置。
+
+field 搜索返回相同 Catalog 上下文，不在每个
 field 上复制 binding。blocked dataset 的 `bindings` 为空，也不会生成 admit 建议命令。
 
 ## package admit 自动完成什么
@@ -260,15 +285,15 @@ field 上复制 binding。blocked dataset 的 `bindings` 为空，也不会生�
 6. 完成准入校验后原子发布不可变计划。
 7. 核对数据库 size/mtime 前后不变。
 
-正式因子数据还会在准入时取得短共享租约，按请求表的 `factor_storage_state` 反查当前
-published publication，核对 validated 计算运行、不可变 Catalog 正文、配方关系表、
-质量记录和数值异常记录，并把类型化发布事实写入已准入计划。因子发布和研究读取相互隔离，
-框架不计算或发布具体因子。旧 `factor.generic.daily` 与 `factor_values` 长表绑定已退役。
+正式因子数据在准入时取得短共享租约。系统按请求表的 `factor_storage_state` 反查当前 published publication。系统核对 validated 计算运行、不可变 Catalog 正文和配方关系表。
 
-`factor.custom.daily` 使用 `trade_date + stock_code + factor_id` 物理键和 `value` 数值列；
-只读准入仍须有当前 publication、修订及可见性规则。`available.daily.v1` 的
-`next_session_open` 必须按真实交易日历计算；混合可见时点的配方不能套用单一日频政策。
-具体因子定义、风险模型、publication 身份和项目验证结果均由项目侧声明及保存。
+质量记录和数值异常记录也参与核对。系统把类型化发布事实写入已准入计划。因子发布和研究读取相互隔离，
+框架不计算或发布具体因子。
+
+`factor.custom.daily` 使用 `trade_date + stock_code + factor_id` 物理键和 `value` 数值列。只读准入仍须有当前 publication、修订及可见性规则。`available.daily.v1` 的
+`next_session_open` 必须按真实交易日历计算。
+
+混合可见时点的配方不能套用单一日频政策。具体因子定义、风险模型、publication 身份和项目验证结果均由项目侧声明及保存。
 
 调用方不传内部 drift 文件，也不在研究图中手工填写 Catalog/PIT hash。
 
@@ -277,25 +302,46 @@ published publication，核对 validated 计算运行、不可变 Catalog 正文
 - 财报：报告期不等于可见时间，按公告日或明确 available_at 对齐。
 - 成分、行业、ST、停牌、复权、市场规则：按历史快照或有效区间查询。
 - 日期型 QueryIR `as_of` 按 `fixed_clock` 自身时区解释为该本地日的排他结束，即次日
-  `00:00`；分钟型 `as_of` 是带时区的绝对时点。两者都不能晚于 `fixed_clock`。
+  `00:00`。分钟型 `as_of` 是带时区的绝对时点。两者都不能晚于 `fixed_clock`。
 - 日频数据声明 `available.daily.v1` 时，admit 必须确认规则内容为
-  `available_after=next_session_open`，并把该业务语义写入已准入计划。ETF momentum Runtime
-  消费这份计划，用实际交易日序列生成下一开盘可见时点。
+  `available_after=next_session_open`，并把该业务语义写入已准入计划。日频消费者
+  使用该计划和真实交易日历判断下一开盘可见时点。
 - 分钟数据：盘中只使用当时已完成的 bar。
 - 修订数据：只能选择 as-of 时点已经出现的版本。
 - 标签：不能成为特征、信号、选模或交易输入的祖先。
 
-日频合同在 package 编译、Catalog 准入和实际算子消费处闭合；列式数据平面不额外声称按
-每一行日频数据做 PIT 过滤。当前计划合同是`admitted-query-plan-v5`；旧v4及更早计划不会
-兼容加载，必须从package重新admit。计划版本升级不改写已经提交的自包含Result。
+日频合同在 package 编译、Catalog 准入和实际算子消费处闭合。列式数据平面不额外声称按
+每一行日频数据做 PIT 过滤。当前计划合同是`admitted-query-plan-v6`，冻结快照布局及准入事实。
+
+输入或合同变化后
+从package重新admit。计划版本升级不改写已经提交的Result。
 
 ## 什么时候重新 compile Catalog
 
-只有数据集、字段、policy、binding 或审批发生变化时。普通研究复用当前 Lock；每个研究仍在 admit 时对显式数据源观察漂移，因为物理数据可能变化。
+数据集、字段、policy、binding 或审批变化时，重新编译 Catalog。普通研究复用当前 Lock。每个研究仍在 admit 时对显式数据源观察漂移，因为物理数据可能变化。
 
 ## 失败动作
 
 - dataset/field 不存在：修 Catalog 或缩小研究声明。
 - binding 不唯一：明确 source profile，不猜默认源。
-- schema 漂移：更新 Catalog 并重新审批，或修复数据源；不绕过。
+- schema 漂移：更新 Catalog 并重新审批，或修复数据源。不绕过。
 - 可见性/修订证据缺失：保持 NOT_RUN。
+
+
+## 常用名称
+
+| 名称 | 含义 |
+| --- | --- |
+| ResearchPackage | 数据、算法、样本、指标和资源的完整研究声明 |
+| Catalog Lock | 已确认的数据字段、来源和可见性说明 |
+| PIT（按时点可见） | 在过去某时刻只使用当时已知的信息 |
+| QueryIR | 限定字段、范围、排序和预算的数据请求 |
+| DAG（计算步骤图） | 节点之间的先后依赖 |
+| Artifact（工件） | 带类型、内容身份和来源引用的产物 |
+| checkpoint（检查点） | 通过正式验收的节点输出及恢复依据 |
+| Result（正式结果包） | 正式表、运行摘要和配置、实现、输入引用 |
+| holdout（最终留出集） | 开发选择之外的最终评价区间 |
+| Supervisor | 监督执行、发布检查点和记录事件的主进程 |
+| Worker | 执行节点计算的独立进程 |
+| manifest（清单） | 记录文件、类型、范围和内容身份的文件 |
+| schema（结构） | 表的字段名称、类型和约束 |

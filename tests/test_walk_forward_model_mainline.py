@@ -27,8 +27,9 @@ import research_pipeline.runtime.adapters.model as operator_adapters
 from test_qlib_model_integration import candidate as qlib_candidate, research_series
 
 
+@pytest.mark.parametrize("prediction_bound", [False, True])
 def test_walk_forward_adapters_match_implementation_signatures(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, prediction_bound
 ) -> None:
     """逐个核对模型链 adapter 的必填参数，避免 Runtime 执行到后段才报 TypeError。"""
 
@@ -68,8 +69,10 @@ def test_walk_forward_adapters_match_implementation_signatures(
     )
     for adapter in adapters:
         context = SimpleNamespace(
+            inputs={"prediction_index": object()} if prediction_bound else {},
             work_dir=tmp_path,
-            node_context=SimpleNamespace(parallel_workers=2, process_slots=10, attempt_deadline_monotonic=None),
+            node_context=SimpleNamespace(parallel_workers=2, process_slots=10, attempt_deadline_monotonic=None,
+                                         check_resources=lambda: None),
             effective_resource_budget=SimpleNamespace(
                 memory_bytes=64 * 1024**2, cpu_slots=2, temp_bytes=64 * 1024**2
             ),
@@ -84,9 +87,14 @@ def test_walk_forward_adapters_match_implementation_signatures(
             for name, parameter in inspect.signature(implementation).parameters.items()
             if name != "output_root" and parameter.default is inspect.Parameter.empty
         }
+        if adapter is operator_adapters.execute_research_model_split_manifest_v2:
+            required.add("prediction_index_root")
+            assert captured["kwargs"]["prediction_index_root"] == (tmp_path if prediction_bound else None)
+        inspect.signature(implementation).bind(output_root=tmp_path, **captured["kwargs"])
         if adapter is operator_adapters.execute_research_model_fit_v2:
             required |= {"parallel_workers", "cpu_slots", "max_temp_bytes",
-                         "deadline_monotonic", "execution_report_path", "process_slots"}
+                         "deadline_monotonic", "execution_report_path", "process_slots", "resource_check"}
+            assert captured["kwargs"]["resource_check"] is context.node_context.check_resources
             assert captured["kwargs"]["parallel_workers"] == 2
             assert captured["kwargs"]["process_slots"] == 10
             assert captured["kwargs"]["execution_report_path"] == tmp_path / "model-fit-execution.json"

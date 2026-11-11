@@ -37,19 +37,18 @@ def _table(*, constant=False):
 
 
 def _context(table):
-    class Snapshot:
-        bundle = SimpleNamespace(result_id="result.fixture", tables=[SimpleNamespace(table_id="predictions", schema_id="prediction.v2")])
+    from research_pipeline.results import ResultSnapshot
+
+    class Snapshot(ResultSnapshot):
         projected = None
 
-        def table_schema(self, schema_id):
-            return table.schema
+        def iter_table_batches(self, schema_id, *, columns=None, batch_size=8192, filters=()):
+            object.__setattr__(self, "projected", columns)
+            yield from super().iter_table_batches(schema_id, columns=columns, batch_size=batch_size, filters=filters)
 
-        def iter_table_batches(self, schema_id, *, columns, batch_size):
-            self.projected = columns
-            yield from table.select(columns).to_batches(max_chunksize=batch_size)
-
-    Snapshot.bundle.run = SimpleNamespace(status="succeeded")
-    return SimpleNamespace(snapshot=Snapshot(), claim_level="research_observation")
+    bundle = SimpleNamespace(result_id="result.fixture", run=SimpleNamespace(status="succeeded"),
+        tables=[SimpleNamespace(table_id="predictions", schema_id="prediction.v2")])
+    return SimpleNamespace(snapshot=Snapshot(bundle, None, {"prediction.v2": table}, {}), claim_level="research_observation")
 
 
 def test_projection_selection_and_original_label():

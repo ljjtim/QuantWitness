@@ -204,7 +204,7 @@ class ExecutionEstimate:
 
         return (
             budget.memory_bytes >= self.execution_memory_bytes
-            and budget.temp_bytes >= self.execution_temp_bytes
+            and (budget.temp_bytes is None or budget.temp_bytes >= self.execution_temp_bytes)
             and budget.cpu_slots >= self.execution_cpu_slots
         )
 

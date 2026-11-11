@@ -14,7 +14,7 @@ class PhysicalSnapshotPolicy:
     compression: str = "zstd"
     row_group_size: int = 65_536
     partitioning: str = "small-or-event-year-month"
-    writer_version: str = "pyarrow-parquet-v2"
+    writer_version: str = "pyarrow-parquet-v3"
     small_table_max_rows: int = 65_536
     max_buffer_bytes: int = 8 * 1024 * 1024
     target_file_rows: int = 262_144
@@ -22,7 +22,7 @@ class PhysicalSnapshotPolicy:
 
     def __post_init__(self) -> None:
         if (self.policy_id, self.partitioning, self.writer_version) != (
-            "adaptive-bounded-v1", "small-or-event-year-month", "pyarrow-parquet-v2"
+            "adaptive-bounded-v1", "small-or-event-year-month", "pyarrow-parquet-v3"
         ):
             raise SnapshotIntegrityError("不支持的快照布局策略身份")
         for name in ("row_group_size", "small_table_max_rows", "max_buffer_bytes",

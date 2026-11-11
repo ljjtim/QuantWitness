@@ -257,7 +257,17 @@ def _validate_catalog_date_rule(admitted: AdmittedQueryPlan, daily: Mapping, cat
     if visibility is not None and (visibility.available_time_field != admitted.event_time_field
                                    or not visibility.inclusive or visibility.additional_time_fields):
         raise ResearchPackageError("日期 causal 可见列或日期边界与 Catalog 准入事实不一致")
+    frozen_open = temporal.session_close_selection
+    calendar_open = (
+        frozen_open is not None
+        and frozen_open == admitted.session_close_binding
+        and frozen_open.calendar_bundle is not None
+        and frozen_open.availability_policy_id == dataset["available_time_policy"]
+        and frozen_open.availability_policy_hash == admitted.availability_policy_hash
+        and frozen_open.session_date_field == admitted.event_time_field
+    )
     if daily["rule"] == "session_open" and (
-        rules.get("available_time_field") != admitted.event_time_field or visibility is None
+        rules.get("available_time_field") != admitted.event_time_field
+        or visibility is None and not calendar_open
     ):
         raise ResearchPackageError("session_open 必须绑定 Catalog 已准入的同日开盘可见日期")

@@ -6,6 +6,8 @@ import json
 import socket
 import struct
 from threading import Event, Thread
+from time import perf_counter
+from collections.abc import Mapping
 
 
 BAR_DTYPE_FIELDS = (
@@ -61,6 +63,7 @@ class LeanDayStream:
         self.memory_bytes = memory_bytes
         self.counts = {}
         self.signal_rows = 0
+        self.timings = {}
         self.failure = None
         self._stop = Event()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lean-day-read")
@@ -75,7 +78,15 @@ class LeanDayStream:
         self._thread.start()
 
     def _load(self, day):
-        rules, content, signals = self.loader(day)
+        started = perf_counter()
+        loaded = self.loader(day)
+        loaded_at = perf_counter()
+        if isinstance(loaded, Mapping):
+            rules, content, signals = (loaded[name] for name in ("rules", "content", "signals"))
+            extra = {name: loaded[name] for name in ("sessions", "settlements", "settlement_only") if name in loaded}
+        else:
+            rules, content, signals = loaded
+            extra = {}
         row_size = 60
         if len(content) % row_size:
             raise ValueError("日行情二进制长度无效")
@@ -83,13 +94,18 @@ class LeanDayStream:
             raise ValueError("单日行情超过已声明内存额度")
         header = {"date": day, "frequency": self.frequency,
                   "rules": rules, "row_count": len(content) // row_size, "signals": signals}
+        header.update(extra)
         if self.frequency == "1d":
             header["availability"] = "next_session_open"
-        return header, content
+        raw = json.dumps(header, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if len(raw) + len(content) > self.memory_bytes:
+            raise ValueError("单日行情及事件头超过已声明内存额度")
+        self.timings[day] = {"load_seconds": loaded_at - started,
+                             "header_seconds": perf_counter() - loaded_at}
+        return header, raw, content
 
     @staticmethod
-    def _send(connection, header, content=b""):
-        raw = json.dumps(header, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    def _send(connection, raw, content=b""):
         connection.sendall(struct.pack("<I", len(raw)))
         connection.sendall(raw)
         if content:
@@ -115,22 +131,26 @@ class LeanDayStream:
                 request = json.loads(_receive_exact(connection, length))
                 if request != {"date": day}:
                     raise ValueError(f"日数据请求顺序无效，期望{day}")
-                header, content = self._future.result()
+                wait_started = perf_counter()
+                header, raw, content = self._future.result()
+                self.timings[day]["wait_seconds"] = perf_counter() - wait_started
                 # 下一日读取与本日传输及执行重叠，不预读整个研究窗口。
                 if index + 1 < len(self.dates):
                     self._future = self._executor.submit(self._load, self.dates[index + 1])
                 else:
                     self._future = None
-                self._send(connection, header, content)
+                send_started = perf_counter()
+                self._send(connection, raw, content)
+                self.timings[day]["send_seconds"] = perf_counter() - send_started
                 self.counts[day] = header["row_count"]
                 self.signal_rows += len(header["signals"]["selection"])
-                del header, content
+                del header, raw, content
         except BaseException as exc:
             if not self._stop.is_set():
                 self.failure = exc
                 if self._connection is not None:
                     try:
-                        self._send(self._connection, {"error": str(exc)})
+                        self._send(self._connection, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"))
                     except OSError:
                         pass
         finally:

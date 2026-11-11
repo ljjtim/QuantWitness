@@ -393,6 +393,10 @@ class ResultAssembler:
                     if not isinstance(processor_files, dict) or set(processor_files) != {"infer", "learn"}:
                         raise ResultContractError("Qlib 模型配置缺少 Processor 文件清单")
                     paths = [config_path, row["model_path"]]
+                    upstream_sources = config.get("upstream_sources", [])
+                    if not isinstance(upstream_sources, list):
+                        raise ResultContractError("模型上游源码清单必须为列表")
+                    paths.extend(upstream_sources)
                     if config.get("schema") not in {"research.qlib-model-bundle.v1", "research.qlib-sequence-model-bundle.v2"}:
                         raise ResultContractError("Qlib 模型配置 schema 不受支持")
                     if config["schema"] == "research.qlib-sequence-model-bundle.v2":
@@ -410,6 +414,19 @@ class ResultAssembler:
                         if not isinstance(generated, dict):
                             raise ResultContractError("生成模型配置缺少源码与权重清单")
                         paths.extend((generated.get("source_path"), generated.get("weights_path")))
+                    if config.get("candidate", {}).get("model", {}).get("class") == "ProjectQlibModel":
+                        project_model = config.get("project_model")
+                        bundle_path = project_model.get("bundle_path") if isinstance(project_model, dict) else None
+                        if not isinstance(bundle_path, str) or not bundle_path:
+                            raise ResultContractError("项目模型配置缺少源码bundle路径")
+                        prefix = bundle_path.rstrip("/") + "/"
+                        source_files = [name for name in commit.files if name.startswith(prefix)]
+                        for required_file in ("manifest.json", "dependency-lock.json", "COMMITTED"):
+                            if prefix + required_file not in source_files:
+                                raise ResultContractError(f"项目模型源码闭包缺少文件: {required_file}")
+                        if not any(name.startswith(prefix + "sources/") and name.endswith(".py") for name in source_files):
+                            raise ResultContractError("项目模型源码闭包没有Python源码")
+                        paths.extend(source_files)
                     for role in ("infer", "learn"):
                         if not isinstance(processor_files[role], list):
                             raise ResultContractError("Qlib Processor 文件清单必须为列表")

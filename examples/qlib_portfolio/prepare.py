@@ -88,7 +88,9 @@ def declaration(name, inputs, outputs, parameters, types=(), module="operator", 
         "operator_id": "project.qlib_demo."+name, "operator_version": "1.0.0",
         "input_ports": [{"port": port, "artifact_type": kind} for port, kind in inputs],
         "output_ports": [{"port": port, "artifact_type": kind} for port, kind in outputs],
-        "parameters": [{"name": key, "value_type": kind, "required": True, "allowed_values": []} for key, kind in parameters],
+        "parameters": [{"name": key, "value_type": kind, "required": True, "allowed_values": []} for key, kind in parameters]
+            + ([{"name": "worker_lifecycle", "value_type": "string", "required": False,
+                 "allowed_values": ["stateless_session"]}] if name in {"feature", "label"} else []),
         "strategy_roles": [], "resource_profile": {"memory_bytes": 1024**3, "cpu_slots": 1,
             "process_slots": 4, "temp_bytes": 1024**3, "wall_seconds": 1800},
         "determinism_mode": "deterministic", "seed_policy": "none", "pit_capabilities": ["pit.as_of.v1"]},
@@ -315,7 +317,8 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
                 "available_column": fields[0], "daily_time": {"rule": "next_session_open", "timezone": "Asia/Shanghai",
                 "calendar_id": design["calendar_id"], "calendar_source": design["calendar_source"], "sessions": days}}], "work_items": work}
         nodes.append(node(kind,"project.qlib_demo."+kind,[("bars","data_plane","data")],
-            {"causal_plan": causal,"design": design,"lineage_ref": identity},"1.0.0"))
+            {"causal_plan": causal,"design": design,"lineage_ref": identity,
+             "worker_lifecycle": "stateless_session"},"1.0.0"))
         declarations.append((kind, declaration(kind,[("bars","data.columnar-bundle.v1")],[(output,artifact)],
             [("causal_plan","json"),("design","json"),("lineage_ref","string")])))
     split_params = {key: design[key] for key in ("holdout_start","train_sessions","validation_sessions","test_sessions","step_sessions","embargo_sessions","expanding")}

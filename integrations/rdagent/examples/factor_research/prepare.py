@@ -8,6 +8,39 @@ import sys
 BASELINE_EXPRESSION = "$close / Ref($close, 5) - 1"
 
 
+def factor_space():
+    """教学项目显式声明候选；框架不解释价格公式。"""
+    candidates = []
+    for operator, direction in (("Ref", "momentum"), ("Mean", "mean_deviation")):
+        candidates.extend({"expression": f"$close / {operator}($close, {n}) - 1", "direction": direction} for n in range(1, 6))
+    for n in range(2, 6):
+        candidates.append({"expression": f"Std($close, {n}) / Mean($close, {n})", "direction": "relative_volatility"})
+        candidates.append({"expression": f"($close - Min($close, {n})) / (Max($close, {n}) - Min($close, {n}))", "direction": "range_position"})
+    return {"space_id": "synthetic-close-research", "fields": ["close"], "max_window": 5,
+        "expression_contract": "仅使用前一已完成会话及更早收盘价；Std为样本标准差，平坦区间缺失。候选公式以candidates为准。",
+        "feature_slot": "historical_return", "candidates": candidates,
+        "population_feature_columns": ["historical_return__w5", "historical_return__w10", "volatility__w5", "volatility__w10"]}
+
+
+def bind_factor_space(package, facts):
+    """准备阶段绑定同一项目设计与既有身份参数。"""
+    import yaml
+    from research_pipeline.platform import typed_canonical_hash
+    facts["design"]["factor_space"] = factor_space()
+    identity = typed_canonical_hash(facts["design"])
+    facts["model_parameters"]["research_identity_hash"] = identity
+    path = Path(package) / "spec/research.yaml"
+    declaration = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for node in declaration["graph"]["nodes"]:
+        parameters = node["parameters"]
+        if "design" in parameters:
+            parameters["design"] = facts["design"]
+        for key in ("lineage_ref", "research_identity_hash"):
+            if key in parameters:
+                parameters[key] = identity
+    path.write_text(yaml.safe_dump(declaration, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
 def prepare_base(output):
     """返回单基线研究包请求，供研究循环生成后续表达式候选。"""
     root = Path(output).resolve()
@@ -25,6 +58,8 @@ def prepare_base(output):
         "historical_return": BASELINE_EXPRESSION,
     })
     facts = json.loads((root / "input/request.json").read_text(encoding="utf-8"))
+    bind_factor_space(bundle["package"], facts)
+    write_json(root / "input/request.json", facts)
     archive = root / "source-archive"
     archive.mkdir()
     teaching_document = root / "confirmed-definition.md"
@@ -72,7 +107,7 @@ def knowledge_responses(records, reflect):
     if not eligible:
         raise ValueError("教学知识例需要至少一条正式开发指标记录")
     refs = [eligible[-1]["record_id"]]
-    studied = {canonical_expression(row["expression"]) for row in records if row.get("expression")}
+    studied = {canonical_expression(row["expression"], space=factor_space()) for row in records if row.get("expression")}
     choices = [f"$close / {operator}($close, {window}) - 1"
                for operator in ("Mean", "Ref") for window in (4, 2, 1, 3, 5)]
     choices += [f"Std($close, {window}) / Mean($close, {window})" for window in (3, 4, 2, 5)]
@@ -81,7 +116,7 @@ def knowledge_responses(records, reflect):
     expression = next((value for value in choices if value not in studied | {BASELINE_EXPRESSION}), None)
     if expression is None:
         raise ValueError("教学表达式范围已研究完毕；需新范围或停止研究")
-    direction = expression_direction(expression)
+    direction = expression_direction(expression, space=factor_space())
     return [reflect("已完成教学基线", "依据上一会话的已验证结果选择新方向"),
         {"action": "factor", "direction": direction, "knowledge_refs": refs,
          "reason": "依据上一会话的正式开发记录，检验尚未研究的窗口"},
@@ -124,9 +159,9 @@ def build(output, *, model_env_file=None, knowledge_index=None, knowledge_output
             write_json(path, value)
             responses.append(str(path))
         proposer = {"mode": "fixed_responses", "responses": responses}
-    payload = {"contract_version": "rd-factor-research-v1", "research_kind": "factor_research",
+    payload = {"contract_version": "rd-factor-research-v2", "research_kind": "factor_research",
         "campaign_id": campaign_id, "session_root": str(root / "session"),
-        "package_template": template, "confirmed_spec": {"kind": "synthetic", "path": str(root / "confirmed-definition.json")},
+        "factor_space": factor_space(), "package_template": template, "confirmed_spec": {"kind": "synthetic", "path": str(root / "confirmed-definition.json")},
         "baseline": {"expression": BASELINE_EXPRESSION, "hypothesis": "按教学文档复现五期收盘动量", "reason": "先完成固定定义的正式基线"},
         "budget": {"rounds": 2 if knowledge_index else 3, "model_calls": 5 if knowledge_index else 7,
             "output_tokens": 10240 if knowledge_index else 14336, "max_output_tokens_per_call": 2048},

@@ -9,6 +9,7 @@ public sealed class CorporateActionProcessor
 {
     /// <summary>延迟可见的历史报价使用原价格时点判断除权，不能当成本日真实行情。</summary>
     public Func<Symbol, DateTime?>? MarketPriceSourceTime { get; set; }
+    public Func<Symbol, DateTimeOffset, bool>? IsDelisted { get; set; }
     private sealed class Entitlement
     {
         public required CorporateActionEvent Action;
@@ -31,6 +32,11 @@ public sealed class CorporateActionProcessor
     private bool _faulted;
     public DateTimeOffset? AsOf => _clock;
     public IReadOnlyList<ActionTransition> Transitions => _transitions.AsReadOnly();
+    /// <summary>读取当前采用版本的登记权益账簿，不计算市场价值或推进时钟。</summary>
+    public IReadOnlyList<RegisteredEntitlementState> RegisteredEntitlements => _rights.Values
+        .OrderBy(x => x.Action.ActionId, StringComparer.Ordinal)
+        .Select(x => new RegisteredEntitlementState(x.Action.ActionId, x.Action.Revision, x.Symbol,
+            x.Registered, x.Cash, x.Bonus, x.Ex, x.Paid, x.Arrived, x.Released)).ToArray();
 
     public CorporateActionProcessor(SecurityPortfolioManager portfolio, Func<string, Symbol> symbolResolver,
         IEnumerable<CorporateActionEvent> events)
@@ -54,6 +60,24 @@ public sealed class CorporateActionProcessor
     private CorporateActionEvent? Visible(string id, DateTimeOffset at) => _events
         .Where(x => x.ActionId == id && x.AvailableAt <= at)
         .OrderByDescending(x => x.Revision).FirstOrDefault();
+
+    /// <summary>初始空仓按实际登记时可见版本逐行动登记一次，不继承窗口前持仓。</summary>
+    public void SeedInitialEmptyPortfolio(DateTimeOffset startAt)
+    {
+        foreach (var versions in _events.GroupBy(x => x.ActionId)
+            .Where(x => x.Any(action => action.RecordAt < startAt)).OrderBy(x => x.Key, StringComparer.Ordinal))
+        {
+            CorporateActionEvent? registered = null;
+            foreach (var at in versions.Select(x => x.RecordAt).Where(x => x < startAt).Distinct().Order())
+            {
+                var visible = Visible(versions.Key, at);
+                if (visible != null && visible.RecordAt == at) { registered = visible; break; }
+            }
+            if (registered == null) throw new ArgumentException($"登记时没有可见行动版本：{versions.Key}");
+            SeedEntitlement(new InitialEntitlement(registered.ActionId, registered.Revision, 0m, registered.RecordAt,
+                "initial_empty_portfolio:" + registered.SourceRef), startAt);
+        }
+    }
 
     /// <summary>只允许以显式历史登记证据衔接窗口开始前登记、窗口内除权的行动。</summary>
     public void SeedEntitlement(InitialEntitlement seed, DateTimeOffset startAt)
@@ -181,7 +205,11 @@ public sealed class CorporateActionProcessor
                 throw new NotSupportedException("零股分配需明确规则，当前拒绝非整数送转权益");
         }
         var last = security.GetLastData();
-        if (last is not null)
+        if (IsDelisted?.Invoke(security.Symbol, at) == true)
+        {
+            security.Holdings.UpdateMarketPrice(0m);
+        }
+        else if (last is not null)
         {
             var sourceTime = MarketPriceSourceTime?.Invoke(security.Symbol) ?? last.EndTime;
             var lastAt = new DateTimeOffset(DateTime.SpecifyKind(sourceTime, DateTimeKind.Unspecified), TimeSpan.FromHours(8));
@@ -219,6 +247,7 @@ public sealed class CorporateActionProcessor
         var active = _rights.Values.Where(x => x.Ex).ToArray();
         decimal Value(Entitlement x)
         {
+            if (IsDelisted?.Invoke(x.Symbol, at) == true) return 0m;
             var security = _portfolio.Securities[x.Symbol];
             var last = security.GetLastData();
             if (last is null && x.Bonus > 0) throw new InvalidOperationException("股份权益缺少可见价格");
@@ -236,3 +265,7 @@ public sealed class CorporateActionProcessor
         => _transitions.Add(new ActionTransition(right.Action.ActionId, right.Action.Revision,
             phase, at, right.Registered, cash, shares));
 }
+
+public sealed record RegisteredEntitlementState(string ActionId, int Revision, Symbol Symbol,
+    decimal RegisteredQuantity, decimal CashEntitlement, decimal BonusQuantity,
+    bool ExApplied, bool CashPaid, bool SharesArrived, bool SharesSellable);

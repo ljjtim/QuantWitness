@@ -89,6 +89,7 @@ def _run_engine(root, runtime, node_context, started):
         try:
             with _project_sampling_scope(root) as sampler:
                 while True:
+                    node_context.remaining_resource_budget()
                     if sampler is None:
                         rss, count = _project_process_usage(process.pid, observed, windows_job_name=job)
                         scratch = _measure_attempt_tree_bytes(node_context.work_dir)
@@ -96,7 +97,7 @@ def _run_engine(root, runtime, node_context, started):
                         rss, count, scratch = sampler.sample_project_usage(process.pid, observed,
                             (node_context.work_dir,), windows_job_name=job)
                     peak_rss, peak_processes, peak_scratch = max(peak_rss, rss), max(peak_processes, count), max(peak_scratch, scratch)
-                    if rss > budget.memory_bytes or count > node_context.process_slots or scratch > budget.temp_bytes:
+                    if rss > budget.memory_bytes or count > node_context.process_slots or (budget.temp_bytes is not None and scratch > budget.temp_bytes):
                         raise RuntimeWorkerError("LEAN进程或临时空间超出节点额度", error_code="lean_resource_exceeded")
                     if budget.wall_seconds and time.monotonic() - started > budget.wall_seconds:
                         raise RuntimeWorkerError("LEAN节点累计运行超时", error_code="lean_node_timeout")
@@ -169,6 +170,10 @@ def execute_lean_strategy_node(service, *, node_context, run_id, attempt_id, env
         prepared["bars"] = sum(stream.counts.values())
         prepared["signal_rows"] = stream.signal_rows
         prepared["source_reads"] = market.statistics
+        prepared["daily_input_timings"] = {day: {
+            **getattr(market, "timings", {}).get(day, {}),
+            **stream.loader.timings.get(day, {}), **stream.timings.get(day, {})}
+            for day in prepared["dates"]}
     finally:
         stream.close()
     engine_finished_at = time.monotonic()
@@ -186,7 +191,9 @@ def execute_lean_strategy_node(service, *, node_context, run_id, attempt_id, env
 
 
 def _publish_lean_output(context, root, prepared, runtime):
-    from research_pipeline.platform.lean_contract import LEAN_PATHS, LEAN_SUPPORT_PATHS, LEAN_METRICS_PATH
+    from research_pipeline.platform.lean_contract import (
+        LEAN_ARTIFACT_TYPE, LEAN_JSONL_FILES, LEAN_PATHS, LEAN_SUPPORT_PATHS, LEAN_METRICS_PATH, LEAN_RESULT_VERSION,
+    )
     from research_pipeline.research.lean_metrics import lean_metrics_table
     from decimal import Decimal
     import pyarrow.parquet as pq
@@ -194,13 +201,16 @@ def _publish_lean_output(context, root, prepared, runtime):
     write_started = time.monotonic()
     counts = {}
     try:
-        for name, source in {"orders": "orders.jsonl", "intents": "intents.jsonl", "daily": "daily.jsonl", "trace": "strategy-trace.jsonl"}.items():
+        for name, source in LEAN_JSONL_FILES.items():
             counts[name] = _json_rows(_read_json_lines(root / source), staging / LEAN_PATHS[name] / "part-00000.parquet")
         strategy_input = json.loads((root / "strategy-input.json").read_text(encoding="utf-8"))
         metrics = lean_metrics_table(
             _read_json_lines(root / "daily.jsonl"), _read_json_lines(root / "orders.jsonl"),
             initial_equity=Decimal(strategy_input["initial_cash_units"]) / 100,
             expected_dates=strategy_input["dates"],
+            fills=_read_json_lines(root / "fills.jsonl"),
+            account_events=_read_json_lines(root / "account_events.jsonl"),
+            final_account=json.loads((root / "account.json").read_text(encoding="utf-8")),
         )
         metric_path = staging / LEAN_METRICS_PATH / "part-00000.parquet"
         metric_path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,14 +221,19 @@ def _publish_lean_output(context, root, prepared, runtime):
             shutil.copyfile(root / Path(relative).relative_to("lean"), destination)
         prepared.setdefault("stage_seconds", {})["output_write_before_commit"] = time.monotonic() - write_started
         model = "lean_next_session_open_v1" if strategy_input.get("frequency") == "1d" else "lean_next_completed_close_v1"
-        _write_json(staging / "result.json", {"contract_version": "research-lean-simulation-v1",
+        _write_json(staging / "result.json", {"contract_version": LEAN_RESULT_VERSION,
             "execution_backend": "lean", "execution_model": model,
             "counts": counts, "preparation": prepared, "lean_runtime": runtime})
-        commit = context.external_store.commit(staging, artifact_name="simulation", artifact_type="research.lean-simulation.v1")
+        commit = context.external_store.commit(staging, artifact_name="simulation", artifact_type=LEAN_ARTIFACT_TYPE)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     return RuntimeNodeOutputs({"simulation": RuntimeNodeValue.external(commit)}, completion_metadata=RuntimeCompletionMetadata(
         counts=counts, backend_id="quantconnect.lean", fidelity="bar_level_research_only",
         limitations=(model, *(["日线权益按最新已可见价格估值，价格来源及时间保存在每日账户；不是当日收盘净值。"]
-                             if model == "lean_next_session_open_v1" else []))))
+                             if model == "lean_next_session_open_v1" else []),
+            *(["已确认退市的剩余股份按零价值计入账户，保留数量且不产生卖出收入；已登记现金权益继续按事件到账。"]
+              if strategy_input.get("lifecycle") else []),
+            *(["执行包含盘中起止；账户按实际窗口结束时估值，年化及日频风险指标仍按交易日期计数。"]
+              if any(item["start_at"] != item["session_open_at"] or item["end_at"] != item["session_close_at"]
+                     for item in strategy_input.get("execution_windows", {}).values()) else []))))

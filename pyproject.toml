@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantwitness"
-version = "1.5.0"
+version = "1.6.0"
 description = "AI-assisted quantitative research and backtesting with reproducible results"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -35,7 +35,7 @@ dev = [
   "tomli>=2; python_version < '3.11'",
 ]
 ml = ["pyqlib==0.9.7", "xgboost>=3.2,<3.3", "plotly>=6,<7", "statsmodels>=0.15,<0.16"]
-ml-sequence = ["pyqlib==0.9.7", "torch==2.5.1"]
+ml-sequence = ["pyqlib==0.9.7", "torch==2.9.1"]
 
 [project.scripts]
 quantwitness = "research_pipeline.cli:main"
@@ -45,14 +45,10 @@ license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "licenses/*.txt"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["research_pipeline.catalog.definitions*", "research_pipeline.catalog.default_lock*"]
 
 [tool.setuptools.package-data]
 "research_pipeline" = ["capabilities.json", "gate_ia_protocol.json"]
-"research_pipeline.catalog" = [
-  "definitions/*.yaml",
-  "default_lock/CURRENT",
-  "default_lock/*/*.json",
-]
 "research_pipeline.packages" = [
   "templates/*.yaml",
   "templates/sources/*.yaml",
@@ -64,11 +60,11 @@ where = ["src"]
 ]
 "research_pipeline.domain" = [
   "session_policies/minute_reference_sessions.v6.json",
-  "session_policies/futures_session_close.v4.json",
   "rule_snapshots/minute_reference_rules.v6.json",
 ]
 
 [tool.setuptools.exclude-package-data]
+"research_pipeline.catalog" = ["definitions/*", "definitions/**/*", "default_lock/*", "default_lock/**/*"]
 "research_pipeline.platform" = ["minute_capabilities/minute_inventory.v3.json"]
 
 [tool.pytest.ini_options]

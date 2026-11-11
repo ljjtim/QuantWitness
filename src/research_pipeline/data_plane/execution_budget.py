@@ -37,13 +37,13 @@ class DataPlaneExecutionBudget:
     """Runtime 批准给单次 provider 的进程树资源包络。"""
 
     memory_bytes: int
-    temp_bytes: int
+    temp_bytes: int | None
     cpu_slots: int
 
     def __post_init__(self) -> None:
         if type(self.memory_bytes) is not int or self.memory_bytes <= 0:
             raise ProviderExecutionError("data-plane execution memory_bytes 必须为正整数")
-        if type(self.temp_bytes) is not int or self.temp_bytes < 0:
+        if self.temp_bytes is not None and (type(self.temp_bytes) is not int or self.temp_bytes < 0):
             raise ProviderExecutionError("data-plane execution temp_bytes 不能为负数")
         if type(self.cpu_slots) is not int or self.cpu_slots <= 0:
             raise ProviderExecutionError("data-plane execution cpu_slots 必须为正整数")
@@ -56,7 +56,7 @@ class DataPlaneExecutionBudget:
             cpu_slots=getattr(budget, "cpu_slots", None),
         )
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, int | None]:
         return {
             "memory_bytes": self.memory_bytes,
             "temp_bytes": self.temp_bytes,
@@ -70,7 +70,7 @@ class ProviderExecutionPlan:
 
     approved_process_memory_bytes: int
     duckdb_memory_bytes: int
-    temp_bytes: int
+    temp_bytes: int | None
     cpu_slots: int
     batch_rows: int
     projected_row_width_upper: int
@@ -82,10 +82,10 @@ class ProviderExecutionPlan:
         values = self.to_dict()
         if any(type(value) is not int or value <= 0 for key, value in values.items() if key != "temp_bytes"):
             raise ProviderExecutionError("provider execution plan 必须为正整数")
-        if type(self.temp_bytes) is not int or self.temp_bytes < 0:
+        if self.temp_bytes is not None and (type(self.temp_bytes) is not int or self.temp_bytes < 0):
             raise ProviderExecutionError("provider execution temp_bytes 不能为负数")
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, int | None]:
         return {
             "approved_process_memory_bytes": self.approved_process_memory_bytes,
             "duckdb_memory_bytes": self.duckdb_memory_bytes,
@@ -198,11 +198,15 @@ def bind_data_plane_request_budgets(
     for request_id, query in sorted(request_queries.items()):
         if isinstance(query.time_range, InstantRangeV2):
             owners = minute_owners.get(request_id, [])
-            if len(owners) != 1:
+            if not owners:
                 raise ProviderExecutionError(
-                    f"分钟 request={request_id} 必须恰好绑定一个 data.minute.scan 节点"
+                    f"分钟 request={request_id} 必须至少绑定一个 data.minute.scan 节点"
                 )
-            result[request_id] = owners[0][1]
+            result[request_id] = DataPlaneExecutionBudget(
+                memory_bytes=min(budget.memory_bytes for _, budget in owners),
+                temp_bytes=min(budget.temp_bytes for _, budget in owners),
+                cpu_slots=min(budget.cpu_slots for _, budget in owners),
+            )
             continue
         if request_id in minute_owners:
             raise ProviderExecutionError(

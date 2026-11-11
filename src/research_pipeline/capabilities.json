@@ -49,7 +49,7 @@
         "research_pipeline/tests/test_mainline_research_package.py::test_explicit_package_load_compile_is_immutable_and_deterministic",
         "research_pipeline/tests/test_cli_mainline.py::test_package_lint_reports_single_current_admission_command",
         "research_pipeline/tests/test_zero_to_result_workflow.py::test_package_admit_observes_drift_from_explicit_read_only_database",
-        "research_pipeline/tests/test_session_close_temporal.py::test_admission_records_each_selected_policy_and_coverage",
+        "research_pipeline/tests/test_session_close_temporal.py::test_next_session_visibility_from_frozen_calendar",
         "research_pipeline/tests/test_mainline_architecture_boundary.py::test_package_modules_have_no_ast_import_cycle"
       ],
       "evidence_level": "local_acceptance",
@@ -103,7 +103,7 @@
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "resume、retry-node、inspect 和 rerun-from 消费当前 invocation、计划内算子闭包和已验证 checkpoint；run 与 workspace run 共用复用参数和正式运行校验；--reuse-run-root 只按显式顺序接受现行节点局部身份下已成功发布 Result 的完成态 run，并机会式复用 pure/cacheable 节点。配合 --require-reused-node 时，指定节点及其必要上游允许不是 pure/cacheable，但必须在 Worker 启动前全部通过节点局部身份、输入、checkpoint、typed 输出和 ExternalArtifact 内容复验，且不得回退执行。run --reuse-failed-run-root 只接受一个显式失败终态 run，要求新旧 DAG、节点身份环境、clock 和 seed 完全一致，只把状态为成功且完整复验通过的 checkpoint 复制进目标 run，再从首个未成功节点继续。两种跨运行来源不能混用，不扫描磁盘或依赖裸 ResultStore。同一次 execute 复用 Supervisor 已冻结的工件验证结果，新的 resume 进程、rerun child 或新 run 必须重新完整验证。多请求 data 节点另以 run 内 partial index 逐项复验已提交 DatasetArtifactRef，只重做失效 request；partial 不进入正式输出。旧计划仍可 inspect/resume/retry，但不能开启跨运行复用。该边界仍为 local_only。"
+      "notes": "resume、retry-node、inspect 和 rerun-from 消费当前 invocation、计划内算子闭包和已验证 checkpoint；run 与 workspace run 共用复用参数和正式运行校验；--reuse-run-root 只按显式顺序接受现行节点局部身份下已成功发布 Result 的完成态 run，并机会式复用 pure/cacheable 节点。配合 --require-reused-node 时，指定节点及其必要上游允许不是 pure/cacheable，但必须在 Worker 启动前全部通过节点局部身份、输入、checkpoint、typed 输出和 ExternalArtifact 内容复验，且不得回退执行。run --reuse-failed-run-root 只接受一个显式失败终态 run，要求新旧 DAG、节点身份环境、clock 和 seed 完全一致，只把状态为成功且完整复验通过的 checkpoint 复制进目标 run，再从首个未成功节点继续。两种跨运行来源不能混用，不扫描磁盘或依赖裸 ResultStore。同一次 execute 复用 Supervisor 已冻结的工件验证结果，新的 resume 进程、rerun child 或新 run 必须重新完整验证。多请求 data 节点另以 run 内 partial index 逐项复验已提交 DatasetArtifactRef，只重做失效 request；partial 不进入正式输出。恢复与跨运行复用均使用当前合同和已冻结的输入、实现及配置身份。该边界仍为 local_only。"
     },
     {
       "id": "result.consume",
@@ -199,7 +199,7 @@
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "Qlib 六节点负责日频回归模型：Linear、LightGBM、XGBoost；Processor 与 Model 按候选/fold 一起训练保存。保留 purge/embargo、开发区 validation 选择及隔离 holdout；模型文件随 Result 封存。只接受 v2 模型工件，不恢复旧七阶段 ML checkpoint。本地技术验收不代表真实策略、可交易性或样本外盈利。"
+      "notes": "Qlib 六节点负责日频回归模型：Linear、LightGBM、XGBoost；Processor 与 Model 按候选/fold 一起训练保存。保留 purge/embargo、开发区 validation 选择及隔离 holdout；模型文件随 Result 封存。模型工件与处理器一同冻结，恢复要求输入、模型与处理器身份一致。本地技术验收不代表真实策略、可交易性或样本外盈利。"
     },
     {
       "id": "minute_line.complete",
@@ -224,7 +224,6 @@
         "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_at_one_minute",
         "research_pipeline/tests/test_minute_cli_contract.py::test_formal_minute_run_records_serial_seed_workers",
         "research_pipeline/tests/test_minute_cli_contract.py::test_formal_minute_run_preserves_parallel_mode",
-        "research_pipeline/release/minute-reference-acceptance/real-data-smoke.md",
         "research_pipeline/tests/test_daily_stream.py::test_month_scan_once_and_stable_clipping",
         "research_pipeline/tests/test_lean_daily_admission.py::test_frequency_rejects_other_intervals_and_port_conflicts"
       ],
@@ -250,8 +249,7 @@
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_at_one_minute",
-        "research_pipeline/tests/test_minute_runtime_adapters.py::test_formal_minute_observation_chain_publishes_result_metric",
-        "research_pipeline/release/minute-reference-acceptance/real-data-smoke.md"
+        "research_pipeline/tests/test_minute_runtime_adapters.py::test_formal_minute_observation_chain_publishes_result_metric"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
@@ -261,29 +259,24 @@
       "id": "simulation.bar_tca",
       "state": "local_only",
       "commands": [
-        "package admit",
-        "run"
+        "capabilities --format json"
       ],
       "required_inputs": [
-        "正式 Simulation 的 orders、fills/trades 与 ledger 身份",
-        "决策时可见的价格基准、正式费用与规则快照",
-        "流动性归因只有在容量当时可见时才可计算",
-        "缺少逐笔正式 fill 的分钟结果必须失败关闭",
-        "正式结果必须进入正式 Result"
+        "显式正式订单与成交事实",
+        "决策时可见的价格基准、费用和政策",
+        "可选的当时可见容量基准"
       ],
       "implementation_anchors": [
-        "research_pipeline/src/research_pipeline/simulation/bar_tca.py::run_bar_tca",
-        "research_pipeline/src/research_pipeline/runtime/bar_tca_adapter.py::execute_simulation_result_bar_tca"
+        "research_pipeline/src/research_pipeline/simulation/bar_tca.py::run_bar_tca"
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_bar_tca.py::test_tca_attributes_each_formal_fill_without_generating_another_fill",
         "research_pipeline/tests/test_bar_tca.py::test_artifact_writer_preserves_formal_fill_set",
-        "research_pipeline/tests/test_simulation_result_contract.py::test_tca_consumes_only_canonical_orders_fills_and_visible_benchmark",
         "research_pipeline/tools/bar_tca_oracle.py"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "Bar TCA 只消费统一 SimulationResult 的正式订单与成交和账本身份，不二次撮合。分钟路径要求决策时可见基准、已完成执行 bar、可见容量与正式 fill，缺任何必要事实均失败关闭。随包参考规则只有有界中国市场标的窗口；公开源码不包含个人真实研究结果，能力保持 local_only。"
+      "notes": "Bar TCA 提供库级成交成本归因，消费调用方提供的正式订单、成交、可见价格基准和政策，不重新撮合。当前没有主 DAG 算子或 Result 报告入口；缺少正式成交或必要可见事实时拒绝计算。"
     },
     {
       "id": "capability.discovery",

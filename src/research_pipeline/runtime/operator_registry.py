@@ -159,12 +159,13 @@ def compile_operator_graph_dag(
                     "implementation_identity": implementation_identity,
                 }
             )
-        resource_profile = dict(spec.resource_profile)
+        resource_profile = effective_node_resource_profile(node, spec)
         resource_profile.pop("process_slots")
         return NodeSpec(
             node_id,
             implementation_id,
-            tuple((item.port, item.artifact_type) for item in spec.input_ports),
+            tuple((item.port, item.artifact_type) for item in spec.input_ports
+                  if item.port in {binding.input_port for binding in node.inputs}),
             tuple((item.port, item.artifact_type) for item in spec.output_ports),
             ResourceBudget(**resource_profile),
             retry,
@@ -215,6 +216,11 @@ def compile_operator_graph_dag(
     return dag
 
 
+def effective_node_resource_profile(node, specification) -> dict[str, int]:
+    """节点只覆盖显式维度，其余沿用已准入算子的默认资源。"""
+    return {**dict(specification.resource_profile), **dict(node.resource_profile or {})}
+
+
 def operator_process_slots_by_node(
     dag: DagSpec,
     recipe: OperatorGraphRecipe,
@@ -232,7 +238,7 @@ def operator_process_slots_by_node(
             recipe_node.operator_id,
             recipe_node.operator_version,
         )
-        process_slots = specification.resource_profile.get("process_slots")
+        process_slots = effective_node_resource_profile(recipe_node, specification).get("process_slots")
         if type(process_slots) is not int or process_slots <= 0:
             raise ValueError(f"operator 进程槽声明无效: {specification.operator_id}")
         binding = registry.binding(

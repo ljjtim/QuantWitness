@@ -16,6 +16,7 @@ import yaml
 from research_pipeline.catalog import CompiledCatalog, DriftAttestation, PolicyContract
 from research_pipeline.application.research_run import _runtime_data_bundle
 from research_pipeline.application.research_plan_store import _formal_input_lineage
+from research_pipeline.application.research_plan import _admit_minute_scan_plans
 from research_pipeline.data_plane import (
     DatasetPartitionRef,
     PartitionedDatasetRef,
@@ -153,7 +154,17 @@ def _stock_action_history_fixture(*, revised_at: datetime):
         def iter_temporal_fact_batches(self, **_kwargs):
             yield pa.RecordBatch.from_pylist([{field: row[field] for field in required}])
 
+        def iter_batches_at(self, **_kwargs):
+            yield pa.RecordBatch.from_pylist([dict(row)])
+
     return plan, FakeDataset(), row
+
+
+def _action_context(monkeypatch):
+    from research_pipeline.runtime.adapters import minute_adjustment
+
+    monkeypatch.setattr(minute_adjustment, "read_temporal_batch", lambda dataset, **_kwargs: dataset)
+    return SimpleNamespace(effective_resource_budget=SimpleNamespace(memory_bytes=1024 * 1024))
 
 
 def test_stock_action_uses_announcement_despite_later_maintenance(monkeypatch) -> None:
@@ -165,12 +176,12 @@ def test_stock_action_uses_announcement_despite_later_maintenance(monkeypatch) -
     monkeypatch.setattr(operator_adapters, "_columnar_request_dataset",
                         lambda *_args: (dataset, SimpleNamespace(), plan))
     times = []
-    def rows_at(*_args, consumer_time, **_kwargs):
+    def batches_at(*_args, consumer_time, **_kwargs):
         times.append(consumer_time)
-        return (dict(row),), SimpleNamespace(), plan
-    monkeypatch.setattr(operator_adapters, "_columnar_request_rows_at", rows_at)
+        yield pa.RecordBatch.from_pylist([dict(row)])
+    monkeypatch.setattr(dataset, "iter_batches_at", batches_at)
     rows, _reference = _temporal_corporate_action_rows(
-        object(), "stock_corporate_actions", instrument_id="000001.XSHE",
+        _action_context(monkeypatch), "stock_corporate_actions", instrument_id="000001.XSHE",
         asset_class="cn_stock",
         trading_sessions=tuple(date(2024, 1, day) for day in (2, 3, 4, 5)),
         applicable_start=datetime.fromisoformat("2024-01-02T09:31:00+08:00"),
@@ -233,7 +244,7 @@ def test_etf_action_missing_window_revision_fails_closed(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="缺少研究窗口内可还原的修订前版本"):
         _temporal_corporate_action_rows(
-            object(),
+            _action_context(monkeypatch),
             "etf_corporate_actions",
             instrument_id="510300.XSHG",
             asset_class="cn_etf",
@@ -258,16 +269,16 @@ def test_stock_action_current_event_preserves_exact_amount(monkeypatch, amount_t
         lambda *_args: (dataset, SimpleNamespace(), plan),
     )
 
-    def rows_at(_context, _request_id, *, consumer_time, filters=()):
+    def batches_at(*, consumer_time, filters=(), **_kwargs):
         assert len(filters) == 1
         assert filters[0].field == "fld_ca_code"
         assert filters[0].operator == "eq"
         assert filters[0].value == "000001.XSHE"
-        return (dict(original),), SimpleNamespace(), plan
+        yield pa.RecordBatch.from_pylist([dict(original)])
 
-    monkeypatch.setattr(operator_adapters, "_columnar_request_rows_at", rows_at)
+    monkeypatch.setattr(dataset, "iter_batches_at", batches_at)
     rows, _reference = _temporal_corporate_action_rows(
-        object(),
+        _action_context(monkeypatch),
         "stock_corporate_actions",
         instrument_id="000001.XSHE",
         asset_class="cn_stock",
@@ -641,6 +652,12 @@ def _environment(
         database=database,
         source_databases={},
         minute_data_root=minute_root,
+        minute_scan_plans=(
+            _admit_minute_scan_plans(
+                plan.recipe, admitted_plans, minute_data_root=minute_root,
+            )
+            if complete_admission else {}
+        ),
         holdout_ledger_anchor=tmp_path / "artifacts",
         node_parameters=parameters,
         semantics=None,
@@ -879,7 +896,7 @@ def test_minute_observation_rejects_request_id_mismatch(tmp_path: Path) -> None:
         )
 
 
-def test_resample_rejects_source_revision_drift_before_using_rows(
+def test_minute_chain_rejects_source_revision_drift_before_using_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     package, plan = _short_package(tmp_path, "minute_futures_night_session")
@@ -908,7 +925,7 @@ def test_resample_rejects_source_revision_drift_before_using_rows(
         "execute_research_bars_minute_resample_v1",
         drift_then_resample,
     )
-    with pytest.raises(RuntimeWorkerError, match="bars_1m") as error:
+    with pytest.raises(RuntimeWorkerError, match="features") as error:
         _service().execute(
             dag=dag,
             environment=environment,
@@ -917,7 +934,10 @@ def test_resample_rejects_source_revision_drift_before_using_rows(
             root_seed=plan.root_seed,
             fixed_clock=plan.fixed_clock,
         )
-    assert "物理源发生漂移" in str(error.value.__cause__)
+    from research_pipeline.data_plane.errors import SnapshotIntegrityError
+
+    assert isinstance(error.value.__cause__, SnapshotIntegrityError)
+    assert "分区来源身份发生漂移" in str(error.value.__cause__)
 
 
 def test_raw_stock_source_passes_formal_admission(

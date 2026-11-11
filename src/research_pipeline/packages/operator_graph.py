@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, fields, replace
 from datetime import date, datetime
 import json
 from typing import Mapping, Protocol, runtime_checkable
@@ -59,6 +59,14 @@ class ParameterPreflightAdmission(Protocol):
         """使用已准入实现闭包预检真实冻结参数。"""
 
 
+@dataclass(frozen=True)
+class PreparedOperatorGraph:
+    """同次声明检查的结果；尚未授予来源准入资格。"""
+
+    plan: OperatorGraphPlan
+    admitted: AdmittedOperatorGraph
+
+
 def compile_operator_graph_package(
     package: ResearchPackage,
     *,
@@ -68,6 +76,60 @@ def compile_operator_graph_package(
     recipe: OperatorGraphRecipe | None = None,
     research_semantics: ResearchSemantics | None = None,
 ) -> OperatorGraphPlan:
+    prepared = prepare_operator_graph_package(
+        package, query_result=query_result, admission=admission,
+        platform_admission=platform_admission, recipe=recipe,
+        research_semantics=research_semantics,
+    )
+    validate_operator_graph_scopes(package, prepared)
+    return prepared.plan
+
+
+def validate_operator_graph_scopes(package, prepared):
+    from .minute_scope_admission import validate_minute_scope_graph
+
+    try:
+        validate_minute_scope_graph(
+            prepared.plan.recipe,
+            dict(zip(prepared.plan.request_ids, prepared.plan.queries, strict=True)),
+            scope_inputs=package.minute_scope_inputs,
+        )
+    except ResearchPackageError:
+        raise
+    except Exception as exc:
+        raise ResearchPackageError(f"operator graph 准入失败: {exc}") from exc
+
+
+def bind_operator_graph_platform(prepared, platform_admission):
+    """仅绑定平台生成的来源证明，保留已检查的研究图及输出闭包。"""
+    plan = prepared.plan
+    values = _platform_admission_values(
+        request_ids=plan.request_ids, platform_admission=platform_admission,
+    )
+    recipe = OperatorGraphRecipe.build(
+        graph_id=plan.recipe.graph_id,
+        nodes=tuple(replace(node, parameters=values)
+                    if node.operator_id == "data.catalog.admission" else node
+                    for node in plan.recipe.nodes),
+    )
+    payload = {**prepared.admitted.payload(), "recipe_hash": recipe.recipe_hash}
+    admitted = replace(prepared.admitted, recipe=recipe,
+                       admission_hash=typed_canonical_hash(payload))
+    arguments = {field.name: getattr(plan, field.name) for field in fields(plan)
+                 if field.name not in {"plan_hash", "contract_version"}}
+    arguments.update(recipe=recipe, admission_hash=admitted.admission_hash)
+    return OperatorGraphPlan.build(**arguments)
+
+
+def prepare_operator_graph_package(
+    package: ResearchPackage,
+    *,
+    query_result: QueryCompileResult,
+    admission: object | None = None,
+    platform_admission: object | None = None,
+    recipe: OperatorGraphRecipe | None = None,
+    research_semantics: ResearchSemantics | None = None,
+) -> PreparedOperatorGraph:
     if not isinstance(admission, OperatorGraphAdmission):
         raise ResearchPackageError("operator_graph_plan_v1 必须提供可信算子注册表准入")
     payload = package.spec_payload
@@ -133,6 +195,9 @@ def compile_operator_graph_package(
                 platform_admission=platform_admission,
             )
         admitted = admission.admit(recipe)
+        from .minute_scope_admission import validate_project_minute_scope_bindings
+        validate_project_minute_scope_bindings(recipe,
+            dict(zip(query_result.request_ids, query_result.queries, strict=True)), admission)
         _validate_operator_graph_special_contracts(
             recipe,
             admission=admission,
@@ -140,11 +205,6 @@ def compile_operator_graph_package(
         )
         from .project_strategy_admission import validate_project_strategy_recipe
         validate_project_strategy_recipe(recipe, admission, dict(zip(query_result.request_ids, query_result.queries, strict=True)))
-        from .minute_scope_admission import validate_minute_scope_graph
-        validate_minute_scope_graph(
-            recipe, dict(zip(query_result.request_ids, query_result.queries, strict=True)),
-            scope_inputs=package.minute_scope_inputs,
-        )
         from .project_causal_admission import validate_project_causal_recipe
 
         validate_project_causal_recipe(
@@ -222,7 +282,7 @@ def compile_operator_graph_package(
         implementation_id: typed_canonical_hash(dict(identity))
         for implementation_id, identity in implementation_identities.items()
     }
-    return OperatorGraphPlan.build(
+    plan = OperatorGraphPlan.build(
         research_id=research_id,
         package_hash=package.package_hash,
         request_ids=query_result.request_ids,
@@ -240,6 +300,8 @@ def compile_operator_graph_package(
         project_bundle_hashes=project_bundle_hashes,
         project_implementation_hashes=project_implementation_hashes,
     )
+
+    return PreparedOperatorGraph(plan, admitted)
 
 
 def _validate_operator_graph_spec(payload: Mapping[str, object]) -> None:
@@ -496,6 +558,8 @@ def _validate_operator_graph_special_contracts(
     from .model_sequence_admission import validate_model_sequence_graph
 
     validate_model_sequence_graph(recipe)
+    from .model_import_admission import validate_model_import_graph
+    validate_model_import_graph(recipe)
     node_by_id = {item.node_id: item for item in recipe.nodes}
     for node in recipe.nodes:
         parameters = node.parameters
@@ -624,7 +688,10 @@ def _validate_research_semantic_graph(
     analysis_graph = bool(analysis_features or label_nodes)
     if analysis_graph and semantics is None:
         raise ResearchPackageError("Feature/Label 分析图必须声明 research_semantics")
-    if semantics is not None and (not analysis_features or not label_nodes):
+    from .model_import_admission import imported_research_semantics_match
+    imported_semantics = (imported_research_semantics_match(recipe, semantics)
+                          if semantics is not None and not analysis_features and not label_nodes else False)
+    if semantics is not None and (not analysis_features or not label_nodes) and not imported_semantics:
         raise ResearchPackageError(
             "research_semantics 必须由 Feature 与 Label/事件结果节点共同实现"
         )

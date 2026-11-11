@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from research_pipeline.platform.metric_contracts import builtin_metric_output_path
+from research_pipeline.domain.session_calendar import PROJECT_SESSION_BUNDLE_VERSION
 
 from typing import Mapping
 from research_pipeline.platform import typed_canonical_hash
-from research_pipeline.data_plane import PartitionedDatasetRef, audit_adjustment_gate, build_minute_partitioned_dataset, build_minute_scan_plan
+from research_pipeline.data_plane import PartitionedDatasetRef, audit_adjustment_gate, build_minute_partitioned_dataset
 from research_pipeline.data_plane.research_data_bundle import merge_research_data_reference
 from research_pipeline.platform.metric_contracts import build_mainline_metric_registry
 from ..operator_runtime import OperatorRuntimeContext, RuntimeCompletionMetadata, RuntimeNodeOutputs, RuntimeNodeValue
 from .common import _environment, _external_result, _input_external_payload, _parameters
-from .minute_io import _minute_root, _minute_scan_plan, _session_bundle_from_payload
+from .minute_io import _minute_scan_plan, _minute_scan_plan_from_environment, _session_bundle_from_payload
 
 
 def execute_data_minute_scan_v1(context: OperatorRuntimeContext) -> RuntimeNodeValue:
@@ -53,19 +54,7 @@ def execute_research_bars_minute_resample_v1(
     admitted = _environment(context).admitted_plans.get(request_id)
     if admitted is None:
         raise ValueError("分钟 resample 缺少 scan 的已准入 QueryIR")
-    # 重新编译只读扫描计划并校验物理源，避免信任上游自报路径。
-    asset_class = str(admitted.minute_asset_class)
-    source_directory = {
-        "cn_stock": "stock",
-        "cn_etf": "fund",
-        "cn_index": "index",
-        "cn_future": "futures",
-    }[asset_class]
-    scan_plan = build_minute_scan_plan(
-        admitted,
-        source=_minute_root(context) / source_directory,
-        allowed_root=_minute_root(context),
-    )
+    scan_plan = _minute_scan_plan_from_environment(context, request_id)
     raw_dataset = source_payload.get("partitioned_dataset")
     if not isinstance(raw_dataset, Mapping):
         raise ValueError("分钟 resample 输入缺少分区引用")
@@ -79,7 +68,8 @@ def execute_research_bars_minute_resample_v1(
     if "minute_scope" in parameters:
         from research_pipeline.domain.minute_request_scope import minute_request_sessions
         for _ in minute_request_sessions(bundle, instruments=scan_plan.instruments,
-              start_at=scan_plan.start_at, end_at=scan_plan.end_at, policy_id=scan_plan.minute_session_policy_ref):
+              start_at=scan_plan.start_at, end_at=scan_plan.visible_end,
+              policy_id=None if bundle.contract_version == PROJECT_SESSION_BUNDLE_VERSION else scan_plan.minute_session_policy_ref):
             pass
     if interval_minutes != 1:
         raise ValueError("分钟行情仅支持一分钟")

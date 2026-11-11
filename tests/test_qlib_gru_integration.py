@@ -73,7 +73,7 @@ def test_cpu_gru_round_trip_one_sample_prediction_and_no_target_access(tmp_path,
     assert single.shape == (1,) and single[0] == prediction[0]
     config = json.loads((tmp_path / row["config_path"]).read_text())
     assert config["schema"] == "research.qlib-sequence-model-bundle.v2"
-    assert config["versions"]["torch"].split("+")[0] == "2.5.1"
+    assert config["versions"]["torch"].split("+")[0] == "2.9.1"
     assert config["effective_model_kwargs"]["GPU"] == -1
     assert config["effective_model_kwargs"]["d_feat"] == 2
     assert config["effective_fit_kwargs"] == {"save_path":"bundles/gru/weights.pt"}
@@ -214,7 +214,7 @@ def test_gru_cpu_context_restores_state_on_training_exception(tmp_path, monkeypa
 def test_gru_rejects_unsupported_tail_batches_or_feature_universe(mutation):
     spec = gru_candidate()
     if mutation == "batch_size":
-        spec["model"]["kwargs"]["batch_size"] = 2
+        spec["model"]["kwargs"]["batch_size"] = 0
     else:
         spec["processors"]["infer"] = [{"class":"CSZScoreNorm", "kwargs":{"fields_group":"feature"}}]
     with pytest.raises(QlibModelError):

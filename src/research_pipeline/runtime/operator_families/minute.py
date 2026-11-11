@@ -103,6 +103,8 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
                 _parameter("applicable_end", ParameterType.STRING),
                 _parameter("availability_policy_ref", ParameterType.STRING),
                 ParameterSpec("initial_listing_evidence", ParameterType.JSON, required=False),
+                ParameterSpec("financial_missing_date_policy", ParameterType.STRING,
+                              required=False, allowed_values=("error", "omit_event")),
             ),
             resource_profile={
                 "memory_bytes": 2 * _GIB,

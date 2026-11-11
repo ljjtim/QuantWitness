@@ -13,7 +13,7 @@ from .seeds import SeedManifest, build_seed_manifest
 from .selection import select_by_validation
 from .search_manifest import SearchCandidate, SearchManifest, build_search_manifest
 from .trial_ledger import TrialEvent, TrialLedger
-from .splits import SplitFold, SplitManifest, ValidationError, build_purged_kfold, build_walk_forward
+from .splits import SplitFold, SplitManifest, ValidationError, build_purged_kfold, build_walk_forward, build_explicit_walk_forward
 
 __all__ = [
     "NestedValidationManifest",
@@ -38,6 +38,7 @@ __all__ = [
     "build_search_manifest",
     "build_purged_kfold",
     "build_walk_forward",
+    "build_explicit_walk_forward",
     "select_by_validation",
     "issue_fit_scope",
 ]

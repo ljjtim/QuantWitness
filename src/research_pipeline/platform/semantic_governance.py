@@ -28,6 +28,7 @@ APPROVED_BUILTIN_SEMANTIC_IDENTITIES = MappingProxyType({
         "data.minute-bars.v1",
         "research.feature-set.v1",
         "research.label.v1",
+        "research.model-prediction-index.v1",
         "research.minute-features.v1",
         "research.minute-labels.v1",
         "research.minute-observation.v1",
@@ -72,11 +73,11 @@ MAINLINE_SEMANTIC_PROMOTION_REVIEWS: tuple["SemanticPromotionReview", ...] = ()
 
 # LEAN仅登记本地项目结果类型，不进入公共算子或能力晋级记录。
 LEAN_LOCAL_SEMANTIC_IDENTITIES = MappingProxyType({
-    "artifact_type": frozenset({"research.lean-simulation.v1"}),
+    "artifact_type": frozenset({"research.lean-simulation.v2"}),
     "result_schema": frozenset(
-        {f"research.lean.{name}.v1"
-         for name in ("orders", "intents", "daily", "trace")}
-        | {"research.lean-signal-source.v1"}
+        {f"research.lean.{name}.v2"
+         for name in ("orders", "intents", "daily", "trace", "fills", "positions", "account_events", "lifecycle")}
+        | {"research.lean-signal-source.v1", "research.lean.metrics.v2"}
     ),
 })
 

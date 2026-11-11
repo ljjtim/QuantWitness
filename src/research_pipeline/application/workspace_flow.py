@@ -24,7 +24,7 @@ from . import result_delivery, research_package, research_plan, research_run, ru
 
 
 _RUNTIME_OPTIONS = (
-    "mode", "workers", "resource_state_dir", "resource_memory_bytes",
+    "mode", "workers", "no_temp_limit", "resource_state_dir", "resource_memory_bytes",
     "resource_cpu_slots", "resource_scratch_bytes", "resource_process_slots",
     "resource_timeout_seconds", "resource_stale_seconds", "source_db",
     "input_snapshot_manifest", "minute_data_root", "reuse_run_root", "require_reused_node", "reuse_failed_run_root", "persist_inputs",
@@ -38,7 +38,7 @@ def workspace_arguments(**values) -> Namespace:
         mode="deterministic_serial", workers=None, resource_stale_seconds=30.0,
         source_db=[], reuse_run_root=[], require_reused_node=[],
         clock=None, root_seed=None, label=None, data_db=None, execution_id=None,
-        extension_bundle=[], source_archive_root=None, persist_inputs=False,
+        extension_bundle=[], source_archive_root=None, persist_inputs=False, no_temp_limit=False,
     )
     return Namespace(**{**defaults, **values})
 
@@ -56,7 +56,7 @@ def normalize_runtime_options(mapping) -> dict[str, object]:
     for name, value in mapping.items():
         if value is None:
             continue
-        if name == "persist_inputs":
+        if name in {"persist_inputs", "no_temp_limit"}:
             if not isinstance(value, bool):
                 raise ValueError("persist_inputs必须为布尔值")
         elif name in integers:

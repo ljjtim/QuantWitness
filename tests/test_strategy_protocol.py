@@ -114,7 +114,7 @@ def test_partial_fill_cancel_and_later_remaining_order_are_expressible():
 
 
 @pytest.mark.parametrize("changes", [
-    {"asset_class": "cn_future"}, {"asset_class": "cn_index"},
+    {"asset_class": "cn_index"},
     {"frequency": "5m"}, {"currency": "USD"},
 ])
 def test_unsupported_asset_frequency_currency_combinations(changes):

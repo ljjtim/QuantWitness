@@ -40,6 +40,9 @@ def assemble_daily_model_samples(
     *,
     horizon_sessions: int,
     target_field: str = "forward_return",
+    _feature_context: tuple[pd.DataFrame, tuple[str, ...]] | None = None,
+    allow_missing_target: bool = False,
+    prediction_index: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, tuple[str, ...]]:
     """把日频长表变成资产无关的样本矩阵，不改变任何特征值。"""
     label_required = {
@@ -56,9 +59,11 @@ def assemble_daily_model_samples(
     _require_columns(labels, label_required, "labels")
     if type(horizon_sessions) is not int or horizon_sessions < 1:
         raise ModelMainlineError("horizon_sessions 必须是正整数")
-    context, feature_columns = assemble_daily_feature_context(features)
+    context, feature_columns = (
+        assemble_daily_feature_context(features) if _feature_context is None else _feature_context
+    )
     selected_labels = labels.loc[labels["horizon_sessions"] == horizon_sessions].copy()
-    if selected_labels.empty:
+    if selected_labels.empty and prediction_index is None:
         raise ModelMainlineError("模型样本缺少目标 horizon Label")
     for column in ("decision_time", "label_start_time", "label_end_time", "available_time"):
         selected_labels[column] = pd.to_datetime(selected_labels[column], utc=True, errors="raise")
@@ -77,12 +82,29 @@ def assemble_daily_model_samples(
     ]
     if selected_labels.duplicated(keys).any():
         raise ModelMainlineError("同一样本的目标 horizon Label 不唯一")
-    result = context.merge(
-        selected_labels.loc[:, label_columns],
-        on=keys,
-        how="inner",
-        validate="one_to_one",
-    )
+    # 资格、可见时间和排序只处理窄元数据；宽特征按最终位置读取一次。
+    metadata_columns = [column for column in context.columns if column not in feature_columns]
+    context_metadata = context.loc[:, metadata_columns].copy()
+    position_column = object()
+    context_metadata[position_column] = np.arange(len(context), dtype=np.int64)
+    if prediction_index is None:
+        result = context_metadata.merge(selected_labels.loc[:, label_columns], on=keys,
+                                        how="inner", validate="one_to_one")
+    else:
+        from .prediction_index import validate_prediction_index
+        index = validate_prediction_index(prediction_index, horizon_sessions=horizon_sessions)
+        index = index.loc[:, keys + ["observation_time", "decision_time", "eligibility_available_time", "lineage_hash"]].rename(
+            columns={"lineage_hash": "eligibility_lineage_hash", "observation_time": "eligibility_observation_time"})
+        result = index.merge(context_metadata, on=keys, how="inner", validate="one_to_one")
+        if (result.observation_time != result.eligibility_observation_time).any():
+            raise ModelMainlineError("预测资格与Feature观察时点不一致")
+        result.drop(columns="eligibility_observation_time", inplace=True)
+        labels = selected_labels.loc[:, label_columns].rename(columns={"decision_time": "label_decision_time"})
+        result = result.merge(labels, on=keys, how="left", validate="one_to_one")
+        matched = result.label_decision_time.notna()
+        if (result.loc[matched, "decision_time"] != result.loc[matched, "label_decision_time"]).any():
+            raise ModelMainlineError("预测资格与Label决策时点不一致")
+        result.drop(columns="label_decision_time", inplace=True)
     result = result.rename(
         columns={
             "available_time": "label_available_time",
@@ -101,7 +123,7 @@ def assemble_daily_model_samples(
     result["target"] = pd.to_numeric(result["target"], errors="raise")
     if (
         result["sample_id"].duplicated().any()
-        or not np.isfinite(result["target"].to_numpy(float)).all()
+        or (np.isinf(result["target"].to_numpy(float)).any() if allow_missing_target else not np.isfinite(result["target"].to_numpy(float)).all())
     ):
         raise ModelMainlineError("模型 sample_id 必须唯一且 target 必须有限")
     result["horizon_sessions"] = horizon_sessions
@@ -119,11 +141,16 @@ def assemble_daily_model_samples(
         "target",
         "feature_lineage_hash",
         "label_lineage_hash",
+        *(["eligibility_available_time", "eligibility_lineage_hash"] if prediction_index is not None else []),
         *feature_columns,
     ]
-    return result.loc[:, ordered].sort_values(
-        ["observation_time", "sample_id"], kind="stable"
-    ).reset_index(drop=True), feature_columns
+    result.sort_values(["observation_time", "sample_id"], kind="stable", inplace=True)
+    positions = result.pop(position_column).to_numpy(dtype=np.int64)
+    result.reset_index(drop=True, inplace=True)
+    # 按列取样避免先构造另一份完整宽表；各输出列保留原始dtype。
+    output = {column: (context[column].array.take(positions) if column in feature_columns
+                       else result[column].array) for column in ordered}
+    return pd.DataFrame(output, copy=False), feature_columns
 
 
 def model_dependency_preflight(candidates, *, thread_count: int) -> dict[str, object]:
@@ -134,14 +161,14 @@ def model_dependency_preflight(candidates, *, thread_count: int) -> dict[str, ob
     normalized = normalize_candidates(candidates)
     distributions = {"pyqlib", "numpy", "pandas"}
     for candidate in normalized:
-        distributions.add({"LinearModel": "scikit-learn", "LGBModel": "lightgbm", "XGBModel": "xgboost", "DEnsembleModel": "lightgbm", "GRU": "torch", "LSTM": "torch", "TransformerModel": "torch", "GeneratedModel": "torch"}[candidate["model"]["class"]])
+        distributions.add({"LinearModel": "scikit-learn", "LGBModel": "lightgbm", "XGBModel": "xgboost", "DEnsembleModel": "lightgbm", "GRU": "torch", "LSTM": "torch", "TransformerModel": "torch", "GeneratedModel": "torch", "GATs": "torch", "ProjectQlibModel": "torch"}[candidate["model"]["class"]])
     versions = {name: _distribution_version(name) for name in sorted(distributions)}
     missing = [name for name, version in versions.items() if version == "missing"]
     if missing:
         raise ModelDependencyError(f"Qlib 模型依赖缺失: {missing}")
-    if any(candidate["model"]["class"] in {"GRU", "LSTM", "TransformerModel", "GeneratedModel"} for candidate in normalized):
-        if versions["torch"].split("+", 1)[0] != "2.5.1" or versions["pyqlib"] != "0.9.7":
-            raise ModelDependencyError("Torch模型要求 pyqlib==0.9.7 与 torch==2.5.1")
+    if any(candidate["model"]["class"] in {"GRU", "LSTM", "TransformerModel", "GeneratedModel", "GATs", "ProjectQlibModel"} for candidate in normalized):
+        if versions["torch"].split("+", 1)[0] != "2.9.1" or versions["pyqlib"] != "0.9.7":
+            raise ModelDependencyError("Torch模型要求 pyqlib==0.9.7 与 torch==2.9.1")
     payload = {"contract_version": WALK_FORWARD_MODEL_VERSION, "dependencies": versions, "thread_count": 1}
     payload["preflight_hash"] = typed_canonical_hash(payload)
     return payload
@@ -195,7 +222,7 @@ def evaluate_locked_holdout(
     holdout_sequence_loader: Callable[[], object] | None = None,
 ) -> dict[str, object]:
     """开发拟合完成后原子记录 opened，再首次读取 holdout 值。"""
-    is_sequence = selected_candidate.get("model", {}).get("class") in {"GRU", "LSTM", "TransformerModel"}
+    is_sequence = selected_candidate.get("model", {}).get("class") in {"GRU", "LSTM", "TransformerModel", "GATs", "ProjectQlibModel"}
     if is_sequence and (development_sequence_context is None or not callable(holdout_sequence_loader)):
         raise ModelMainlineError("序列模型 holdout 必须提供开发序列上下文及打开后加载窗口的回调")
     if not is_sequence and (development_sequence_context is not None or holdout_sequence_loader is not None):
@@ -323,7 +350,7 @@ def evaluate_locked_holdout(
     try:
         raw_holdout = holdout_loader()
         holdout_frame = _normalize_model_samples(
-            raw_holdout, feature_columns, target_kind
+            raw_holdout, feature_columns, target_kind, allow_missing_target=True
         ).set_index("sample_id", drop=False)
         if set(holdout_frame.index) != set(holdout_ids):
             raise ModelMainlineError("holdout loader 必须只返回冻结样本全集")
@@ -340,8 +367,11 @@ def evaluate_locked_holdout(
         holdout = holdout_frame.loc[list(holdout_ids)].copy()
         holdout_context = holdout_sequence_loader() if is_sequence else None
         predictions = predict_bundle(output_root, model, holdout, sequence_context=holdout_context)
-        evaluation_target = evaluation_labels(output_root, model, holdout)
-        metric = _metric(evaluation_target, predictions, objective, target_kind)
+        labeled = np.isfinite(holdout.target.to_numpy(float))
+        evaluation_target = np.full(len(holdout), np.nan)
+        if labeled.any():
+            evaluation_target[labeled] = evaluation_labels(output_root, model, holdout.loc[labeled])
+        metric = _metric(evaluation_target[labeled], predictions[labeled], objective, target_kind) if labeled.any() else None
         rows = _prediction_records(
             holdout,
             predictions,
@@ -352,7 +382,7 @@ def evaluate_locked_holdout(
             model["model_path"],
         )
         for row, evaluation_label in zip(rows, evaluation_target, strict=True):
-            row["evaluation_label"] = float(evaluation_label)
+            row["evaluation_label"] = None if pd.isna(evaluation_label) else float(evaluation_label)
             row["score_semantics"] = "ranking_score" if any(p["class"] == "CSRankNorm" for p in selected_candidate["processors"]["learn"]) else "raw_return_prediction"
         result_hash = typed_canonical_hash(
             {"predictions": [{**row, "observation_session": row["observation_session"].isoformat()} for row in rows], "objective": objective, "metric": metric}
@@ -377,6 +407,8 @@ def evaluate_locked_holdout(
         "predictions": rows,
         "objective": objective,
         "metric": metric,
+        "sample_count": int(labeled.sum()),
+        "prediction_count": len(holdout),
         "holdout_identity_hash": plan.holdout_identity_hash,
         "plan_hash": plan.plan_hash,
         "prepared_hash": prepared["prepared_hash"],
@@ -419,12 +451,12 @@ def _prediction_records(
             "observation_time": pd.Timestamp(row.observation_time).isoformat(),
             "feature_available_time": pd.Timestamp(row.feature_available_time).isoformat(),
             "decision_time": pd.Timestamp(row.decision_time).isoformat(),
-            "label_available_time": pd.Timestamp(row.label_available_time).isoformat(),
-            "raw_label": float(row.target),
-            "label_start_time": pd.Timestamp(row.label_start_time).isoformat(),
-            "label_end_time": pd.Timestamp(row.label_end_time).isoformat(),
+            "label_available_time": None if pd.isna(row.label_available_time) else pd.Timestamp(row.label_available_time).isoformat(),
+            "raw_label": None if pd.isna(row.target) else float(row.target),
+            "label_start_time": None if pd.isna(row.label_start_time) else pd.Timestamp(row.label_start_time).isoformat(),
+            "label_end_time": None if pd.isna(row.label_end_time) else pd.Timestamp(row.label_end_time).isoformat(),
             "prediction": float(prediction),
-            "actual": float(row.target),
+            "actual": None if pd.isna(row.target) else float(row.target),
             "processor_ref": preprocessor_hash,
             "model_ref": model_hash,
         }
@@ -435,7 +467,7 @@ def _prediction_records(
 
 
 def _normalize_model_samples(
-    samples: pd.DataFrame, feature_columns: Sequence[str], target_kind: str
+    samples: pd.DataFrame, feature_columns: Sequence[str], target_kind: str, *, allow_missing_target: bool = False
 ) -> pd.DataFrame:
     required = {
         "sample_id",
@@ -464,7 +496,7 @@ def _normalize_model_samples(
             "模型样本时钟必须满足 observation <= label_start < label_end"
         )
     frame["target"] = pd.to_numeric(frame["target"], errors="raise")
-    if not np.isfinite(frame["target"].to_numpy(float)).all():
+    if (np.isinf(frame["target"].to_numpy(float)).any() if allow_missing_target else not np.isfinite(frame["target"].to_numpy(float)).all()):
         raise ModelMainlineError("target 必须有限")
     if target_kind == "classification" and not set(frame["target"].unique()) <= {
         0,

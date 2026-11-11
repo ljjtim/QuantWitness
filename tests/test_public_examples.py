@@ -45,6 +45,14 @@ def test_public_qlib_development_complete_cli_workflow(tmp_path: Path) -> None:
         "--mode", "development", "--output", str(output),
     ], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=600, check=False)
     assert completed.returncode == 0, completed.stdout + completed.stderr
+    package = yaml.safe_load((output / "package/spec/research.yaml").read_text(encoding="utf-8"))
+    for node in package["graph"]["nodes"]:
+        if node["node_id"] in {"feature", "label"}:
+            assert node["parameters"]["worker_lifecycle"] == "stateless_session"
+            declaration = yaml.safe_load((output / "declarations" / (node["node_id"] + ".yaml")).read_text(encoding="utf-8"))
+            lifecycle = next(item for item in declaration["operator"]["parameters"] if item["name"] == "worker_lifecycle")
+            assert lifecycle == {"name": "worker_lifecycle", "value_type": "string", "required": False,
+                                 "allowed_values": ["stateless_session"]}
     receipt = json.loads((output / "run-receipt.json").read_text(encoding="utf-8"))
     assert receipt["status"] == "result_finalized"
     context = load_result_context(receipt["result_directory"], result_store=output / "results",

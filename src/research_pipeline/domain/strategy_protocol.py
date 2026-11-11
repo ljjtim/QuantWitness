@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from research_pipeline.platform.asset_taxonomy import MINUTE_TARGET_ASSET_CLASSES
 from dataclasses import dataclass, field, fields, is_dataclass
 from functools import cached_property
 from datetime import date, datetime, time
@@ -12,11 +13,11 @@ from typing import Mapping
 
 from .models import DomainContractError
 from .time import require_aware_datetime
-from .trading import InstrumentKey
+from .trading import InstrumentKey, _POSITION_EFFECTS
 from .values import Money, Price, require_integer_quantity
 
 
-STRATEGY_PROTOCOL_VERSION = "research-strategy-protocol-v3"
+STRATEGY_PROTOCOL_VERSION = "research-strategy-protocol-v4"
 STRATEGY_STATE_VERSION = "research-strategy-json-state-v1"
 EVENT_ORDER = (
     "initialize", "before_trading", "execution_feedback", "scheduled", "bar", "after_trading",
@@ -43,13 +44,23 @@ def _text(value: object, name: str) -> None:
     _check(isinstance(value, str) and bool(value.strip()), f"{name} 必须是非空字符串")
 
 
-def _stock(instrument: InstrumentKey) -> None:
+def _instrument(instrument: InstrumentKey) -> None:
     _check(isinstance(instrument, InstrumentKey), "instrument 必须是 InstrumentKey")
     _check(
         (instrument.asset_class, instrument.currency, instrument.contract_kind)
-        in {("cn_stock", "CNY", "stock"), ("cn_etf", "CNY", "etf")},
-        "策略协议仅支持人民币股票与ETF现货", "strategy_capability_unsupported",
+        in {("cn_stock", "CNY", "stock"), ("cn_etf", "CNY", "etf"),
+            ("cn_future", "CNY", "future"), ("cn_future", "CNY", "future_contract")},
+        "策略协议仅支持人民币股票、ETF与真实期货合约", "strategy_capability_unsupported",
     )
+    if instrument.asset_class == "cn_future":
+        _check(not any(token in instrument.instrument_id.upper() for token in ("8888", "9999", "CONTINUOUS")),
+               "连续合约不能作为交易合约", "strategy_capability_unsupported")
+
+
+def _position_effect(instrument: InstrumentKey, effect: str) -> None:
+    _check(effect in _POSITION_EFFECTS, "position_effect不受支持")
+    _check(effect != "auto" if instrument.asset_class == "cn_future" else effect == "auto",
+           "期货须显式声明开平仓，现货position_effect只能为auto", "strategy_capability_unsupported")
 
 
 def _money(value: Money, name: str, *, signed: bool = False) -> None:
@@ -160,8 +171,8 @@ class StrategyDeclaration:
         _check(self.protocol_version == STRATEGY_PROTOCOL_VERSION
                and self.state_version == STRATEGY_STATE_VERSION,
                "策略协议或状态版本不受支持", "strategy_version_unsupported")
-        _check(self.asset_class in {"cn_stock", "cn_etf"} and self.currency == "CNY" and self.frequency in {"1m", "1d"},
-               "策略仅支持人民币股票与ETF的1m或1d频率", "strategy_capability_unsupported")
+        _check(self.asset_class in MINUTE_TARGET_ASSET_CLASSES and self.currency == "CNY" and self.frequency in {"1m", "1d"},
+               "策略仅支持人民币股票、ETF与期货的1m或1d频率", "strategy_capability_unsupported")
         for name in ("strategy_id", "bundle_id", "state_schema_id"):
             _text(getattr(self, name), name)
         _tuple(self.subscriptions, "subscriptions", str)
@@ -181,15 +192,24 @@ class StrategyDeclaration:
 
 @dataclass(frozen=True, kw_only=True)
 class StrategyPositionView:
+    """期货数量以手计；可平量和预占量按方向及今昨桶分别记录。"""
+
     instrument: InstrumentKey
     quantity: int
     sellable_quantity: int
     reserved_sell_quantity: int
     mark_price: Price | None
     mark_available_at: datetime | None
+    direction: str = "long"
+    bucket: str | None = None
 
     def __post_init__(self) -> None:
-        _stock(self.instrument)
+        _instrument(self.instrument)
+        if self.instrument.asset_class == "cn_future":
+            _check(self.direction in {"long", "short"} and self.bucket in {"today", "yesterday"},
+                   "期货持仓必须声明多空方向与今昨仓桶")
+        else:
+            _check(self.direction == "long" and self.bucket is None, "现货持仓只支持long且不分今昨仓桶")
         for name in ("quantity", "sellable_quantity", "reserved_sell_quantity"):
             require_integer_quantity(getattr(self, name), name, allow_zero=True)
         _check(self.sellable_quantity + self.reserved_sell_quantity <= self.quantity,
@@ -210,10 +230,12 @@ class StrategyOrderView:
     status: str
     submitted_at: datetime
     reserved_cash: Money
+    position_effect: str = "auto"
 
     def __post_init__(self) -> None:
         _text(self.order_id, "order_id")
-        _stock(self.instrument)
+        _instrument(self.instrument)
+        _position_effect(self.instrument, self.position_effect)
         _check(self.side in {"buy", "sell"}, "订单方向不受支持")
         require_integer_quantity(self.quantity)
         require_integer_quantity(self.filled_quantity, "filled_quantity", allow_zero=True)
@@ -226,6 +248,8 @@ class StrategyOrderView:
 
 @dataclass(frozen=True, kw_only=True)
 class StrategyAccountView:
+    """期货资金为C/U/E/M/F/A；通用字段同步投影C/A/F/E，不另建账本。"""
+
     account_seq: int
     as_of: datetime
     total_cash: Money
@@ -235,21 +259,50 @@ class StrategyAccountView:
     net_asset: Money
     positions: tuple[StrategyPositionView, ...]
     active_orders: tuple[StrategyOrderView, ...]
+    asset_class: str = "cn_stock"
+    settled_cash: Money | None = None
+    unrealized_pnl: Money | None = None
+    equity: Money | None = None
+    margin: Money | None = None
+    frozen_funds: Money | None = None
+    available_funds: Money | None = None
 
     def __post_init__(self) -> None:
         require_integer_quantity(self.account_seq, "account_seq", allow_zero=True)
         require_aware_datetime(self.as_of, "as_of")
+        _check(self.asset_class in MINUTE_TARGET_ASSET_CLASSES, "账户资产类别不受支持")
+        future = self.asset_class == "cn_future"
         for name in ("total_cash", "available_cash", "frozen_cash", "withdrawable_cash", "net_asset"):
-            _money(getattr(self, name), name, signed=name == "net_asset")
+            _money(getattr(self, name), name, signed=name == "net_asset" or (future and name in {"total_cash", "available_cash"}))
         _check(len({getattr(self, name).scale for name in (
             "total_cash", "available_cash", "frozen_cash", "withdrawable_cash", "net_asset",
         )}) == 1, "账户金额必须使用同一scale")
-        _check(self.available_cash.units + self.frozen_cash.units <= self.total_cash.units,
-               "可用与冻结现金不能超过总现金")
-        _check(self.withdrawable_cash.units <= self.available_cash.units, "可取资金不能超过可买资金")
+        names = ("settled_cash", "unrealized_pnl", "equity", "margin", "frozen_funds", "available_funds")
+        if future:
+            _check(self.total_cash.scale == 2, "期货账户金额须以人民币分计")
+            for name in names:
+                _money(getattr(self, name), name, signed=name not in {"margin", "frozen_funds"})
+            _check(all(getattr(self, name).scale == self.total_cash.scale for name in names),
+                   "期货账户金额必须使用同一scale")
+            _check(self.equity.units == self.settled_cash.units + self.unrealized_pnl.units,
+                   "期货账户必须满足E=C+U")
+            _check(self.available_funds.units == self.equity.units - self.margin.units - self.frozen_funds.units,
+                   "期货账户必须满足A=E-M-F")
+            _check(self.total_cash == self.settled_cash and self.available_cash == self.available_funds
+                   and self.net_asset == self.equity and self.frozen_cash == self.frozen_funds,
+                   "期货账户通用资金字段必须与C/A/E/F一致")
+            _check(self.withdrawable_cash.units <= max(0, self.available_funds.units),
+                   "可取资金不能超过非负可用资金")
+        else:
+            _check(all(getattr(self, name) is None for name in names), "现货账户不能夹带期货资金字段")
+            _check(self.available_cash.units + self.frozen_cash.units <= self.total_cash.units,
+                   "可用与冻结现金不能超过总现金")
+            _check(self.withdrawable_cash.units <= self.available_cash.units, "可取资金不能超过可买资金")
         _tuple(self.positions, "positions", StrategyPositionView)
         _tuple(self.active_orders, "active_orders", StrategyOrderView)
-        _unique(tuple(item.instrument for item in self.positions), "持仓证券")
+        _check(all((item.instrument.asset_class == "cn_future") == future
+                   for item in (*self.positions, *self.active_orders)), "现货与期货不能共用账户")
+        _unique(tuple((item.instrument, item.direction, item.bucket) for item in self.positions), "持仓证券、方向与桶")
         _unique(tuple(item.order_id for item in self.active_orders), "活动订单")
         _check(all(item.reserved_cash.scale == self.frozen_cash.scale for item in self.active_orders),
                "订单预占必须使用账户scale")
@@ -287,7 +340,7 @@ class StrategyInputRef:
             require_aware_datetime(self.bar_end, "bar_end")
             _check(self.bar_start < self.bar_end <= self.available_at, "只能交付完成bar")
         if self.instrument is not None:
-            _stock(self.instrument)
+            _instrument(self.instrument)
             if self.price is not None:
                 _check(isinstance(self.price, Price) and self.price.currency == "CNY", "参考价必须是人民币Price")
 
@@ -301,6 +354,8 @@ class StrategyFeedback:
     filled_quantity: int
     trade_ids: tuple[str, ...]
     reason: str | None = None
+    fill_ids: tuple[str, ...] = ()
+    leg_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.intent_id, "intent_id")
@@ -316,12 +371,21 @@ class StrategyFeedback:
         for item in self.trade_ids:
             _text(item, "trade_id")
         _unique(self.trade_ids, "trade_ids")
+        for name in ("fill_ids", "leg_ids"):
+            values = getattr(self, name)
+            _tuple(values, name, str)
+            for value in values:
+                _text(value, name)
+            _unique(values, name)
+        _check(bool(self.fill_ids) == bool(self.leg_ids), "成交与成交腿引用必须成对提供")
+        _check(not self.fill_ids or self.filled_quantity > 0, "成交引用必须对应实际成交数量")
         if self.kind in {"rejected", "cancel_rejected", "expired"}:
             _text(self.reason, "reason")
         if self.kind in {"accepted", "rejected", "unchanged"}:
-            _check(self.filled_quantity == 0 and not self.trade_ids, "接受或拒绝回执不能携带成交")
+            _check(self.filled_quantity == 0 and not self.trade_ids and not self.fill_ids and not self.leg_ids,
+                   "接受或拒绝回执不能携带成交")
         if self.kind in {"filled", "partially_filled"}:
-            _check(self.filled_quantity > 0 and bool(self.trade_ids), "成交反馈须有累计数量与成交引用")
+            _check(self.filled_quantity > 0 and bool(self.trade_ids or self.fill_ids), "成交反馈须有累计数量与成交引用")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -378,6 +442,8 @@ class StrategyEvent:
 
 def validate_event(declaration: StrategyDeclaration, event: StrategyEvent) -> None:
     _check(event.kind in declaration.subscriptions, "收到未订阅事件", "strategy_event_unsubscribed")
+    _check((declaration.asset_class == "cn_future") == (event.account.asset_class == "cn_future"),
+           "策略声明与账户资产类别不一致")
     _check({item.binding_id for item in event.inputs} <= {item.binding_id for item in declaration.input_bindings},
            "事件输入来源未声明", "strategy_input_undeclared")
     bindings = {item.binding_id: item for item in declaration.input_bindings}
@@ -414,18 +480,23 @@ class StrategyIntent:
     funds_policy: str | None = None
     price_input_id: str | None = None
     order_id: str | None = None
+    position_effect: str = "auto"
 
     def __post_init__(self) -> None:
         _text(self.intent_id, "intent_id")
-        _stock(self.instrument)
+        _instrument(self.instrument)
         _check(self.kind in INTENT_KINDS, "交易意图不受支持", "strategy_capability_unsupported")
         if self.kind == "cancel":
+            _check(self.position_effect == "auto", "撤单不能声明开平仓")
             _text(self.order_id, "order_id")
             _check(all(getattr(self, name) is None for name in (
                 "side", "quantity", "amount", "weight", "order_type", "time_in_force",
                 "limit_price", "protection_price", "funds_policy", "price_input_id",
             )), "撤单不能夹带交易字段")
             return
+        _position_effect(self.instrument, self.position_effect)
+        if self.instrument.asset_class == "cn_future":
+            _check(self.kind == "quantity", "期货仅支持手数委托与撤单", "strategy_capability_unsupported")
         _check(self.order_id is None, "新意图不能指定已有order_id")
         _check(self.order_type in {"market", "limit"} and self.time_in_force in {"DAY", "IOC"}
                and self.funds_policy in {"reject", "resize"}, "订单类型、有效期或资金政策不受支持",
@@ -462,8 +533,6 @@ class StrategyIntent:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "StrategyIntent":
-        if isinstance(payload, Mapping) and "protection_price" not in payload:
-            payload = dict(payload, protection_price=None)
         _check(isinstance(payload, Mapping) and set(payload) == {item.name for item in fields(cls)},
                "StrategyIntent字段不匹配")
         values = dict(payload)
@@ -545,6 +614,8 @@ def parse_strategy_response(
     _check(not intents or event.kind not in {"initialize", "before_trading", "after_trading"}, "初始化、盘前和盘后不提交交易意图")
     for index, intent in enumerate(intents):
         _check(intent.intent_id == f"{event.event_seq}:{index}", "intent_id必须由事件序号和批内顺序组成")
+        _check((intent.instrument.asset_class == "cn_future") == (declaration.asset_class == "cn_future"),
+               "交易意图资产类别与策略声明不一致", "strategy_capability_unsupported")
     response = StrategyResponse(event_seq=event.event_seq, state_schema_id=declaration.state_schema_id,
                                 state_json=state_json, intents=intents)
     # state_json已规范化；占位值只计算其余字段，避免再次遍历和编码完整状态。

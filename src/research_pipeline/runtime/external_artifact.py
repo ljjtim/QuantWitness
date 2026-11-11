@@ -241,7 +241,7 @@ class ExternalArtifactStore:
         source_store: "ExternalArtifactStore",
         commit: ExternalArtifactCommit,
     ) -> ExternalArtifactCommit:
-        """复验父对象后保留分区文件元数据导入，保持稳定 ArtifactRef。"""
+        """消费本次源验证后复制；目标重新验收，保持稳定 ArtifactRef。"""
         verified = source_store.verify(commit.semantic_hash)
         if verified != commit:
             raise RuntimeIntegrityError("待导入 external artifact 引用漂移")
@@ -431,6 +431,12 @@ class ExternalArtifactStore:
                     list(causal_lineage)
                 ).encode("utf-8")
             table = pa.Table.from_pandas(attached, preserve_index=False)
+            for field in original.schema:
+                index = table.schema.get_field_index(field.name)
+                if index >= 0 and field.metadata:
+                    schema = table.schema.set(index, table.schema.field(index).with_metadata(field.metadata))
+                    table = table.cast(schema)
+
             if causal_lineage and any(fact.get("daily_time") is not None for fact in causal_lineage):
                 index = table.schema.get_field_index("decision_time")
                 field = table.schema.field(index).with_metadata({

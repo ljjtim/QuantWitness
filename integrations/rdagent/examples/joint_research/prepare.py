@@ -40,12 +40,12 @@ def build(output, *, model_env_file=None):
         proposer = model["proposer"]
     budget = {"rounds": 3, "evaluations": 3, "model_calls": 12, "output_tokens": 24576, "max_output_tokens_per_call": 2048}
     model.update(proposer=proposer)
-    factor = {"contract_version": "rd-factor-research-v1", "research_kind": "factor_research", "campaign_id": "joint_factor",
-        "session_root": str(root / "factor-placeholder"), "package_template": deepcopy(model["package_template"]),
+    factor = {"contract_version": "rd-factor-research-v2", "research_kind": "factor_research", "campaign_id": "joint_factor",
+        "factor_space": module("factor_research").factor_space(), "session_root": str(root / "factor-placeholder"), "package_template": deepcopy(model["package_template"]),
         "confirmed_spec": {"kind": "synthetic", "path": str(root / "confirmed-definition.json")},
         "baseline": {"expression": module("factor_research").BASELINE_EXPRESSION, "hypothesis": "文档五期动量基线", "reason": "先复现已确认定义"},
         "budget": {key: value for key, value in budget.items() if key != "evaluations"}, "proposer": proposer}
-    payload = {"contract_version": "rd-joint-research-v1", "research_kind": "joint_research", "campaign_id": "synthetic_joint_research",
+    payload = {"contract_version": "rd-joint-research-v2", "research_kind": "joint_research", "campaign_id": "synthetic_joint_research",
         "session_root": str(root / "joint-session"), "factor_request": factor, "model_request": model, "budget": budget, "proposer": proposer}
     validate_joint_research(payload)
     write_json(root / "request.json", payload)

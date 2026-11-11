@@ -15,7 +15,7 @@ MODEL_CONTRACT = (
 
 
 def _context(value, reflection=False):
-    fields = {"confirmed_spec", "development", "objective", "history", "max_output_tokens", "current", "joint_knowledge", "joint_direction", "factor_contract", "factor_feature_slot"}
+    fields = {"confirmed_spec", "development", "objective", "history", "max_output_tokens", "current", "joint_knowledge", "joint_direction", "factor_space", "factor_feature_slot"}
     if not isinstance(value, dict) or set(value) - fields:
         raise ValueError("模型研究只能使用已验证开发上下文")
     data = json.loads(json.dumps(value, allow_nan=False))
@@ -25,10 +25,12 @@ def _context(value, reflection=False):
     if "joint_knowledge" in data:
         from .joint_feedback import validate_joint_feedback
         validate_joint_feedback(data["joint_knowledge"])
-    if "factor_contract" in data:
-        from .factor_research import DAI_FACTOR_CONTRACT, factor_contract
-        if factor_contract(data) != DAI_FACTOR_CONTRACT or data.get("factor_feature_slot") != "dai_following":
-            raise ValueError("日级联合模型必须绑定dai_following槽")
+    if ("factor_space" in data) != ("factor_feature_slot" in data):
+        raise ValueError("联合模型必须同时声明因子空间与因子槽")
+    if "factor_space" in data:
+        from .factor_research import factor_space
+        if data.get("factor_feature_slot") != factor_space(data)["feature_slot"]:
+            raise ValueError("联合模型的因子槽与研究空间不同")
     records = data["history"] + ([data.get("current")] if reflection else [])
     if not reflection and "current" in data:
         raise ValueError("模型提案不能夹带当前结果")
@@ -73,12 +75,12 @@ def _components():
             return "正式开发区的生成式前馈模型研究"
 
         def get_runtime_environment(self):
-            return "Qlib 0.9.7 / Torch 2.5.1 CPU；正式Workspace执行"
+            return "使用研究包冻结的Qlib、Torch与设备；正式Workspace执行"
 
         def get_scenario_all_desc(self, **kwargs):
             facts = {k: self.context[k] for k in ("confirmed_spec", "development", "objective")}
-            if "factor_contract" in self.context:
-                facts.update(factor_contract=self.context["factor_contract"], factor_feature_slot=self.context["factor_feature_slot"])
+            if "factor_space" in self.context:
+                facts.update(factor_space=self.context["factor_space"], factor_feature_slot=self.context["factor_feature_slot"])
             return json.dumps(facts, ensure_ascii=False) + MODEL_CONTRACT
 
     class Generator(ModelHypothesisGen):

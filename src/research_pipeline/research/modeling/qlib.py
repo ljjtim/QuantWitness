@@ -29,8 +29,10 @@ MODEL_CLASSES = {
     "GRU": "qlib.contrib.model.pytorch_gru_ts",
     "LSTM": "qlib.contrib.model.pytorch_lstm_ts",
     "TransformerModel": "qlib.contrib.model.pytorch_transformer_ts",
+    "GATs": "qlib.contrib.model.pytorch_gats_ts",
+    "ProjectQlibModel": "research_pipeline.research.modeling.project_model",
 }
-SEQUENCE_MODEL_CLASSES = {"GRU", "LSTM", "TransformerModel"}
+SEQUENCE_MODEL_CLASSES = {"GRU", "LSTM", "TransformerModel", "GATs", "ProjectQlibModel"}
 PROCESSORS = {"RobustZScoreNorm", "ZScoreNorm", "CSZScoreNorm", "Fillna", "DropnaLabel", "CSRankNorm"}
 TRAIN_FITTED_PROCESSORS = {"RobustZScoreNorm", "ZScoreNorm"}
 
@@ -51,7 +53,7 @@ def normalize_candidates(candidates: Sequence[Mapping[str, object]]) -> list[dic
         ids.add(cid)
         model = item["model"]
         if set(model) != {"class", "module_path", "kwargs"} or MODEL_CLASSES.get(model["class"]) != model["module_path"]:
-            raise QlibModelError("只支持 Qlib LinearModel/LGBModel/XGBModel/DEnsembleModel/GRU/LSTM/TransformerModel及受控GeneratedModel固定路径")
+            raise QlibModelError("只支持已登记Qlib模型、GATs及受控ProjectQlibModel/GeneratedModel固定路径")
         if model["class"] not in SEQUENCE_MODEL_CLASSES and "dataset" in item:
             raise QlibModelError("dataset 只允许序列候选")
         kwargs = model["kwargs"]
@@ -67,7 +69,9 @@ def normalize_candidates(candidates: Sequence[Mapping[str, object]]) -> list[dic
             if set(item) != {"candidate_id", "model", "processors", "fit", "dataset"}:
                 raise QlibModelError("序列模型 候选必须声明 dataset")
             dataset = item["dataset"]
-            if not isinstance(dataset, dict) or set(dataset) != {"class", "step_len", "missing_policy"}:
+            if (not isinstance(dataset, dict)
+                    or not {"class", "step_len", "missing_policy"} <= set(dataset)
+                    or set(dataset) - {"class", "step_len", "missing_policy", "batch_contract", "graph_layers"}):
                 raise QlibModelError("序列模型 dataset 必须声明 class/step_len/missing_policy")
             if dataset["class"] != "TSDatasetH" or type(dataset["step_len"]) is not int or dataset["step_len"] < 2:
                 raise QlibModelError("序列模型 dataset 必须使用 step_len>=2 的 TSDatasetH")
@@ -75,6 +79,30 @@ def normalize_candidates(candidates: Sequence[Mapping[str, object]]) -> list[dic
                 raise QlibModelError("序列模型 只允许 complete_window 缺失策略")
             allowed_sequence = {"d_feat", "hidden_size", "num_layers", "dropout", "n_epochs", "lr",
                            "metric", "batch_size", "early_stop", "loss", "optimizer", "n_jobs", "GPU", "seed"}
+            is_gat = model["class"] == "GATs" or (model["class"] == "ProjectQlibModel"
+                and kwargs.get("adapter", {}).get("batch_contract") == "daily_cross_section")
+            if is_gat:
+                allowed_sequence = (allowed_sequence - {"batch_size"}) | {"base_model", "model_path"}
+                if "batch_size" in kwargs:
+                    raise QlibModelError("每日图批次由有效证券数决定，不接受batch_size")
+                if kwargs.get("base_model", "GRU") not in {"GRU", "LSTM"} or kwargs.get("model_path") is not None:
+                    raise QlibModelError("GATs只支持GRU/LSTM且不加载外部预训练文件")
+            if model["class"] == "ProjectQlibModel":
+                from .project_model import validate_project_model_adapter
+                validate_project_model_adapter(kwargs.get("adapter"), verify_bundle=False)
+                # 项目参数由冻结源码的构造函数解释；核心不认识专用网络参数。
+                allowed_sequence |= set(kwargs)
+            from .gru import batch_contract
+            if batch_contract(item) not in {"sample", "daily_cross_section"}:
+                raise QlibModelError("序列模型batch_contract无效")
+            if model["class"] == "GATs" and batch_contract(item) != "daily_cross_section":
+                raise QlibModelError("GATs必须使用每日完整横截面批次")
+            if "graph_layers" in dataset:
+                if (batch_contract(item) != "daily_cross_section"
+                        or type(dataset["graph_layers"]) is not int or dataset["graph_layers"] < 1):
+                    raise QlibModelError("graph_layers仅允许每日图批次的正整数资源声明")
+                if model["class"] == "GATs" and dataset["graph_layers"] != 1:
+                    raise QlibModelError("原生GATs只有一层图注意力")
             is_transformer = model["class"] == "TransformerModel"
             if is_transformer:
                 allowed_sequence = (allowed_sequence - {"hidden_size"}) | {"d_model", "nhead", "reg"}
@@ -95,11 +123,11 @@ def normalize_candidates(candidates: Sequence[Mapping[str, object]]) -> list[dic
             optimizer = kwargs.get("optimizer", "adam")
             if not isinstance(optimizer, str) or optimizer.lower() not in {"adam", "gd"}:
                 raise QlibModelError("序列模型 optimizer 只支持 adam 或 gd")
-            if (type(kwargs.get("GPU", -1)) is not int or kwargs.get("GPU", -1) != -1
+            if (type(kwargs.get("GPU", -1)) is not int or kwargs.get("GPU", -1) < -1
                     or type(kwargs.get("n_jobs", 0)) is not int or kwargs.get("n_jobs", 0) != 0):
-                raise QlibModelError("序列模型 首批只支持 CPU 与 n_jobs=0")
-            if type(kwargs.get("batch_size", 1)) is not int or kwargs.get("batch_size", 1) != 1:
-                raise QlibModelError("序列模型 首批 batch_size 必须为 1，保证验证尾批完整消费")
+                raise QlibModelError("序列模型GPU必须>=-1且n_jobs=0")
+            if type(kwargs.get("batch_size", 1)) is not int or kwargs.get("batch_size", 1) < 1:
+                raise QlibModelError("序列模型batch_size必须为正整数")
             defaults = {"d_feat": 1, "hidden_size": 64, "num_layers": 2,
                         "n_epochs": 200, "batch_size": 1, "early_stop": 20}
             for name, minimum in (("d_feat", 1), ("hidden_size", 1), ("num_layers", 1),
@@ -283,7 +311,16 @@ def _training_recorder(directory: Path):
             logging.getLogger(__name__).warning("训练记录清理失败：%s", cleanup_failure)
 
 
-def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_path, root_seed, fit_scope_ref, sequence_context=None):
+def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_path,
+               root_seed, fit_scope_ref, sequence_context=None,
+               _bound_sequence_context=None, _sequence_facts=None, _fit_input=None):
+    if _fit_input is not None:
+        if train is not None or valid is not None:
+            raise QlibModelError("内部拟合输入不能与外部train/valid同时提供")
+        source, train_positions, valid_positions = _fit_input
+        train = source.iloc[train_positions]
+        valid = source.iloc[valid_positions]
+        del _fit_input, source, train_positions, valid_positions
     candidate = normalize_candidates([candidate])[0]
     is_sequence = candidate["model"]["class"] in SEQUENCE_MODEL_CLASSES
     if not is_sequence and sequence_context is not None:
@@ -305,25 +342,39 @@ def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_
         from .gru import bind_windows, effective_kwargs, require_sequence_environment
         require_sequence_environment()
         effective_kwargs(candidate, features, root_seed)
-        sequence_windows = bind_windows(sequence_context, pd.concat([train, valid]), features, candidate["dataset"]["step_len"])
+        sequence_windows = _bound_sequence_context
+        if sequence_windows is None:
+            sequence_windows = bind_windows(
+                sequence_context, pd.concat([train, valid]), features,
+                candidate["dataset"]["step_len"],
+            )
+        elif (sequence_windows.step_len != candidate["dataset"]["step_len"]
+              or sequence_windows.feature_columns != features):
+            raise QlibModelError("复用的序列窗口与候选声明不一致")
+    train_ids = train["sample_id"].astype(str).tolist()
+    valid_ids = valid["sample_id"].astype(str).tolist()
+    completed_fit_time = max(fit_time, pd.to_datetime(valid["label_available_time"], utc=True).max(),
+                             pd.to_datetime(valid["label_end_time"], utc=True).max())
     root = Path(output_root)
     bundle = root / bundle_path
     bundle.mkdir(parents=True, exist_ok=False)
     processor_module = importlib.import_module("qlib.data.dataset.processor")
     processors = {"infer": [], "learn": []}
     processor_files = {"infer": [], "learn": []}
-    fitted_data = tr.copy()
+    train_bounds = (tr.index.get_level_values("datetime").min(), tr.index.get_level_values("datetime").max())
+    if is_sequence:
+        del va
+    fitted_data = tr
     for phase in ("infer", "learn"):
         for i, spec in enumerate(candidate["processors"][phase]):
             kwargs = dict(spec.get("kwargs", {}))
             if spec["class"] == "CSRankNorm":
                 kwargs.setdefault("fields_group", "label")
             if spec["class"] in TRAIN_FITTED_PROCESSORS:
-                kwargs.update(fit_start_time=tr.index.get_level_values("datetime").min(),
-                              fit_end_time=tr.index.get_level_values("datetime").max())
+                kwargs.update(fit_start_time=train_bounds[0], fit_end_time=train_bounds[1])
             proc = getattr(processor_module, spec["class"])(**kwargs)
             proc.fit(fitted_data)
-            fitted_data = proc(fitted_data.copy())
+            fitted_data = proc(fitted_data if is_sequence else fitted_data.copy())
             processors[phase].append(proc)
             relative = f"{bundle_path}/processors/{phase}-{i:03d}.pkl"
             path = root / relative
@@ -331,9 +382,10 @@ def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_
             proc.to_pickle(path, dump_all=True)
             processor_files[phase].append(relative)
     if is_sequence:
+        del tr, fitted_data
         from .gru import processed_dataset
         dataset = processed_dataset(sequence_windows, processors=processors,
-            segments={"train": train.sample_id.astype(str).tolist(), "valid": valid.sample_id.astype(str).tolist()},
+            segments={"train": train_ids, "valid": valid_ids},
             label_frame=pd.concat([train, valid]))
     else:
         data = pd.concat([tr, va]).sort_index()
@@ -341,6 +393,8 @@ def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_
             "train": (tr.index.get_level_values("datetime").min(), tr.index.get_level_values("datetime").max()),
             "valid": (va.index.get_level_values("datetime").min(), va.index.get_level_values("datetime").max()),
         })
+        del tr, va, fitted_data, data
+    del train, valid
     spec = candidate["model"]
     kwargs = dict(spec["kwargs"])
     fit = dict(candidate["fit"])
@@ -360,12 +414,24 @@ def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_
         fit.setdefault("verbose_eval", False)
     execution_scope = nullcontext()
     if is_sequence:
-        from .gru import cpu_execution, effective_kwargs, preserve_batch_axis
+        from .gru import cpu_execution, effective_kwargs, preserve_batch_axis, model_dataset
+        dataset = model_dataset(dataset, candidate)
         kwargs = effective_kwargs(candidate, features, root_seed)
         fit.update(evals_result={}, save_path=str(bundle / "weights.pt"))
-        execution_scope = cpu_execution()
+        execution_scope = cpu_execution(kwargs["GPU"])
+    project_state = None
+    if spec["class"] == "ProjectQlibModel":
+        from .project_model import archive_project_model
+        project_state = archive_project_model(root, bundle_path, kwargs["adapter"])
     with execution_scope:
-        model = getattr(importlib.import_module(spec["module_path"]), spec["class"])(**kwargs)
+        if spec["class"] == "ProjectQlibModel":
+            from .project_model import load_project_model_class
+            constructor_kwargs = dict(kwargs)
+            adapter = constructor_kwargs.pop("adapter")
+            model = load_project_model_class(adapter)(**constructor_kwargs)
+            model._rp_network_attribute = adapter["network_attribute"]
+        else:
+            model = getattr(importlib.import_module(spec["module_path"]), spec["class"])(**kwargs)
         if is_sequence:
             from .gru import model_network
             model_network(model, spec["class"]).register_forward_hook(preserve_batch_axis)
@@ -373,10 +439,14 @@ def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_
         if spec["class"] == "LGBModel":
             with _training_recorder(bundle / "training-records"):
                 model.fit(dataset, **fit)
+        elif is_sequence:
+            from .gru import upstream_loader_contract
+            with upstream_loader_contract(model, candidate):
+                model.fit(dataset, **fit)
         else:
             model.fit(dataset, **fit)
     model.to_pickle(bundle / "model.pkl", dump_all=True)
-    fit_time = max(fit_time, pd.to_datetime(valid["label_available_time"], utc=True).max(), pd.to_datetime(valid["label_end_time"], utc=True).max())
+    fit_time = completed_fit_time
     versions = {"python": platform.python_version()}
     distributions = ("pyqlib", "numpy", "pandas", "scikit-learn", "lightgbm", "xgboost")
     if is_sequence or spec["class"] == "GeneratedModel":
@@ -405,12 +475,14 @@ def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_
         "effective_model_kwargs": kwargs,
         "training_curve": training_curve,
         "effective_fit_kwargs": {key: value for key, value in fit.items() if key != "evals_result"},
-        "train_ids": train["sample_id"].astype(str).tolist(),
-        "valid_ids": valid["sample_id"].astype(str).tolist(),
+        "train_ids": train_ids,
+        "valid_ids": valid_ids,
         "fit_time": fit_time.isoformat(),
         "training_label": "cross_sectional_rank" if any(p["class"] == "CSRankNorm" for p in candidate["processors"]["learn"]) else "raw",
         "index": ["datetime", "instrument"],
     }
+    if project_state is not None:
+        config["project_model"] = project_state
     if is_sequence:
         from .gru import SEQUENCE_BUNDLE_SCHEMA, save_window_facts, verify_loaded_model
         if not training_curve or any(not math.isfinite(row["value"]) or row["value"] > 0 for row in training_curve):
@@ -418,7 +490,18 @@ def fit_bundle(train, valid, *, candidate, feature_columns, output_root, bundle_
         config["schema"] = SEQUENCE_BUNDLE_SCHEMA
         config["weights_path"] = f"{bundle_path}/weights.pt"
         config["effective_fit_kwargs"] = {"save_path": config["weights_path"]}
-        config["sequence"] = save_window_facts(root, bundle_path, sequence_windows)
+        config["sequence"] = (deepcopy(_sequence_facts) if _sequence_facts is not None
+                              else save_window_facts(root, bundle_path, sequence_windows))
+        network = model_network(model, spec["class"])
+        config["network_structure"] = repr(network)
+        from .project_model import archive_upstream_sources
+        config["upstream_sources"] = archive_upstream_sources(root, bundle_path, model, network)
+        if kwargs["GPU"] >= 0:
+            import torch
+            config["device"] = {"name": torch.cuda.get_device_name(kwargs["GPU"]),
+                "index": kwargs["GPU"], "cuda": torch.version.cuda,
+                "allocated_peak_bytes": torch.cuda.max_memory_allocated(kwargs["GPU"]),
+                "reserved_peak_bytes": torch.cuda.max_memory_reserved(kwargs["GPU"])}
         verify_loaded_model(root, config, model)
     if spec["class"] == "DEnsembleModel":
         config["ensemble_state"] = _ensemble_state(model, features)
@@ -446,7 +529,8 @@ def _ensemble_state(model, features):
             "sub_weights": list(model.sub_weights), "iterations": iterations}
 
 
-def predict_bundle(root, model_row, frame, *, sequence_context=None):
+def predict_bundle(root, model_row, frame, *, sequence_context=None, _bound_sequence_context=None):
+    requested_frame = frame
     root = Path(root)
     config = json.loads((root / model_row["config_path"]).read_text(encoding="utf-8"))
     from qlib.utils.serial import Serializable
@@ -459,7 +543,19 @@ def predict_bundle(root, model_row, frame, *, sequence_context=None):
                 or config.get("sequence", {}).get("schema") != "research.qlib-sequence-input.v2"):
             raise QlibModelError("序列模型必须使用序列模型文件合同")
         candidate = normalize_candidates([config["candidate"]])[0]
-        windows = bind_windows(sequence_context, frame, features, candidate["dataset"]["step_len"])
+        from .gru import batch_contract, daily_prediction_frame
+        if batch_contract(candidate) == "daily_cross_section":
+            context = sequence_context if sequence_context is not None else _bound_sequence_context
+            if context is None:
+                raise QlibModelError("每日图预测必须提供完整Feature窗口")
+            frame = daily_prediction_frame(context, frame)
+            _bound_sequence_context = None
+        windows = _bound_sequence_context
+        if windows is None:
+            windows = bind_windows(sequence_context, frame, features, candidate["dataset"]["step_len"])
+        elif (windows.step_len != candidate["dataset"]["step_len"]
+              or windows.feature_columns != tuple(features)):
+            raise QlibModelError("复用的序列窗口与候选声明不一致")
         if (config["sequence"]["step_len"] != windows.step_len
                 or config["sequence"]["feature_columns"] != list(windows.feature_columns)
                 or config["sequence"]["calendar_sessions"] != [str(day) for day in windows.calendar_sessions]
@@ -467,10 +563,23 @@ def predict_bundle(root, model_row, frame, *, sequence_context=None):
             raise QlibModelError("序列模型预测窗口、日历或特征顺序与拟合封存不一致")
         processors = {"infer": [Serializable.load(root / path) for path in config["processor_files"]["infer"]], "learn": []}
         dataset = processed_dataset(windows, processors=processors, segments={"test": frame.sample_id.astype(str).tolist()})
-        with cpu_execution():
+        from .gru import model_dataset
+        dataset = model_dataset(dataset, candidate)
+        if config["candidate"]["model"]["class"] == "ProjectQlibModel":
+            from .project_model import restore_project_model
+            restore_project_model(root, config)
+        with cpu_execution(config["effective_model_kwargs"].get("GPU", -1)):
             model = Serializable.load(root / config["model_path"])
             verify_loaded_model(root, config, model)
-            result = model.predict(dataset)
+            from .gru import model_network
+            network = model_network(model, candidate["model"]["class"])
+            recurrent = getattr(network, "rnn", None)
+            if recurrent is not None:
+                # pickle恢复会重建Parameter存储；重新绑定cuDNN布局，不改变已验权重。
+                recurrent.flatten_parameters()
+            from .gru import upstream_loader_contract
+            with upstream_loader_contract(model, candidate):
+                result = model.predict(dataset)
     else:
         if sequence_context is not None:
             raise QlibModelError("表格模型不接受 sequence_context")
@@ -490,7 +599,8 @@ def predict_bundle(root, model_row, frame, *, sequence_context=None):
     wanted = pd.MultiIndex.from_arrays([pd.to_datetime(frame["observation_session"], utc=True).dt.tz_localize(None), frame["entity_id"].astype(str)], names=["datetime", "instrument"])
     if result.index.has_duplicates or set(result.index) != set(wanted):
         raise QlibModelError("Qlib 预测必须覆盖全部输入证券日期且不得重复")
-    values = result.reindex(wanted).to_numpy(dtype=float)
+    requested = pd.MultiIndex.from_arrays([pd.to_datetime(requested_frame["observation_session"], utc=True).dt.tz_localize(None), requested_frame["entity_id"].astype(str)], names=["datetime", "instrument"])
+    values = result.reindex(requested).to_numpy(dtype=float)
     if not np.isfinite(values).all():
         raise QlibModelError("Qlib 预测包含非有限值")
     return values
@@ -502,7 +612,8 @@ def evaluation_labels(root, model_row, frame):
     from qlib.utils.serial import Serializable
     root = Path(root)
     config = json.loads((root / model_row["config_path"]).read_text(encoding="utf-8"))
-    data = _matrix(frame, config["feature_columns"], label=True)
+    from .inputs import qlib_label_matrix
+    data = qlib_label_matrix(frame, config["feature_columns"])
     for path in config["processor_files"]["learn"]:
         data = Serializable.load(root / path)(data)
     wanted = pd.MultiIndex.from_arrays([pd.to_datetime(frame["observation_session"], utc=True).dt.tz_localize(None),

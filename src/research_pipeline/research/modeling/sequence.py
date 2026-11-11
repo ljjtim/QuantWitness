@@ -34,6 +34,7 @@ def build_sequence_windows(
     calendar_sessions: Sequence,
     feature_columns: Sequence[str],
     step_len: int,
+    _feature_context: tuple[pd.DataFrame, tuple[str, ...]] | None = None,
 ) -> SequenceWindows:
     """窗口资格先于标签切分；purge 只限制末端，不删除历史特征。"""
     if type(step_len) is not int or step_len < 1:
@@ -42,7 +43,10 @@ def build_sequence_windows(
     if not calendar or any(pd.isna(day) for day in calendar) or tuple(sorted(set(calendar))) != calendar:
         raise ModelMainlineError("序列日历必须非空、升序且无重复")
     columns = tuple(feature_columns)
-    context, actual_columns = assemble_daily_feature_context(features)
+    if _feature_context is None:
+        context, actual_columns = assemble_daily_feature_context(features)
+    else:
+        context, actual_columns = _feature_context
     if not columns or len(set(columns)) != len(columns) or set(columns) != set(actual_columns):
         raise ModelMainlineError("序列特征列必须完整覆盖冻结 Feature 列且不得重复")
     if not set(TARGET_COLUMNS) <= set(targets):
@@ -56,42 +60,61 @@ def build_sequence_windows(
     endpoints["decision_time"] = pd.to_datetime(endpoints["decision_time"], utc=True)
     if endpoints["sample_id"].duplicated().any() or endpoints.duplicated(["entity_id", "observation_session"]).any():
         raise ModelMainlineError("序列末端身份及证券会话必须唯一")
-    context["entity_id"] = context["entity_id"].astype(str)
-    context["observation_session"] = context["observation_session"].map(lambda day: pd.Timestamp(day).date())
-    if context.duplicated(["entity_id", "observation_session"]).any():
+    metadata_columns = [column for column in context.columns if column not in columns]
+    metadata = context.loc[:, metadata_columns].copy()
+    metadata["entity_id"] = metadata["entity_id"].astype(str)
+    metadata["observation_session"] = metadata["observation_session"].map(lambda day: pd.Timestamp(day).date())
+    if metadata.duplicated(["entity_id", "observation_session"]).any():
         raise ModelMainlineError("历史特征证券会话必须唯一")
-    context = context.loc[context["observation_session"].isin(calendar)].reset_index(drop=True)
-    context.insert(0, "context_index", np.arange(len(context), dtype=np.int64))
-    records = {(row.entity_id, row.observation_session): row
-               for row in context.itertuples(index=False)}
-    positions = {day: index for index, day in enumerate(calendar)}
-    members, exclusions = [], []
-    for target in endpoints.to_dict("records"):
-        day = target["observation_session"]
-        if day not in positions:
-            raise ModelMainlineError("序列末端会话不在冻结交易日历内")
-        end = positions[day]
-        reason = "insufficient_history" if end + 1 < step_len else None
-        history = []
-        if reason is None:
-            for member_day in calendar[end - step_len + 1:end + 1]:
-                row = records.get((target["entity_id"], member_day))
-                if row is None or row.feature_count != len(columns):
-                    reason = "missing_feature"
-                    break
-                if row.feature_available_time > target["decision_time"]:
-                    reason = "feature_not_visible"
-                    break
-                history.append(row)
-        if reason:
-            exclusions.append({"sample_id": target["sample_id"], "reason_code": reason})
-            continue
-        for step, row in enumerate(history):
-            members.append((target["sample_id"], step, row.context_index))
-    return SequenceWindows(context=context, targets=endpoints,
-        members=pd.DataFrame(members, columns=MEMBER_COLUMNS).astype(
-            {"step": "int64", "context_index": "int64"}),
-        exclusions=pd.DataFrame(exclusions, columns=("sample_id", "reason_code")),
+    selected = metadata["observation_session"].isin(calendar).to_numpy()
+    positions_in_source = np.flatnonzero(selected)
+    metadata = metadata.loc[selected].reset_index(drop=True)
+    keep_all = bool(selected.all())
+    # 新表拥有独立列结构；全量保留时共享只读数值，筛选时每列只take一次。
+    context = pd.DataFrame({"context_index": np.arange(len(metadata), dtype=np.int64),
+        **{column: (context[column].array if keep_all
+            else context[column].array.take(positions_in_source)) if column in columns
+            else metadata[column].array for column in context.columns}}, copy=False)
+    positions = pd.Index(calendar)
+    endpoint_positions = positions.get_indexer(endpoints.observation_session)
+    if (endpoint_positions < 0).any():
+        raise ModelMainlineError("序列末端会话不在冻结交易日历内")
+    source_index = pd.MultiIndex.from_frame(context[["entity_id", "observation_session"]])
+    counts = context.feature_count.to_numpy() if len(context) else np.zeros(1, dtype=np.int64)
+    available = pd.to_datetime(context.feature_available_time, utc=True).astype("int64").to_numpy() if len(context) else np.zeros(1, dtype=np.int64)
+    decision = pd.to_datetime(endpoints.decision_time, utc=True).astype("int64").to_numpy()
+    calendar_array = np.asarray(calendar, dtype=object)
+    identifiers = endpoints.sample_id.to_numpy()
+    entities = endpoints.entity_id.to_numpy()
+    member_ids, member_steps, member_indices, excluded_ids, excluded_reasons = [], [], [], [], []
+    for start in range(0, len(endpoints), 8192):
+        end = min(start + 8192, len(endpoints))
+        ends = endpoint_positions[start:end]
+        history_positions = ends[:, None] - np.arange(step_len - 1, -1, -1)
+        insufficient = history_positions[:, 0] < 0
+        safe_positions = np.maximum(history_positions, 0)
+        keys = pd.MultiIndex.from_arrays([np.repeat(entities[start:end], step_len),
+            calendar_array[safe_positions.ravel()]])
+        indices = source_index.get_indexer(keys).reshape(-1, step_len)
+        safe_indices = np.maximum(indices, 0)
+        missing = (indices < 0) | (counts[safe_indices] != len(columns))
+        late = available[safe_indices] > decision[start:end, None]
+        invalid = missing | late
+        any_invalid = invalid.any(axis=1)
+        first_invalid = invalid.argmax(axis=1)
+        first_missing = missing[np.arange(len(ends)), first_invalid]
+        reasons = np.where(insufficient, "insufficient_history",
+            np.where(any_invalid, np.where(first_missing, "missing_feature", "feature_not_visible"), ""))
+        good = reasons == ""
+        member_ids.append(np.repeat(identifiers[start:end][good], step_len))
+        member_steps.append(np.tile(np.arange(step_len, dtype=np.int64), int(good.sum())))
+        member_indices.append(indices[good].ravel())
+        excluded_ids.extend(identifiers[start:end][~good])
+        excluded_reasons.extend(reasons[~good])
+    members = pd.DataFrame({"sample_id":np.concatenate(member_ids),
+        "step":np.concatenate(member_steps),"context_index":np.concatenate(member_indices)})
+    return SequenceWindows(context=context, targets=endpoints, members=members,
+        exclusions=pd.DataFrame({"sample_id":excluded_ids,"reason_code":excluded_reasons}),
         feature_columns=columns, calendar_sessions=calendar, step_len=step_len)
 
 
@@ -122,33 +145,46 @@ def qlib_sequence_dataset(
         bounds[name] = (pd.Timestamp(dates.min()), pd.Timestamp(dates.max()))
     if "train" in bounds and bounds["train"][1] >= bounds["valid"][0]:
         raise ModelMainlineError("序列 train 必须严格早于 valid")
-    source = windows.context.set_index(["observation_session", "entity_id"])
-    values = source.loc[:, windows.feature_columns].copy()
+    source_index = pd.MultiIndex.from_frame(windows.context[["observation_session", "entity_id"]])
     if transformed_features is not None:
-        if (not transformed_features.index.equals(source.index)
+        if (not transformed_features.index.equals(source_index)
                 or list(transformed_features.columns) != list(windows.feature_columns)):
             raise ModelMainlineError("处理后的序列特征必须保持上下文索引和特征顺序")
-        values = transformed_features.copy()
-    members = windows.members.loc[windows.members["sample_id"].isin(selected)]
-    used = windows.context.loc[windows.context.context_index.isin(members.context_index)]
-    keys = pd.MultiIndex.from_frame(used[["observation_session", "entity_id"]].drop_duplicates())
-    values = values.reindex(keys).sort_index()
-    if not np.isfinite(values.to_numpy(dtype=float)).all():
-        raise ModelMainlineError("序列完整窗口经处理后仍有非有限特征")
-    values.index = pd.MultiIndex.from_arrays(
-        [pd.to_datetime(values.index.get_level_values(0)), values.index.get_level_values(1)],
+    members = windows.members.loc[windows.members["sample_id"].isin(selected), "context_index"]
+    used = windows.context.loc[windows.context.context_index.isin(members),
+                               ["observation_session", "entity_id"]]
+    keys = pd.MultiIndex.from_frame(used.drop_duplicates()).sort_values()
+    positions = source_index.get_indexer(keys)
+    if (positions < 0).any():
+        raise ModelMainlineError("序列窗口引用不存在的上下文")
+    output_index = pd.MultiIndex.from_arrays(
+        [pd.to_datetime(keys.get_level_values(0)), keys.get_level_values(1)],
         names=["datetime", "instrument"])
-    values.columns = pd.MultiIndex.from_product([["feature"], windows.feature_columns])
-    values[("label", "target")] = np.nan
-    values[("filter", "endpoint")] = False
+    feature_source = windows.context if transformed_features is None else transformed_features
+    output = {}
+    for column in windows.feature_columns:
+        array = feature_source[column].array.take(positions)
+        if not np.isfinite(np.asarray(array, dtype=float)).all():
+            raise ModelMainlineError("序列完整窗口经处理后仍有非有限特征")
+        output[("feature", column)] = array
+    output[("label", "target")] = np.full(len(keys), np.nan)
+    output[("filter", "endpoint")] = np.zeros(len(keys), dtype=bool)
+    values = pd.DataFrame(output, index=output_index, copy=False)
+    del output, feature_source, members, used
     if labels is not None:
         if labels.index.has_duplicates or set(labels.index) != set(selected) or not np.isfinite(labels.to_numpy(dtype=float)).all():
             raise ModelMainlineError("序列标签必须恰好覆盖 train/valid 末端且为有限数")
-    for sid, row in endpoints.iterrows():
-        index = (pd.Timestamp(row["observation_session"]), row["entity_id"])
-        values.loc[index, ("filter", "endpoint")] = True
-        if labels is not None:
-            values.loc[index, ("label", "target")] = float(labels.loc[sid])
+    endpoint_index = pd.MultiIndex.from_arrays([pd.to_datetime(endpoints.observation_session), endpoints.entity_id], names=["datetime", "instrument"])
+    endpoint_positions = values.index.get_indexer(endpoint_index)
+    if (endpoint_positions < 0).any():
+        raise ModelMainlineError("序列末端不在所消费上下文中")
+    filter_values = np.zeros(len(values), dtype=bool)
+    filter_values[endpoint_positions] = True
+    values[("filter", "endpoint")] = filter_values
+    if labels is not None:
+        label_values = np.full(len(values), np.nan)
+        label_values[endpoint_positions] = labels.reindex(endpoints.index).to_numpy(dtype=float)
+        values[("label", "target")] = label_values
     # 上下文已应用冻结处理器；标签清洗不能在此删除没有标签的历史行。
     handler = DataHandlerLP(data_loader=StaticDataLoader(values), infer_processors=[],
                             learn_processors=[], init_data=False)

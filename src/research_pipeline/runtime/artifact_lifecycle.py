@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Mapping
 
@@ -67,6 +68,59 @@ class PayloadHandoff:
     commit: object
     files: Mapping[str, str]
     worker_exited: bool
+
+
+class CausalBatchLifecycle:
+    """释放已封口且核心验收完成的键批工作副本，不提供批次恢复。"""
+
+    def __init__(self, work_root: Path, external, *, owner=None):
+        self.root = work_root.resolve(strict=True)
+        owner = owner if owner is not None else _CURRENT_OWNER.get()
+        self.protection_root = owner.root if owner is not None else self.root
+        self.external = external
+        self.journal = self.root / "causal-handoffs.jsonl"
+
+    def release(self, work_root, *, commits, batch_index, task_completed,
+                core_accepted, resources_accepted):
+        source = Path(work_root).resolve(strict=True)
+        if source.parent != self.root or not source.name.startswith("causal-"):
+            raise ValueError("因果批次释放路径必须是当前节点登记的直属工作目录")
+        if not task_completed or not core_accepted or not resources_accepted or not commits:
+            raise ValueError("因果批次尚未完成正式交接和资源验收")
+        for commit in commits:
+            current = self.external.verify(commit.semantic_hash)
+            if current != commit:
+                raise ValueError("因果批次正式替代工件发生变化")
+            for relative in commit.files:
+                target = self.external.objects_root / commit.semantic_hash / relative
+                if not target.is_file():
+                    raise ValueError("因果批次正式替代工件未闭合")
+        # 核心attach可能增加时间字段；交接引用绑定正式提交，不要求原输出字节相同。
+        record = {"batch_index": batch_index, "work_directory": source.name,
+                  "commits": [commit.semantic_hash for commit in commits],
+                  "task_completed": True}
+        try:
+            reasons = protection_reasons(source, self.protection_root)
+            files = tuple(path for path in source.rglob("*") if path.is_file())
+            record.update(handoff_files=len(files),
+                          handoff_bytes=sum(path.stat().st_size for path in files),
+                          protection_reasons=list(reasons))
+            with self.journal.open("a", encoding="utf-8") as stream:
+                stream.write(canonical_json(record) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            if reasons:
+                return record
+            for path in files:
+                path.unlink()
+            for directory in sorted((path for path in source.rglob("*") if path.is_dir()),
+                                    key=lambda path: len(path.parts), reverse=True):
+                directory.rmdir()
+            source.rmdir()
+        except OSError as exc:
+            record["cleanup_error"] = f"{type(exc).__name__}: {exc}"
+            logging.getLogger(__name__).warning("因果批次工作副本保留: %s", record)
+        return record
 
 
 class AttemptArtifactLifecycle:
@@ -152,6 +206,10 @@ class AttemptArtifactLifecycle:
                 raise ValueError("Worker 释放载荷不属于当前 attempt")
             if "outputs" not in source.relative_to(boundary).parts:
                 raise ValueError("Worker 释放范围必须是 outputs 载荷")
+        elif category == "worker_state_input":
+            boundary = self.root / "work" / self.attempt_id
+            if not source.is_relative_to(boundary) or source.name != "content.bin" or source.parent.name != "runtime_state" or source.parent.parent.name != "inputs":
+                raise ValueError("状态输入释放范围必须是当前分区登记的副本")
         elif category == "request_recovery":
             if source != self.root / "request-recovery" / self.node_id / "data":
                 raise ValueError("请求恢复释放范围必须是当前节点的 data")
@@ -221,6 +279,23 @@ class AttemptArtifactLifecycle:
                 path.write_text(canonical_json(report), encoding="utf-8")
             except OSError as exc:
                 logging.getLogger(__name__).warning("载荷释放记录无法保存: %s", exc)
+        return report
+
+    def release_partition(self, *, checkpoint_committed: bool) -> dict[str, object]:
+        """分区交接不等待整个节点终态；调用方先验收资源并提交分区。"""
+        report = {"node_id": self.node_id, "attempt_id": self.attempt_id,
+                  "released_files": 0, "released_bytes": 0, "items": []}
+        ready = checkpoint_committed and self.resources_accepted
+        for handoff in self.handoffs:
+            item = self._release_handoff(handoff, ready=ready)
+            report["items"].append(item)
+            report["released_files"] += item["released_files"]
+            report["released_bytes"] += item["released_bytes"]
+        path = self.root / "work" / self.attempt_id / "artifact-lifecycle.json"
+        try:
+            path.write_text(canonical_json(report), encoding="utf-8")
+        except OSError as exc:
+            logging.getLogger(__name__).warning("分区载荷释放记录无法保存: %s", exc)
         return report
 
     def _release_handoff(self, handoff: PayloadHandoff, *, ready: bool) -> dict[str, object]:

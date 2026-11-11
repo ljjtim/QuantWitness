@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import date
+from functools import lru_cache
+from types import MappingProxyType
 
 import pandas as pd
 import pyarrow as pa
@@ -209,11 +212,25 @@ class RestrictedCausalInput:
             yield batch.filter(pa.array(row_mask)).select(selected)
 
 
+@lru_cache(maxsize=8)
+def _daily_calendar(sessions: tuple):
+    """按不可变日期内容复用日历和后续交易日映射，不缓存逐批时间判断。"""
+    from research_pipeline.domain.time import TradingSessionCalendar
+
+    calendar = TradingSessionCalendar.build(sessions)
+    return calendar, MappingProxyType(dict(zip(calendar.sessions[:-1], calendar.sessions[1:])))
+
+
 def daily_source_times(values: pd.Series, binding: Mapping) -> tuple[pd.Series, pd.Series]:
     """保留原始日期，由核心按已准入规则生成观测与可见时点。"""
     from research_pipeline.domain.time import TradingSessionCalendar, TimeContractError
 
-    calendar = TradingSessionCalendar.build(binding["sessions"])
+    values_calendar = binding["sessions"]
+    if isinstance(values_calendar, (tuple, list)) and all(type(value) in (str, date) for value in values_calendar):
+        calendar, following = _daily_calendar(tuple(values_calendar))
+    else:
+        calendar = TradingSessionCalendar.build(values_calendar)
+        following = dict(zip(calendar.sessions[:-1], calendar.sessions[1:]))
     try:
         dates = pd.to_datetime(values, errors="raise")
         if dates.isna().any() or dates.dt.tz is not None or (dates != dates.dt.normalize()).any():
@@ -228,7 +245,6 @@ def daily_source_times(values: pd.Series, binding: Mapping) -> tuple[pd.Series, 
             observations = (dates + pd.Timedelta(hours=9, minutes=30)).dt.tz_localize(binding["timezone"]).dt.tz_convert("UTC")
             available = observations.copy()
         elif rule == "next_session_open":
-            following = dict(zip(calendar.sessions[:-1], calendar.sessions[1:]))
             next_dates = dates.dt.date.map(following)
             if next_dates.isna().any():
                 raise CausalTimeContractError("日频日期不在冻结日历中或缺少后续交易日")

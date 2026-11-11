@@ -15,6 +15,7 @@ import re
 from zoneinfo import ZoneInfo
 
 from research_pipeline.platform.asset_taxonomy import (
+    MINUTE_TARGET_ASSET_CLASSES,
     AssetTaxonomyError,
     normalize_asset_class,
     require_canonical_asset_class,
@@ -284,8 +285,12 @@ class SessionPolicyRevision:
             raise SessionCalendarError("session policy version 不受支持")
         if self.contract_version == PROJECT_SESSION_POLICY_VERSION:
             require_aware_datetime(self.available_at, "session available_at")
-            if self.instrument.asset_class not in {"cn_stock", "cn_etf"}:
-                raise SessionCalendarError("项目日历当前仅支持股票与ETF")
+            if self.instrument.asset_class not in MINUTE_TARGET_ASSET_CLASSES:
+                raise SessionCalendarError("项目日历仅支持股票、ETF与真实期货合约")
+            if self.instrument.asset_class == "cn_future" and (
+                    self.instrument.instrument_class not in {"future", "future_contract"}
+                    or any(token in self.instrument.instrument_id.upper() for token in ("8888", "9999", "CONTINUOUS"))):
+                raise SessionCalendarError("项目期货日历须使用真实合约")
         elif self.available_at is not None:
             raise SessionCalendarError("已发布v1日历不接受新增可见时间字段")
         if not self.policy_id.strip() or self.revision < 1:
@@ -669,6 +674,26 @@ class SessionCalendarResolver:
             raise SessionCalendarError("instant 没有唯一 session，禁止使用 dt.date() 兜底")
         return matches[0]
 
+    def next_session_open(self, instrument, trading_date, *, not_before=None):
+        """按同合约历史日历取下一会话；缺失或早于来源截止时拒绝。"""
+        current = _strict_trading_date(trading_date, "trading_date")
+        policies = self._instrument_policies(instrument, None)
+        for day in sorted({day for policy in policies for day in policy.trading_dates if day > current}):
+            if self.bundle.contract_version == PROJECT_SESSION_BUNDLE_VERSION:
+                selected = self._visible_policies(policies, day, None)
+            else:
+                selected = tuple(policy for policy in policies if day in policy.trading_dates and policy.revision == 1)
+            if not selected:
+                continue
+            if len(selected) != 1:
+                raise SessionCalendarError("下一会话日历版本冲突")
+            segments = self._segments_for_date(selected[0], day)
+            opening = min(item.starts_at for item in segments if item.bar_eligible)
+            if not_before is not None and opening <= _session_instant(not_before, "not_before"):
+                raise SessionCalendarError(f"下一会话早于来源可见截止：{instrument.instrument_id} {current}")
+            return opening
+        raise SessionCalendarError(f"下一会话覆盖缺失：{instrument.instrument_id} {current}")
+
     def resolve_completed_bar_end(
         self,
         instrument: SessionInstrumentMetadata,
@@ -738,7 +763,9 @@ class SessionCalendarResolver:
         if len(families) != 1:
             raise SessionCalendarError("session政策族冲突")
         selected = max(candidates, key=lambda item: item.revision)
-        return (selected,) if trading_date in selected.trading_dates else ()
+        position = bisect_left(selected.trading_dates, trading_date)
+        return ((selected,) if position < len(selected.trading_dates)
+                and selected.trading_dates[position] == trading_date else ())
 
     def _instrument_policies(
         self,

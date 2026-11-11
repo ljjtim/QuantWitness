@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import datetime
 import importlib
 import json
+import logging
+import sys
 from pathlib import Path
 import shutil
 import time
@@ -78,6 +80,7 @@ from .scheduler import (
     ReadyCandidate,
     ReservationLedger,
     ResourceCapacity,
+    require_node_capacity,
 )
 from .resource_governor import (
     ResourceGovernor,
@@ -86,6 +89,7 @@ from .resource_governor import (
     ResourceUsageSampler,
     ResourceVector,
     resource_data_bucket,
+    _require_sampled_resources,
 )
 from .store import EventStore
 from .dag_parallel import (
@@ -95,6 +99,33 @@ from .dag_parallel import (
 
 
 OPERATOR_DAG_RUN_VERSION = "research-runtime-operator-dag-run-v3"
+
+
+def _release_resource_lease(governor, lease, active_error: BaseException | None) -> None:
+    try:
+        governor.release(lease)
+    except Exception as release_error:
+        if active_error is None:
+            raise
+        secondary = safe_error_summary(
+            release_error, default_error_code="resource_release_failed",
+        )
+        logging.getLogger(__name__).error(
+            "执行失败后的资源租约未释放: %s: %s",
+            secondary["exception_type"], secondary["message"],
+        )
+
+
+@contextmanager
+def _resource_lease_cleanup(governor, lease):
+    active_error = None
+    try:
+        yield
+    except BaseException as exc:
+        active_error = exc
+        raise
+    finally:
+        _release_resource_lease(governor, lease, active_error)
 
 
 class RuntimeExecutionService:
@@ -109,6 +140,7 @@ class RuntimeExecutionService:
         resource_governor: ResourceGovernor | None = None,
         resource_timeout_seconds: float | None = None,
         no_node_timeout: bool = False,
+        no_temp_limit: bool = False,
         project_registry: AdmittedProjectOperatorRegistry | None = None,
         project_parameters_by_node: Mapping[str, Mapping[str, object]] | None = None,
         result_table_requirements_by_node: Mapping[
@@ -124,6 +156,7 @@ class RuntimeExecutionService:
             raise ValueError("启用资源治理时必须显式提供正数 timeout")
         self.resource_governor = resource_governor
         self.resource_timeout_seconds = resource_timeout_seconds
+        self.no_temp_limit = no_temp_limit
         self.no_node_timeout = no_node_timeout
         self.project_registry = project_registry
         self.project_parameters_by_node = {
@@ -145,6 +178,8 @@ class RuntimeExecutionService:
         """复用统一 Runtime 服务入口执行分钟分区 profile。"""
         from .minute_profile import MinutePartitionRuntime
 
+        if self.no_temp_limit and kwargs.get("budget") is not None:
+            kwargs["budget"] = replace(kwargs["budget"], max_temp_bytes=None)
         if self.resource_governor is None:
             return MinutePartitionRuntime().execute(**kwargs)  # type: ignore[arg-type]
         budget = kwargs.get("budget")
@@ -163,7 +198,7 @@ class RuntimeExecutionService:
             vector=vector,
             timeout_seconds=float(self.resource_timeout_seconds),
         )
-        try:
+        with _resource_lease_cleanup(self.resource_governor, lease):
             with self.resource_governor.maintained_lease(lease):
                 return MinutePartitionRuntime().execute(  # type: ignore[arg-type]
                     **kwargs,
@@ -171,8 +206,6 @@ class RuntimeExecutionService:
                     parent_resource_lease=lease,
                     resource_timeout_seconds=self.resource_timeout_seconds,
                 )
-        finally:
-            self.resource_governor.release(lease)
 
     def prepare_rerun_from(
         self,
@@ -239,8 +272,10 @@ class RuntimeExecutionService:
         ):
             raise RuntimeIntegrityError("rerun-from child run 已含 Runtime 可写状态")
         parent_checkpoints = CheckpointStore(parent_root, create=False)
+        verification_session = RunScopedArtifactVerification(child_run_id)
         parent_external = ExternalArtifactStore(
-            parent_root / "external-artifacts", create=False
+            parent_root / "external-artifacts", create=False,
+            verification_session=verification_session,
         )
         child_checkpoints = CheckpointStore(child_root)
         child_external = ExternalArtifactStore(child_root / "external-artifacts")
@@ -363,7 +398,7 @@ class RuntimeExecutionService:
                         vector=run_vector,
                         timeout_seconds=float(self.resource_timeout_seconds),
                     )
-                    session.callback(self.resource_governor.release, run_lease)
+                    session.enter_context(_resource_lease_cleanup(self.resource_governor, run_lease))
                     session.enter_context(self.resource_governor.maintained_lease(run_lease))
                 events = session.enter_context(EventStore(run_root).writer_session())
                 return self._execute(
@@ -446,7 +481,9 @@ class RuntimeExecutionService:
             node.node_id: _effective_resource_budget(
                 node.resource_budget,
                 capacity=self.resource_capacity,
+                node_id=node.node_id,
                 no_node_timeout=self.no_node_timeout,
+                no_temp_limit=self.no_temp_limit,
             )
             for node in dag.nodes
         }
@@ -455,7 +492,7 @@ class RuntimeExecutionService:
             raise RuntimeAdmissionError("节点声明预算加 Supervisor 驻留内存超过运行总容量")
         reservation_budgets = {
             node.node_id: _reservation_budget(
-                node.resource_budget,
+                effective_budgets[node.node_id],
                 process_slots=process_slots.get(node.node_id, 1),
             )
             for node in dag.nodes
@@ -467,9 +504,9 @@ class RuntimeExecutionService:
         )
         if resource_ledger is not None:
             for node in dag.nodes:
-                resource_ledger.require_single_node_admission(node.resource_budget)
-            for budget in reservation_budgets.values():
-                resource_ledger.require_single_node_admission(budget)
+                resource_ledger.require_single_node_admission(node.resource_budget, node_id=node.node_id)
+            for node_id, budget in reservation_budgets.items():
+                resource_ledger.require_single_node_admission(budget, node_id=node_id)
         governance_hash = (
             None
             if self.resource_governor is None
@@ -613,6 +650,37 @@ class RuntimeExecutionService:
         reused: list[str] = []
         owner.start_dag_progress(len(dag.nodes))
         node_map = {node.node_id: node for node in dag.nodes}
+        def register_model_tables(node, node_outputs, *, executed=False):
+            supported = {
+                "research.model.split-manifest.v2", "research.model.fit.v2",
+                "research.model.predict.v2", "research.model.fold-metrics.v2",
+                "research.model.selection.v2", "research.model.import.v1",
+            }
+            if node.implementation_id not in supported or node.implementation_id not in self._definitions:
+                return
+            if node.implementation_id == "research.model.import.v1":
+                from .model_import_source import verify_completed_model_source
+                parameters = environment.node_parameters[node.node_id]
+                if not executed:
+                    with activate_artifact_verification(verification_session):
+                        verify_completed_model_source(parameters)
+                source = parameters.get("source_manifest_json")
+                source = json.loads(source) if isinstance(source, str) else source
+                if not isinstance(source, Mapping):
+                    raise RuntimeIntegrityError("模型导入生产证明缺少冻结来源")
+                for port, field in (("splits", "split_commit"), ("models", "fit_commit")):
+                    if node_outputs.values[port].external_commit.to_dict() != source[field]:
+                        raise RuntimeIntegrityError("模型导入生产证明与实际输出不一致")
+            from .logical_table_verification import register_produced_tables
+            for port, value in node_outputs.values.items():
+                if node.implementation_id == "research.model.import.v1" and port != "splits":
+                    continue
+                commit = value.external_commit
+                if commit is not None:
+                    if external.verify(commit.semantic_hash) != commit:
+                        raise RuntimeIntegrityError("模型生产证明工件身份不一致")
+                    register_produced_tables(verification_session,
+                                            external.objects_root / commit.semantic_hash, commit)
         def execute_node(topological_level, node_id):
             node = node_map[node_id]
             values_by_port = self._inputs(dag, node, outputs)
@@ -646,6 +714,7 @@ class RuntimeExecutionService:
                     raise RuntimeIntegrityError(
                         f"节点 {node_id} checkpoint outputs 与内容引用不一致"
                     )
+                register_model_tables(node, node_outputs)
                 outputs[node_id] = node_outputs
                 reused.append(node_id)
                 self._reconcile_success(
@@ -667,6 +736,7 @@ class RuntimeExecutionService:
                 )
             if reused_from is not None:
                 source_run_id, source_manifest, node_outputs = reused_from
+                register_model_tables(node, node_outputs)
                 outputs[node_id] = node_outputs
                 reused.append(node_id)
                 events.append(
@@ -889,6 +959,14 @@ class RuntimeExecutionService:
                             additional_scratch_roots=(checkpoints.staging_root / attempt_id,),
                         ))
                         sampled = True
+                    def check_sampled_resources() -> None:
+                        # 检查历史峰值，不结束采样或重置已经观察到的超限。
+                        if sampler is not None:
+                            _require_sampled_resources(
+                                sampler, budget=effective_budgets[node_id],
+                                reservation=reservation_vector,
+                            )
+
                     node_context = RuntimeNodeContext(
                         node=node,
                         inputs=values_by_port,
@@ -900,6 +978,7 @@ class RuntimeExecutionService:
                         resource_governor=self.resource_governor,
                         resource_lease=lease,
                         attempt_deadline_monotonic=attempt_deadline,
+                        resource_check=check_sampled_resources if not parallel else None,
                         process_slots=process_slots.get(node_id, 1),
                         parallel_workers=(min(workers, node.resource_budget.cpu_slots,
                                               max(1, process_slots.get(node_id, 1) - 1))
@@ -1046,34 +1125,43 @@ class RuntimeExecutionService:
                     operator_id, operator_version, profile_id = (
                         self._observation_identity(node)
                     )
-                    self.resource_governor.record_observation(
-                        ResourceObservation(
-                            operator_id=operator_id,
-                            operator_version=operator_version,
-                            profile_id=profile_id,
-                            environment_hash=self.audit_environment.manifest_digest,
-                            data_bucket=resource_data_bucket(estimate_components),
-                            run_id=run_id,
-                            node_id=node_id,
-                            attempt_id=attempt_id,
-                            status=(
-                                "cancelled"
-                                if isinstance(exc, (KeyboardInterrupt, SystemExit))
-                                else "failed"
-                            ),
-                            fixture=False,
-                            estimate_components=estimate_components,
-                            actual_components={
-                                "peak_rss_bytes": sampler.peak_rss_bytes,
-                                "peak_scratch_bytes": sampler.peak_scratch_bytes,
-                                "output_bytes": 0,
-                                "max_processes": sampler.max_processes,
-                                "wall_milliseconds": sampler.wall_milliseconds,
-                            },
-                            observed_at=datetime.now().astimezone().isoformat(),
-                            measurement_status=sampler.measurement_status,
+                    try:
+                        self.resource_governor.record_observation(
+                            ResourceObservation(
+                                operator_id=operator_id,
+                                operator_version=operator_version,
+                                profile_id=profile_id,
+                                environment_hash=self.audit_environment.manifest_digest,
+                                data_bucket=resource_data_bucket(estimate_components),
+                                run_id=run_id,
+                                node_id=node_id,
+                                attempt_id=attempt_id,
+                                status=(
+                                    "cancelled"
+                                    if isinstance(exc, (KeyboardInterrupt, SystemExit))
+                                    else "failed"
+                                ),
+                                fixture=False,
+                                estimate_components=estimate_components,
+                                actual_components={
+                                    "peak_rss_bytes": sampler.peak_rss_bytes,
+                                    "peak_scratch_bytes": sampler.peak_scratch_bytes,
+                                    "output_bytes": 0,
+                                    "max_processes": sampler.max_processes,
+                                    "wall_milliseconds": sampler.wall_milliseconds,
+                                },
+                                observed_at=datetime.now().astimezone().isoformat(),
+                                measurement_status=sampler.measurement_status,
+                            )
                         )
-                    )
+                    except Exception as observation_error:
+                        secondary = safe_error_summary(
+                            observation_error, default_error_code="resource_observation_failed",
+                        )
+                        logging.getLogger(__name__).error(
+                            "节点失败后的资源观测未写入: %s: %s",
+                            secondary["exception_type"], secondary["message"],
+                        )
                 self._status(
                     events,
                     run_id,
@@ -1115,7 +1203,7 @@ class RuntimeExecutionService:
                     self._write_record(record_path, {**base_record, "status": run_failure_status})
                 failure_payload = getattr(exc, "failure_payload", None)
                 raise RuntimeWorkerError(
-                    f"operator 节点执行失败: {node_id}",
+                    f"operator 节点执行失败: {node_id}: {diagnostic['message']}",
                     error_code=str(diagnostic["error_code"]),
                     failure_payload=(
                         failure_payload
@@ -1125,7 +1213,7 @@ class RuntimeExecutionService:
                 ) from exc
             finally:
                 if lease is not None:
-                    self.resource_governor.release(lease)
+                    _release_resource_lease(self.resource_governor, lease, sys.exc_info()[1])
                 if local_reservation is not None:
                     resource_ledger.release(local_reservation.key)
             self._status(
@@ -1146,6 +1234,7 @@ class RuntimeExecutionService:
                 node_id=node_id,
             )
             lifecycle.release(checkpoint_committed=checkpoint_committed)
+            register_model_tables(node, node_outputs, executed=True)
             outputs[node_id] = node_outputs
             owner.complete_dag_nodes(len(outputs))
         if parallel:
@@ -1293,6 +1382,11 @@ class RuntimeExecutionService:
             )
             if not checkpoint_path.exists():
                 continue
+            # 源工件只在本次解码和复制之间共享验证，不沿用来源运行的信任。
+            source_external = ExternalArtifactStore(
+                source_external.root, create=False,
+                verification_session=RunScopedArtifactVerification(source_run_id),
+            )
             manifest = source_checkpoints.verify(expectation)
             source_outputs = self._decode_outputs(
                 (checkpoint_path / manifest.content_path).read_bytes(),
@@ -1576,6 +1670,7 @@ class RuntimeExecutionService:
             fixed_clock=node_context.fixed_clock,
             root_seed=node_context.root_seed,
             budget=node_context.remaining_resource_budget(),
+            resource_check=node_context.remaining_resource_budget,
             process_slots=node_context.process_slots,
         )
         self._verify_project_request_consumption(
@@ -1685,6 +1780,8 @@ class RuntimeExecutionService:
                 dataset,
                 partition.partition_key,
             )
+            from .project_causal_minute import frozen_minute_scope_input
+            scope_input = frozen_minute_scope_input(environment, parameters.get("minute_scope"), dataset)
             result = execute_project_worker_attempt(
                 registry=self.project_registry,
                 implementation_id=node.implementation_id,
@@ -1697,6 +1794,7 @@ class RuntimeExecutionService:
                 fixed_clock=node_context.fixed_clock,
                 root_seed=node_context.root_seed,
                 budget=node_context.remaining_resource_budget(),
+                resource_check=node_context.remaining_resource_budget,
                 process_slots=node_context.process_slots,
                 partition_key=partition.partition_key,
                 dataset_roots=roots,
@@ -1704,11 +1802,28 @@ class RuntimeExecutionService:
                     verified_partition.reference.to_dict()
                 ),
                 state_in=state,
+                minute_scope_input=scope_input,
             )
             current_stateful = result.state is not None
             if stateful is not None and current_stateful != stateful:
                 raise RuntimeIntegrityError("项目分区 state 合同在月份间发生变化")
             stateful = current_stateful
+            partition_lifecycle = (
+                None if lifecycle is None else AttemptArtifactLifecycle(
+                    lifecycle.root, node.node_id,
+                    partition_attempt.relative_to(lifecycle.root / "work").as_posix(),
+                    node_context.external_store,
+                )
+            )
+            if state is not None and partition_lifecycle is not None:
+                state_commit_previous = node_context.external_store.verify(str(state.commit["semantic_hash"]))
+                partition_lifecycle.register(
+                    category="worker_state_input",
+                    source=partition_attempt / "inputs/runtime_state/content.bin",
+                    commit=state_commit_previous,
+                    files={"": next(iter(state_commit_previous.files))},
+                    worker_exited=result.process_cleanup_status == "complete",
+                )
             committed_outputs = {
                 output.port: self._commit_project_worker_output(
                     node_context.external_store,
@@ -1734,31 +1849,40 @@ class RuntimeExecutionService:
                     else str(result.state.commit["schema_hash"])
                 ),
             )
+            # 交接期间同步保留节点累计峰值；释放不能掩盖短暂副本重叠。
+            from research_pipeline.platform.process_resources import _project_sampling_scope
+            with _project_sampling_scope(partition_attempt) as partition_sampler:
+                if partition_sampler is None:
+                    partition_sampler = ResourceUsageSampler(node_context.work_dir)
+                partition_sampler._sample(force_scratch=True)
+                if partition_sampler._started:
+                    partition_sampler.wall_milliseconds = max(
+                        partition_sampler.wall_milliseconds,
+                        round((time.monotonic() - partition_sampler._started) * 1000),
+                    )
+                _require_sampled_resources(
+                    partition_sampler, budget=node_context.effective_resource_budget,
+                    reservation=ResourceVector.from_budget(node_context.effective_resource_budget,
+                                                          process_slots=node_context.process_slots or partition_sampler.max_processes),
+                )
             store.commit(checkpoint)
-            if lifecycle is not None:
+            if partition_lifecycle is not None:
                 for output in result.outputs:
-                    lifecycle.register_worker(
+                    partition_lifecycle.register_worker(
                         output, committed_outputs[output.port],
                         worker_exited=result.process_cleanup_status == "complete",
                     )
                 if result.state is not None:
-                    lifecycle.register(
+                    partition_lifecycle.register(
                         category="worker_output", source=result.state.path,
                         commit=state_commit, files={"": "runtime_state/content.bin"},
                         worker_exited=result.process_cleanup_status == "complete",
                     )
             outputs_by_partition[partition.partition_key] = committed_outputs
-            state = (
-                None
-                if result.state is None
-                else ProjectWorkerState(
-                    result.state.path,
-                    {
-                        **dict(result.state.commit),
-                        "semantic_hash": state_commit.semantic_hash,
-                    },
-                )
-            )
+            state = self._project_state_from_checkpoint(checkpoint, node_context.external_store)
+            if partition_lifecycle is not None:
+                partition_lifecycle.resources_accepted = True
+                partition_lifecycle.release_partition(checkpoint_committed=True)
         return RuntimeNodeOutputs(
             self._assemble_partitioned_project_outputs(
                 node_context.external_store,
@@ -2688,32 +2812,6 @@ class RuntimeExecutionService:
         temporary.replace(path)
 
 
-def _require_sampled_resources(
-    sampler: ResourceUsageSampler, *, budget: ResourceBudget,
-    reservation: ResourceVector,
-) -> None:
-    if sampler.measurement_status != "available":
-        raise RuntimeWorkerError(
-            "节点资源测量不可用，不能发布成功 checkpoint",
-            error_code="resource_measurement_unavailable",
-            failure_payload={"code": "resource_measurement_unavailable"},
-        )
-    limits = {
-        "memory_bytes": (sampler.peak_rss_bytes, min(budget.memory_bytes, reservation.memory_bytes)),
-        "temp_bytes": (sampler.peak_scratch_bytes, min(budget.temp_bytes, reservation.scratch_bytes)),
-        "process_slots": (sampler.max_processes, reservation.process_slots),
-    }
-    if budget.wall_seconds:
-        limits["wall_milliseconds"] = (sampler.wall_milliseconds, budget.wall_seconds * 1000)
-    exceeded = {name: {"actual": actual, "limit": limit} for name, (actual, limit) in limits.items() if actual > limit}
-    if exceeded:
-        raise RuntimeWorkerError(
-            "节点资源使用超过执行预算或租约",
-            error_code="resource_exceeded",
-            failure_payload={"code": "resource_exceeded", "exceeded": exceeded},
-        )
-
-
 def _runtime_value_size(value: RuntimeNodeValue, store: ExternalArtifactStore) -> int:
     if value.inline_content is not None:
         return len(value.inline_content)
@@ -2752,20 +2850,19 @@ def _effective_resource_budget(
     budget: ResourceBudget,
     *,
     capacity: ResourceCapacity | None,
+    node_id: str | None = None,
     no_node_timeout: bool = False,
+    no_temp_limit: bool = False,
 ) -> ResourceBudget:
     """验证节点容量；显式无限时运行以0记录累计时长上限。"""
 
+    if no_temp_limit:
+        budget = replace(budget, temp_bytes=None)
     if no_node_timeout:
         budget = replace(budget, wall_seconds=0)
     if capacity is None:
         return budget
-    if (
-        budget.memory_bytes > capacity.memory_bytes
-        or budget.cpu_slots > capacity.cpu_slots
-        or budget.temp_bytes > capacity.temp_bytes
-    ):
-        raise RuntimeAdmissionError("节点声明预算超过运行总容量")
+    require_node_capacity(budget, capacity, node_id=node_id)
     return budget
 
 

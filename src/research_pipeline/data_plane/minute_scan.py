@@ -6,19 +6,20 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
+from types import MappingProxyType
 
 from research_pipeline.platform.canonical import typed_canonical_hash
-from research_pipeline.domain.session_calendar import CURRENT_SESSION_POLICY_BUNDLE_HASH
+from research_pipeline.domain.minute_scope_input import validate_minute_scope_reference
 
 from .admission import AdmittedQueryPlan
 from .errors import ProviderExecutionError, QueryIRInvalidError
 from .partitioned_artifacts import DatasetPartitionRef, PartitionedDatasetRef
 from .path_policy import PathRolePolicy
-from .query_ir import InstantRangeV2
+from .query_ir import InstantRangeV2, minute_visible_end, MINUTE_TIMEZONE
 
 
-MINUTE_SCAN_PLAN_VERSION = "minute-scan-plan-v1"
+MINUTE_SCAN_PLAN_VERSION = "minute-scan-plan-v2"
 STANDARD_MINUTE_COLUMNS = (
     "code",
     "dt",
@@ -105,10 +106,14 @@ class MinuteScanPlan:
     minute_capability_manifest_hash: str
     universe_snapshot_id: str | None = None
     contract_version: str = MINUTE_SCAN_PLAN_VERSION
+    minute_scope: Mapping[str, object] | None = None
+    minute_timezone: str = MINUTE_TIMEZONE
 
     def __post_init__(self) -> None:
         if self.contract_version != MINUTE_SCAN_PLAN_VERSION:
             raise QueryIRInvalidError("MinuteScanPlan version 不受支持")
+        if self.minute_scope is not None:
+            object.__setattr__(self, "minute_scope", MappingProxyType(validate_minute_scope_reference(self.minute_scope)))
         if not self.partitions:
             raise QueryIRInvalidError("分钟扫描分区为空")
         if sum(item.size for item in self.partitions) > self.budget.max_selected_file_bytes:
@@ -155,6 +160,30 @@ class MinuteScanPlan:
             raise QueryIRInvalidError("分钟扫描分区集合与查询月份不一致")
 
     @property
+    def visible_end(self) -> datetime:
+        """本次实际可读范围的半开终点。"""
+        return minute_visible_end(self.end_at, self.as_of)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> MinuteScanPlan:
+        values = dict(payload)
+        revision = values.pop("source_revision_hash")
+        values["budget"] = MinuteScanBudget(**values["budget"])
+        values["partitions"] = tuple(
+            MinuteSourcePartition(**{key: value for key, value in item.items()
+                                     if key != "evidence_strength"})
+            for item in values["partitions"]
+        )
+        for key in ("source_columns", "instruments", "minute_quality_policy_refs"):
+            values[key] = tuple(values[key])
+        for key in ("start_at", "end_at", "as_of"):
+            values[key] = datetime.fromisoformat(values[key])
+        plan = cls(**values)
+        if plan.source_revision_hash != revision:
+            raise QueryIRInvalidError("分钟扫描来源修订身份不一致")
+        return plan
+
+    @property
     def source_revision_hash(self) -> str:
         return typed_canonical_hash([item.to_dict() for item in self.partitions])
 
@@ -183,6 +212,8 @@ class MinuteScanPlan:
             "minute_capability_manifest_hash": self.minute_capability_manifest_hash,
             "universe_snapshot_id": self.universe_snapshot_id,
             "source_revision_hash": self.source_revision_hash,
+            "minute_scope": None if self.minute_scope is None else dict(self.minute_scope),
+            "minute_timezone": self.minute_timezone,
         }
 
 
@@ -192,6 +223,7 @@ def build_minute_scan_plan(
     source: str | Path,
     allowed_root: str | Path,
     budget: MinuteScanBudget | None = None,
+    minute_scope: Mapping[str, object] | None = None,
 ) -> MinuteScanPlan:
     """从已准入 QueryIR 选择精确 year/month 文件并记录来源身份。"""
 
@@ -299,13 +331,38 @@ def build_minute_scan_plan(
         tuple(str(item) for item in admitted_plan.minute_quality_policy_refs or ()),
         str(admitted_plan.minute_capability_manifest_hash),
         admitted_plan.query.universe.snapshot_id,
+        minute_scope=minute_scope,
+        minute_timezone=admitted_plan.minute_timezone,
     )
+
+
+def verify_minute_scan_source(plan: MinuteScanPlan, *, allowed_root: str | Path) -> None:
+    """跨进程打开冻结来源时核对路径及 footer，不重新编译扫描计划。"""
+    import pyarrow.parquet as pq
+
+    policy = PathRolePolicy()
+    root = policy.resolve_root(allowed_root, role="minute_scan_allowed_root")
+    for partition in plan.partitions:
+        path = policy.resolve_contained_path(
+            allowed_root=root, candidate=partition.relative_path,
+            root_role="minute_scan_allowed_root", path_role="minute_scan_partition",
+            expected_kind="file",
+        )
+        stat = path.stat()
+        metadata = pq.ParquetFile(path).metadata
+        observed = MinuteSourcePartition(
+            partition.relative_path, stat.st_size, stat.st_mtime_ns,
+            metadata.num_rows, metadata.num_row_groups,
+            typed_canonical_hash(str(metadata.schema.to_arrow_schema())),
+        )
+        if observed != partition:
+            raise ProviderExecutionError(f"分钟来源与准入计划发生漂移: {partition.relative_path}")
 
 
 def build_minute_partitioned_dataset(plan: MinuteScanPlan) -> PartitionedDatasetRef:
     """把已准入扫描计划转成不包含 raw rows 的月分区引用。"""
 
-    visible_end = min(plan.end_at, plan.as_of + timedelta(microseconds=1))
+    visible_end = plan.visible_end
     lineage = {
         "admitted_plan_hash": plan.admitted_plan_hash,
         "source_revision_hash": plan.source_revision_hash,
@@ -314,9 +371,11 @@ def build_minute_partitioned_dataset(plan: MinuteScanPlan) -> PartitionedDataset
         "minute_session_policy_ref": plan.minute_session_policy_ref,
         "minute_quality_policy_refs": list(plan.minute_quality_policy_refs),
         "minute_capability_manifest_hash": plan.minute_capability_manifest_hash,
+        "minute_timezone": plan.minute_timezone,
     }
-    if plan.minute_asset_class == "cn_future":
-        lineage["minute_session_bundle_hash"] = CURRENT_SESSION_POLICY_BUNDLE_HASH
+    if plan.minute_scope is not None:
+        lineage["minute_scope"] = dict(plan.minute_scope)
+        lineage["minute_session_bundle_hash"] = plan.minute_scope["calendar_hash"]
     partitions = []
     for source in plan.partitions:
         match = _PARTITION_PATH.fullmatch(source.relative_path)
@@ -392,4 +451,5 @@ __all__ = [
     "MinuteSourcePartition",
     "build_minute_partitioned_dataset",
     "build_minute_scan_plan",
+    "verify_minute_scan_source",
 ]

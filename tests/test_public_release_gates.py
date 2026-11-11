@@ -42,7 +42,11 @@ def test_public_ci_uses_example_dependency_lock_and_current_build_receipt() -> N
     steps = {item["name"]: item for item in job["steps"]}
     source_install = steps["Install"]["run"]
     build = steps["Build release wheel"]["run"]
-    installed = steps["Test isolated wheel and four formal example workflows"]["run"]
+    installed = steps["Test isolated wheel and formal example workflows"]["run"]
+    assert "tests/test_turnover_factor_example.py" in steps["Run public example algorithms"]["run"]
+    assert "tests/test_turnover_factor_example.py" in installed
+    rd_steps = workflow["jobs"]["rdagent-distribution"]["steps"]
+    assert any("tests/test_factor_space.py" in item.get("run", "") for item in rd_steps)
     assert f"pyarrow=={version}" in source_install
     assert f"pyarrow=={version}" in installed
     assert "pip check" in source_install and "pip check" in installed

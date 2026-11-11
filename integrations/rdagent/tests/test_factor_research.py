@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from factor_space_fixture import price_space
 
 from quantwitness_rdagent.factor_research import (
     FactorResearch, ResearchCalls, ResearchBudgetExhausted, canonical_expression, _freeze,
@@ -14,10 +15,11 @@ from quantwitness_rdagent.contracts import write_json
 def session(tmp_path, responses=None):
     value = FactorResearch.__new__(FactorResearch)
     value.root = tmp_path
+    value.factor_space = price_space()
     value.model_env_file = None
     value.metric_description = {"unit": "squared_decimal_price_change", "metric_id": "validation_mse"}
     value.materials = {"text": "确认的教学定义", "responses": responses or ['{"ok":true}']}
-    value.payload = {"campaign_id": "demo", "budget": {"rounds": 3, "model_calls": 2,
+    value.payload = {"factor_space": price_space(), "campaign_id": "demo", "budget": {"rounds": 3, "model_calls": 2,
         "output_tokens": 100, "max_output_tokens_per_call": 50},
         "proposer": {"mode": "fixed_responses"},
         "package_template": {"objective": {"direction": "minimize"},
@@ -61,11 +63,11 @@ def test_reserved_calls_enforce_both_budgets(tmp_path):
     "$close / Mean($close, 6) - 1", "$close / Ref($close,1) - 1 + $label"])
 def test_formula_scope_rejects_future_or_unverified_method(expression):
     with pytest.raises(ValueError):
-        canonical_expression(expression)
+        canonical_expression(expression, space=price_space())
 
 
 def test_formula_canonicalization_identifies_duplicate():
-    assert canonical_expression(" $close/Ref($close, 3)-1.0 ") == "$close / Ref($close, 3) - 1"
+    assert canonical_expression(" $close/Ref($close, 3)-1 ", space=price_space()) == "$close / Ref($close, 3) - 1"
 
 
 def test_context_never_exposes_result_paths_or_unverified_metric(tmp_path):
@@ -164,8 +166,8 @@ def test_invalid_live_response_preserves_spend_without_retry(tmp_path, monkeypat
 ])
 def test_price_family_normalization_and_direction(expression, canonical, direction):
     from quantwitness_rdagent.factor_research import expression_direction
-    assert canonical_expression(expression) == canonical
-    assert expression_direction(expression) == direction
+    assert canonical_expression(expression, space=price_space()) == canonical
+    assert expression_direction(expression, space=price_space()) == direction
 
 
 @pytest.mark.parametrize("expression", [
@@ -177,4 +179,4 @@ def test_price_family_normalization_and_direction(expression, canonical, directi
 ])
 def test_price_families_reject_mixed_windows_future_and_unbound_fields(expression):
     with pytest.raises(ValueError):
-        canonical_expression(expression)
+        canonical_expression(expression, space=price_space())

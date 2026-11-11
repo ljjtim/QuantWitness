@@ -135,5 +135,5 @@ compile_source({'nodes':[{'inputs':[-1], 'width':1, 'activation':'identity'}]}, 
 def test_generated_mainline_dependency_preflight_records_torch():
     from research_pipeline.research.modeling.walk_forward import model_dependency_preflight
     receipt = model_dependency_preflight([generated_candidate()], thread_count=1)
-    assert receipt['dependencies']['torch'].split('+')[0] == '2.5.1'
+    assert receipt['dependencies']['torch'].split('+')[0] == '2.9.1'
     assert receipt['dependencies']['pyqlib'] == '0.9.7'

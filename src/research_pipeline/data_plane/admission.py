@@ -19,10 +19,8 @@ from research_pipeline.catalog import (
 from research_pipeline.platform.canonical import typed_canonical_hash
 from research_pipeline.platform.claim_levels import CLAIM_LEVELS
 from research_pipeline.domain.session_close import (
-    FUTURES_SESSION_CLOSE_POLICY_IDS,
-    FuturesSessionCloseError,
-    load_futures_session_close_bundle,
-    require_current_futures_session_close_binding,
+    FUTURES_NEXT_SESSION_POLICY_RULES,
+    futures_calendar_facts,
 )
 
 from .snapshot_layout import PhysicalSnapshotPolicy
@@ -123,20 +121,8 @@ class AdmittedQueryPlan:
                 self.session_close_binding.availability_policy_hash
             ):
                 raise QueryIRInvalidError("session-close availability policy hash 不一致")
-            try:
-                require_current_futures_session_close_binding(
-                    bundle_hash=self.session_close_binding.bundle_hash,
-                    policy_identities=tuple(
-                        (
-                            item.session_policy_id,
-                            item.session_policy_revision,
-                            item.session_policy_hash,
-                        )
-                        for item in self.session_close_binding.policy_bindings
-                    ),
-                )
-            except FuturesSessionCloseError as exc:
-                raise QueryIRInvalidError(str(exc)) from exc
+            if self.session_close_binding.calendar_bundle is None:
+                raise QueryIRInvalidError("期货会话计划必须冻结当前session_calendar")
         daily_contract = (
             self.daily_availability_policy_ref,
             self.daily_availability_rule,
@@ -245,6 +231,7 @@ def admit_query(
     binding: Any,
     attestation: DriftAttestation,
     factor_publication: FactorPublicationBinding | None = None,
+    session_calendar=None,
 ) -> AdmittedQueryPlan:
     """生成唯一静态准入结果；C6 不得重复拥有这些判断。"""
     dataset = catalog.datasets.get(query.dataset_id)
@@ -382,6 +369,7 @@ def admit_query(
             catalog=catalog,
             required_fields=required,
             instrument_field=instrument_field,
+            session_calendar=session_calendar,
         )
     )
     required |= temporal_fields
@@ -519,6 +507,7 @@ def _compile_temporal_selection(
     catalog: CompiledCatalog,
     required_fields: set[str],
     instrument_field: str | None,
+    session_calendar=None,
 ) -> tuple[TemporalSelectionPlan, set[str], str]:
     """把 Catalog policy 和 observation keys 编译为 Provider 直接执行的结构。"""
 
@@ -568,125 +557,40 @@ def _compile_temporal_selection(
         visibility_filter = VisibilityFilter(event_time_field, False)
 
     availability_policy_id = str(dataset["available_time_policy"])
-    if availability_policy_id in FUTURES_SESSION_CLOSE_POLICY_IDS:
-        if instrument_field is None:
-            raise QueryCatalogUnapprovedError("session-close数据集必须有证券实体字段")
-        expected_after = {
-            "available.futures.daily.session-close.v1": "completed_session_close",
-            "available.futures.session_close.v1": "session_close",
-        }[availability_policy_id]
-        if (
-            availability.get("policy_type") != "availability"
-            or availability_rules.get("available_after") != expected_after
-            or availability_rules.get("same_session_signal_use") != "reject"
-            or availability_rules.get("available_time_field") != available_field
-        ):
-            raise QueryCatalogUnapprovedError(
-                "期货 session-close Catalog policy 无法编译为同 session 禁用规则"
-            )
-        if not isinstance(query.time_range, DateRangeV1):
-            raise QueryIRInvalidError("期货 session-close 只接受有界日频 QueryIR")
-        if query.universe.snapshot_id is not None or not query.universe.instruments:
-            raise QueryCatalogUnapprovedError(
-                "期货 session-close 必须声明 bundle 可核对的显式合约 universe"
-            )
+    if availability_rules.get("available_after") in {"completed_session_close", "session_close"}:
+        raise QueryCatalogUnapprovedError("期货收盘旧政策已退役；须绑定当前会话可见性政策和冻结日历")
+    if availability_policy_id in FUTURES_NEXT_SESSION_POLICY_RULES:
+        if session_calendar is None:
+            raise QueryCatalogUnapprovedError("期货会话可见性须绑定本次项目完整历史日历")
+        expected = FUTURES_NEXT_SESSION_POLICY_RULES[availability_policy_id]
+        if (availability.get("policy_type") != "availability"
+                or availability_rules.get("available_after") != expected
+                or availability_rules.get("available_time_field") != available_field
+                or availability_rules.get("timezone") != "Asia/Shanghai"):
+            raise QueryCatalogUnapprovedError("期货会话可见性与Catalog规则不一致")
+        if instrument_field is None or not query.universe.instruments or not isinstance(query.time_range, DateRangeV1):
+            raise QueryIRInvalidError("期货会话可见性须声明真实合约和有界日期")
         try:
-            bundle = load_futures_session_close_bundle()
-            policies = bundle.resolve(
-                availability_policy_id=availability_policy_id,
-                instruments=query.universe.instruments,
-                start=query.time_range.start,
-                end=query.time_range.end,
-            )
-        except FuturesSessionCloseError as exc:
+            facts, policies = futures_calendar_facts(session_calendar, instruments=query.universe.instruments,
+                start=query.time_range.start, end=query.time_range.end, available_after=expected)
+        except ValueError as exc:
             raise QueryCatalogUnapprovedError(str(exc)) from exc
-        facts: list[SessionCloseFact] = []
-        mappings: dict[str, SessionCloseInstrumentBinding] = {}
-        policy_bindings: list[SessionClosePolicyBinding] = []
+        mappings, policy_bindings = {}, []
         for policy in policies:
-            calendar = bundle.calendar_binding_for(policy)
-            timezone_name = calendar.timezone
-            instrument_id = policy.instrument.instrument_id
-            mapping = SessionCloseInstrumentBinding(
-                instrument_id,
-                "cn_future",
-                policy.instrument.exchange,
-                "".join(
-                    character
-                    for character in instrument_id.split(".", 1)[0]
-                    if character.isalpha()
-                ),
-                timezone_name,
-            )
-            previous_mapping = mappings.setdefault(instrument_id, mapping)
-            if previous_mapping != mapping:
-                raise QueryCatalogUnapprovedError(
-                    "session-close 同一合约的市场映射不一致"
-                )
-            selected_dates = tuple(
-                trading_date
-                for trading_date in policy.trading_dates
-                if query.time_range.start <= trading_date <= query.time_range.end
-            )
-            if not selected_dates:
-                raise QueryCatalogUnapprovedError(
-                    "session-close policy 未覆盖请求日期"
-                )
-            policy_bindings.append(
-                SessionClosePolicyBinding(
-                    instrument_id,
-                    policy.policy_id,
-                    policy.revision,
-                    policy.policy_hash,
-                    selected_dates[0],
-                    selected_dates[-1],
-                    selected_dates,
-                )
-            )
-            for trading_date in selected_dates:
-                session = policy.build_session(
-                    trading_date,
-                    scope_binding_hash=bundle.bundle_hash,
-                )
-                day_segments = tuple(
-                    item
-                    for item in session.segments
-                    if item.phase == "day" and item.bar_eligible
-                )
-                if not day_segments:
-                    raise QueryCatalogUnapprovedError(
-                        "session-close policy 缺少 eligible 日盘完成时刻"
-                    )
-                facts.append(
-                    SessionCloseFact(
-                        policy.instrument.instrument_id,
-                        trading_date,
-                        max(item.ends_at for item in day_segments),
-                    )
-                )
-        session_close_selection = SessionCloseSelection(
-            availability_policy_id,
-            typed_canonical_hash(dict(availability)),
-            bundle.bundle_id,
-            bundle.bundle_hash,
-            bundle.source_artifact_ref,
-            bundle.source_acquired_at,
-            instrument_field,
-            event_time_field,
-            tuple(sorted(mappings.values(), key=lambda item: item.instrument_id)),
-            tuple(
-                sorted(
-                    policy_bindings,
-                    key=lambda item: (
-                        item.instrument_id,
-                        item.coverage_start,
-                        item.session_policy_id,
-                        item.session_policy_revision,
-                    ),
-                )
-            ),
-            tuple(sorted(facts, key=lambda item: (item.instrument_id, item.session_date))),
-        )
+            code = policy.instrument.instrument_id
+            mappings[code] = SessionCloseInstrumentBinding(code, "cn_future", policy.instrument.exchange,
+                                                          policy.instrument.product_class, "Asia/Shanghai")
+            dates = tuple(day for instrument, day, _ in facts if instrument == code and day in policy.trading_dates)
+            policy_bindings.append(SessionClosePolicyBinding(code, policy.policy_id, policy.revision,
+                policy.policy_hash, min(dates), max(dates), dates))
+        session_close_selection = SessionCloseSelection(availability_policy_id, typed_canonical_hash(dict(availability)),
+            session_calendar.bundle_id, session_calendar.bundle_hash,
+            "minute_scope:" + session_calendar.bundle_id, datetime.fromisoformat("1970-01-01T00:00:00+00:00"),
+            instrument_field, event_time_field, tuple(sorted(mappings.values(), key=lambda item: item.instrument_id)),
+            tuple(sorted(policy_bindings, key=lambda item: (item.instrument_id, item.coverage_start,
+                                                          item.session_policy_id, item.session_policy_revision))),
+            tuple(SessionCloseFact(code, day, at) for code, day, at in sorted(facts)),
+            calendar_bundle=session_calendar.to_dict())
 
     if (
         available_field is not None

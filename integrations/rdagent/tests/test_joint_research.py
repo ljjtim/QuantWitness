@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from factor_space_fixture import price_space
 from importlib.util import find_spec
 
 native = pytest.mark.skipif(find_spec("rdagent") is None, reason="需要固定RD-Agent源码及Linux场景依赖")
@@ -56,13 +57,13 @@ def test_direction_uses_upstream_and_real_refs():
     def complete(prompt, **kwargs):
         calls.append({"prompt": prompt, **kwargs})
         return json.dumps({"action": "model", "direction": "generated_model", "knowledge_refs": ["joint:0000"], "reason": "开发因子误差支持检验非线性"})
-    result = select_joint_direction({"knowledge": [record()], "max_output_tokens": 512}, complete)
+    result = select_joint_direction({"factor_space": price_space(), "knowledge": [record()], "max_output_tokens": 512}, complete)
     assert result["action"] == "model"
     assert len(calls) == 1 and "joint:0000" in calls[0]["prompt"] and "0.5" in calls[0]["prompt"]
     def invalid(prompt, **kwargs):
         return json.dumps({"action": "model", "direction": "generated_model", "knowledge_refs": ["unknown"], "reason": "无来源"})
     with pytest.raises(ValueError, match="knowledge_refs"):
-        select_joint_direction({"knowledge": [record()], "max_output_tokens": 512}, invalid)
+        select_joint_direction({"factor_space": price_space(), "knowledge": [record()], "max_output_tokens": 512}, invalid)
 
 
 @native
@@ -102,7 +103,7 @@ def test_failed_evaluation_consumes_budget_and_resume_reuses(tmp_path):
 def test_population_requires_common_validation_and_complete_factor():
     from copy import deepcopy
     from quantwitness_rdagent.joint_feedback import development_population
-    model = {"design": {"mode": "development"}, "tables": {
+    model = {"design": {"mode": "development", "factor_space": {**price_space(), "population_feature_columns": ["historical_return__w5", "volatility__w5"]}}, "tables": {
         "samples": [{"sample_id": "s1", "target": 0.2, "label_start_time": "t1", "label_end_time": "t2", "label_available_time": "t3", "historical_return__w5": 0.1, "volatility__w5": 0.2}],
         "validation_predictions": [{"fold_id": "f1", "sample_id": "s1", "actual": 0.2, "label_end_time": "t2", "label_available_time": "t3", "candidate_id": "a"}]}}
     baseline = development_population(model["design"], model["tables"])

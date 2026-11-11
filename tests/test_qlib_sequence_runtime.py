@@ -228,3 +228,22 @@ def test_runtime_windows_current_metadata_round_trip():
     assert restored.feature_columns == windows.feature_columns
     for name in ("context", "targets", "members", "exclusions"):
         pd.testing.assert_frame_equal(getattr(restored, name), getattr(windows, name))
+
+
+def test_missing_future_label_preserves_sequence_graph_nodes(tmp_path):
+    _, labels, p = source(tmp_path)
+    p["evaluation_scope"] = "development"
+    baseline = split(tmp_path,p)
+    members_before = _read(tmp_path/"split", "sequence_members")
+    absent = labels.iloc[30]
+    mask = (labels.entity_id == absent.entity_id) & (labels.observation_session == absent.observation_session)
+    labels.loc[mask, "forward_return"] = np.nan
+    runtime._write_artifact(tmp_path/"labels_nan", {"labels":labels},status="ok",extra={"semantics_hash":"3"*64})
+    labels.to_parquet(tmp_path/"labels_nan/labels/part-00000.parquet",index=False,row_group_size=1)
+    runtime.execute_model_split_artifact(feature_root=tmp_path/"features",label_root=tmp_path/"labels_nan",
+        output_root=tmp_path/"split_nan",parameters=p,fixed_clock="2024-06-01T00:00:00Z",max_memory_bytes=BUDGET)
+    members_after = _read(tmp_path/"split_nan", "sequence_members")
+    pd.testing.assert_frame_equal(members_before,members_after)
+    sid=str(absent.entity_id)+":"+str(absent.observation_session)+":h1"
+    assert sid not in set(_read(tmp_path/"split_nan", "samples").sample_id)
+    assert sid in set(members_after.sample_id)

@@ -13,6 +13,7 @@ from types import MappingProxyType, SimpleNamespace
 from typing import Mapping
 
 from research_pipeline.data_plane.admission import AdmittedQueryPlan
+from research_pipeline.data_plane.minute_scan import MinuteScanPlan, MinuteScanBudget
 from research_pipeline.data_plane.execution_estimate import (
     ExecutionEstimate,
     load_execution_estimates,
@@ -50,7 +51,7 @@ from research_pipeline.extensions import (
 PLAN_MANIFEST = "research-plan.json"
 QUERY_DIRECTORY = "queries"
 DAG_PLAN = "dag.json"
-OPERATOR_GRAPH_PLAN_VERSION = "research-cli-operator-graph-plan-v8"
+OPERATOR_GRAPH_PLAN_VERSION = "research-cli-operator-graph-plan-v9"
 OPERATOR_GRAPH_PLAN = "operator-graph-plan.json"
 PROJECT_BUNDLE_DIRECTORY = "extensions"
 
@@ -66,6 +67,60 @@ class PreparedResearchPlan:
     recipe: OperatorGraphRecipe
     registry: object
     minute_scope_inputs: Mapping[str, object]
+    minute_scan_plans: Mapping[str, MinuteScanPlan]
+
+
+def minute_scan_parameters(recipe):
+    """按请求归集扫描节点，保留每个节点的预算与能力声明。"""
+    selected = {}
+    for node in recipe.nodes:
+        if node.operator_id != "data.minute.scan":
+            continue
+        ids = node.parameters["request_ids"]
+        if len(ids) != 1:
+            raise ValueError("每个分钟 scan 须绑定一个 request")
+        selected.setdefault(ids[0], []).append(node.parameters)
+    return selected
+
+
+def minute_scan_budget(parameters):
+    """共享扫描计划采用各节点都能接受的最严格预算。"""
+    return MinuteScanBudget(
+        max_selected_file_bytes=min(int(item["max_source_bytes"]) for item in parameters),
+        max_batch_bytes=min(int(item["max_batch_bytes"]) for item in parameters),
+    )
+
+
+def validate_minute_scan_plans(recipe, admitted, scan_plans):
+    from research_pipeline.packages.minute_scope_admission import minute_scan_scope_bindings
+
+    parameters = minute_scan_parameters(recipe)
+    scopes = minute_scan_scope_bindings(recipe, {
+        key for key, query in admitted.items() if query.minute_asset_class == "cn_future"
+    })
+    if set(parameters) != set(scan_plans):
+        raise ValueError("冻结分钟扫描计划与 scan 请求集合不一致")
+    for request_id, values in parameters.items():
+        plan = scan_plans[request_id]
+        query = admitted[request_id]
+        expected_budget = minute_scan_budget(values)
+        if (plan.minute_scope != scopes.get(request_id)
+                or plan.minute_timezone != query.minute_timezone
+                or plan.admitted_plan_hash != query.plan_hash or plan.budget != expected_budget
+                or plan.start_at != query.query.time_range.start_at
+                or plan.end_at != query.query.time_range.end_at
+                or plan.as_of != query.query.as_of_instant
+                or plan.instruments != query.query.universe.instruments
+                or plan.universe_snapshot_id != query.query.universe.snapshot_id
+                or plan.query_max_rows != query.query.budget.max_rows
+                or plan.query_max_bytes != query.query.budget.max_bytes
+                or plan.batch_size != query.query.budget.batch_size):
+            raise ValueError(f"冻结分钟扫描计划与准入请求或预算不一致: {request_id}")
+        for node_parameters in values:
+            if plan.query_max_rows > int(node_parameters["max_returned_rows"]):
+                raise ValueError("分钟 QueryIR 返回行预算超过算子声明")
+            if plan.minute_capability_manifest_hash != node_parameters["scope_binding_hash"]:
+                raise ValueError("分钟 scan 能力 manifest 绑定与 QueryIR 不一致")
 
 
 def _requires_causal_catalog(recipe) -> bool:
@@ -94,10 +149,16 @@ def publish_operator_graph_research_plan(
     input_snapshot_manifest: Mapping[str, object] | None = None,
     catalog=None,
     minute_scope_inputs=None,
+    minute_scan_plans=None,
+    minute_data_root=None,
     metric_definitions=(),
 ) -> PreparedResearchPlan:
     """原子发布声明式多查询候选计划；G 阶段不执行它。"""
     scope_inputs = minute_scope_inputs or {}
+    scan_plans = minute_scan_plans or {}
+    validate_minute_scan_plans(plan.recipe, admitted_plans, scan_plans)
+    if scan_plans and minute_data_root is None:
+        raise ValueError("分钟扫描计划缺少实际 minute-data-root")
     scope_references = tuple(node.parameters["minute_scope"] for node in plan.recipe.nodes
                              if "minute_scope" in node.parameters)
     if set(scope_inputs) != {reference["name"] for reference in scope_references} or any(
@@ -206,6 +267,8 @@ def publish_operator_graph_research_plan(
         "result_spec": plan.result_spec.to_dict(),
         "admitted_plan_hashes": admitted_hashes,
         "execution_estimates": execution_estimate_payload,
+        "minute_scan_plans": {key: value.to_dict() for key, value in sorted(scan_plans.items())},
+        "minute_data_root": None if not scan_plans else str(Path(minute_data_root).resolve()),
         "metric_definitions": [item.to_dict() for item in metric_definitions],
         "formal_ancestor_node_ids": list(formal_ancestor_node_ids),
         "consumed_request_ids": list(consumed_request_ids),
@@ -261,11 +324,13 @@ def publish_operator_graph_research_plan(
     return PreparedResearchPlan(
         target, manifest, dict(admitted_plans), dag, plan.recipe, execution_registry,
         {name: replace(scope, root=target) for name, scope in scope_inputs.items()},
+        dict(scan_plans),
     )
 
 
 def load_operator_graph_research_plan(
     *, target: str | Path, loaded_minute_scopes: dict | None = None,
+    loaded_minute_scan_plans: dict | None = None,
 ) -> tuple[
     dict[str, object],
     dict[str, AdmittedQueryPlan],
@@ -282,6 +347,7 @@ def load_operator_graph_research_plan(
         "formal_ancestor_node_ids", "consumed_request_ids", "input_claim_ceilings",
         "effective_claim_level",
         "execution_estimates", "metric_definitions",
+        "minute_scan_plans", "minute_data_root",
     }
     if not isinstance(manifest, dict):
         raise ValueError("operator graph plan manifest schema 无效")
@@ -365,6 +431,15 @@ def load_operator_graph_research_plan(
     recipe_payload = dict(raw_recipe)
     declared_recipe_hash = recipe_payload.pop("recipe_hash", None)
     recipe = OperatorGraphRecipe.from_dict(recipe_payload)
+    from .model_import_preparation import verify_model_import_sources
+    verify_model_import_sources(recipe)
+    scan_plans = {key: MinuteScanPlan.from_dict(value)
+                  for key, value in manifest["minute_scan_plans"].items()}
+    validate_minute_scan_plans(recipe, plans, scan_plans)
+    if bool(scan_plans) != bool(manifest["minute_data_root"]):
+        raise ValueError("分钟扫描计划与实际来源根不闭合")
+    if loaded_minute_scan_plans is not None:
+        loaded_minute_scan_plans.update(scan_plans)
     from research_pipeline.packages.minute_scope_admission import load_graph_minute_scopes
 
     scope_inputs = load_graph_minute_scopes(root, (node.parameters for node in recipe.nodes))

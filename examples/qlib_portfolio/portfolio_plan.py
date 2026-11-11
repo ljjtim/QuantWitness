@@ -4,10 +4,10 @@ from research_pipeline.platform.lean_contract import LEAN_ARTIFACT_TYPE, LEAN_SC
 
 
 PORTFOLIO_METRICS = {
-    'project.lean.total_return@1.0.0': ('区间总收益', 'ratio', 'higher_is_better'),
-    'project.lean.max_drawdown@1.0.0': ('区间最大回撤', 'ratio', 'lower_is_better'),
-    'project.lean.turnover_mean@1.0.0': ('日均双边换手率', 'ratio', 'neutral'),
-    'project.lean.fee_total@1.0.0': ('成交费用合计', 'CNY', 'lower_is_better'),
+    'project.lean.total_return@2.0.0': ('区间总收益', 'ratio', 'higher_is_better'),
+    'project.lean.max_drawdown@2.0.0': ('区间最大回撤', 'ratio', 'lower_is_better'),
+    'project.lean.turnover_mean@2.0.0': ('日均双边换手率', 'ratio', 'neutral'),
+    'project.lean.fee_total@2.0.0': ('成交费用合计', 'CNY', 'lower_is_better'),
 }
 
 

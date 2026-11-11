@@ -16,12 +16,33 @@ from ..operator_definition_factory import (
 def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
     return (
         _definition(
+            "research.model.import", "research.model.import.v1",
+            inputs=(),
+            outputs=(("splits", "research.model-split-manifest.v2"),
+                     ("models", "research.model-fits.v2")),
+            parameters=tuple(_parameter(name, ParameterType.STRING) for name in (
+                "source_run_root", "source_fit_artifact", "source_split_artifact",
+                "source_fit_node_id", "source_split_node_id")) + (
+                    ParameterSpec("source_manifest_json", ParameterType.STRING, required=False),),
+            resource_profile={"memory_bytes": 2 * _GIB, "cpu_slots": 1,
+                              "temp_bytes": 64 * _GIB, "wall_seconds": 7200},
+            code_fingerprint="explicit-completed-model-input-v1",
+            capability="research.model-import.v1",
+            module_name="research_pipeline.runtime.model_import",
+            symbol_name="execute_model_import_artifacts",
+            dependency_modules=("research_pipeline.runtime.model_import_source",),
+            implementation_scope="core",
+            operator_version="1.0.0",
+        ),
+        _definition(
             "research.model.split-manifest",
             "research.model.split-manifest.v2",
             inputs=(
                 ("features", "research.feature-set.v1"),
                 ("labels", "research.label.v1"),
+                ("prediction_index", "research.model-prediction-index.v1"),
             ),
+            optional_inputs=("prediction_index",),
             outputs=(("splits", "research.model-split-manifest.v2"),),
             parameters=(
                 _parameter("horizon_sessions", ParameterType.INTEGER),
@@ -34,6 +55,7 @@ def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
                 _parameter("test_sessions", ParameterType.INTEGER),
                 _parameter("step_sessions", ParameterType.INTEGER),
                 ParameterSpec("sequence_step_len", ParameterType.INTEGER, required=False),
+                ParameterSpec("explicit_folds_json", ParameterType.STRING, required=False),
                 _parameter("embargo_sessions", ParameterType.INTEGER),
                 _parameter("expanding", ParameterType.BOOLEAN),
             ),
@@ -51,7 +73,12 @@ def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
             operator_version="2.0.0",
             dependency_modules=(
                 "research_pipeline.research.modeling.walk_forward", "research_pipeline.research.modeling.inputs",
+                "research_pipeline.research.modeling.prediction_index",
                 "research_pipeline.research.validation.splits",
+                "research_pipeline.runtime.model_feature_stream",
+                "research_pipeline.runtime.model_fold_inputs",
+                "research_pipeline.runtime.model_sequence",
+                "research_pipeline.research.modeling.sequence",
             ),
             partition_keys=("fold_id",),
         ),
@@ -74,7 +101,7 @@ def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
             symbol_name="execute_model_fit_artifact",
             implementation_scope="core",
             operator_version="2.0.0",
-            dependency_modules=("research_pipeline.runtime.model_fit_parallel", "research_pipeline.research.validation.search_manifest", "research_pipeline.research.modeling.walk_forward", "research_pipeline.research.modeling.inputs", "research_pipeline.research.modeling.qlib", "research_pipeline.research.modeling.sequence", "research_pipeline.research.modeling.gru", "research_pipeline.research.modeling.generated", "research_pipeline.research.modeling.generated_definition"),
+            dependency_modules=("research_pipeline.runtime.logical_table_verification", "research_pipeline.runtime.model_fold_inputs", "research_pipeline.runtime.model_fit_parallel", "research_pipeline.research.validation.search_manifest", "research_pipeline.research.modeling.walk_forward", "research_pipeline.research.modeling.inputs", "research_pipeline.research.modeling.qlib", "research_pipeline.research.modeling.sequence", "research_pipeline.research.modeling.gru", "research_pipeline.research.modeling.generated", "research_pipeline.research.modeling.generated_definition"),
             partition_keys=("candidate_id", "fold_id"),
             seeded=True,
             cache_compatibility_mode="numerical",
@@ -100,7 +127,7 @@ def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
             symbol_name="execute_model_predict_artifact",
             implementation_scope="core",
             operator_version="2.0.0",
-            dependency_modules=("research_pipeline.research.modeling.walk_forward", "research_pipeline.research.modeling.inputs", "research_pipeline.research.modeling.qlib", "research_pipeline.research.modeling.sequence", "research_pipeline.research.modeling.gru", "research_pipeline.research.modeling.generated", "research_pipeline.research.modeling.generated_definition"),
+            dependency_modules=("research_pipeline.runtime.logical_table_verification", "research_pipeline.runtime.model_fold_inputs", "research_pipeline.runtime.model_sequence", "research_pipeline.research.modeling.walk_forward", "research_pipeline.research.modeling.inputs", "research_pipeline.research.modeling.qlib", "research_pipeline.research.modeling.sequence", "research_pipeline.research.modeling.gru", "research_pipeline.research.modeling.generated", "research_pipeline.research.modeling.generated_definition"),
             partition_keys=("candidate_id", "fold_id"),
             cache_compatibility_mode="numerical",
         ),
@@ -150,6 +177,7 @@ def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
             ),
             outputs=(("selection", "research.model-selection.v2"),),
             parameters=(
+                ParameterSpec("emit_all_test", ParameterType.BOOLEAN, required=False),
                 _choice_parameter(
                     "target_kind",
                     ParameterType.STRING,
@@ -165,7 +193,7 @@ def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
                 ),
             ),
             resource_profile={
-                "memory_bytes": 2 * _GIB,
+                "memory_bytes": 4 * _GIB,
                 "cpu_slots": 1,
                 "temp_bytes": 2 * _GIB,
                 "wall_seconds": 3_600,
@@ -176,7 +204,7 @@ def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
             symbol_name="execute_model_selection_artifact",
             implementation_scope="core",
             operator_version="2.0.0",
-            dependency_modules=("research_pipeline.research.validation.selection",),
+            dependency_modules=("research_pipeline.runtime.logical_table_verification", "research_pipeline.runtime.model_fold_inputs", "research_pipeline.runtime.model_sequence", "research_pipeline.research.validation.selection"),
             cache_compatibility_mode="numerical",
         ),
         _definition(
@@ -212,16 +240,20 @@ def build_daily_model_operator_definitions() -> tuple[OperatorDefinition, ...]:
             symbol_name="execute_model_locked_holdout_artifact",
             implementation_scope="core",
             operator_version="2.0.0",
-            dependency_modules=(
+            dependency_modules=("research_pipeline.runtime.logical_table_verification", 
                 "research_pipeline.research.modeling.walk_forward", "research_pipeline.research.modeling.inputs",
                 "research_pipeline.research.modeling.qlib",
                 "research_pipeline.research.modeling.sequence",
                 "research_pipeline.research.modeling.gru",
                 "research_pipeline.research.validation.holdout",
                 "research_pipeline.research.validation.holdout_series",
+                "research_pipeline.runtime.model_feature_stream",
+                "research_pipeline.runtime.model_fold_inputs",
+                "research_pipeline.runtime.model_sequence",
                 "research_pipeline.platform.file_lock",
             ),
             seeded=True,
             cache_compatibility_mode="numerical",
         ),
     )
+

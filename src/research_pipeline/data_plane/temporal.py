@@ -420,6 +420,7 @@ class SessionCloseSelection:
     policy_bindings: tuple[SessionClosePolicyBinding, ...]
     facts: tuple[SessionCloseFact, ...]
     contract_version: str = SESSION_CLOSE_SELECTION_VERSION
+    calendar_bundle: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if self.contract_version != SESSION_CLOSE_SELECTION_VERSION:
@@ -499,10 +500,25 @@ class SessionCloseSelection:
             binding = binding_by_instrument.get(fact.instrument_id)
             if binding is None:
                 raise QueryIRInvalidError("session-close fact 缺少市场映射")
-            if fact.completed_at.astimezone(ZoneInfo(binding.timezone)).date() != fact.session_date:
-                raise QueryIRInvalidError("session-close completion 与交易日/时区不一致")
         if covered != {(item.instrument_id, item.session_date) for item in facts}:
             raise QueryIRInvalidError("session-close policy 覆盖与完成时刻不闭合")
+        if self.calendar_bundle is None:
+            raise QueryIRInvalidError("期货会话计划必须冻结当前session_calendar")
+        if self.calendar_bundle is not None:
+            from research_pipeline.domain.session_calendar import SessionPolicyBundle
+            from research_pipeline.domain.session_close import FUTURES_NEXT_SESSION_POLICY_RULES, futures_calendar_facts
+            calendar = SessionPolicyBundle.from_dict(self.calendar_bundle)
+            rule = FUTURES_NEXT_SESSION_POLICY_RULES.get(self.availability_policy_id)
+            if rule is None or calendar.bundle_hash != self.bundle_hash:
+                raise QueryIRInvalidError("期货会话可见性政策或日历身份不一致")
+            observed = []
+            for instrument in bindings:
+                dates = [item.session_date for item in facts if item.instrument_id == instrument.instrument_id]
+                expected, _ = futures_calendar_facts(calendar, instruments=(instrument.instrument_id,),
+                    start=min(dates), end=max(dates), available_after=rule)
+                observed.extend(expected)
+            if set(observed) != {(f.instrument_id, f.session_date, f.completed_at) for f in facts}:
+                raise QueryIRInvalidError("期货可见时间与完整历史日历不一致")
 
     def completion_time(self, instrument_id: object, session_date: object) -> datetime:
         instrument = str(instrument_id)
@@ -552,6 +568,7 @@ class SessionCloseSelection:
             "policy_bindings": [item.to_dict() for item in self.policy_bindings],
             "facts": [item.to_dict() for item in self.facts],
             "contract_version": self.contract_version,
+            **({"calendar_bundle": dict(self.calendar_bundle)} if self.calendar_bundle is not None else {}),
         }
 
     @classmethod
@@ -570,6 +587,8 @@ class SessionCloseSelection:
             "facts",
             "contract_version",
         }
+        if isinstance(value, Mapping) and "calendar_bundle" in value:
+            expected.add("calendar_bundle")
         if not isinstance(value, Mapping) or set(value) != expected:
             raise QueryIRInvalidError("session-close selection schema 不匹配")
         try:
@@ -598,6 +617,7 @@ class SessionCloseSelection:
             tuple(SessionClosePolicyBinding.from_dict(item) for item in policy_bindings),
             tuple(SessionCloseFact.from_dict(item) for item in facts),
             str(value["contract_version"]),
+            value.get("calendar_bundle"),
         )
 
 

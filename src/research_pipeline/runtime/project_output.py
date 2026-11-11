@@ -70,6 +70,50 @@ class ProjectOutputRoot(type(Path())):
                 handle.write(chunk)
         return self._commit(target, "runtime_state", "runtime.project-state", schema_hash)
 
+    def write_prediction_index(self, *, port, relative_path, schema, batches,
+                               semantics_hash, source_admission):
+        """封存显式预测资格，项目无需导入模型运行时。"""
+        import pyarrow as pa
+        from .walk_forward_model_execution import _write_partitioned_artifact
+
+        target = self._target(relative_path)
+
+        def frames():
+            pending, rows, buffered_bytes = [], 0, 0
+            for batch in batches:
+                if not isinstance(batch, pa.RecordBatch) or not batch.schema.equals(schema):
+                    raise ValueError("project_output_batch_schema_invalid")
+                if batch.nbytes > MAX_PROJECT_WRITE_BYTES:
+                    raise ValueError("project_output_batch_bytes_exceeded")
+                offset = 0
+                while offset < batch.num_rows:
+                    count = min(PROJECT_OUTPUT_ROW_GROUP_ROWS - rows, batch.num_rows - offset)
+                    part = batch.slice(offset, count)
+                    pending.append(part)
+                    rows += count
+                    buffered_bytes += part.nbytes
+                    if buffered_bytes > MAX_PROJECT_WRITE_BYTES:
+                        raise ValueError("project_output_row_group_bytes_exceeded")
+                    offset += count
+                    if rows == PROJECT_OUTPUT_ROW_GROUP_ROWS:
+                        yield pa.Table.from_batches(pending, schema=schema).to_pandas()
+                        pending, rows, buffered_bytes = [], 0, 0
+            if pending:
+                yield pa.Table.from_batches(pending, schema=schema).to_pandas()
+
+        _write_partitioned_artifact(
+            target, partitioned_tables={"prediction_index": frames()}, tables=lambda: {},
+            status="computed", extra={"semantics_hash": semantics_hash,
+                                      "source_admission": source_admission},
+        )
+        return self.commit_directory(
+            port=port, artifact_type="research.model-prediction-index.v1",
+            relative_path=relative_path,
+            files=tuple(sorted(path.relative_to(target).as_posix()
+                               for path in target.rglob("*") if path.is_file())),
+            publish_at_artifact_root=True,
+        )
+
     def commit_directory(
         self,
         *,

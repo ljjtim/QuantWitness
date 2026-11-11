@@ -201,7 +201,7 @@ def _evidence(entry, plan, files, reference, *, dataset, execution_budget):
     )
 
 
-def admit_archived_queries(queries, *, catalog, execution_budgets, manifest):
+def admit_archived_queries(queries, *, catalog, execution_budgets, manifest, session_calendars=None):
     """使用调用方已编译的 QueryIR 完成当前归档准入。"""
     manifest = load_archived_input_manifest(manifest)
     if set(queries) != set(manifest["requests"]) or set(queries) != set(execution_budgets):
@@ -223,7 +223,8 @@ def admit_archived_queries(queries, *, catalog, execution_budgets, manifest):
             source_profile=binding["source_profile"], environment=binding["environment"],
             binding_version=binding["binding_version"],
         )
-        plan = admit_query(query, catalog=catalog, binding=resolved, attestation=attestation)
+        plan = admit_query(query, catalog=catalog, binding=resolved, attestation=attestation,
+                           session_calendar=(session_calendars or {}).get(request_id))
         require_archived_plan_equivalent(original, plan)
         expected_mapping = {field_id: field_id for field_id in _snapshot_fields(original)} if entry["kind"] == "dataset" else dict(original.columns)
         if dict(plan.columns) != expected_mapping:

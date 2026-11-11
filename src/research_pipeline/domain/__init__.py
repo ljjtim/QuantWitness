@@ -49,13 +49,7 @@ from .session_calendar import (
     SessionSegmentTemplate,
     load_session_policy_bundle,
 )
-from .session_close import (
-    FUTURES_SESSION_CLOSE_BUNDLE_RESOURCE,
-    FUTURES_SESSION_CLOSE_BUNDLE_VERSION,
-    FuturesSessionCloseError,
-    FuturesSessionClosePolicyBundle,
-    load_futures_session_close_bundle,
-)
+
 from .session_assignment import (
     SESSION_COMPLETED_BAR_BOUNDARY,
     SESSION_EFFECTIVE_INTERVAL_BOUNDARY,
@@ -87,10 +81,6 @@ __all__ = [
     "CorporateAction",
     "DomainContractError",
     "FinancialTimeTrace",
-    "FUTURES_SESSION_CLOSE_BUNDLE_RESOURCE",
-    "FUTURES_SESSION_CLOSE_BUNDLE_VERSION",
-    "FuturesSessionCloseError",
-    "FuturesSessionClosePolicyBundle",
     "FixedValue",
     "Instrument",
     "InstrumentAlias",
@@ -143,7 +133,6 @@ __all__ = [
     "build_completed_bar_trace",
     "parse_session",
     "load_session_policy_bundle",
-    "load_futures_session_close_bundle",
     "assign_completed_bars",
     "reconcile_session_aggregates",
     "load_minute_rule_snapshot_bundle",

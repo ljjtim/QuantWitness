@@ -181,7 +181,7 @@ def test_development_group_freezes_unmodified_series_and_rejects_member_change(t
         horizons.execute_horizons(root, "lint")
 
 
-def test_readme_commands_freeze_explicit_series_for_final():
+def test_readme_commands_freeze_explicit_series_for_final(tmp_path):
     import shlex
     import run
     from prepare import research_series_from_arguments
@@ -190,6 +190,7 @@ def test_readme_commands_freeze_explicit_series_for_final():
         if line.startswith("python examples/qlib_portfolio/run.py ")]
     assert commands
     for command in commands:
+        command = command.replace("<research-series绝对目录>", '"' + tmp_path.as_posix() + '"')
         args = parser.parse_args(shlex.split(command)[2:])
         series = research_series_from_arguments(args, parser)
         if args.stage in {"all", "prepare"} and args.mode in {"model", "portfolio"}:

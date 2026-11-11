@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import sys
 
 import pandas as pd
 
@@ -23,6 +24,8 @@ class SplitFold:
     test_ids: tuple[str, ...]
     purged_ids: tuple[str, ...]
     embargoed_ids: tuple[str, ...]
+    validation_range: tuple[str, str] | None = None
+    test_range: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -34,7 +37,7 @@ class SplitManifest:
     manifest_hash: str
 
 
-def build_purged_kfold(samples: pd.DataFrame, *, calendar: object, folds: int, embargo_sessions: int = 0) -> SplitManifest:
+def build_purged_kfold(samples: pd.DataFrame, *, calendar: object, folds: int, embargo_sessions: int = 0, frame_budget=None) -> SplitManifest:
     frame = _normalize_samples(samples)
     sessions = _calendar(calendar)
     if folds < 2 or folds > len(frame):
@@ -44,7 +47,8 @@ def build_purged_kfold(samples: pd.DataFrame, *, calendar: object, folds: int, e
     ordered = frame.sort_values(["observation_time", "sample_id"], kind="mergesort").reset_index(drop=True)
     blocks = [block for block in _split_positions(len(ordered), folds) if len(block)]
     fold_results: list[SplitFold] = []
-    rows: list[dict[str, object]] = []
+    rows: list[pd.DataFrame] = []
+    audit_source = _audit_source(frame, frame_budget)
     for index, positions in enumerate(blocks, start=1):
         validation = ordered.iloc[positions]
         eval_start = validation["observation_time"].min()
@@ -65,8 +69,11 @@ def build_purged_kfold(samples: pd.DataFrame, *, calendar: object, folds: int, e
             embargoed_ids=tuple(candidates.loc[~overlap & embargo, "sample_id"]),
         )
         fold_results.append(fold)
-        rows.extend(_audit_rows(ordered, fold))
-    return _manifest("purged_kfold", tuple(fold_results), rows, sessions)
+        rows.append(_audit_rows(audit_source, fold, frame_budget))
+    manifest = _manifest("purged_kfold", tuple(fold_results), rows, sessions, frame_budget)
+    if frame_budget is not None:
+        frame_budget.release_bytes(audit_source.attrs["audit_source_buffer_bytes"])
+    return manifest
 
 
 def build_walk_forward(
@@ -79,6 +86,8 @@ def build_walk_forward(
     step_sessions: int,
     embargo_sessions: int = 0,
     expanding: bool = True,
+    prediction_samples=None,
+    frame_budget=None,
 ) -> SplitManifest:
     frame = _normalize_samples(samples)
     sessions = _calendar(calendar)
@@ -88,7 +97,8 @@ def build_walk_forward(
     if embargo_sessions < 0:
         raise ValidationError("embargo_sessions 不能为负")
     results: list[SplitFold] = []
-    rows: list[dict[str, object]] = []
+    rows: list[pd.DataFrame] = []
+    audit_source = _audit_source(frame, frame_budget)
     offset = 0
     while True:
         train_start = 0 if expanding else offset
@@ -105,14 +115,16 @@ def build_walk_forward(
         candidate_train = frame.loc[frame["observation_time"].dt.date.isin(train_dates)]
         candidate_validation = frame.loc[frame["observation_time"].dt.date.isin(validation_dates)]
         test = frame.loc[frame["observation_time"].dt.date.isin(test_dates)]
-        if candidate_train.empty or candidate_validation.empty or test.empty:
+        prediction_test = (prediction_samples.loc[pd.to_datetime(prediction_samples.observation_time).dt.date.isin(test_dates)]
+                           if prediction_samples is not None else test)
+        if candidate_train.empty or candidate_validation.empty or prediction_test.empty:
             raise ValidationError("walk-forward 窗口存在空训练/验证/测试集")
         first_eval = candidate_validation["decision_time"].min()
         keep = (candidate_train["label_end"] < first_eval) & (
             candidate_train["label_available_time"] <= first_eval
         )
         train = candidate_train.loc[keep]
-        first_test = test["decision_time"].min()
+        first_test = pd.to_datetime(prediction_test["decision_time"], utc=True).min()
         validation_keep = (candidate_validation["label_end"] < first_test) & (
             candidate_validation["label_available_time"] <= first_test
         )
@@ -131,13 +143,67 @@ def build_walk_forward(
             test_ids=tuple(test["sample_id"]),
             purged_ids=purged,
             embargoed_ids=tuple(embargoed["sample_id"]),
+            validation_range=(sessions[validation_start].isoformat(), sessions[validation_end].isoformat()),
+            test_range=(sessions[test_start].isoformat(), sessions[test_end].isoformat()),
         )
         results.append(fold)
-        rows.extend(_audit_rows(frame, fold))
+        rows.append(_audit_rows(audit_source, fold, frame_budget))
         offset += step_sessions
     if not results:
         raise ValidationError("交易日不足，无法构建 walk-forward")
-    return _manifest("expanding_walk_forward" if expanding else "rolling_walk_forward", tuple(results), rows, sessions)
+    manifest = _manifest("expanding_walk_forward" if expanding else "rolling_walk_forward", tuple(results), rows, sessions, frame_budget)
+    if frame_budget is not None:
+        frame_budget.release_bytes(audit_source.attrs["audit_source_buffer_bytes"])
+    return manifest
+
+
+def build_explicit_walk_forward(samples: pd.DataFrame, *, calendar: object, folds: object, prediction_samples=None, frame_budget=None) -> SplitManifest:
+    """按声明日期构建fold，沿用真实标签成熟时间purge。"""
+    frame = _normalize_samples(samples)
+    sessions = _calendar(calendar)
+    if not isinstance(folds, (list, tuple)) or not folds:
+        raise ValidationError("显式fold必须是非空列表")
+    results, rows, identifiers = [], [], set()
+    audit_source = _audit_source(frame, frame_budget)
+    for spec in folds:
+        if not isinstance(spec, dict) or set(spec) != {"fold_id", "train", "validation", "test"}:
+            raise ValidationError("显式fold要求fold_id/train/validation/test")
+        identifier = spec["fold_id"]
+        if not isinstance(identifier, str) or not identifier or identifier in identifiers:
+            raise ValidationError("显式fold_id必须非空且唯一")
+        identifiers.add(identifier)
+        ranges = []
+        for role in ("train", "validation", "test"):
+            interval = spec[role]
+            if not isinstance(interval, (list, tuple)) or len(interval) != 2:
+                raise ValidationError("fold日期区间必须含起止两个ISO日期")
+            start, end = (date.fromisoformat(value) for value in interval)
+            if start > end:
+                raise ValidationError("fold区间起点晚于终点")
+            ranges.append((start, end))
+        if not (ranges[0][1] < ranges[1][0] and ranges[1][1] < ranges[2][0]):
+            raise ValidationError("显式fold训练、验证、测试必须按时间分离")
+        subsets = [frame.loc[frame.observation_time.dt.date.between(start, end)] for start, end in ranges]
+        prediction_test = (prediction_samples.loc[pd.to_datetime(prediction_samples.observation_time).dt.date.between(*ranges[2])]
+                           if prediction_samples is not None else subsets[2])
+        if subsets[0].empty or subsets[1].empty or prediction_test.empty:
+            raise ValidationError("显式fold存在空训练、验证或测试集")
+        train, valid, test = subsets
+        valid_boundary, test_boundary = valid.decision_time.min(), pd.to_datetime(prediction_test.decision_time, utc=True).min()
+        train_keep = (train.label_end < valid_boundary) & (train.label_available_time <= valid_boundary)
+        valid_keep = (valid.label_end < test_boundary) & (valid.label_available_time <= test_boundary)
+        if not train_keep.any() or not valid_keep.any():
+            raise ValidationError("显式fold标签purge后为空")
+        fold = SplitFold(identifier, tuple(train.loc[train_keep, "sample_id"]),
+            tuple(valid.loc[valid_keep, "sample_id"]), tuple(test.sample_id),
+            tuple(train.loc[~train_keep, "sample_id"]) + tuple(valid.loc[~valid_keep, "sample_id"]), (),
+            tuple(spec["validation"]), tuple(spec["test"]))
+        results.append(fold)
+        rows.append(_audit_rows(audit_source, fold, frame_budget))
+    manifest = _manifest("explicit_walk_forward", tuple(results), rows, sessions, frame_budget)
+    if frame_budget is not None:
+        frame_budget.release_bytes(audit_source.attrs["audit_source_buffer_bytes"])
+    return manifest
 
 
 def _normalize_samples(samples: pd.DataFrame) -> pd.DataFrame:
@@ -194,24 +260,63 @@ def _split_positions(size: int, groups: int) -> list[list[int]]:
     return output
 
 
-def _audit_rows(frame: pd.DataFrame, fold: SplitFold) -> list[dict[str, object]]:
-    role = {sample_id: "train" for sample_id in fold.train_ids}
-    role.update({sample_id: "validation" for sample_id in fold.validation_ids})
-    role.update({sample_id: "test" for sample_id in fold.test_ids})
-    role.update({sample_id: "purged" for sample_id in fold.purged_ids})
-    role.update({sample_id: "embargoed" for sample_id in fold.embargoed_ids})
-    rows = []
-    for row in frame.itertuples(index=False):
-        if row.sample_id not in role:
-            continue
-        rows.append({"fold_id": fold.fold_id, "sample_id": row.sample_id, "role": role[row.sample_id], "observation_time": row.observation_time.isoformat(), "label_start": row.label_start.isoformat(), "label_end": row.label_end.isoformat(), "exclusion_reason": role[row.sample_id] if role[row.sample_id] in {"purged", "embargoed"} else None})
-    return rows
+def _audit_source(frame: pd.DataFrame, frame_budget=None) -> pd.DataFrame:
+    """每个样本的原始ISO时间只构造一次，各fold共享字符串。"""
+    if frame_budget is not None:
+        frame_budget.require_additional(len(frame) * (4 * 8 + 3 * 128), label="切分审计共享ISO时间及列缓冲")
+    source = frame.loc[:, ["sample_id", "observation_time", "label_start", "label_end"]].copy()
+    payload_bytes = 0
+    def iso(value):
+        nonlocal payload_bytes
+        result = value.isoformat()
+        payload_bytes += sys.getsizeof(result)
+        return result
+    for column in ("observation_time", "label_start", "label_end"):
+        source[column] = source[column].map(iso)
+    if frame_budget is not None:
+        shallow = int(source.memory_usage(index=True, deep=False).sum())
+        frame_budget.reserve_bytes(shallow + payload_bytes, label="切分审计共享时间")
+        source.attrs["audit_source_buffer_bytes"] = shallow
+        source.attrs["audit_time_payload_bytes"] = payload_bytes
+    return source
 
 
-def _manifest(method: str, folds: tuple[SplitFold, ...], rows: list[dict[str, object]], sessions: tuple[date, ...]) -> SplitManifest:
-    audit = pd.DataFrame(rows).sort_values(["fold_id", "sample_id"], kind="mergesort").reset_index(drop=True)
+def _audit_rows(source: pd.DataFrame, fold: SplitFold, frame_budget=None) -> pd.DataFrame:
+    if frame_budget is not None:
+        frame_budget.require_additional(len(source) * 12 * 8, label="切分审计fold列缓冲")
+    roles = pd.Series(index=source.index, dtype=object)
+    for role, identifiers in (("train", fold.train_ids), ("validation", fold.validation_ids),
+                              ("test", fold.test_ids), ("purged", fold.purged_ids),
+                              ("embargoed", fold.embargoed_ids)):
+        roles.loc[source.sample_id.isin(identifiers)] = role
+    selected = roles.notna()
+    result = source.loc[selected].copy()
+    result.insert(0, "fold_id", fold.fold_id)
+    result.insert(2, "role", roles.loc[selected].to_numpy())
+    result["exclusion_reason"] = roles.loc[selected].where(
+        roles.loc[selected].isin(("purged", "embargoed")), None,
+    ).to_numpy()
+    if frame_budget is not None:
+        size = int(result.memory_usage(index=True, deep=False).sum())
+        frame_budget.reserve_bytes(size, label="切分审计fold列")
+        result.attrs["audit_buffer_bytes"] = size
+    return result
+
+
+def _manifest(method: str, folds: tuple[SplitFold, ...], rows: list[pd.DataFrame], sessions: tuple[date, ...], frame_budget=None) -> SplitManifest:
+    if frame_budget is not None:
+        frame_budget.require_additional(
+            sum(len(part) for part in rows) * 7 * 8 * 3,
+            label="切分审计拼接排序及共享ISO时间",
+        )
+    audit = pd.concat(rows, ignore_index=True).sort_values(["fold_id", "sample_id"], kind="mergesort").reset_index(drop=True)
+    if frame_budget is not None:
+        frame_budget.reserve_bytes(int(audit.memory_usage(index=True, deep=False).sum()),
+                                   label="切分审计表列缓冲")
+        for part in rows:
+            frame_budget.release_bytes(part.attrs["audit_buffer_bytes"])
     calendar_hash = typed_canonical_hash([value.isoformat() for value in sessions])
-    payload = {"method": method, "calendar_hash": calendar_hash, "folds": [{"fold_id": fold.fold_id, "train_ids": list(fold.train_ids), "validation_ids": list(fold.validation_ids), "test_ids": list(fold.test_ids), "purged_ids": list(fold.purged_ids), "embargoed_ids": list(fold.embargoed_ids)} for fold in folds]}
+    payload = {"method": method, "calendar_hash": calendar_hash, "folds": [{"fold_id": fold.fold_id, "train_ids": list(fold.train_ids), "validation_ids": list(fold.validation_ids), "test_ids": list(fold.test_ids), "purged_ids": list(fold.purged_ids), "embargoed_ids": list(fold.embargoed_ids), "validation_range": fold.validation_range, "test_range": fold.test_range} for fold in folds]}
     return SplitManifest(method, folds, audit, calendar_hash, typed_canonical_hash(payload))
 
 

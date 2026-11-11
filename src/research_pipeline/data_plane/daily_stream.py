@@ -114,6 +114,9 @@ class DayBatchReader:
 
     def _load_month(self, month) -> None:
         self._clear_cache()
+        if self._month is not None:
+            # 旧月已交接后释放 Arrow 池中的空闲页，避免与新月缓存叠加驻留。
+            pa.default_memory_pool().release_unused()
         self._month = month
         self.estimated_month_bytes = 0
         self._month_scans += 1
@@ -165,6 +168,14 @@ class DayBatchReader:
                         selected_bytes = selected.get_total_buffer_size()
                         self._check_memory(self.cached_bytes + temporary_bytes + selected_bytes + selected.num_rows * 4)
                         self._check_order(day, selected)
+                        code_index = selected.schema.get_field_index(self.dataset.instrument_field)
+                        codes = selected.column(code_index)
+                        if pa.types.is_string(codes.type):
+                            encoded = pc.dictionary_encode(codes)
+                            self._check_memory(self.cached_bytes + temporary_bytes + selected_bytes
+                                               + encoded.get_total_buffer_size())
+                            selected = selected.set_column(code_index, self.dataset.instrument_field, encoded)
+                            selected_bytes = selected.get_total_buffer_size()
                         self._cache.setdefault(day, []).append(selected)
                         self._day_bytes[day] = self._day_bytes.get(day, 0) + selected_bytes
                         self._cached_bytes += selected_bytes
@@ -190,12 +201,20 @@ class DayBatchReader:
             if batches is None:
                 return pa.Table.from_batches([], schema=self._schema)
             table = pa.Table.from_batches(batches)
+            decoded_bytes = 0
+            code_index = table.schema.get_field_index(self.dataset.instrument_field)
+            codes = table.column(code_index)
+            if pa.types.is_dictionary(codes.type):
+                decoded = pc.cast(codes, pa.string())
+                decoded_bytes = decoded.get_total_buffer_size()
+                self._check_memory(self.cached_bytes + decoded_bytes)
+                table = table.set_column(code_index, self.dataset.instrument_field, decoded)
             if day in self._unordered:
                 # Arrow 排序对相同键保持输入次序；额度包含索引及输出副本。
-                self._check_memory(self.cached_bytes + self._day_bytes[day] + table.num_rows * 8)
+                self._check_memory(self.cached_bytes + decoded_bytes + table.get_total_buffer_size() + table.num_rows * 8)
                 keys = [(self.dataset.instrument_field, "ascending"), (self.dataset.timestamp_field, "ascending")]
                 ordered = table.take(pc.sort_indices(table, sort_keys=keys)).select(self.columns)
-                self._check_memory(self.cached_bytes + ordered.get_total_buffer_size())
+                self._check_memory(self.cached_bytes + decoded_bytes + ordered.get_total_buffer_size())
                 table = ordered
             return table.select(self.columns)
 

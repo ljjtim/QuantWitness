@@ -67,9 +67,9 @@ def test_transformer_accepts_supported_position_encoding_lengths(step_len):
         ("model.kwargs.n_epochs", 0, "n_epochs"),
         ("model.kwargs.dropout", 1.0, "dropout"),
         ("model.kwargs.lr", 0.0, "lr"),
-        ("model.kwargs.GPU", 0, "CPU"),
+        ("model.kwargs.GPU", -2, "GPU"),
         ("model.kwargs.n_jobs", 1, "n_jobs"),
-        ("model.kwargs.batch_size", 2, "batch_size"),
+        ("model.kwargs.batch_size", 0, "batch_size"),
         ("model.kwargs.loss", "mae", "mse"),
         ("model.kwargs.metric", "rmse", "mse"),
         ("model.kwargs.optimizer", "adamw", "optimizer"),
@@ -101,14 +101,12 @@ def test_transformer_public_admission_accepts_all_supported_candidate_families(s
 
 
 @pytest.mark.parametrize("scope", ["development", "final"])
-def test_transformer_public_admission_rejects_rank_labels(scope):
-    from research_pipeline.packages import ResearchPackageError
+def test_transformer_public_admission_accepts_declared_rank_labels(scope):
     from test_qlib_sequence_admission import _check, _recipe
 
     candidate = transformer_candidate()
     candidate["processors"]["learn"].append({"class": "CSRankNorm", "kwargs": {}})
-    with pytest.raises(ResearchPackageError, match="raw标签"):
-        _check(_recipe(scope=scope, fit=[candidate], holdout=[candidate]))
+    _check(_recipe(scope=scope, fit=[candidate], holdout=[candidate]))
 
 
 @pytest.mark.parametrize("version", ["missing", "2.6.0"])

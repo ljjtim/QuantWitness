@@ -34,6 +34,70 @@ def load_graph_minute_scopes(root, node_parameters):
     return loaded
 
 
+def minute_scan_scope_bindings(recipe, future_request_ids, *, required_node_ids=()):
+    """显式消费者声明决定期货扫描日历，不从策略或相邻项目猜测。"""
+    if not future_request_ids:
+        return {}
+    from research_pipeline.domain.minute_scope_input import validate_minute_scope_reference
+
+    bindings = {}
+    nodes = {node.node_id: node for node in recipe.nodes}
+
+    def upstream_requests(node):
+        pending = [binding.source_node_id for binding in node.inputs]
+        seen = set()
+        while pending:
+            key = pending.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            producer = nodes[key]
+            if producer.operator_id == "data.minute.scan":
+                yield from (key for key in producer.parameters["request_ids"] if key in future_request_ids)
+            else:
+                pending.extend(binding.source_node_id for binding in producer.inputs)
+
+    def bind(request_id, reference):
+        reference = validate_minute_scope_reference(reference)
+        if request_id in bindings and bindings[request_id] != reference:
+            raise ResearchPackageError(f"期货分钟请求绑定不同 minute_scope: {request_id}")
+        bindings[request_id] = reference
+
+    for node in recipe.nodes:
+        if node.node_id in required_node_ids or "minute_scope" in node.parameters:
+            requests = tuple(upstream_requests(node))
+            if requests and "minute_scope" not in node.parameters:
+                raise ResearchPackageError(f"期货分钟项目消费者必须显式声明 minute_scope: {node.node_id}")
+            for request_id in requests:
+                bind(request_id, node.parameters["minute_scope"])
+        causal = node.parameters.get("causal_plan")
+        if causal is not None:
+            for source in causal["sources"]:
+                request_id = source["request_id"]
+                if request_id in future_request_ids:
+                    if "minute_scope" not in node.parameters:
+                        raise ResearchPackageError(f"期货分钟因果节点必须显式声明 minute_scope: {node.node_id}")
+                    bind(request_id, node.parameters["minute_scope"])
+        if node.operator_id == "research.bars.minute_resample" and "minute_scope" in node.parameters:
+            for binding in node.inputs:
+                producer = nodes[binding.source_node_id]
+                if binding.input_port == "minute_1m" and producer.operator_id == "data.minute.scan":
+                    for request_id in producer.parameters["request_ids"]:
+                        if request_id in future_request_ids:
+                            bind(request_id, node.parameters["minute_scope"])
+    return bindings
+
+
+def validate_project_minute_scope_bindings(recipe, queries, admission):
+    """普通项目分区消费者也须在准备时绑定自己的日历参数。"""
+    project_token = getattr(admission, "project_token", None)
+    required = {node.node_id for node in recipe.nodes
+                if project_token is not None and project_token(node.operator_id, node.operator_version) is not None}
+    minute_scan_scope_bindings(recipe,
+        {key for key, query in queries.items() if query.dataset_id == "cn_futures.minute_bar"},
+        required_node_ids=required)
+
+
 def validate_minute_scope_graph(recipe, queries, *, scope_inputs=None):
 
     scope_inputs = scope_inputs or {}
@@ -57,6 +121,19 @@ def validate_minute_scope_graph(recipe, queries, *, scope_inputs=None):
         if selected is None or selected.reference != reference:
             raise ResearchPackageError("minute_scope 缺少已加载的完整来源")
         return selected
+
+    future_requests = {key for key, query in queries.items() if query.dataset_id == "cn_futures.minute_bar"}
+    bindings = minute_scan_scope_bindings(recipe, future_requests)
+    for request_id, reference in bindings.items():
+        scope = scope_inputs.get(reference["name"])
+        if scope is None or scope.reference != reference:
+            raise ResearchPackageError("期货分钟 minute_scope 缺少已加载的完整来源")
+        if scope.calendar.contract_version != PROJECT_SESSION_BUNDLE_VERSION:
+            raise ResearchPackageError("期货分钟因果输入须绑定完整项目日历")
+        query = queries[request_id]
+        for _ in minute_request_sessions(scope.calendar, instruments=query.universe.instruments,
+                start_at=query.time_range.start_at, end_at=query.visible_end_at):
+            pass
 
     nodes = {node.node_id: node for node in recipe.nodes}
     def ancestors(node):
@@ -85,8 +162,8 @@ def validate_minute_scope_graph(recipe, queries, *, scope_inputs=None):
         bundle = source(node).calendar
         for query in requests(node):
             for _ in minute_request_sessions(bundle, instruments=query.universe.instruments,
-                  start_at=query.time_range.start_at, end_at=query.time_range.end_at,
-                  policy_id=node.parameters["session_policy_ref"]):
+                  start_at=query.time_range.start_at, end_at=query.visible_end_at,
+                  policy_id=None if bundle.contract_version == PROJECT_SESSION_BUNDLE_VERSION else node.parameters["session_policy_ref"]):
                 pass
         calendars[node.node_id] = bundle
     for node in recipe.nodes:
@@ -107,6 +184,25 @@ def validate_minute_scope_graph(recipe, queries, *, scope_inputs=None):
                     or scope.calendar.contract_version != PROJECT_SESSION_BUNDLE_VERSION):
                 raise ResearchPackageError("日线策略须绑定完整项目交易日历和规则")
             zone = ZoneInfo("Asia/Shanghai")
+            if node.parameters["strategy_declaration"].get("asset_class") == "cn_future":
+                from research_pipeline.domain.session_calendar import SessionCalendarResolver
+                resolver = SessionCalendarResolver(scope.calendar)
+                sessions = []
+                for code in query.universe.instruments:
+                    policies = tuple(item for item in scope.calendar.policies if item.instrument.instrument_id == code)
+                    if not policies:
+                        raise ResearchPackageError(f"期货日线缺少冻结会话：{code}")
+                    for day in sorted({day for item in policies for day in item.trading_dates
+                                       if query.time_range.start <= day <= query.time_range.end}):
+                        if resolver._visible_policies(policies, day, None):
+                            sessions.append(resolver.resolve_trading_date(policies[0].instrument, day, policy_revision=None))
+                if not sessions:
+                    raise ResearchPackageError("期货日线窗口没有冻结交易会话")
+                require_minute_request_coverage(scope.rules, scope.calendar,
+                    instruments=query.universe.instruments,
+                    start_at=min(item.starts_at for session in sessions for item in session.segments if item.bar_eligible),
+                    end_at=max(item.ends_at for session in sessions for item in session.segments if item.bar_eligible))
+                continue
             require_minute_request_coverage(scope.rules, scope.calendar,
                 instruments=query.universe.instruments,
                 start_at=datetime.combine(query.time_range.start, time.min, tzinfo=zone),
@@ -135,7 +231,7 @@ def validate_minute_scope_graph(recipe, queries, *, scope_inputs=None):
         for query in requests(nodes[bars.source_node_id]):
             if rules.contract_version == PROJECT_RULE_BUNDLE_VERSION:
                 require_minute_request_coverage(rules, calendar, instruments=query.universe.instruments,
-                    start_at=query.time_range.start_at, end_at=query.time_range.end_at)
+                    start_at=query.time_range.start_at, end_at=query.visible_end_at)
             if "strategy_declaration" in node.parameters:
                 from .project_strategy_admission import validate_strategy_schedules
                 validate_strategy_schedules(node.parameters["strategy_declaration"], calendar, query)

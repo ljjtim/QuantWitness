@@ -12,10 +12,11 @@ from zoneinfo import ZoneInfo
 from research_pipeline.platform import canonical_json, typed_canonical_hash
 from research_pipeline.catalog import AdjustmentFactorSnapshot
 from research_pipeline.data_plane import ArtifactResolver, DatasetArtifactRef, DatasetFilter, PartitionedDatasetResolver, PartitionedDatasetRef, audit_adjustment_gate, build_adjustment_factor_snapshot, build_minute_resample_plan, execute_minute_resample, execute_minute_adjustment, inspect_parquet_partition, require_minute_price_mode
+from research_pipeline.data_plane.dataset_files import read_temporal_batch
 from research_pipeline.domain import CorporateAction, InstrumentKey
 from research_pipeline.simulation import compile_cn_etf_corporate_action_rows, compile_cn_stock_corporate_action_rows, corporate_action_snapshot_hash
 from research_pipeline.simulation.corporate_actions import canonical_cn_etf_instrument_id
-from ..operator_runtime import OperatorRuntimeContext, RuntimeNodeOutputs, RuntimeNodeValue
+from ..operator_runtime import OperatorRuntimeContext, RuntimeCompletionMetadata, RuntimeNodeOutputs, RuntimeNodeValue
 from .common import _corporate_action_from_dict, _environment, _external_result, _input_data_bundle, _input_external_payload, _input_external_root, _json_ready, _local_date, _local_datetime, _parameters
 from .minute_io import _aware, _minute_root, _minute_scan_plan_from_environment, _session_instruments
 
@@ -285,6 +286,11 @@ def _temporal_corporate_action_rows_many(
             values[0] if len(values) == 1 else values,
         ),)
 
+    dataset = read_temporal_batch(
+        dataset, plan=plan, filters=code_filters(source_codes),
+        max_bytes=context.effective_resource_budget.memory_bytes // 4,
+        batch_size=8_192,
+    )
     fact_rows = (
         dict(row)
         for batch in dataset.iter_temporal_fact_batches(
@@ -363,20 +369,15 @@ def _temporal_corporate_action_rows_many(
     selected_history: dict[tuple[str, str], dict[str, tuple[datetime, dict[str, object]]]] = {}
     for selection_at, codes in sorted(selection_times.items()):
         filters = code_filters(codes)
-        if len(instrument_ids) == 1:
-            selected, _reference, _plan = _columnar_request_rows_at(
-                context, request_id, consumer_time=selection_at, filters=filters,
+        selected = (
+            dict(row)
+            for batch in dataset.iter_batches_at(
+                plan=plan, consumer_time=selection_at,
+                columns=tuple(plan.query.field_ids), filters=filters,
+                batch_size=8_192,
             )
-        else:
-            selected = (
-                dict(row)
-                for batch in dataset.iter_batches_at(
-                    plan=plan, consumer_time=selection_at,
-                    columns=tuple(plan.query.field_ids), filters=filters,
-                    batch_size=8_192,
-                )
-                for row in batch.to_pylist()
-            )
+            for row in batch.to_pylist()
+        )
         for row in selected:
             code = source_code(row.get(role["code"], ""))
             if code not in codes:
@@ -470,8 +471,8 @@ def _initial_listing_evidence(
         raise ValueError("IPO listed_date 必须等于适用起点的本地日期")
     available_at = _local_datetime(value["available_at"], "available_at")
     market_open = datetime.combine(listed_date, time(9, 30), local_start.tzinfo)
-    if available_at > applicable_start or available_at >= market_open:
-        raise ValueError("IPO 上市证据必须在适用起点及当日开盘前可见")
+    if available_at > applicable_start or available_at > market_open:
+        raise ValueError("IPO 上市证据必须不晚于适用起点及当日开盘时刻可见")
     return dict(value)
 
 
@@ -488,6 +489,11 @@ def _build_minute_adjustment_snapshot_payload(
     action_request_id = str(parameters["corporate_action_request_id"])
     instrument_id = str(parameters["instrument_id"])
     asset_class = str(parameters["asset_class"])
+    financial_missing_date_policy = parameters.get("financial_missing_date_policy", "error")
+    if financial_missing_date_policy not in {"error", "omit_event"}:
+        raise ValueError("financial_missing_date_policy 不受支持")
+    if asset_class != "cn_stock" and financial_missing_date_policy != "error":
+        raise ValueError("financial_missing_date_policy=omit_event 仅支持股票")
     as_of = _aware(parameters["as_of"])
     applicable_start = _aware(parameters["applicable_start"])
     applicable_end = _aware(parameters["applicable_end"])
@@ -594,6 +600,7 @@ def _build_minute_adjustment_snapshot_payload(
         compile_cn_stock_corporate_action_rows(
             financial_rows, trading_sessions=trading_sessions,
             allow_post_effective_visibility=True, contract_version=2,
+            missing_date_policy=financial_missing_date_policy,
         )
         if asset_class == "cn_stock" else compile_cn_etf_corporate_action_rows(
             financial_rows, trading_sessions=trading_sessions, as_of=as_of,
@@ -691,6 +698,14 @@ def _adjustment_snapshot_parquet_row(payload: Mapping[str, object]) -> dict[str,
 _ADJUSTMENT_INSTRUMENT_BATCH_SIZE = 128
 
 
+def _financial_date_completion_metadata(parameters):
+    if parameters.get("financial_missing_date_policy", "error") != "omit_event":
+        return None
+    return RuntimeCompletionMetadata(limitations=(
+        "股票权益采用omit_event假设：缺派息日不计现金分红，缺股份到账日或上市日不计对应送转权益；除权复权保留原始分配信息。",
+    ))
+
+
 def execute_data_minute_adjustment_snapshot_v1(
     context: OperatorRuntimeContext,
 ) -> RuntimeNodeOutputs:
@@ -708,7 +723,7 @@ def execute_data_minute_adjustment_snapshot_v1(
         bundle_hash = _input_data_bundle(context).get("bundle_hash")
         if bundle_hash is not None:
             payload["source_data_bundle_hash"] = bundle_hash
-        return _external_result(context, payload, parquet_rows={
+        return _external_result(context, payload, completion_metadata=_financial_date_completion_metadata(parameters), parquet_rows={
             "snapshot": [_adjustment_snapshot_parquet_row(payload)],
         })
     if (
@@ -822,7 +837,7 @@ def _execute_multi_adjustment_snapshot(
         "snapshots": snapshots,
         **({"source_data_bundle_hash": _input_data_bundle(context)["bundle_hash"]}
            if "bundle_hash" in _input_data_bundle(context) else {}),
-    }, parquet_rows={"snapshot": table_rows})
+    }, parquet_rows={"snapshot": table_rows}, completion_metadata=_financial_date_completion_metadata(parameters))
 
 
 def execute_research_bars_minute_adjust_v1(

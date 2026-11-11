@@ -1,111 +1,92 @@
-# 从文档基线到新因子的研究循环
+# 因子研究
 
-此模式使用固定 RD-Agent 的假设生成流程、实验定义模板与研究反思，调用 Qlib 表达式和原有 ResearchPackage 主链。候选在运行时产生，不要求预先列出候选菜单。当前正式案例限于日频收盘动量、均价偏离、相对波动和区间位置；方向知识只来自执行成功的正式 Result 中符合开发范围的指标。
+因子研究从已确认的基线开始。
+后续提案只能选择冻结空间中的公式。
+每轮通过Workspace执行正式研究包。
+循环只反馈成功Result中的开发指标。
 
-## 执行
+## 准备材料
 
-在同时安装核心 ml 依赖、可选 RD 集成和固定 RD 源码的 Linux 环境中使用。同环境执行 Workspace；项目原公式复现的 Windows 桥不受影响。输出、模型和临时文件放在显式研究目录。
+准备完整ResearchPackage、Catalog和输入归档。
+项目算子bundle实现特征、标签和汇总。
+日频Qlib包提供`feature`、`label`、`summary`和`model_fit`节点。
+前3个节点的`design`保持一致。
+模型节点保存同一研究身份。
 
-```bash
-python integrations/rdagent/examples/factor_research/prepare.py --output /mnt/i/research/factor-demo
-python -m quantwitness_rdagent factor-run --request /mnt/i/research/factor-demo/request.json
-python -m quantwitness_rdagent factor-inspect --request /mnt/i/research/factor-demo/request.json
-python -m quantwitness_rdagent factor-resume --request /mnt/i/research/factor-demo/request.json
-```
+请求使用`rd-factor-research-v2`。
+请求包含以下字段。
 
-完成一会话后可把正式开发记录导出为知识索引，供下一会话使用：
+| 字段 | 内容 |
+| --- | --- |
+| `campaign_id`、`session_root` | 会话身份与新目录 |
+| `package_template` | 只有1个固定基准的PackageCampaign请求 |
+| `confirmed_spec` | 合成教学定义或已人工确认的公式材料 |
+| `baseline` | `expression`、`hypothesis`、`reason` |
+| `factor_space` | 完整冻结研究空间 |
+| `budget` | 轮数、调用数、总输出额度和单次输出额度 |
+| `proposer` | 固定响应或显式live模型身份 |
+| `knowledge` | 可选的输入索引、输出索引和检索上限 |
 
-```bash
-python -m quantwitness_rdagent knowledge-export --session /mnt/i/research/factor-demo/session --output /mnt/i/research/knowledge.json
-python integrations/rdagent/examples/factor_research/prepare.py \
-  --output /mnt/i/research/factor-next --campaign-id synthetic_factor_next \
-  --knowledge-index /mnt/i/research/knowledge.json \
-  --knowledge-output /mnt/i/research/knowledge-next.json
-```
+## 声明研究空间
 
-下一会话冻结索引正文和检索记录；提案必须引用记录 ID，范围外、未来、指标不一致和 test/holdout 记录会被排除。索引不是自包含结果文件，来源会话和其中的 Result 必须保留。
-
-默认准备命令创建虚构行情、教学定义和固定文本响应，不调用模型、不写数据库。运行会真实计算特征、训练 Qlib 模型并发布正式 Result；固定文本只替代模型服务的回复。算法正确性在开发期用手算和确定性案例检查。因此它证明流程，不证明实时模型已自主发现投资机会。
-
-
-live 模式在 prepare 时加 `--model-env-file /mnt/i/research/private/model.env`，运行和恢复时提供同一参数。prepare 只读取公开模型身份，不发送模型请求；配置字段及代理要求沿用公式复现客户端。凭据不写入系统环境、请求 JSON 或会话快照。
-
-## 研究步骤
-
-1. 读取已确认定义并运行原表达式，取得正式执行基线。
-2. 反思只接收执行成功的正式开发目标、参与汇总的指标行数及方法说明（指标行数不是预测样本数）。
-3. 上游假设生成和实验定义分两次请求，提出一个新表达式。
-4. 新表达式写入 ResearchPackage 变体，重新执行 Qlib 训练并保存 Result。
-5. 保留正式结果与反思，下一轮提案消费这些开发历史，直到轮次或模型预算结束。
-
-研究只修改 `historical_return`；两个既有窗口槽都使用声明表达式，`volatility`保持原定义。可执行式及含义如下，公式内各处使用相同窗口：
-
-| 方向 | 表达式 | 窗口 |
-| --- | --- | --- |
-| momentum | `$close / Ref($close, N) - 1` | 1至5 |
-| mean_deviation | `$close / Mean($close, N) - 1` | 1至5 |
-| relative_volatility | `Std($close, N) / Mean($close, N)` | 2至5，样本标准差ddof=1 |
-| range_position | `($close - Min($close, N)) / (Max($close, N) - Min($close, N))` | 2至5，最高最低相同时缺失 |
-
-相对波动衡量价格离散程度，不是年化收益波动率；区间位置只使用收盘价，不假定有最高价和最低价字段。计算点是决策前一完整会话的收盘，不能使用当前09:30之后的行情。开发期手算用例覆盖这四类公式；未支持公式会被拒绝，不自动降级或扩大范围。
-
-标准特征集与更多算子的底层用法见[Qlib表达式](../../../docs/qlib-expressions.md)，其范围大于本例支持的研究范围。
-
-## 请求与文档确认
-
-`rd-factor-research-v1`声明：
-
-- `campaign_id/session_root`：会话身份及目录。
-- `package_template`：一个基准候选的完整开发研究包请求，来源、Catalog、归档、bundle、目标及资源明确。禁止最终test/holdout计算。
-- `confirmed_spec`：教学使用`kind=synthetic,path`，定义须与合成数据范围及基线一致；真实确认使用`kind=confirmed_formula`及`path/draft/materials/decisions`，调用原有`render_spec`复验确认文件。已确认的`decisions.interface`必须包含规范基线表达式，不能只指定不相关文档。
-- `baseline`：`expression/hypothesis/reason`。
-- `budget`：`rounds/model_calls/output_tokens/max_output_tokens_per_call`，基线计一轮；每次反思一次调用，后续每轮提案两次调用。
-- `proposer`：`fixed_responses`及按请求顺序的文本文件，或`live/model/base_url`。固定响应是接口验收数据，不是可选候选菜单。
-
-真实文档沿用`spec-extract → spec-review → spec-confirm`材料流程。确认只解决定义；实际数据来源、计算范围和模型预算仍须获准。方法含超出当前表达式或数据语义的内容时，应扩展实现并验收后再运行，不能把近似公式称为原文完整复现。
-
-## 结果与恢复
-
-`session/rounds/<编号>/`保存proposal、evaluation、reflection和record。`session/experiments/<候选>/`保存独立包执行，metrics记录指向正式Result。`session/outcome.json`只有全部声明轮次均完成评价和反思时才为completed，否则明确incomplete和停止原因。执行成功不代表收益优于基线。
-
-`calls/`保存不含凭据的请求和响应，并在调用前预约单次最大输出预算。恢复复用已完成响应和实验；请求内容、确认材料、基包、输入声明及bundle改变会拒绝恢复。已发送但响应未落盘的调用保留unknown，不自动重复付费；需人工核对后建立明确的新运行安排。
-
-提案、反思只接收成功Result中允许的开发指标及研究说明；失败候选保留运行诊断。整份Result、未裁剪日志和test/holdout不进入提示。参数循环原入口`campaign-*`继续支持确定性菜单实验；`factor-*`提供新的表达式研究。
-
-## 跨会话知识与方向
-
-请求可增加：
+请求与正式`design.factor_space`必须相同。
 
 ```json
-{"knowledge": {"index": "/mnt/i/research/knowledge.json", "output": "/mnt/i/research/knowledge-next.json", "max_records": 8}}
+{
+  "space_id": "example-signal-study",
+  "fields": ["signal"],
+  "max_window": 3,
+  "expression_contract": "只使用前一完整会话及更早输入，公式由项目算子解释。",
+  "feature_slot": "candidate_signal",
+  "candidates": [
+    {"expression": "$signal", "direction": "baseline"},
+    {"expression": "Ref($signal, 3)", "direction": "lag"}
+  ],
+  "population_feature_columns": ["candidate_signal__value"]
+}
 ```
 
-输入索引和输出索引必须使用不同路径，输出位于来源会话之外。`max_records`为1至32。导出从正式Result重新读取开发指标并核对研究包、指标定义和设计；`knowledge-input.json`保存本会话的冻结索引与入选记录。研究结束后复核并继承输入索引的全部历史记录，再追加本会话记录；检索上限只限制提示上下文，不截断历史积累。独立会话使用不同campaign_id，避免无Result的技术记录身份冲突。重复恢复不改写同一内容。原始索引改变会拒绝恢复。
+`space_id`只标识空间，不触发框架分支。`feature_slot`必须已存在于`design.feature_expressions`。基线必须属于`candidates`。
 
-检索要求指标定义、单位、方向、频率、年化政策和计算语义相同，资产来源、日历和价格口径相同；历史资产及研究会话必须包含在当前允许范围内，历史`as_of`不得晚于当前研究时点。空的`holdout_index`结构表可以存在，test/holdout评价表不能作为知识来源。提案上下文只接收已投影的开发指标、公式、反思和记录ID，不包含来源文件路径。
+框架按忽略空白后的文本匹配候选。框架返回项目声明的规范文本。候选表达式不能重复，方向不能为`stop`。
 
-索引记录`baseline`、`improved`、`no_improvement`和`technical_failure`。改善按来源会话此前最佳开发指标判断；负结果仍保留正式指标，技术失败或被拒绝提案只提供技术约束，不能变成金融证据。反思是研究者对结果的解释，指标结论由正式数值决定。
+项目算子负责字段、窗口、缺失和时点规则。
 
-有知识的新一轮增加一次方向调用，再进行两次提案调用和一次反思调用。方向支持上述四类价格因子或`stop`；方向及表达式必须引用检索到的`knowledge_refs`，表达式必须属于所选方向。重复表达式和无效引用被拒绝；没有合适知识时直接停止，不调用模型。固定教学例默认两轮、五次接口响应；预算和恢复沿用原有持久调用回执。
+提案只替换声明槽，其他特征保持原样。
+框架同步更新研究设计与既有身份参数。
+`population_feature_columns`使用正式samples表的完整列名。
+联合研究按这些列检查共同资格。
+缺失值不进入金融反馈。
 
-研究知识索引使用 `rd-research-knowledge-v2`。`knowledge-export`可导出具有最终`outcome.json`的completed或incomplete会话。暂停但尚无最终outcome的会话须先恢复。索引同时保存正式结果与技术失败状态，但完整研究是否完成仍以outcome为准。
+## 运行合成示例
 
-## 已知范围
+前置条件：已安装核心ml依赖、可选集成和固定RD-Agent。
+`WORK`指向仓库外目录。
+在公开源码根执行命令。
 
-- 上游源码固定且不修改；实际采用无副作用Scenario、正式开发结果视图和显式APIBackend。此模式不使用默认qrun、数据下载、ChatSession SQLite缓存或embedding。
-- 当前知识索引只支持因子方向，不生成任意模型代码，也不进行因子/模型联合方向轮转。
-- 阶段快照可恢复并复用已完成轮次；节点执行中断仍服从Runtime诊断。若inspect返回`readmit-new-run`，`factor-resume`不会强行重试，需按诊断新建运行。当前KeyboardInterrupt可能被归为该类，不能宣称任意中断均可自动恢复。
-- 合成固定响应验收、live调用验收和真实市场研究是不同证据，报告必须分别说明。
+```bash
+python integrations/rdagent/examples/factor_research/prepare.py --output "$WORK/factor"
+python -m quantwitness_rdagent factor-run --request "$WORK/factor/request.json"
+python -m quantwitness_rdagent factor-inspect --request "$WORK/factor/request.json"
+python -m quantwitness_rdagent factor-resume --request "$WORK/factor/request.json"
+```
 
-## 已确认日级因子合同
+示例枚举4类收盘价公式及有限窗口。
+准备命令生成合成Parquet与完整声明。
+固定响应验证研究流程，不调用付费模型。
+真实公式复现使用`confirmed_formula`材料。
+合成示例使用`synthetic`定义。
+两者都必须与实际基线一致。
 
-待著而救日级研究显式声明 `factor_contract="dai-daily-v1"`，使用 `$dai` 基线、受限Ref/Mean派生和 `dai_following` 槽；请求字段、方向、共同资格与正式证据见[日级研究指南](dai-daily-research.md)。既有收盘价示例继续使用原合同。
+## 预算与恢复
 
+预算字段为`rounds`、`model_calls`、`output_tokens`和`max_output_tokens_per_call`。
+单次输出不超过8192 token。
+提案、反思和方向选择共用预算。
+使用live模式时，准备和运行都传入`--model-env-file`。
+模型地址和身份必须与冻结请求相符。
 
-## 查看中断与请求差异
-
-`factor-inspect --request REQUEST.json` 只读查看已有会话，不创建文件、不调用模型或重跑正式评价。`not_started` 表示尚未建立会话，`incomplete` 表示已冻结但尚无终态，`interrupted` 列出未记录完的轮次及已有执行引用、诊断；原执行锁仍存活时返回 `running` 和 `next_action=wait`。已保存 outcome 保留原状态。
-
-`request_mismatch` 会列出 `changed_fields`，并给出 `next_action=use_frozen_request_or_new_session`；须恢复原请求或使用新会话，不能改变同一会话预算和研究范围。正常接续使用 `factor-resume`，成功评价不重复计算；恢复仍复验原冻结材料。查看的诊断不会进入正式开发指标反馈，test/holdout 不参与研究循环。
-
-未取得确定结果的模型调用预约显示在 `unresolved_model_calls`；`next_action=review_model_calls` 要求核对原调用收据，不自动重复调用或释放已预约预算。
+`factor-resume`继续原请求和原目录。
+改变空间、材料或输入时创建新会话。
+已预约但结果未知的调用不会自动重试。
+跨会话使用方式见[研究知识](coding-knowledge.md)。

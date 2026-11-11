@@ -228,6 +228,6 @@
   "notes": [
     "来源描述与已保存的查询快照分别记录；默认直接读取，--persist-inputs 才保存查询输入。",
     "报告、比较、分析与导出直接消费 Result；开发反馈来自成功 Result 的开发指标。",
-    "PIT、标签与 holdout 约束在生产读取处执行；LEAN 输出 orders、intents、daily、trace 及 metrics，并保留必要支持文件。"
+    "PIT、标签与 holdout 约束在生产读取处执行；LEAN 输出 八张执行表与 metrics，并保留必要支持文件。"
   ]
 }

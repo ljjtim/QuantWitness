@@ -21,7 +21,8 @@ from research_pipeline.data_plane import (
     VerifiedDatasetPartition,
     VerifiedMinutePartitionStream,
 )
-from research_pipeline.domain import load_session_policy_bundle
+from research_pipeline.domain.minute_scope_input import load_minute_scope_calendar, validate_minute_scope_reference
+from research_pipeline.domain.session_calendar import PROJECT_SESSION_BUNDLE_VERSION
 from research_pipeline.extensions import (
     ProjectArtifactCommit,
     ProjectArtifactInput,
@@ -45,6 +46,26 @@ from .project_table_input import (
     ProjectRequestTableInput,
     ProjectTableInput,
 )
+from research_pipeline.extensions.project_bundle import _freeze_payload
+from .causal_worker_session import SESSION_BATCH_VERSION, session_binding
+
+
+def _expand_session_task(task, session):
+    if not isinstance(task, Mapping) or task.get("contract_version") != SESSION_BATCH_VERSION:
+        return task
+    if session is None or "static_task" not in session or set(task) != {
+        "contract_version", "work_items", "effective_resource_budget", "state_input", "inherited_lineage",
+    }:
+        raise ValueError("project_worker_session_batch_invalid")
+    static = session["static_task"]
+    parameters = static["context"]["parameters"]
+    plan = _freeze_payload({**parameters["causal_plan"], "work_items": task["work_items"]})
+    return {**static, "context": {**static["context"],
+                "parameters": _freeze_payload({**parameters, "causal_plan": plan}),
+                "effective_resource_budget": task["effective_resource_budget"]},
+            "state_input": task["state_input"],
+            "causal_context": {**static["causal_context"], "plan": plan,
+                               "inherited_lineage": task["inherited_lineage"]}}
 
 
 _WINDOWS_JOB_KILL_ON_CLOSE = 0x00002000
@@ -284,12 +305,24 @@ def _execute_task(args, *, session=None, windows_job_bound=True):
     try:
         if sys.platform == "win32" and not windows_job_bound:
             raise ValueError("project_worker_job_binding_failed")
-        task = json.loads(task_path.read_text(encoding="utf-8"))
+        task = _expand_session_task(json.loads(task_path.read_text(encoding="utf-8")), session)
         identity, manifest, context, inputs, output_contracts = _validate_task(
             task,
             attempt_root=attempt_root,
             session=session,
         )
+        if session is not None:
+            causal = task["causal_context"]
+            task = {**task, "context": {**task["context"], "parameters": context.parameters},
+                    "causal_context": {**_freeze_payload({key: value for key, value in causal.items()
+                                                           if key != "inherited_lineage"}),
+                                       "inherited_lineage": causal["inherited_lineage"]}}
+            binding = _freeze_payload(session_binding(task))
+            if "binding" in session and binding != session["binding"]:
+                raise ValueError("project_worker_session_binding_changed")
+            if "binding" not in session:
+                session["binding"] = binding
+                session["static_task"] = task
         if session is None or not session.get("dependencies_verified"):
             _validate_installed_dependencies(manifest.dependency_lock)
             if session is not None:
@@ -314,8 +347,14 @@ def _execute_task(args, *, session=None, windows_job_bound=True):
             raise ValueError("project_entry_missing")
         causal_facts = None
         if "causal_context" in task:
+            archive_readers = None
+            if session is not None:
+                from .project_causal_worker import CausalArchiveReaders
+                if "archive_readers" not in session:
+                    session["archive_readers"] = CausalArchiveReaders()
+                archive_readers = session["archive_readers"]
             raw_commits, causal_facts = run_causal_entry(
-                entry, context, inputs, output_root, task["causal_context"]
+                entry, context, inputs, output_root, task["causal_context"], archive_readers=archive_readers,
             )
         else:
             if "causal_plan" in context.parameters:
@@ -451,14 +490,6 @@ def _validate_task(
         raise ValueError("project_runtime_identity_hash_invalid")
     if task["bundle_relative_path"] != identity["bundle_hash"]:
         raise ValueError("project_bundle_location_invalid")
-    if session is not None:
-        import copy
-        from .causal_worker_session import session_binding
-        binding = session_binding(task)
-        if "binding" in session and binding != session["binding"]:
-            raise ValueError("project_worker_session_binding_changed")
-        if "binding" not in session:
-            session["binding"] = copy.deepcopy(binding)
     manifest = session.get("manifest") if session is not None else None
     first_task = manifest is None
     if first_task:
@@ -497,6 +528,7 @@ def _validate_task(
             attempt_root=attempt_root,
             run_id=context.run_id,
             attempt_id=context.attempt_id,
+            expected_minute_scope=context.parameters.get("minute_scope"),
         )
         for item in task["inputs"]
     )
@@ -533,6 +565,8 @@ def _load_input(
     attempt_root: Path,
     run_id: str,
     attempt_id: str,
+    expected_minute_scope=None,
+    session_calendars=None,
 ) -> object:
     invocation = item.get("invocation")
     if (
@@ -546,8 +580,10 @@ def _load_input(
     if kind == "causal_partitions":
         from .project_causal_minute import load_causal_minute_input
 
+        calendars = {} if session_calendars is None else session_calendars
         return load_causal_minute_input(item, load_partition=lambda part: _load_input(
-            part, attempt_root=attempt_root, run_id=run_id, attempt_id=attempt_id
+            part, attempt_root=attempt_root, run_id=run_id, attempt_id=attempt_id,
+            expected_minute_scope=expected_minute_scope, session_calendars=calendars,
         ))
     if kind == "table":
         if (
@@ -720,7 +756,7 @@ def _load_input(
         "allowed_roots",
     }
     if (
-        set(item) != expected
+        set(item) - {"minute_scope_input"} != expected
         or not isinstance(item["dataset"], Mapping)
         or not isinstance(item["allowed_roots"], Mapping)
     ):
@@ -784,7 +820,9 @@ def _load_input(
         or not isinstance(session_policy_ref, str)
     ):
         raise ValueError("project_partition_minute_lineage_invalid")
-    bundle = _session_bundle_for_partition(asset_class, lineage)
+    bundle = _session_bundle_for_partition(asset_class, lineage,
+        minute_scope_input=item.get("minute_scope_input"), expected_scope=expected_minute_scope,
+        calendar_cache=session_calendars)
     instruments = ()
     if bundle is not None:
         by_id = {
@@ -802,6 +840,7 @@ def _load_input(
         session_policy_ref=session_policy_ref,
         session_bundle=bundle,
         session_instruments=instruments,
+        source_timezone=lineage.get("minute_timezone"),
     )
     return ProjectPartitionInput(
         port=str(item["port"]),
@@ -813,12 +852,26 @@ def _load_input(
     )
 
 
-def _session_bundle_for_partition(asset_class: str, lineage: Mapping[str, object]):
+def _session_bundle_for_partition(asset_class: str, lineage: Mapping[str, object], *,
+                                  minute_scope_input=None, expected_scope=None, calendar_cache=None):
     if asset_class != "cn_future":
         return None
-    bundle = load_session_policy_bundle()
-    if lineage.get("minute_session_bundle_hash") != bundle.bundle_hash:
+    if expected_scope is None or not isinstance(minute_scope_input, Mapping):
+        raise ValueError("project_partition_minute_scope_missing")
+    reference = validate_minute_scope_reference(expected_scope)
+    if (set(minute_scope_input) != {"root", "reference"}
+            or minute_scope_input["reference"] != reference
+            or lineage.get("minute_scope") != reference
+            or lineage.get("minute_session_bundle_hash") != reference["calendar_hash"]):
         raise ValueError("project_partition_session_bundle_mismatch")
+    key = (str(Path(minute_scope_input["root"]).resolve(strict=True)), reference["calendar_hash"])
+    bundle = None if calendar_cache is None else calendar_cache.get(key)
+    if bundle is None:
+        bundle = load_minute_scope_calendar(key[0], reference)
+        if bundle.contract_version != PROJECT_SESSION_BUNDLE_VERSION:
+            raise ValueError("project_partition_session_bundle_mismatch")
+        if calendar_cache is not None:
+            calendar_cache[key] = bundle
     return bundle
 
 

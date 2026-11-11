@@ -11,6 +11,9 @@
     <Compile Include="ChinaOrderProperties.cs" />
     <Compile Include="ChinaAStockModels.cs" />
     <Compile Include="ChinaExecution.cs" />
+    <Compile Include="ChinaFutureHolding.cs" />
+    <Compile Include="ChinaFutureModels.cs" />
+    <Compile Include="ChinaFutureExecution.cs" />
     <Compile Include="DirectSessionData.cs" />
     <Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath></Reference>
     <Reference Include="QuantConnect.Algorithm"><HintPath>$(LeanBin)/QuantConnect.Algorithm.dll</HintPath></Reference>

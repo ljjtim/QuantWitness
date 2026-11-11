@@ -14,6 +14,39 @@ from typing import Mapping
 import psutil
 
 
+def _owned_process_descendants(root):
+    """逐父子边核对出生时间，排除Windows退出父PID复用形成的旧链。"""
+    root_started = root.create_time()
+    # psutil.children/ppid在Windows都会重新枚举全机，直接共用同一父PID快照。
+    parent_by_pid = psutil._ppid_map()
+    by_parent = {}
+    for pid, parent_pid in parent_by_pid.items():
+        by_parent.setdefault(parent_pid, []).append(pid)
+    descendants = []
+    pending = [(root, root_started)]
+    seen = {(root.pid, root_started)}
+    while pending:
+        parent, parent_started = pending.pop()
+        try:
+            if psutil.Process(parent.pid).create_time() != parent_started:
+                continue
+        except psutil.NoSuchProcess:
+            continue
+        for child_pid in by_parent.get(parent.pid, ()):
+            try:
+                child = psutil.Process(child_pid)
+                started = child.create_time()
+            except psutil.NoSuchProcess:
+                continue
+            identity = (child.pid, started)
+            if started < parent_started or identity in seen:
+                continue
+            seen.add(identity)
+            descendants.append(child)
+            pending.append((child, started))
+    return descendants
+
+
 def _project_process_usage(
     worker_pid: int | None, observed_descendants: dict[int, float],
     *, windows_job_name: str | None = None,
@@ -31,7 +64,7 @@ def _project_process_usage(
     job_pids = (_windows_job_process_ids(windows_job_name)
                 if sys.platform == "win32" and windows_job_name else None)
     try:
-        children = (worker.children(recursive=True) if worker is not None else ()) if job_pids is None else job_pids
+        children = (_owned_process_descendants(worker) if worker is not None else ()) if job_pids is None else job_pids
     except psutil.NoSuchProcess:
         children = ()
     for child in children:
@@ -185,7 +218,7 @@ def _terminate_process_tree(
                 continue
         try:
             parent = psutil.Process(process.pid)
-            for child in parent.children(recursive=True):
+            for child in _owned_process_descendants(parent):
                 descendants[child.pid] = child
         except psutil.NoSuchProcess:
             parent = None

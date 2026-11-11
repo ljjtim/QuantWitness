@@ -103,14 +103,21 @@ class EventStore:
 
     @contextmanager
     def writer_session(self):
-        """独占写者期间只重建一次；退出后不保留日志信任。"""
+        """独占期间增量记账；正常退出落盘投影，不保留日志信任。"""
         if self._writer_active:
             raise RuntimeStateError("事件写者会话不能嵌套")
         with _StoreLock(self.lock_path):
             self._writer_active = True
             try:
-                self._current_session()
+                initial_seq = self._current_session().state.last_seq
                 yield self
+                if self._session is not None and self._session.state.last_seq != initial_seq:
+                    temporary = self.projection_path.with_suffix(".tmp")
+                    temporary.write_text(
+                        canonical_json(self._session.state.snapshot().to_dict()),
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary, self.projection_path)
             finally:
                 self._session = None
                 self._writer_active = False
@@ -185,9 +192,6 @@ class EventStore:
                     handle.flush()
                     os.fsync(handle.fileno())
                 session.accept(event, target)
-                temporary = self.projection_path.with_suffix(".tmp")
-                temporary.write_text(canonical_json(session.state.snapshot().to_dict()), encoding="utf-8")
-                os.replace(temporary, self.projection_path)
             except BaseException:
                 # 日志写入是否完成以再次重放为准，不沿用不确定的内存状态。
                 self._session = None

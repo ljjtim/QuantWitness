@@ -290,20 +290,30 @@ class ParameterSpec:
 class PortSpec:
     port: str
     artifact_type: str
+    required: bool = True
 
     def __post_init__(self) -> None:
         _require_id(self.port, "port")
         _require_id(self.artifact_type, "artifact_type")
+        if type(self.required) is not bool:
+            raise OperatorContractError("port.required 必须是布尔值")
 
-    def to_dict(self) -> dict[str, str]:
-        return {"port": self.port, "artifact_type": self.artifact_type}
+    def to_dict(self) -> dict[str, object]:
+        result = {"port": self.port, "artifact_type": self.artifact_type}
+        if not self.required:
+            result["required"] = False
+        return result
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "PortSpec":
-        _require_exact(payload, {"port", "artifact_type"}, "port")
+        fields = {"port", "artifact_type"}
+        if "required" in payload:
+            fields.add("required")
+        _require_exact(payload, fields, "port")
         return cls(
             _require_string(payload["port"], "port.port"),
             _require_string(payload["artifact_type"], "port.artifact_type"),
+            payload.get("required", True),
         )
 
 
@@ -440,6 +450,8 @@ class OperatorSpec:
         _require_id(self.operator_version, "operator_version")
         _validate_ports(self.input_ports, "operator.input_ports")
         _validate_ports(self.output_ports, "operator.output_ports")
+        if any(not item.required for item in self.output_ports):
+            raise OperatorContractError("operator.output_ports 必须全部声明为必需端口")
         if not self.output_ports:
             raise OperatorContractError("operator 必须声明输出端口")
         _validate_parameter_specs(self.parameters, "operator.parameters")
@@ -660,8 +672,17 @@ class OperatorNodeRecipe:
     inputs: tuple[InputBinding, ...]
     parameters: Mapping[str, object]
     strategies: tuple[StrategySelection, ...]
+    resource_profile: Mapping[str, int] | None = None
 
     def __post_init__(self) -> None:
+        if self.resource_profile is not None:
+            allowed = {"memory_bytes", "cpu_slots", "process_slots", "temp_bytes", "wall_seconds"}
+            if (not isinstance(self.resource_profile, Mapping)
+                    or not set(self.resource_profile) <= allowed
+                    or any(type(value) is not int or value <= 0
+                           for value in self.resource_profile.values())):
+                raise OperatorContractError("operator_node.resource_profile 必须是资源维度的正整数映射")
+            object.__setattr__(self, "resource_profile", MappingProxyType(dict(self.resource_profile)))
         _require_id(self.node_id, "operator_node.node_id")
         _require_id(self.operator_id, "operator_node.operator_id")
         _require_id(self.operator_version, "operator_node.operator_version")
@@ -695,6 +716,7 @@ class OperatorNodeRecipe:
             "inputs": [item.to_dict() for item in self.inputs],
             "parameters": self.parameters,
             "strategies": [item.to_dict() for item in self.strategies],
+            **({"resource_profile": dict(self.resource_profile)} if self.resource_profile is not None else {}),
         })
 
     def validate_parameters(self, specs: tuple[ParameterSpec, ...]) -> dict[str, object]:
@@ -709,11 +731,15 @@ class OperatorNodeRecipe:
             "inputs": [item.to_dict() for item in self.inputs],
             "parameters": _plain_json(self.parameters),
             "strategies": [item.to_dict() for item in self.strategies],
+            **({"resource_profile": dict(self.resource_profile)} if self.resource_profile is not None else {}),
         }
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "OperatorNodeRecipe":
-        _require_exact(payload, {"node_id", "operator_id", "operator_version", "inputs", "parameters", "strategies"}, "operator_node")
+        _require_exact(payload, {"node_id", "operator_id", "operator_version", "inputs", "parameters", "strategies"}
+                       | ({"resource_profile"} if "resource_profile" in payload else set()), "operator_node")
+        if "resource_profile" in payload and not isinstance(payload["resource_profile"], Mapping):
+            raise OperatorContractError("operator_node.resource_profile 必须是映射")
         if not isinstance(payload["inputs"], (list, tuple)) or not isinstance(payload["strategies"], (list, tuple)) or not isinstance(payload["parameters"], Mapping):
             raise OperatorContractError("operator_node 子字段类型无效")
         if any(not isinstance(item, Mapping) for item in (*payload["inputs"], *payload["strategies"])):
@@ -727,6 +753,7 @@ class OperatorNodeRecipe:
             inputs,
             payload["parameters"],
             strategies,
+            payload.get("resource_profile"),
         )
 
 

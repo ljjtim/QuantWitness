@@ -39,7 +39,7 @@ def build(output, *, model_env_file=None, coding_sources=(), model_family="Gener
             write_json(path, response)
             files.append(str(path))
         proposer = {"mode": "fixed_responses", "responses": files}
-    payload = {"contract_version": "rd-model-research-v1", "research_kind": "model_research",
+    payload = {"contract_version": "rd-model-research-v2", "research_kind": "model_research",
         "campaign_id": "synthetic_generated_model", "session_root": str(root / "session"),
         "package_template": template, "confirmed_spec": str(definition),
         "baseline": {"definition": BASELINE, "hypothesis": "单层回归作为结构基线", "reason": "先建立可复核的简单模型"},

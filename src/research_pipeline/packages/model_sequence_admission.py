@@ -36,8 +36,12 @@ def validate_model_sequence_graph(recipe: OperatorGraphRecipe) -> None:
             candidates = normalize_candidates([json.loads(value) for value in raw])
         except (ValueError, TypeError, KeyError) as exc:
             raise ResearchPackageError(f"Qlib 模型候选声明无效: {exc}") from exc
+        for candidate in candidates:
+            if candidate["model"]["class"] == "ProjectQlibModel":
+                from research_pipeline.research.modeling.project_model import validate_project_model_adapter
+                validate_project_model_adapter(candidate["model"]["kwargs"]["adapter"], check_environment=False)
         lengths = {item["dataset"]["step_len"] for item in candidates
-                   if item["model"]["class"] in {"GRU", "LSTM", "TransformerModel"}}
+                   if item["model"]["class"] in {"GRU", "LSTM", "TransformerModel", "GATs", "ProjectQlibModel"}}
         split_binding = next((binding for binding in node.inputs
                               if binding.input_port == "splits"), None)
         source = nodes.get(split_binding.source_node_id) if split_binding else None
@@ -49,9 +53,6 @@ def validate_model_sequence_graph(recipe: OperatorGraphRecipe) -> None:
         if step is not None:
             if not lengths:
                 raise ResearchPackageError("序列切分至少需要一个匹配窗口的序列候选")
-            if any(processor["class"] == "CSRankNorm" for candidate in candidates
-                   for processor in candidate["processors"]["learn"]):
-                raise ResearchPackageError("正式序列模型评价要求raw标签，不支持CSRankNorm")
             consumed_sequence_splits.add(source.node_id)
     if set(split_steps) - consumed_sequence_splits:
         raise ResearchPackageError("序列切分必须供至少一个序列模型节点使用")

@@ -5,6 +5,7 @@ import base64
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 import json
+import copy
 from pathlib import Path
 from types import MappingProxyType
 
@@ -17,6 +18,7 @@ from .execution_budget import DataPlaneExecutionBudget
 from .execution_estimate import ExecutionEstimate
 from .factor_publication import require_factor_publication_unchanged
 from .revision import probe_duckdb_source
+from .verification_lifecycle import current_artifact_verification
 
 
 @dataclass(frozen=True)
@@ -92,12 +94,31 @@ class DirectVerifiedDataset:
         self.max_batch_bytes = resolver.max_batch_bytes
         self.budget = DataPlaneExecutionBudget(**descriptor["execution_budget"])
         self.estimate = ExecutionEstimate.from_dict(descriptor["execution_estimate"])
+        self._verified_archive = None
+        self._verified_plan_payload = None
 
     def _verify(self):
         payload = _load_descriptor(self._resolver, self._reference)
         if payload != dict(self.manifest):
             raise SnapshotIntegrityError("直接来源绑定发生变化")
-        verify_direct_source(payload, self.plan)
+        if payload["source_kind"] == "archived_parquet":
+            from .archive_read import _resolve_entry, require_archived_plan_equivalent
+            current = self.plan.identity_payload()
+            if self._verified_archive is None:
+                if payload["admitted_plan_hash"] != self.plan.plan_hash:
+                    raise SnapshotIntegrityError("直接来源与准入计划身份不一致")
+                archive = _resolve_entry(payload["archive_entry"])
+                require_archived_plan_equivalent(archive[0], self.plan)
+                if archive[3] != self.schema:
+                    raise SnapshotIntegrityError("归档直接来源 schema 变化")
+                self._verified_archive = archive
+                self._verified_plan_payload = copy.deepcopy(current)
+            elif current != self._verified_plan_payload:
+                raise SnapshotIntegrityError("直接来源准入计划发生变化")
+            archive = self._verified_archive
+            archive[4]._require_current_binding()
+        else:
+            verify_direct_source(payload, self.plan)
 
     @contextmanager
     def _source(self, *, columns=None, filters=()):
@@ -107,8 +128,7 @@ class DirectVerifiedDataset:
             self._verify()
             try:
                 if self.manifest["source_kind"] == "archived_parquet":
-                    from .archive_read import _resolve_entry
-                    yield _resolve_entry(self.manifest["archive_entry"])
+                    yield self._verified_archive
                 else:
                     with open_projected_stream(
                         database, self.plan, self.budget, self.estimate,
@@ -141,9 +161,11 @@ class DirectVerifiedDataset:
             raise SnapshotIntegrityError("扫描 batch_size 超过批准上限")
         expression = _filter_expression(filters, allowed_columns=allowed_columns, schema=self.schema)
         # 质量检查所需的键、证券和时点随投影读取，不扩大为全部业务列。
+        instrument_columns = (() if self.plan.instrument_field is None
+                              else (self.plan.instrument_field,))
         scan_columns = (self.plan.temporal_selection.required_scan_fields
                         if self.manifest["temporal_source"] else tuple(dict.fromkeys(
-                            (*columns, *self.plan.primary_key, self.plan.event_time_field, self.plan.instrument_field))))
+                            (*columns, *self.plan.primary_key, self.plan.event_time_field, *instrument_columns))))
         from .gates import QualityGateSession
         gate_plan = (self.plan if self.manifest["temporal_source"] else replace(
             self.plan, query=replace(self.plan.query, field_ids=scan_columns),
@@ -178,6 +200,26 @@ def _load_descriptor(resolver, reference):
         allowed_root=resolver.allowed_root, candidate=reference.relative_path,
         root_role="dataset_artifact_allowed_root", path_role="direct_source_descriptor",
         expected_kind="file")
+    stat = path.stat()
+    stamp = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    session = current_artifact_verification()
+    identity = str(path) + "|" + reference.descriptor_hash
+
+    def load():
+        return _read_verified_descriptor(path, reference), stamp
+
+    payload, expected = load() if session is None else session.resolve(
+        "direct_descriptor", identity, load,
+    )
+    if stamp != expected:
+        raise SnapshotIntegrityError("直接来源描述发生变化")
+    for name in ("source_identity", "schema_hash", "source_revision_hash"):
+        if payload.get(name) != getattr(reference, name):
+            raise SnapshotIntegrityError(f"直接来源 {name} 发生变化")
+    return copy.deepcopy(payload)
+
+
+def _read_verified_descriptor(path, reference):
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, UnicodeError) as exc:
@@ -213,7 +255,14 @@ def verify_direct_source(payload, plan):
 
 def resolve_direct_dataset(resolver, reference):
     descriptor = _load_descriptor(resolver, reference)
-    dataset = DirectVerifiedDataset(descriptor=descriptor, reference=reference, resolver=resolver)
+    def build():
+        return DirectVerifiedDataset(descriptor=descriptor, reference=reference, resolver=resolver)
+
+    session = current_artifact_verification()
+    identity = "|".join((str(resolver.allowed_root), reference.relative_path,
+                         reference.descriptor_hash, str(resolver.max_batch_rows),
+                         str(resolver.max_batch_bytes)))
+    dataset = build() if session is None else session.resolve("direct_dataset", identity, build)
     database = descriptor.get("database")
     lease = FactorReadLease(database) if dataset.plan.factor_publication else nullcontext()
     with lease:

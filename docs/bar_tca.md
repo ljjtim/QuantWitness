@@ -1,42 +1,47 @@
-# 交易成本：收益花在了哪里
+# 正式成交的交易成本归因
 
-策略想成交的价格与实际模拟成交价格可能不同。交易成本分析把正式成交对应的费用、滑点等影响分开，让你知道差异来自哪里。它分析已有成交，不再运行第二套撮合器。
+解释正式成交相对决策价格的成本差额。
 
-## 参数与行为说明
+## 开始前
 
-Bar TCA 是正式仿真成交的诊断归因，不是第二个成交引擎。它支持股票、ETF 和期货的日频正式成交；
-分钟路径只有在能提供逐笔正式 fill 与 ledger 身份后才能启用。当前能力保持 `local_only`。
+- 输入：真实订单、逐笔成交、费用和可见决策基准。
+- 输出：订单、成交、逐日及窗口归因工件。
+- 命令中的尖括号内容是待替换参数。
 
-## 唯一成交事实
+## 使用顺序
 
-日频 TCA 通过 `execute_simulation_result_bar_tca()` 只消费已复验的公共 `SimulationResultContract` orders/fills、显式决策基准、费用以及 ledger/settlement 身份。历史原始现金表与期货结算表的测试转译入口不属于发行包：
+1. 声明归因政策和单位。
+2. 准备正式成交及决策基准。
+3. 调用 `run_bar_tca`。
+4. 保存并验证归因工件。
+5. 结合容量与结论限制解释结果。
 
-- TCA 不决定成交数量、成交时点、成交价格、拒单、顺延或强平；
-- 每条 TCA fill 必须一一绑定 `source_fill_id`、`source_fill_hash` 和正式 ledger hash；
-- 股票 block、ETF 和期货都从 `simulation/result-contract/orders|fills`（block 为 `result-contract/`）读取，不再按模拟器表名分支；
-- 正式费用直接来自成交账本，TCA policy 不能再生成另一份“正式费用”。
+Bar TCA 计算库消费已有订单、成交和费用，计算决策基准与实际成交之间的差额。它不决定成交数量、价格、时点、拒单或强平，也不再次撮合。
 
-分钟仿真现在直接输出公共六表；510300 ETF 与 AG2406 冻结参考包的 TCA 均逐笔绑定正式 fill、
-账本、决策基准和已完成执行 bar 容量。缺少其中任一直接输入时仍失败关闭，不能退回 Bar 重模拟成交。
+## 计算接口
 
-## 时间可见性
+当前接口位于 `research_pipeline.simulation.bar_tca`，并由 `research_pipeline.simulation` 导出：
 
-- decision benchmark 必须在订单 decision time 之前可见；
-- ETF 日频使用决策时已知的前收基准，不读取当日 close 或全天 volume；
-- 期货只使用决策时已经发布的最近结算价。缺失、重复或发布晚于决策时直接失败，绝不回退当日 open；
-- 当日 close 只能用于明确标记的事后观察，不能改变正式 fill 或实现差额。
+```python
+from research_pipeline.simulation import (
+    BarTcaPolicy,
+    BarTcaOrder,
+    BarTcaFormalFill,
+    run_bar_tca,
+    write_bar_tca_artifact,
+    verify_bar_tca_artifact,
+)
+```
 
-日频全天 volume 通常收盘后才完整，因此不能冒充开盘容量。只有显式容量值及其 `available_at`
-不晚于 fill time 时，才能计算 participation 和 modeled impact。
+调用方提供完整的正式订单、逐笔成交、决策价格及可见时间、费用、账本身份和归因政策。`run_bar_tca()` 返回归因结果，`write_bar_tca_artifact()` 保存工件，`verify_bar_tca_artifact()` 检查工件内容。当前没有将该计算库接入主 DAG 的内建算子或 Runtime adapter。LEAN Result 不自动生成 TCA 四表。
 
-## 输出
+库内政策区分股票、ETF、期货以及日频、分钟频率。政策声明影响模型、价差和冲击参数、参与率上限、合约乘数、价格精度、可见时间及规则身份。库支持的资产类型不改变当前[LEAN执行](lean-execution.md)的资产范围。
 
-四层 Parquet 工件继续是：
+## 来源与时间
 
-- `tca/orders`：正式订单状态、正式成交数量和观察成本汇总；
-- `tca/fills`：逐笔 source fill lineage、正式价格、正式费用和观察实现差额；
-- `tca/daily`：按成交日汇总；
-- `tca/research`：窗口汇总与 source simulation/ledger/fill manifest 身份。
+每笔归因都保留正式成交身份和账本身份。正式费用使用已确认成交费用。归因政策不能另生成一份正式费用。
+
+决策基准必须在订单决策时已经可见。日线收盘价和全天成交量不能用作当天开盘的已知输入。容量只有在其 `available_at` 不晚于成交时点时，才能用于参与率和模型冲击计算。期货价格、费用和损益还须使用实际合约乘数及明确单位。
 
 观察实现差额为：
 
@@ -44,24 +49,33 @@ Bar TCA 是正式仿真成交的诊断归因，不是第二个成交引擎。它
 有符号(正式成交价 - 决策基准) × 正式数量 × 合约乘数 + 正式费用
 ```
 
-价格整数按 policy 的 `price_scale` 解释。日频的现金与费用单位统一为人民币分：价差乘总数量和合约乘数后换算到分，观察价差按四舍五入、模型价差成本按向上取整，再与正式费用相加。分钟沿用该路径原有的价格整数单位。旧日频两位报价的数值保持一致；使用其他价格精度的日频输入同样必须把正式费用声明为分，不能按报价整数单位填写。
+价格整数按 `price_scale` 解释。日频费用统一以人民币分声明，价差金额换算到分后再相加。分钟按该路径声明的金额单位处理。观察价差按半升舍入，模型价差成本按向上取整。
 
-无可见容量时，`liquidity_attribution_status=not_computable`，participation、modeled spread 和
-modeled impact 为 null，不能用 0 冒充已计算；结论上限自动收紧到 `analysis_only`。
+## 输出
 
-## 正式结果与开发验收
+工件包含 `orders`、`fills`、`daily`、`research` 四表，以及 `manifest.json` 和 `COMMITTED`。表中分别保存订单汇总、逐笔正式成交关联、日汇总和窗口汇总。清单绑定政策、来源身份、行数和内容摘要。
 
-TCA 消费规范订单、成交、持仓、现金、费用、估值，以及声明的基准和政策，不二次撮合。ResultSpec 选择正式表，报告直接读取 Result。生产路径检查 source fill 对应关系、金额单位及费用口径。
+没有可见容量时，`liquidity_attribution_status=not_computable`，参与率、模型价差和模型冲击保留为空，结论上限为 `analysis_only`。股票和 ETF 分钟政策只接受 `analysis_only`。
 
-日频与分钟 TCA 工件保存 orders、fills、daily、research 四张正式表，以及 manifest.json 和 COMMITTED。清单记录政策、输入和来源身份、各表行数与内容摘要。Result 随正式表封存仿真及 TCA 的清单和提交标记；决策基准及成交观察在生产归因时消费。
+## 已知限制
 
-开发用例用手算订单和成交检查滑点、实施差额、参与率与聚合，覆盖零成交、部分成交、缺失基准和不同价格精度。核对失败修对应生产实现，不以状态字符串代替数值案例。
+归因只解释给定成交与政策，不提供 tick、盘口、排队或实盘路由模型。结果正确性依赖调用方提供的正式成交、费用、基准和单位。本地算法检查不构成全市场或实盘成交认证。
 
-项目通过 ResultSpec 选择账本与 TCA 表，按实际使用范围保留订单、成交、持仓、现金、费用、
-估值和成本归因。开发测试将 source fill、数量、价格、费用与手算对照，覆盖新增、删除、
-重复和错误关联。研究报告使用实际生产输出及声明的单位和样本范围。
 
-## 能力边界
+## 常用名称
 
-当前范围不包含 Tick/LOB、日内容量预测或实盘路由。能力状态以 `capabilities.json` 为准，
-本地开发测试不构成全市场或实盘成交认证。
+| 名称 | 含义 |
+| --- | --- |
+| ResearchPackage | 数据、算法、样本、指标和预算的完整声明 |
+| Catalog Lock | 已确认的字段、来源和可见性说明 |
+| PIT（按时点可见） | 过去某时刻只使用当时已知的信息 |
+| bar（周期行情） | 一个日线或分钟区间的行情记录 |
+| OHLCV（开高低收量） | 开盘价、最高价、最低价、收盘价和成交量 |
+| Feature（特征） | 决策时已知的研究输入 |
+| Label（标签） | 用于评价预测的未来目标 |
+| bundle（封存包） | 完整代码、依赖或数据声明及其内容身份 |
+| checkpoint（检查点） | 通过验收的节点输出和恢复依据 |
+| Result（正式结果包） | 正式表、运行摘要及配置、实现和输入引用 |
+| minute_scope（分钟范围引用） | 指向同一冻结日历和历史规则的小引用 |
+| Supervisor | 监督运行和提交结果的主进程 |
+| Worker | 执行节点计算的独立进程 |

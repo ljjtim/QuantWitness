@@ -83,6 +83,7 @@ def _execute(args) -> dict[str, object]:
             resource_memory_bytes=args.resource_memory_bytes,
             resource_cpu_slots=args.resource_cpu_slots,
             resource_scratch_bytes=args.resource_scratch_bytes,
+            no_temp_limit=getattr(args, "no_temp_limit", False),
             resource_process_slots=args.resource_process_slots,
             resource_timeout_seconds=args.resource_timeout_seconds,
             resource_stale_seconds=args.resource_stale_seconds,

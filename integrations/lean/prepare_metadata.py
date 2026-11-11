@@ -13,6 +13,13 @@ def prepare(package, upstream, target):
     research = yaml.safe_load((package/'spec/research.yaml').read_text(encoding='utf-8'))
     node = next(n for n in research['graph']['nodes'] if 'strategy_declaration' in n['parameters'])
     parameters = node['parameters']
+    if parameters['strategy_declaration']['asset_class'] == 'cn_future':
+        for name in ('market-hours', 'symbol-properties'):
+            shutil.copytree(upstream/'Data'/name, target/name, dirs_exist_ok=True)
+        # 期货规格与历史会话随正式输入冻结，宿主据此注册真实合约。
+        print(json.dumps(dict(symbols=len(parameters['instruments']), metadata=str(target),
+                              contract_source='admitted_futures_inputs')))
+        return
     scope = package/'minute-scopes'/parameters['minute_scope']['name']
     policies = pq.read_table(scope/'policies.parquet').to_pylist()
     dates = {day for policy in policies for day in policy['trading_dates']}

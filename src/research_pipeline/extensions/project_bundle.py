@@ -88,18 +88,59 @@ def _safe_relative_path(value: str, field: str) -> str:
     return value
 
 
+@dataclass(frozen=True, eq=False)
+class _FrozenPayload(Mapping):
+    """已逐项校验并深度冻结的参数映射，只在当前进程内共享。"""
+
+    _values: Mapping
+
+    def __getitem__(self, key):
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+    def __eq__(self, other):
+        return _frozen_payload_equal(self, other)
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+def _frozen_payload_equal(left, right):
+    """JSON身份按标量类型及浮点精确值比较，共享不可变子树直接通过。"""
+    if left is right:
+        return True
+    if isinstance(left, Mapping) and isinstance(right, Mapping):
+        return (len(left) == len(right) and all(key in right and _frozen_payload_equal(value, right[key])
+                                               for key, value in left.items()))
+    if type(left) is not type(right):
+        return False
+    if type(left) is tuple:
+        return len(left) == len(right) and all(_frozen_payload_equal(a, b) for a, b in zip(left, right))
+    if type(left) is float:
+        return left.hex() == right.hex()
+    return left == right
+
+
 def _freeze_payload(value: object, field: str = "parameters") -> object:
+    if type(value) is _FrozenPayload:
+        return value
     if value is None or type(value) in (bool, int, float, str):
         return value
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_payload(item, f"{field}[]") for item in value)
+        frozen = tuple(_freeze_payload(item, f"{field}[]") for item in value)
+        return value if type(value) is tuple and all(a is b for a, b in zip(value, frozen)) else frozen
     if isinstance(value, Mapping):
         frozen: dict[str, object] = {}
         for key, item in value.items():
             if not isinstance(key, str) or key.lower() in _FORBIDDEN_PAYLOAD_KEYS:
                 raise ExtensionError(f"{field} 包含可执行或不安全字段: {key}")
             frozen[key] = _freeze_payload(item, f"{field}.{key}")
-        return MappingProxyType(dict(sorted(frozen.items())))
+        return _FrozenPayload(MappingProxyType(dict(sorted(frozen.items()))))
     raise ExtensionError(f"{field} 只能包含 JSON 标量、列表和映射")
 
 
@@ -228,7 +269,7 @@ class ProjectOperatorContext:
     fixed_clock: str
     root_seed: int
     parameters: Mapping[str, object]
-    effective_resource_budget: Mapping[str, int] = field(default_factory=dict)
+    effective_resource_budget: Mapping[str, int | None] = field(default_factory=dict)
     abi_version: str = PROJECT_OPERATOR_ABI_VERSION
 
     def __post_init__(self) -> None:
@@ -254,9 +295,9 @@ class ProjectOperatorContext:
         budget = dict(self.effective_resource_budget)
         if budget and (
             set(budget) != expected_budget
-            or any(type(value) is not int for value in budget.values())
+            or any(type(value) is not int for key, value in budget.items() if not (key == "temp_bytes" and value is None))
             or any(value <= 0 for key, value in budget.items() if key not in {"temp_bytes", "wall_seconds"})
-            or budget.get("temp_bytes", 0) < 0
+            or (budget.get("temp_bytes") is not None and budget["temp_bytes"] < 0)
             or budget.get("wall_seconds", 0) < 0
         ):
             raise ExtensionError("项目算子有效资源预算无效")
@@ -1116,63 +1157,43 @@ def compile_project_operator_bundle(
 
 def verify_project_operator_bundle(path: str | Path) -> object:
     """离线复验 bundle 的文件闭包、合同和全部内容身份。"""
-    root = Path(path).resolve(strict=True)
-    if not root.is_dir():
-        raise ExtensionError("项目 bundle 必须是已存在目录")
-    manifest_path = root / "manifest.json"
-    if not manifest_path.is_file():
-        raise ExtensionError("项目 bundle 缺少 manifest.json")
-    expected_top = {"sources", "dependency-lock.json", "manifest.json", "COMMITTED"}
-    if {item.name for item in root.iterdir()} != expected_top:
-        raise ExtensionError("项目 bundle 顶层文件集合漂移")
-    for name in ("dependency-lock.json", "manifest.json", "COMMITTED"):
-        _assert_regular_file(root / name, root=root)
-    if not (root / "sources").is_dir() or not (root / "sources").resolve().is_relative_to(root):
-        raise ExtensionError("项目 bundle sources 必须位于 bundle 根目录内")
+    from research_pipeline.platform.project_bundle_content import verify_project_bundle_content
+    parsed = []
+
+    def validate_manifest(raw):
+        parsed.append(ProjectOperatorBundleManifest.from_dict(raw))
+
     try:
-        raw = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ExtensionError("项目 bundle manifest 无法读取") from exc
-    if not isinstance(raw, Mapping):
-        raise ExtensionError("项目 bundle manifest 必须是对象")
-    manifest = ProjectOperatorBundleManifest.from_dict(raw)
-    if root.name != manifest.bundle_hash:
-        raise ExtensionError("项目 bundle 目录名与身份不一致")
-    if (root / "COMMITTED").read_text(encoding="utf-8") != manifest.bundle_hash + "\n":
-        raise ExtensionError("项目 bundle COMMITTED 不一致")
-    lock_bytes = _canonical_bytes(dict(manifest.dependency_lock)) + b"\n"
-    if (root / "dependency-lock.json").read_bytes() != lock_bytes:
-        raise ExtensionError("项目 bundle dependency lock 漂移")
-    source_root = root / "sources"
-    descendants = _source_paths(source_root)
-    actual_paths = tuple(sorted(item.relative_to(source_root).as_posix() for item in descendants if item.is_file()))
-    declared_paths = tuple(str(item["path"]) for item in manifest.source_files)
-    if actual_paths != declared_paths:
-        raise ExtensionError("项目 bundle 源码文件集合漂移")
-    allowed_directories = {""}
-    for relative in declared_paths:
-        parent = PurePosixPath(relative).parent
-        while parent.as_posix() != ".":
-            allowed_directories.add(parent.as_posix())
-            parent = parent.parent
-    actual_directories = {item.relative_to(source_root).as_posix() for item in descendants if item.is_dir()}
-    if actual_directories != allowed_directories - {""}:
-        raise ExtensionError("项目 bundle 源码目录集合漂移")
-    for item in manifest.source_files:
-        file_path = source_root / str(item["path"])
-        _assert_regular_file(file_path, root=source_root.resolve(strict=True))
-        data = file_path.read_bytes()
-        if len(data) != item["size"] or _sha256(data) != item["sha256"]:
-            raise ExtensionError(f"项目 bundle 源码漂移: {item['path']}")
-    if typed_canonical_hash({"source_files": [dict(item) for item in manifest.source_files]}) != manifest.source_tree_hash:
-        raise ExtensionError("项目 bundle source tree hash 不一致")
-    if typed_canonical_hash(dict(manifest.dependency_lock)) != manifest.dependency_lock_hash:
-        raise ExtensionError("项目 bundle dependency lock hash 不一致")
+        verify_project_bundle_content(path, manifest_validator=validate_manifest)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise ExtensionError(str(exc)) from exc
+    manifest = parsed[0]
+    source_root = Path(path).resolve(strict=True) / "sources"
     _validate_imports(source_root, tuple(dict(item) for item in manifest.source_files), manifest.dependency_lock)
     return manifest
 
 
+def build_project_model_adapter(bundle_path, module, class_name, *,
+                                network_attribute="GAT_model", batch_contract="daily_cross_section"):
+    """将模型入口绑定到已构建的项目源码闭包，供候选和计划冻结。"""
+    root = Path(bundle_path).resolve(strict=True)
+    manifest = verify_project_operator_bundle(root)
+    if (not isinstance(module, str) or not _MODULE_PATTERN.fullmatch(module)
+            or not isinstance(class_name, str) or not _FUNCTION_PATTERN.fullmatch(class_name)
+            or not isinstance(network_attribute, str) or not _FUNCTION_PATTERN.fullmatch(network_attribute)):
+        raise ExtensionError("项目模型入口或网络属性无效")
+    relative = Path(*module.split(".")).with_suffix(".py").as_posix()
+    if relative not in {item["path"] for item in manifest.source_files}:
+        raise ExtensionError("项目模型模块不在bundle源码闭包")
+    if batch_contract not in {"sample", "daily_cross_section"}:
+        raise ExtensionError("项目模型批次合同无效")
+    return {"schema": "project-qlib-model-adapter-v1", "project_bundle_path": str(root),
+            "project_bundle_hash": manifest.bundle_hash, "module": module, "class": class_name,
+            "network_attribute": network_attribute, "batch_contract": batch_contract}
+
+
 __all__ = [
+    "build_project_model_adapter",
     "PROJECT_OPERATOR_ABI_VERSION",
     "PROJECT_OPERATOR_BUNDLE_VERSION",
     "PROJECT_OPERATOR_DECLARATION_VERSION",

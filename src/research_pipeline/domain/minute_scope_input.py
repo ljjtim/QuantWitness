@@ -14,6 +14,8 @@ from types import MappingProxyType
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from research_pipeline.platform.arrow_rows import record_batch_rows
+
 from .minute_rule_snapshots import (
     MinuteRuleSnapshot, MinuteRuleSnapshotBundle, MinuteRuleSnapshotError,
     MinuteRuleSource, _date as _rule_date, _datetime as _rule_datetime,
@@ -135,7 +137,7 @@ def _rows(directory: Path, filename: str):
         if not parquet.schema_arrow.equals(_SCHEMAS[filename], check_metadata=False):
             raise MinuteRuleSnapshotError(f"分钟输入 {filename} 列或类型不符")
         for batch in parquet.iter_batches(batch_size=2048):
-            yield from batch.to_pylist()
+            yield from record_batch_rows(batch)
     except (pa.ArrowException, OSError) as exc:
         raise MinuteRuleSnapshotError(f"分钟输入 {filename} 无法读取") from exc
 
@@ -146,11 +148,7 @@ def _index(items, value):
     return items[value]
 
 
-def load_minute_scope_input(root, reference) -> MinuteScopeInput:
-    """逐批恢复 typed bundle；完整身份由既有构造器复核，不选取版本。"""
-    reference = validate_minute_scope_reference(reference)
-    root = Path(root)
-    manifest = _manifest(root, reference)
+def _load_scope_calendar(root, reference, manifest):
     directory = _directory(root, reference)
     instruments = []
     rule_instruments = []
@@ -191,26 +189,61 @@ def load_minute_scope_input(root, reference) -> MinuteScopeInput:
         inventory_evidence_hash=meta["inventory_evidence_hash"], policies=tuple(policies),
         bundle_hash=reference["calendar_hash"], contract_version=meta["contract_version"],
     )
+    return calendar, tuple(rule_instruments)
+
+
+def load_minute_scope_calendar(root, reference) -> SessionPolicyBundle:
+    """只恢复冻结来源的完整日历，不读取或解码规则表。"""
+    reference = validate_minute_scope_reference(reference)
+    root = Path(root)
+    manifest = _manifest(root, reference)
+    calendar, _ = _load_scope_calendar(root, reference, manifest)
+    return calendar
+
+
+def load_minute_scope_input(root, reference) -> MinuteScopeInput:
+    """逐批恢复 typed bundle；完整身份由既有构造器复核，不选取版本。"""
+    reference = validate_minute_scope_reference(reference)
+    root = Path(root)
+    manifest = _manifest(root, reference)
+    directory = _directory(root, reference)
+    calendar, rule_instruments = _load_scope_calendar(root, reference, manifest)
+    # 列式字典在解码后继续共享；仅共享不可变标量，嵌套载荷保持独立。
+    share_text = lru_cache(maxsize=16384)(lambda value: value)
+
+    @lru_cache(maxsize=65536)
+    def scalar_pair(key, value_type, encoded):
+        value = float.fromhex(encoded) if value_type is float else encoded
+        return (share_text(key), share_text(value) if value_type is str else value)
+
+    def parameter_pairs(payload):
+        for key, value in sorted(payload.items()):
+            if type(value) in (str, int, float, bool, type(None)):
+                yield scalar_pair(key, type(value), value.hex() if type(value) is float else value)
+            else:
+                yield (share_text(key), value)
+
     parameters = []
     for row in _rows(directory, "parameters.parquet"):
         payload = json.loads(row["parameters"])
         if not isinstance(payload, dict):
             raise MinuteRuleSnapshotError("分钟输入参数模板必须是对象")
-        parameters.append(tuple(sorted(payload.items())))
+        parameters.append(tuple(parameter_pairs(payload)))
     sources = tuple(MinuteRuleSource.from_dict(row) for row in _rows(directory, "sources.parquet"))
     snapshots = []
     # 同次加载按原始文本复用解析，保留不同时区表示和首次解析的拒绝行为。
     parse_rule_date = lru_cache(maxsize=4096)(_rule_date)
     parse_rule_datetime = lru_cache(maxsize=4096)(_rule_datetime)
+    share_sources = lru_cache(maxsize=16384)(lambda values: tuple(share_text(value) for value in values))
     for row in _rows(directory, "rules.parquet"):
         snapshots.append(MinuteRuleSnapshot(
-            rule_id=row["rule_id"], revision=row["revision"], instrument_id=row["instrument_id"],
-            asset_class=row["asset_class"], status=row["status"],
+            rule_id=share_text(row["rule_id"]), revision=row["revision"], instrument_id=share_text(row["instrument_id"]),
+            asset_class=share_text(row["asset_class"]), status=share_text(row["status"]),
             effective_from=parse_rule_date(row["effective_from"], "effective_from"),
             effective_to=parse_rule_date(row["effective_to"], "effective_to"),
             available_at=None if row["available_at"] is None else parse_rule_datetime(row["available_at"], "available_at"),
-            source_ids=tuple(row["source_ids"]), parameters=_index(parameters, row["parameter_index"]),
-            unsupported_reason=row["unsupported_reason"], contract_version=row["contract_version"],
+            source_ids=share_sources(tuple(row["source_ids"])), parameters=_index(parameters, row["parameter_index"]),
+            unsupported_reason=share_text(row["unsupported_reason"]), contract_version=share_text(row["contract_version"]),
         ))
     meta = manifest["rules"]
     rules = MinuteRuleSnapshotBundle(
@@ -290,18 +323,33 @@ def write_minute_scope_input(root, *, name, calendar: SessionPolicyBundle,
     _write_rows(directory, "sources.parquet", (item.to_dict() for item in rules.sources))
     parameter_values = []
     parameter_indices = {}
+    shared_parameters = {}
 
     def rule_rows():
         for rule in rules.rules:
-            row = rule.to_dict()
-            # JSON 保留 null、bool、整数、浮点和嵌套列表/对象，不用 Arrow 推断异构参数。
-            encoded = json.dumps(row.pop("parameters"), ensure_ascii=False, sort_keys=True,
-                                 separators=(",", ":"), allow_nan=False)
-            if encoded not in parameter_indices:
-                parameter_indices[encoded] = len(parameter_values)
-                parameter_values.append(encoded)
-            row["parameter_index"] = parameter_indices[encoded]
-            yield row
+            identity = id(rule.parameters)
+            parameter_index = shared_parameters.get(identity)
+            if parameter_index is None:
+                # 只在本次写入中复用共享的不可变标量模板；嵌套参数按当前内容编码。
+                encoded = json.dumps(dict(rule.parameters), ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":"), allow_nan=False)
+                if encoded not in parameter_indices:
+                    parameter_indices[encoded] = len(parameter_values)
+                    parameter_values.append(encoded)
+                parameter_index = parameter_indices[encoded]
+                if all(type(value) in (str, int, float, bool, type(None)) for _, value in rule.parameters):
+                    if len(shared_parameters) >= 8192:
+                        shared_parameters.clear()
+                    shared_parameters[identity] = parameter_index
+            yield {
+                "contract_version": rule.contract_version, "rule_id": rule.rule_id,
+                "revision": rule.revision, "instrument_id": rule.instrument_id,
+                "asset_class": rule.asset_class, "status": rule.status,
+                "effective_from": rule.effective_from.isoformat(), "effective_to": rule.effective_to.isoformat(),
+                "available_at": None if rule.available_at is None else rule.available_at.isoformat(timespec="seconds"),
+                "source_ids": list(rule.source_ids), "unsupported_reason": rule.unsupported_reason,
+                "parameter_index": parameter_index,
+            }
 
     _write_rows(directory, "rules.parquet", rule_rows())
     _write_rows(directory, "parameters.parquet", ({"parameters": item} for item in parameter_values))

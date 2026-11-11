@@ -84,6 +84,7 @@ def compile_cn_stock_corporate_action_rows(
     trading_sessions: Sequence[date],
     allow_post_effective_visibility: bool = False,
     contract_version: int = 1,
+    missing_date_policy: str = "error",
 ) -> tuple[CorporateAction, ...]:
     """编译聚宽 A 股实施方案。
 
@@ -91,9 +92,14 @@ def compile_cn_stock_corporate_action_rows(
     cash_arrival_date、stock_arrival_date、transfer_arrival_date 分别来自
     a_bonus_date、dividend_arrival_date、a_transfer_arrival_date。
     只要求非零分配对应的到账字段，股份可卖日使用 listing_date。
+    v2 显式使用 omit_event 时，空日期不生成对应权益事件，其他分配独立保留。
     """
     if contract_version not in {1, 2}:
         raise SimulationContractError("公司行动编译 contract_version 不受支持")
+    if missing_date_policy not in {"error", "omit_event"}:
+        raise SimulationContractError("公司行动 missing_date_policy 不受支持")
+    if contract_version != 2 and missing_date_policy != "error":
+        raise SimulationContractError("忽略空日期仅适用于 v2 金融权益，不适用于复权事件")
     sessions = tuple(sorted(set(trading_sessions)))
     if not sessions:
         raise SimulationContractError("公司行动编译缺少交易日历")
@@ -159,7 +165,9 @@ def compile_cn_stock_corporate_action_rows(
             "CNY",
             "stock",
         ).instrument_hash
-        if cash_per_ten:
+        if cash_per_ten and not (
+            missing_date_policy == "omit_event" and row.get("cash_arrival_date") is None
+        ):
             cash_due = (
                 _required_date(row.get("cash_arrival_date"), "cash_arrival_date")
                 if contract_version == 2 else max(
@@ -199,6 +207,10 @@ def compile_cn_stock_corporate_action_rows(
             numerator, denominator = 100_000 + extra_scaled, 100_000
             divisor = gcd(numerator, denominator)
             if contract_version == 2:
+                if missing_date_policy == "omit_event" and (
+                    row.get(arrival_field) is None or row.get("listing_date") is None
+                ):
+                    continue
                 arrival = _required_date(row.get(arrival_field), arrival_field)
                 sellable = _required_date(row.get("listing_date"), "listing_date")
                 stock_due = arrival

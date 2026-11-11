@@ -37,11 +37,10 @@ from research_pipeline.packages import (
     verify_package_source_provenance,
 )
 from research_pipeline.platform import MainlineError, typed_canonical_hash
-from research_pipeline.platform.operator_contracts import OperatorGraphRecipe
 from research_pipeline.platform.metric_contracts import MetricDefinition
 from research_pipeline.runtime import ResourceBudget
 from research_pipeline.packages.operator_graph import (
-    _validate_operator_graph_spec, compile_operator_graph_package,
+    prepare_operator_graph_package, validate_operator_graph_scopes, bind_operator_graph_platform,
 )
 from research_pipeline.runtime.operator_registry import (
     build_mainline_operator_registry,
@@ -49,7 +48,10 @@ from research_pipeline.runtime.operator_registry import (
 )
 from research_pipeline.extensions import build_admitted_operator_registry
 
-from .research_plan_store import publish_operator_graph_research_plan
+from .research_plan_store import (
+    publish_operator_graph_research_plan, minute_scan_parameters, minute_scan_budget,
+    validate_minute_scan_plans,
+)
 
 
 PLAN_FAILURE_VERSION = "research-plan-failure-v1"
@@ -89,12 +91,18 @@ def prepare_package(args, *, documents=None, package=None):
     """编译并发布计划，同次执行直接使用返回的准入对象。"""
     if package is None:
         package = load_research_package(args.package, documents=documents)
+    from .model_import_preparation import freeze_model_import_sources
+    package = freeze_model_import_sources(package)
     if package.builder_id != OPERATOR_GRAPH_BUILDER_ID:
         raise ValueError("ResearchPackage builder 不受支持；请使用当前 operator graph 模板")
     missing = [
         name for name in ("catalog_lock", "output")
         if not getattr(args, name, None)
     ]
+    if (any(node.get("operator_id") == "data.minute.scan"
+            for node in package.spec_payload.get("graph", {}).get("nodes", ()))
+            and not getattr(args, "minute_data_root", None)):
+        missing.append("minute_data_root")
     archive = getattr(args, "input_snapshot_manifest", None)
     if archive and (getattr(args, "data_db", None) or getattr(args, "source_db", None)):
         raise ValueError("--input-snapshot-manifest 与 --data-db/--source-db 互斥")
@@ -122,6 +130,8 @@ def prepare_package(args, *, documents=None, package=None):
         roles["input_snapshot_manifest_input"] = archive
     if getattr(args, "data_db", None):
         roles["source_database_input"] = args.data_db
+    if getattr(args, "minute_data_root", None):
+        roles["minute_data_input"] = args.minute_data_root
     for index, binding in enumerate(getattr(args, "source_db", ())):
         _, path = _parse_source_db_binding(binding)
         roles[f"source_database_{index}_input"] = path
@@ -152,16 +162,20 @@ def _execute_operator_graph(
 ):
     query_result = compile_package_queries(package)
     _reject_audit_query_formal_consumers(package, query_result=query_result)
+    prepared_graph = prepare_operator_graph_package(
+        package, query_result=query_result, admission=registry,
+    )
+    validate_operator_graph_scopes(package, prepared_graph)
+    recipe = prepared_graph.plan.recipe
     catalog = load_compiled_catalog(args.catalog_lock)
-    _validate_operator_graph_spec(package.spec_payload)
-    recipe = OperatorGraphRecipe.from_dict(package.spec_payload["graph"])
     # 数据预算与最终 DAG 同取 OperatorDefinition，其他节点只在正式编译时构建。
     data_nodes = []
     for node in recipe.nodes:
         if node.operator_id not in {"data.columnar.materialize", "data.minute.scan"}:
             continue
         spec = registry.require_operator(node.operator_id, node.operator_version)
-        profile = dict(spec.resource_profile)
+        from research_pipeline.runtime.operator_registry import effective_node_resource_profile
+        profile = effective_node_resource_profile(node, spec)
         profile.pop("process_slots")
         data_nodes.append(SimpleNamespace(node_id=node.node_id, resource_budget=ResourceBudget(**profile)))
     execution_budgets = bind_data_plane_request_budgets(
@@ -175,6 +189,7 @@ def _execute_operator_graph(
         from research_pipeline.data_plane.archived_inputs import (
             load_archived_input_manifest, admit_archived_queries,
         )
+        from research_pipeline.packages.project_strategy_admission import futures_query_calendars
 
         input_snapshot_manifest = load_archived_input_manifest(archive_path)
         source_roles = {f"archive_{key}_input": item["root"]
@@ -186,6 +201,8 @@ def _execute_operator_graph(
         admitted, execution_estimates, platform_admission = admit_archived_queries(
             dict(zip(query_result.request_ids, query_result.queries, strict=True)), catalog=catalog,
             manifest=input_snapshot_manifest, execution_budgets=execution_budgets,
+            session_calendars=futures_query_calendars(package,
+                dict(zip(query_result.request_ids, query_result.queries, strict=True))),
         )
         source_status = {"input_source": "archived_snapshot", "database_opened": False}
     else:
@@ -195,11 +212,17 @@ def _execute_operator_graph(
             query_result=query_result,
         )
         source_status = {"database_unchanged": database_unchanged}
-    package_plan = compile_operator_graph_package(
-        package, query_result=query_result, recipe=recipe,
-        admission=registry,
-        platform_admission=platform_admission,
+    minute_scan_plans = _admit_minute_scan_plans(
+        recipe, admitted, minute_data_root=getattr(args, "minute_data_root", None),
+        input_snapshot_manifest=input_snapshot_manifest,
     )
+    if minute_scan_plans:
+        platform_admission = {**platform_admission, "drift_proof_hash": typed_canonical_hash({
+            "source_drift_proof": platform_admission["drift_proof_hash"],
+            "minute_data_root": str(Path(args.minute_data_root).resolve()),
+            "minute_scan_plans": {key: value.to_dict() for key, value in sorted(minute_scan_plans.items())},
+        })}
+    package_plan = bind_operator_graph_platform(prepared_graph, platform_admission)
     if not isinstance(package_plan, OperatorGraphPlan):
         raise ValueError("operator graph builder 返回了错误计划类型")
     dag = compile_operator_graph_dag(package_plan, registry)
@@ -219,6 +242,8 @@ def _execute_operator_graph(
         args.output,
         package_id=package.package_id,
         minute_scope_inputs=package.minute_scope_inputs,
+        minute_scan_plans=minute_scan_plans,
+        minute_data_root=getattr(args, "minute_data_root", None),
         plan=package_plan,
         research_identity=package.research_identity_payload(plan_hash=package_plan.plan_hash),
         metric_contract=metric,
@@ -243,8 +268,48 @@ def _execute_operator_graph(
         "source_verification": source_verification,
         "output": str(output.directory),
         "execution_ready": True,
+        "node_resources": [
+            {"node_id": node.node_id, "resource_budget": node.resource_budget.to_dict()}
+            for node in dag.nodes
+        ],
         "next_action": "使用 run，提供相同来源、产物目录、固定时钟和 seed。",
     }, output
+
+
+def _admit_minute_scan_plans(recipe, admitted, *, minute_data_root, input_snapshot_manifest=None):
+    """准入实际月文件和预算，只读取路径、schema 与 footer。"""
+    from research_pipeline.data_plane.minute_scan import (
+        build_minute_scan_plan, _ASSET_SOURCE_DIRECTORIES,
+    )
+    from research_pipeline.packages.minute_scope_admission import minute_scan_scope_bindings
+
+    requests = minute_scan_parameters(recipe)
+    if not requests:
+        return {}
+    if minute_data_root is None:
+        raise PlanRequirementsMissingError(
+            "分钟准入必须显式提供 --minute-data-root", "minute_data_root",
+        )
+    root = Path(minute_data_root).resolve()
+    plans = {}
+    scopes = minute_scan_scope_bindings(recipe, {
+        key for key, query in admitted.items() if query.minute_asset_class == "cn_future"
+    })
+    for request_id, parameters in requests.items():
+        query = admitted[request_id]
+        source_directory = _ASSET_SOURCE_DIRECTORIES.get(query.minute_asset_class)
+        if source_directory is None:
+            raise ValueError(f"分钟 scan 资产类别不受支持: {query.minute_asset_class}")
+        plans[request_id] = build_minute_scan_plan(
+            query, source=root / source_directory, allowed_root=root,
+            budget=minute_scan_budget(parameters),
+            minute_scope=scopes.get(request_id),
+        )
+        if input_snapshot_manifest is not None:
+            from research_pipeline.data_plane.archived_inputs import validate_archived_minute_scan
+            validate_archived_minute_scan(input_snapshot_manifest, request_id, plans[request_id], root)
+    validate_minute_scan_plans(recipe, admitted, plans)
+    return plans
 
 
 def _reject_audit_query_formal_consumers(package, *, query_result=None) -> None:
@@ -325,6 +390,8 @@ def _auto_admit_queries(
     inspectors = {}
     factor_publication_id = None
     admitted = {}
+    from research_pipeline.packages.project_strategy_admission import futures_query_calendars
+    session_calendars = futures_query_calendars(package, dict(zip(query_result.request_ids, query_result.queries, strict=True)))
     execution_estimates = {}
     with ExitStack() as sessions:
         for request_id, query in zip(query_result.request_ids, query_result.queries, strict=True):
@@ -396,6 +463,7 @@ def _auto_admit_queries(
                 binding=resolved,
                 attestation=attestation,
                 factor_publication=factor_publication,
+                session_calendar=session_calendars.get(request_id),
             )
             scan_fields = plan.temporal_selection.required_scan_fields
             field_types = dict(plan.field_types)

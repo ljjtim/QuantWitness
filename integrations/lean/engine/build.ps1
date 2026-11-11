@@ -16,6 +16,8 @@ $python = Join-Path $LeanHome 'python-env/Scripts/python.exe'
 foreach ($file in @($dotnet, $python, (Join-Path $launcher 'QuantConnect.Lean.Launcher.dll'))) {
     if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "缺少已安装的 LEAN 依赖：$file" }
 }
+$syncRecord = Join-Path $LeanHome 'source-sync.json'
+if (Test-Path -LiteralPath $syncRecord) { Remove-Item -LiteralPath $syncRecord }
 foreach ($folder in @('temp', 'logs', 'cache/dotnet-home', 'cache/nuget', 'cache/http', 'cache/nuget-plugins', 'assets')) {
     New-Item -ItemType Directory -Path (Join-Path $buildRoot $folder) -Force | Out-Null
 }

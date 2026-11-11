@@ -22,6 +22,11 @@ _MINUTE_INSTANT = re.compile(
 )
 
 
+def minute_visible_end(end_at: datetime, as_of: datetime) -> datetime:
+    """完成分钟在 as_of 当刻可见，转换为半开区间终点。"""
+    return min(end_at, as_of + timedelta(microseconds=1))
+
+
 class QueryPurpose(str, Enum):
     FEATURE = "feature"
     LABEL = "label"
@@ -398,6 +403,13 @@ class QueryIR:
         raise QueryIRInvalidError("time_range 合同类型不受支持")
 
     @property
+    def visible_end_at(self) -> datetime:
+        """分钟查询实际可读范围的半开终点。"""
+        if not isinstance(self.time_range, InstantRangeV2):
+            raise QueryIRInvalidError("visible_end_at 只适用于分钟 QueryIR")
+        return minute_visible_end(self.time_range.end_at, self.as_of_instant)
+
+    @property
     def as_of_instant(self) -> datetime | None:
         if not isinstance(self.time_range, InstantRangeV2) or self.as_of is None:
             return None
@@ -440,6 +452,7 @@ __all__ = [
     "QueryPurpose",
     "SortKey",
     "UniverseSelection",
+    "minute_visible_end",
     "parse_aware_datetime",
     "resolve_as_of_cutoff",
 ]

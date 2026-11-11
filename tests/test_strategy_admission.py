@@ -47,7 +47,7 @@ def test_schedule_scope_checks_each_instrument_and_historical_day(case):
     declared = declaration(subscriptions=("scheduled",),
                            schedules=(StrategySchedule(schedule_id="late", basis="local_time", at="14:45:00"),))
     query = SimpleNamespace(universe=SimpleNamespace(instruments=(CODE, OTHER)),
-                            time_range=SimpleNamespace(start_at=START, end_at=END))
+                            time_range=SimpleNamespace(start_at=START, end_at=END), visible_end_at=END)
     if case in {"shared", "future_revision"}:
         validate_strategy_schedules(declared.to_dict(), calendar, query)
     else:

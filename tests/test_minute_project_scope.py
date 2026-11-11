@@ -188,6 +188,25 @@ def test_public_package_compilation_freezes_project_scope(tmp_path):
     with pytest.raises(ResearchPackageError, match='证券缺失'):
         compile_research_package(load_research_package(target), admission=registry)
 
+
+def test_causal_declaration_failure_precedes_full_rule_coverage(tmp_path, monkeypatch):
+    from research_pipeline.packages import compile_research_package, load_research_package, ResearchPackageError
+    from research_pipeline.packages import minute_scope_admission, project_causal_admission
+    from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
+
+    target, *_ = _project_package(tmp_path)
+
+    def invalid_declaration(*args, **kwargs):
+        raise ValueError('因果声明窗口错误')
+
+    def unexpected_coverage(*args, **kwargs):
+        pytest.fail('声明错误时不应运行完整规则覆盖')
+
+    monkeypatch.setattr(project_causal_admission, 'validate_project_causal_recipe', invalid_declaration)
+    monkeypatch.setattr(minute_scope_admission, 'validate_minute_scope_graph', unexpected_coverage)
+    with pytest.raises(ResearchPackageError, match='因果声明窗口错误'):
+        compile_research_package(load_research_package(target), admission=build_mainline_operator_registry())
+
 def test_project_scope_is_checked_on_bars_branch_only(tmp_path):
     from research_pipeline.packages.minute_scope_admission import validate_minute_scope_graph
     (sessions, rules) = project_inputs()
@@ -203,7 +222,7 @@ def test_project_scope_is_checked_on_bars_branch_only(tmp_path):
     adjusted = node('adjusted', 'research.bars.minute_adjust', {}, (('bars', 'bars'), ('snapshot', 'unrelated')))
     simulation = node('sim', 'finance.simulation.intraday', {'minute_scope': reference, 'rule_bundle_hash': rules.bundle_hash}, (('bars', 'adjusted'),))
     recipe = SimpleNamespace(nodes=(scan, unrelated, bars, adjusted, simulation))
-    query = SimpleNamespace(universe=SimpleNamespace(instruments=(CODE,)), time_range=SimpleNamespace(start_at=START, end_at=END))
+    query = SimpleNamespace(dataset_id='cn_equity.minute_bar', universe=SimpleNamespace(instruments=(CODE,)), time_range=SimpleNamespace(start_at=START, end_at=END), visible_end_at=END)
     validate_minute_scope_graph(recipe, {'prices': query}, scope_inputs=scope_inputs)
     bars.parameters.pop('minute_scope')
     from research_pipeline.packages import ResearchPackageError
@@ -264,7 +283,7 @@ def test_runtime_resample_preserves_project_calendar_and_consumes_it(tmp_path, m
     parameters = {node.node_id: dict(node.parameters) for node in plan.recipe.nodes}
     bars_node = next((node for node in plan.recipe.nodes if node.operator_id == 'research.bars.minute_resample'))
     parameters[bars_node.node_id]['interval_minutes'] = interval
-    environment = ResearchRunEnvironment(tmp_path, {}, {'stock_minute': admitted}, None, {}, root, tmp_path / 'artifacts', parameters, None, plan.fixed_clock, plan.root_seed, 1, None, {}, package.minute_scope_inputs)
+    environment = ResearchRunEnvironment(tmp_path, {}, {'stock_minute': admitted}, None, {}, root, tmp_path / 'artifacts', parameters, None, plan.fixed_clock, plan.root_seed, 1, None, {}, package.minute_scope_inputs, minute_scan_plans={'stock_minute': scan})
     context = SimpleNamespace(environment=environment, external_store=ExternalArtifactStore(tmp_path / 'external'), node=SimpleNamespace(node_id=bars_node.node_id, output_types=(('bars', 'data.minute-bars.v1'),)), effective_resource_budget=SimpleNamespace(memory_bytes=1024 ** 3))
     monkeypatch.setattr(minute_data, '_input_external_payload', lambda context, port: payload)
     if interval != 1:

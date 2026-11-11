@@ -20,6 +20,51 @@ from .adapters.common import _input_external_root
 SIGNAL_REQUIRED_COLUMNS = ("event_id", "entity_id", *CORE_FEATURE_TIME_COLUMNS)
 
 
+class StrategySignalReader:
+    """同次执行只读取一次文件结构与日期范围，每日只打开相交文件。"""
+
+    def __init__(self, context, *, columns):
+        self.root = _input_external_root(context, "signals")
+        self.commit = context.inputs["signals"].external_commit
+        if self.commit.artifact_type != "research.feature-set.v1":
+            raise ValueError("策略signals必须绑定正式Feature工件")
+        self.columns = tuple(columns)
+        self.files = []
+        zone = timezone(timedelta(hours=8))
+        for relative in sorted(self.commit.files):
+            if not relative.endswith(".parquet"):
+                continue
+            with pq.ParquetFile(self.root / relative) as parquet:
+                schema = parquet.schema_arrow
+                if not set((*SIGNAL_REQUIRED_COLUMNS, *columns)) <= set(schema.names):
+                    raise ValueError("策略signals缺少稳定键、证券、核心时间或声明列")
+                if any(not pa.types.is_integer(schema.field(column).type) for column in columns):
+                    raise ValueError("策略signals业务投影只能使用整数列")
+                if not pa.types.is_string(schema.field("event_id").type) or not (
+                        pa.types.is_string(schema.field("entity_id").type) or pa.types.is_null(schema.field("entity_id").type)):
+                    raise ValueError("策略signals event_id须为字符串，entity_id须为字符串或空值")
+                index = parquet.schema.names.index("decision_time")
+                bounds = []
+                for group in range(parquet.metadata.num_row_groups):
+                    statistics = parquet.metadata.row_group(group).column(index).statistics
+                    if statistics is None or not statistics.has_min_max:
+                        bounds = []
+                        break
+                    values = (statistics.min, statistics.max)
+                    if any(not isinstance(value, datetime) for value in values):
+                        bounds = []
+                        break
+                    bounds.extend((value.astimezone(zone) if value.tzinfo is not None else value).date()
+                                  for value in values)
+                self.files.append((relative, schema.remove_metadata(),
+                                   None if not bounds else (min(bounds), max(bounds))))
+
+    def files_for_day(self, day):
+        for relative, schema, bounds in self.files:
+            if day is None or bounds is None or bounds[0] <= day <= bounds[1]:
+                yield relative, schema
+
+
 def signal_payload(value):
     """保留原始Feature列值，时间与日期使用Result中的规范JSON表示。"""
     if isinstance(value, (datetime, date)):
@@ -89,7 +134,8 @@ class StrategySignalInputs:
 
 
 @contextmanager
-def open_strategy_signal_inputs(context, *, declaration, instruments, evidence_sink=None, day: date | None = None):
+def open_strategy_signal_inputs(context, *, declaration, instruments, evidence_sink=None, day: date | None = None,
+                                target_reader=None, signal_reader=None):
     """按UTC+8决策日下推读取，只在声明内存内排序，不生成中间文件。"""
     bindings = tuple(binding for binding in declaration.input_bindings if binding.source == "signals")
     if not bindings:
@@ -99,14 +145,18 @@ def open_strategy_signal_inputs(context, *, declaration, instruments, evidence_s
         from .portfolio_target_inputs import portfolio_target_rows
         if 'signals' in context.inputs or len(bindings) != 1 or bindings[0].columns != ('weight_ppb',):
             raise ValueError('组合目标须独占一个weight_ppb信号binding')
-        yield StrategySignalInputs(portfolio_target_rows(context, instruments=instruments, day=day),
-            bindings=bindings, instruments=instruments, max_context_bytes=declaration.limits.max_context_bytes)
+        rows = portfolio_target_rows(context, instruments=instruments, day=day, reader=target_reader)
+        try:
+            yield StrategySignalInputs(rows, bindings=bindings, instruments=instruments,
+                max_context_bytes=declaration.limits.max_context_bytes)
+        finally:
+            rows.close()
         return
-    root = _input_external_root(context, "signals")
-    commit = context.inputs["signals"].external_commit
-    if commit.artifact_type != "research.feature-set.v1":
-        raise ValueError("策略signals必须绑定正式Feature工件")
     columns = tuple(dict.fromkeys(column for binding in bindings for column in binding.columns))
+    reader = signal_reader or StrategySignalReader(context, columns=columns)
+    if reader.columns != columns:
+        raise ValueError("信号读取器列与冻结声明不一致")
+    root, commit = reader.root, reader.commit
     codes = {item.instrument_id for item in instruments}
     budget = context.effective_resource_budget
 
@@ -122,17 +172,7 @@ def open_strategy_signal_inputs(context, *, declaration, instruments, evidence_s
             raise ValueError("策略signals超过声明内存预算，禁止spill；请提高声明内存或使用显式保存路径")
 
     try:
-        for relative in sorted(commit.files):
-            if not relative.endswith(".parquet"):
-                continue
-            parquet = pq.ParquetFile(root / relative)
-            schema = parquet.schema_arrow
-            if not set((*SIGNAL_REQUIRED_COLUMNS, *columns)) <= set(schema.names):
-                raise ValueError("策略signals缺少稳定键、证券、核心时间或声明列")
-            if any(not pa.types.is_integer(schema.field(column).type) for column in columns):
-                raise ValueError("策略signals业务投影只能使用整数列")
-            if not pa.types.is_string(schema.field("event_id").type) or not (pa.types.is_string(schema.field("entity_id").type) or pa.types.is_null(schema.field("entity_id").type)):
-                raise ValueError("策略signals event_id须为字符串，entity_id须为字符串或空值")
+        for relative, schema in reader.files_for_day(day):
             expression = None
             if day is not None:
                 start = datetime.combine(day, time.min, timezone(timedelta(hours=8)))
@@ -141,7 +181,7 @@ def open_strategy_signal_inputs(context, *, declaration, instruments, evidence_s
                 if pa.types.is_timestamp(stamp) and stamp.tz is None:
                     start, end = start.replace(tzinfo=None), end.replace(tzinfo=None)
                 expression = (ds.field("decision_time") >= pa.scalar(start, type=stamp)) & (ds.field("decision_time") < pa.scalar(end, type=stamp))
-            scanner = ds.dataset(str(root / relative), format="parquet").scanner(
+            scanner = ds.dataset(str(root / relative), format="parquet", schema=schema).scanner(
                 columns=list(projected), filter=expression, batch_size=256,
                 batch_readahead=0, fragment_readahead=0, use_threads=False)
             for batch in scanner.to_batches():

@@ -12,6 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 CORE_ROOT_FILES = (
+    "CHANGELOG.md",
     "LICENSE", "MANIFEST.in", "NOTICE", "README.md", "pyproject.toml",
 )
 BUILD_SUPPORT_FILES = (
@@ -32,6 +33,8 @@ BUILD_SUPPORT_FILES = (
     "release/gate-a-protocol.json",
 )
 UNIT_CORE_TEST_FILES = (
+    "tests/test_turnover_factor_example.py",
+    "tests/test_custom_metric_example.py",
     "tests/test_atomic_directory.py",
     "tests/test_arrow_sort.py",
     "tests/test_minute_public_inventory.py",
@@ -62,6 +65,9 @@ PUBLIC_ROOT_FILES = (
 PUBLIC_DOC_FILES = (
     "docs/direct-inputs.md",
     "docs/lean-execution.md",
+    "docs/admission-execution.md",
+    "docs/lean-futures.md",
+    "docs/lean-futures-results.md",
     "docs/strategy-protocol.md",
     "docs/minute-project-scope.md",
     "docs/architecture/.gitignore",
@@ -79,13 +85,14 @@ PUBLIC_DOC_FILES = (
     'licenses/QLIB-MIT.txt',
     'licenses/RD-AGENT-MIT.txt',
 
-    "release/daily-cash-local-admission.md",
-    "release/model-resource-review.md",
-    "release/causal-performance-review.md",
-    "project_extensions/dai_zhu_er_jiu_metrics.md",
     "docs/framework-contracts.md",
     "docs/ai_workflow.md",
     "docs/architecture.md",
+    "docs/minute_simulation.md",
+    "docs/minute_reference_scope.md",
+    "docs/minute_operators.md",
+    "docs/minute_market_rules.md",
+    "docs/equity_minute_raw_volume_pit.md",
     "docs/architecture/README.md",
     "docs/architecture/research-pipeline-architecture.html",
     "docs/architecture/dataflow-research-lineage.html",
@@ -99,7 +106,6 @@ PUBLIC_DOC_FILES = (
     "docs/architecture/sources/workflow.json",
     "docs/architecture/sources/sequence.json",
     "docs/architecture/sources/lifecycle.json",
-    "docs/architecture/sources/detailed/overview.json",
     "docs/architecture/sources/detailed/architecture.json",
     "docs/architecture/sources/detailed/dataflow.json",
     "docs/architecture/sources/detailed/workflow.json",
@@ -107,8 +113,6 @@ PUBLIC_DOC_FILES = (
     "docs/architecture/sources/detailed/lifecycle.json",
     "docs/financial_simulation.md",
     "docs/spot_account.md",
-    "docs/explicit_orders.md",
-    "docs/minute_simulation.md",
     "docs/bar_tca.md",
     "docs/catalog.md",
     "docs/cli.md",
@@ -120,8 +124,6 @@ PUBLIC_DOC_FILES = (
     "docs/workspace-quickstart.md",
     "docs/index.md",
     "docs/minute_rule_provenance.md",
-    "docs/native_backtest_acceptance.md",
-    "docs/shared_futures.md",
     "docs/operations.md",
     "docs/release.md",
     "docs/external-acceptance.md",
@@ -136,6 +138,7 @@ PUBLIC_DOC_FILES = (
     "docs/minute-resource-budget.md",
     "docs/resource-history.md",
     "docs/walk_forward_model.md",
+    "docs/completed-model-input.md",
     "docs/qlib-model-results.md",
     "docs/qlib-report.md",
     "docs/qlib-expressions.md",
@@ -146,6 +149,7 @@ PUBLIC_DOC_FILES = (
     "docs/qlib-portfolio-risk.md",
 )
 CORE_DOC_FILES = (
+    "examples/custom_metric/README.md",
     "integrations/lean/README.md",
     "integrations/lean/engine/README.md",
     "examples/qlib_portfolio/README.md",
@@ -171,10 +175,12 @@ CORE_DOC_FILES = (
     "examples/qlib_risk/README.md",
     "project_extensions/qlib_portfolio_risk/README.md",
     "integrations/rdagent/docs/joint-research.md",
-    "integrations/rdagent/docs/dai-daily-research.md",
 )
 PUBLIC_EXAMPLE_PROJECTS = (
+    "turnover_factor",
+    "custom_metric",
     "lean_quickstart",
+    "lean_futures",
     "equity_cross_section",
     "etf_time_series",
     "event_study",
@@ -321,8 +327,14 @@ LEAN_INSTALL_FILES = (
     "integrations/lean/refresh-package.ps1",
     "integrations/lean/requirements.txt",
     "integrations/lean/run.ps1",
+    "integrations/lean/sync_installation.py",
     "integrations/lean/engine/Directory.Build.props",
     "integrations/lean/engine/LeanStrategyHost.cs",
+    "integrations/lean/engine/LeanFutureHost.cs",
+    "integrations/lean/engine/LeanFutureLifecycle.cs",
+    "integrations/lean/engine/china-rules/ChinaFutureHolding.cs",
+    "integrations/lean/engine/china-rules/ChinaFutureModels.cs",
+    "integrations/lean/engine/china-rules/ChinaFutureExecution.cs",
     "integrations/lean/engine/QuantWitnessLeanHost.csproj",
     "integrations/lean/engine/README.md",
     "integrations/lean/engine/ResearchLeanAlgorithm.py",
@@ -344,6 +356,8 @@ LEAN_INSTALL_FILES = (
     "integrations/lean/engine/parquet-direct/ParquetInput.csproj",
 )
 PUBLIC_INTEGRATION_FILES = (
+    "integrations/rdagent/tests/factor_space_fixture.py",
+    "integrations/rdagent/tests/test_factor_space.py",
     *LEAN_INSTALL_FILES,
     "integrations/rdagent/README.md",
     "integrations/rdagent/LICENSE",
@@ -438,8 +452,6 @@ PUBLIC_INTEGRATION_FILES = (
     "integrations/rdagent/src/quantwitness_rdagent/joint_loop.py",
     "integrations/rdagent/src/quantwitness_rdagent/joint_research.py",
     "integrations/rdagent/tests/test_joint_research.py",
-    "integrations/rdagent/tests/test_daily_dai_contract.py",
-    "integrations/rdagent/docs/dai-daily-research.md",
 )
 PUBLIC_TOOL_FILES = (
     *BUILD_SUPPORT_FILES,
@@ -581,7 +593,7 @@ def package_file_paths(project: Path) -> tuple[str, ...]:
             if (
                 package_name == "research_pipeline"
                 and package_relative[:2] == ("domain", "session_policies")
-                and path.name not in {"minute_reference_sessions.v6.json", "futures_session_close.v4.json"}
+                and path.name not in {"minute_reference_sessions.v6.json"}
             ):
                 continue
             if (
@@ -605,7 +617,8 @@ def core_release_paths(project: Path) -> tuple[str, ...]:
     root = _require_project(project)
     examples = tuple(
         path.relative_to(root).as_posix()
-        for path in (root / "examples/lean_quickstart").rglob("*")
+        for example in ("lean_quickstart", "lean_futures", "custom_metric", "turnover_factor")
+        for path in (root / "examples" / example).rglob("*")
         if path.is_file()
         and path.suffix.lower() in _PUBLIC_EXAMPLE_SUFFIXES
         and not any(part.lower() in _FORBIDDEN_PARTS for part in path.parts)
