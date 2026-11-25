@@ -15,7 +15,7 @@ from research_pipeline.research.modeling.sequence import build_sequence_windows
 from test_qlib_gru_contract import gru_candidate
 from test_qlib_model_integration import synthetic_samples, research_series
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="需要 ml-sequence 可选依赖")
+pytestmark = [pytest.mark.ml, pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="需要 ml-sequence 可选依赖")]
 
 
 def inputs(model_class="GRU"):

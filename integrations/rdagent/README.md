@@ -1,7 +1,7 @@
 # RD-Agent可选集成
 
 本集成让AI参与定义提取、代码实现和开发研究。
-可选包0.2.0配合QuantWitness 1.6.x使用。
+可选包0.3.0配合QuantWitness 1.7.x使用。
 QuantWitness执行研究包并发布Result。
 研究循环只读取正式开发指标。
 最终test/holdout与研究反馈隔离。

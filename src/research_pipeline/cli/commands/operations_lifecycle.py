@@ -44,8 +44,12 @@ def _execute(args) -> dict[str, object]:
             "protected": [asdict(item) for item in plan.protected],
             "quarantined": list(quarantined),
         }
+    from research_pipeline.application.research_run import verify_research_invocation
+
     report = run_research_doctor(
         run_roots=tuple(args.run_root),
+        lean_homes=tuple(args.lean_home),
+        invocation_verifier=verify_research_invocation,
     )
     findings = [asdict(item) for item in report.findings]
     if report.status == "fail":

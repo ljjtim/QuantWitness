@@ -21,12 +21,16 @@ def _timestamp(value, label):
     return stamp
 
 
+def is_lean_futures_row(row):
+    return row.get("asset_class") == "cn_future" or row.get("margin") is not None
+
+
 def lean_research_daily(daily, *, account_events=(), final_account=None):
     """保留原始账户字段，仅为研究收益增加权益与实际估值时间投影。"""
     days = [dict(row) for row in daily]
     if not days:
         return days
-    futures = [row.get("asset_class") == "cn_future" or "margin" in row for row in days]
+    futures = [is_lean_futures_row(row) for row in days]
     if any(futures) and not all(futures):
         raise ValueError("LEAN日终不能混用期货与现货账户")
     if not all(futures):
@@ -100,8 +104,7 @@ def lean_trade_totals(dates, orders, *, fills=None, futures=False):
     if futures and fills is None:
         raise ValueError("LEAN期货指标必须提供正式fills表，空表也须显式提供")
     if futures:
-        for event in orders:
-            order_ids.add(event["order_id"])
+        order_ids.update(event["order_id"] for event in orders)
     count = 0
     for event in fills if futures else orders:
         order_ids.add(event["order_id"])
@@ -133,7 +136,6 @@ def lean_trade_totals(dates, orders, *, fills=None, futures=False):
         gross[day] += abs(quantity) * price * multiplier
         fees_by_day[day] += fee
         filled_ids.add(event["order_id"])
-        order_ids.add(event["order_id"])
         count += 1
     return {"gross_by_day": gross, "fees_by_day": fees_by_day,
             "fee_total": sum(fees_by_day.values()), "fill_count": len(fill_ids) if futures else count,

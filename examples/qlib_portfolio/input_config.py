@@ -65,9 +65,9 @@ def load_input_config(path, *, mode, feature_fields=()):
     visible = datetime.fromisoformat(finance["policy_available_at"])
     if visible.utcoffset() is None or visible > datetime.fromisoformat(days[0] + "T00:00:00+08:00"):
         raise ValueError("金融规则在研究起点尚不可见")
-    from research_pipeline.platform.market_rule_defaults import resolve_cn_etf_daily_market_rule_profile
-    profile = resolve_cn_etf_daily_market_rule_profile(finance["market_rule_profile_id"])
-    profile.require_covers(date.fromisoformat(days[0]), date.fromisoformat(days[-1]))
+    profile_id = finance["market_rule_profile_id"]
+    if not isinstance(profile_id, str) or profile_id != "cn_etf.daily.curated.v1":
+        raise ValueError(f"不受支持的ETF日频市场规则配置：{profile_id}")
     catalog = CompiledCatalog.load(config["catalog_lock"])
     archive = load_archived_input_manifest(config["input_snapshot_manifest"])
     expected_requests = {'daily_feature', 'daily_label'}
@@ -81,9 +81,12 @@ def load_input_config(path, *, mode, feature_fields=()):
             if key in execution:
                 target = Path(execution[key])
                 execution[key] = str((target if target.is_absolute() else path.parent/target).resolve())
-        execution_ids = {execution[key] for key in ('bars_request_id', 'open_request_id', 'factor_request_id', 'corporate_action_request_id')}
-        if len(execution_ids) != 4 or execution_ids & expected_requests:
-            raise ValueError('组合四类执行来源须独立命名且不能替代模型请求')
+        request_keys = ['bars_request_id', 'open_request_id', 'factor_request_id', 'corporate_action_request_id']
+        if 'trading_calendar_request_id' in execution:
+            request_keys.append('trading_calendar_request_id')
+        execution_ids = {execution[key] for key in request_keys}
+        if len(execution_ids) != len(request_keys) or execution_ids & expected_requests:
+            raise ValueError('组合执行来源须独立命名且不能替代模型请求')
         expected_requests |= execution_ids
     if set(archive["requests"]) != expected_requests:
         raise ValueError('归档请求必须与模型及显式LEAN来源声明完全一致')
@@ -96,7 +99,8 @@ def load_input_config(path, *, mode, feature_fields=()):
         if request_id in execution_ids:
             from research_pipeline.packages.project_strategy_admission import validate_daily_strategy_plan, validate_daily_open_plan
             execution = config['lean_execution']
-            if query.purpose.value == 'audit' or set(query.universe.instruments) != set(codes):
+            is_calendar = request_id == execution.get('trading_calendar_request_id')
+            if query.purpose.value == 'audit' or (not is_calendar and set(query.universe.instruments) != set(codes)):
                 raise ValueError('LEAN执行来源不得为AUDIT且须覆盖相同证券')
             binding = catalog.bindings.get(entry['binding_id'])
             if not binding or binding['status'] != 'approved' or binding['dataset_id'] != query.dataset_id:
@@ -109,6 +113,9 @@ def load_input_config(path, *, mode, feature_fields=()):
             elif request_id == execution['factor_request_id']:
                 if not {'fld_etf_date', 'fld_etf_code', 'fld_etf_close', 'fld_etf_factor'} <= set(query.field_ids):
                     raise ValueError('ETF快照来源须包含正式date/code/close/factor字段')
+            elif is_calendar:
+                if query.dataset_id != 'cn_market.trading_sessions' or 'fld_cn_trade_day' not in query.field_ids:
+                    raise ValueError('ETF公司行动日历须包含正式市场交易日字段')
             elif query.dataset_id != 'cn_etf.corporate_action':
                 raise ValueError('ETF行动来源须声明正式公司行动dataset')
             request = query.to_dict()

@@ -239,7 +239,7 @@ def test_package_export_does_not_require_study_reproduction_proof(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    import research_pipeline.results as results_module
+    from research_pipeline.application import result_delivery as results_module
 
     package_path = tmp_path / "package"
     package_path.mkdir()
@@ -255,14 +255,13 @@ def test_package_export_does_not_require_study_reproduction_proof(
     )
     plan = SimpleNamespace(plan_hash="b" * 64, queries=(object(),))
     monkeypatch.setattr(packages_module, "load_research_package", lambda _, **_kwargs: package)
-    monkeypatch.setattr(research_package, "_compile_trusted_context", lambda *_: plan)
     monkeypatch.setattr(
         packages_module,
         "verify_package_source_provenance",
         lambda *_: {"sources": []},
     )
     monkeypatch.setattr(PathRolePolicy, "validate", lambda *_, **__: None)
-    context = object()
+    context = SimpleNamespace(snapshot=SimpleNamespace(bundle=SimpleNamespace(plan_hash=plan.plan_hash)))
     output = tmp_path / "output"
     monkeypatch.setattr(
         results_module,
@@ -276,9 +275,9 @@ def test_package_export_does_not_require_study_reproduction_proof(
         if received is context and Path(destination) == output
         else (_ for _ in ()).throw(AssertionError("export 参数无效")),
     )
-    monkeypatch.setattr(research_package, "_validate_package_result", lambda *_: None)
+    monkeypatch.setattr(packages_module, "validate_package_result", lambda *_: None)
     args = Namespace(
-        package_command="export-result",
+        command="export-result",
         package=str(package_path),
         result=str(tmp_path / "result"),
         result_store=str(tmp_path / "result-store"),
@@ -286,6 +285,6 @@ def test_package_export_does_not_require_study_reproduction_proof(
         source_archive_root=None,
     )
 
-    result = research_package._execute(args)
+    result = results_module._execute(args)
 
     assert result["output"] == str(output)

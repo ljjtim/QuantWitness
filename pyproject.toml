@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quantwitness"
-version = "1.6.0"
+version = "1.7.0"
 description = "AI-assisted quantitative research and backtesting with reproducible results"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -48,7 +48,7 @@ where = ["src"]
 exclude = ["research_pipeline.catalog.definitions*", "research_pipeline.catalog.default_lock*"]
 
 [tool.setuptools.package-data]
-"research_pipeline" = ["capabilities.json", "gate_ia_protocol.json"]
+"research_pipeline" = ["capabilities.json"]
 "research_pipeline.packages" = [
   "templates/*.yaml",
   "templates/sources/*.yaml",
@@ -71,6 +71,9 @@ exclude = ["research_pipeline.catalog.definitions*", "research_pipeline.catalog.
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
+  "integration: 运行真实子进程、主链或多节点流程的集成测试",
+  "distribution: 构建、安装或核对发行包闭包的测试",
+  "ml: 需要可选模型依赖或真实模型训练的测试",
   "duckdb: 需要 DuckDB 运行时或 DuckDB fixture 的测试",
   "external_factor: 需要 monorepo 中 factor_calc 的外部集成边界测试",
   "archive_acceptance: 只复核历史 release/验收材料的归档测试",

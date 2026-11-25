@@ -55,6 +55,7 @@ public sealed partial class ChinaAStockModels
 
     public void InitializeSecurity(Security security)
     {
+        if (security.Type == SecurityType.Base) return;
         if (security.Type != SecurityType.Equity || security.QuoteCurrency.Symbol != "CNY"
             || _assetClass(security.Symbol) is not ("cn_stock" or "cn_etf"))
             throw new NotSupportedException("中国现货规则仅接收人民币A股或ETF");
@@ -71,10 +72,14 @@ public sealed partial class ChinaAStockModels
     public decimal SellableQuantity(Security security, DateTime utcTime)
     {
         if (IsDelisted?.Invoke(security.Symbol, utcTime) == true) return 0m;
+        return SellableQuantity(security, utcTime, Rule(security.Symbol, utcTime));
+    }
+
+    private decimal SellableQuantity(Security security, DateTime utcTime, ChinaRule rule)
+    {
         var day = _book.TradingDate(utcTime);
         var locked = _lockedBonusQuantity(security.Symbol);
         if (locked < 0 || locked != decimal.Truncate(locked)) throw new InvalidOperationException("外部锁定股份必须为非负整数");
-        var rule = Rule(security.Symbol, utcTime);
         var today = rule.SettlementDays == 0 ? 0 : _buys.GetValueOrDefault((security.Symbol, day));
         return Math.Max(0, security.Holdings.Quantity - today - locked);
     }
@@ -104,7 +109,7 @@ public sealed partial class ChinaAStockModels
         if (budget.HasValue && (!buy || budget <= 0 || budget * 100 != decimal.Truncate(budget.Value * 100)))
             return "BudgetCny 仅支持买单，须为正数且精确到分";
         var quantity = Math.Abs(signed);
-        var sellable = buy ? 0 : SellableQuantity(security, utc);
+        var sellable = buy ? 0 : SellableQuantity(security, utc, rule);
         if (!buy && quantity - Cost(order.Id).Quantity > sellable) return "超过 T+1 可卖数量或存在锁定送股";
         if (!rule.Grid(buy, order.Type != OrderType.Limit).Accepts(quantity, sellable + Cost(order.Id).Quantity))
             return "申报数量不满足历史最小量、步长、上限或零股规则";
@@ -197,11 +202,23 @@ public sealed partial class ChinaAStockModels
         }
         var bar = security.Cache.GetData<TradeBar>();
         var dailyOpen = bar is DailyOpenBar;
-        if (bar == null || (!dailyOpen && bar.Period != TimeSpan.FromMinutes(1)) || bar.IsFillForward)
+        if (bar?.IsFillForward == true)
+        {
+            fill.FillQuantity = 0; fill.FillPrice = 0; fill.Status = order.Status;
+            fill.OrderFee = OrderFee.Zero; fill.Message = "填充行情不提供实际成交机会";
+            return fill;
+        }
+        if (bar == null || (!dailyOpen && bar.Period != TimeSpan.FromMinutes(1)))
             throw new InvalidOperationException("仅支持真实、完整、非填充的一分钟 TradeBar");
         var start = bar.Time.ConvertToUtc(security.Exchange.TimeZone);
         var end = bar.EndTime.ConvertToUtc(security.Exchange.TimeZone);
-        if (end > utc || end != utc) throw new InvalidOperationException("行情分钟尚未完成或未与当前时钟对齐");
+        if (end > utc) throw new InvalidOperationException("行情分钟尚未完成");
+        if (end < utc)
+        {
+            fill.FillQuantity = 0; fill.FillPrice = 0; fill.Status = order.Status;
+            fill.OrderFee = OrderFee.Zero; fill.Message = "当前时点没有新的完整分钟，保留委托等待";
+            return fill;
+        }
         var rule = Rule(security.Symbol, utc);
         rule.RequireVisibleReference(utc);
         if (order.Type == OrderType.MarketOnOpen && (rule.AvailableAt.UtcDateTime > start || rule.ValidFrom?.UtcDateTime > start))
@@ -288,11 +305,10 @@ public sealed class ChinaAStockFillModel(ChinaAStockModels models) : EquityFillM
         if (!ChinaAStockModels.Supported(parameters.Order.Type)) throw Unsupported(parameters.Order);
         var configs = parameters.ConfigProvider.GetSubscriptionDataConfigs(parameters.Security.Symbol);
         if (configs.Count == 0 || configs.Any(c => c.Type != typeof(TradeBar) || c.Resolution is not (Resolution.Minute or Resolution.Daily)
-            || c.DataNormalizationMode != DataNormalizationMode.Raw || c.FillDataForward || c.ExtendedMarketHours))
+            || c.DataNormalizationMode != DataNormalizationMode.Raw || c.ExtendedMarketHours))
             throw new NotSupportedException("仅支持 Raw、非填充、非延长时段的股票日线或一分钟 TradeBar 订阅");
-        if (configs.Any(c => c.Resolution == Resolution.Daily) && (parameters.Order.Type != OrderType.Market
-            || (parameters.Order.Properties as ChinaOrderProperties)?.DailyOpenDecision != true))
-            throw new NotSupportedException("日线仅支持已可见前日日线决策后的原生Market开盘执行");
+        if (configs.Any(c => c.Resolution == Resolution.Daily) && parameters.Order.Type != OrderType.Market)
+            throw new NotSupportedException("日线仅支持原生Market开盘执行；Limit及显式MOO不在日线支持范围");
         return base.Fill(parameters);
     }
     public override OrderEvent MarketFill(Security security, MarketOrder order)
@@ -315,24 +331,33 @@ public sealed class ChinaAStockFillModel(ChinaAStockModels models) : EquityFillM
 
 public sealed class ChinaAStockBrokerageModel(ChinaAStockModels models) : DefaultBrokerageModel(AccountType.Cash)
 {
-    public override bool CanSubmitOrder(Security security, Order order, out BrokerageMessageEvent message)
+    public override bool PreserveMarketOrder(Security security) =>
+        security.Type == SecurityType.Equity && security.Subscriptions.Any(config => config.Resolution == Resolution.Minute);
+
+    private bool AcceptsRequest(Security security, Order order, DateTime at, decimal? quantity,
+        decimal? limitPrice, out BrokerageMessageEvent message)
     {
+        if (PreserveMarketOrder(security) && order.Type is OrderType.Market or OrderType.Limit
+            && !security.Exchange.Hours.IsOpen(at.ConvertFromUtc(security.Exchange.TimeZone), false))
+        {
+            message = new BrokerageMessageEvent(BrokerageMessageType.Warning, "ChinaRuleRejected",
+                "一分钟现货仅在常规交易时段内接受市价或限价申报");
+            return false;
+        }
         string? reason;
-        try { reason = models.Validate(security, order, order.Time); }
+        try { reason = models.Validate(security, order, at, quantity, limitPrice); }
         catch (Exception error) when (error is InvalidOperationException or ArgumentException or KeyNotFoundException)
         { reason = error.Message; }
         message = reason == null ? null! : new BrokerageMessageEvent(BrokerageMessageType.Warning, "ChinaRuleRejected", reason);
-        return reason == null && base.CanSubmitOrder(security, order, out message);
+        return reason == null;
     }
-    public override bool CanUpdateOrder(Security security, Order order, UpdateOrderRequest request, out BrokerageMessageEvent message)
-    {
-        string? reason;
-        try { reason = models.Validate(security, order, request.Time, request.Quantity, request.LimitPrice); }
-        catch (Exception error) when (error is InvalidOperationException or ArgumentException or KeyNotFoundException)
-        { reason = error.Message; }
-        message = reason == null ? null! : new BrokerageMessageEvent(BrokerageMessageType.Warning, "ChinaRuleRejected", reason);
-        return reason == null && base.CanUpdateOrder(security, order, request, out message);
-    }
+    public override bool CanSubmitOrder(Security security, Order order, out BrokerageMessageEvent message) =>
+        AcceptsRequest(security, order, order.Time, null, null, out message)
+        && base.CanSubmitOrder(security, order, out message);
+
+    public override bool CanUpdateOrder(Security security, Order order, UpdateOrderRequest request, out BrokerageMessageEvent message) =>
+        AcceptsRequest(security, order, request.Time, request.Quantity, request.LimitPrice, out message)
+        && base.CanUpdateOrder(security, order, request, out message);
     public override IFillModel GetFillModel(Security security) => models.FillModel;
     public override IFeeModel GetFeeModel(Security security) => models.FeeModel;
     public override ISettlementModel GetSettlementModel(Security security) => new ImmediateSettlementModel();

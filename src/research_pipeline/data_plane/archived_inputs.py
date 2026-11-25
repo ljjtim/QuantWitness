@@ -201,7 +201,8 @@ def _evidence(entry, plan, files, reference, *, dataset, execution_budget):
     )
 
 
-def admit_archived_queries(queries, *, catalog, execution_budgets, manifest, session_calendars=None):
+def admit_archived_queries(queries, *, catalog, execution_budgets, manifest, session_calendars=None,
+                          schedule_datasets=None):
     """使用调用方已编译的 QueryIR 完成当前归档准入。"""
     manifest = load_archived_input_manifest(manifest)
     if set(queries) != set(manifest["requests"]) or set(queries) != set(execution_budgets):
@@ -236,6 +237,8 @@ def admit_archived_queries(queries, *, catalog, execution_budgets, manifest, ses
             if required > estimate.provider_duckdb_memory_bytes:
                 raise SnapshotIntegrityError("归档 Arrow 排序超过节点内存预算")
         admitted[request_id], estimates[request_id] = plan, estimate
+        if schedule_datasets is not None and request_id in schedule_datasets:
+            schedule_datasets[request_id] = dataset if entry["kind"] == "dataset" else None
         attestations.append(attestation.to_dict())
         source_facts[request_id] = {"kind": entry["kind"], "reference": entry["reference"], "original_plan_hash": original.plan_hash}
     pit = {request_id: {"availability_policy_hash": plan.availability_policy_hash, "revision_policy_hash": plan.revision_policy_hash, "query": plan.query.to_dict()} for request_id, plan in admitted.items()}

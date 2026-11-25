@@ -1,0 +1,13 @@
+package_slug: cn_stock_daily_observation
+display_name: A股日频研究观察模板
+package_version: v1
+builder_id: operator_graph_plan_v1
+metric_contract:
+  contract_id: daily_observation_metrics
+  version: v1
+  metrics: [data.row_count@1.0.0]
+  semantics:
+    data.row_count@1.0.0: 自包含结果中符合声明窗口与证券范围的记录数
+claim_contract:
+  allowed_claim_levels: [research_observation]
+  max_claim_level: research_observation

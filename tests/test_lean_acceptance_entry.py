@@ -91,7 +91,8 @@ def test_result_observation_reads_current_daily_and_artifact(tmp_path):
     artifact.mkdir(parents=True)
     (artifact/'result.json').write_text(json.dumps(dict(contract_version=LEAN_RESULT_VERSION,
         preparation=dict(run=str(run/'execution'), stage_seconds={'execute':2}))), encoding='utf-8')
-    pq.write_table(pa.table({'payload_json':[json.dumps(dict(date='2024-01-03', day_wall_seconds=1.5, rows=240))]}), result/'daily.parquet')
+    from datetime import date
+    pq.write_table(pa.table({'date':[date(2024,1,3)], 'day_wall_seconds':[1.5], 'rows':[240]}), result/'daily.parquet')
     (result/'result.json').write_text(json.dumps(dict(tables=[dict(schema_id=LEAN_SCHEMA_IDS['daily'],
         artifact_key='artifact', files=['daily.parquet'])])), encoding='utf-8')
     (run/'events.jsonl').write_text('', encoding='utf-8')

@@ -13,6 +13,9 @@ from research_pipeline.platform import canonical_json
 from research_pipeline.research.validation import build_walk_forward, ValidationError
 import research_pipeline.runtime.walk_forward_model_execution as runtime
 
+
+pytestmark = pytest.mark.ml
+
 BUDGET = 128 * 1024**2
 
 
@@ -61,7 +64,7 @@ def candidate(name="LinearModel", *, alpha=0.1, rank=False):
 
 
 @pytest.mark.parametrize("name", ["LinearModel","LGBModel","XGBModel","DEnsembleModel"])
-def test_three_models_frozen_bundle_round_trip_and_future_labels(tmp_path, name, monkeypatch):
+def test_model_frozen_bundle_round_trip_and_future_labels(tmp_path, name, monkeypatch):
     import sqlite3
     def reject_database(*args, **kwargs):
         raise AssertionError("合成模型测试不得连接数据库")

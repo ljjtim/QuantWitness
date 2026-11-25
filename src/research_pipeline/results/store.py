@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 from types import MappingProxyType
 from typing import BinaryIO, Callable, Mapping
 import uuid
@@ -18,13 +17,20 @@ import pyarrow.parquet as pq
 from research_pipeline.data_plane import DataPlaneError, DatasetFilter, PathRolePolicy
 from research_pipeline.data_plane.dataset_files import _filter_expression
 from research_pipeline.platform import canonical_json, typed_canonical_hash
-from .artifact_reader import ExternalArtifactReader, ExternalArtifactSnapshot
+from research_pipeline.platform.audit_mode import strict_audit_enabled
+from research_pipeline.platform.immutable_files import remove_tree
+from research_pipeline.platform.lean_contract import LEAN_METRICS_SCHEMA_ID
+from research_pipeline.runtime.external_artifact import ExternalArtifactCommit
+
+from .artifact_reader import ExternalArtifactReader
 from .contracts import ResultBundle
 from .errors import ResultContractError
 
 
 RESULT_MANIFEST_NAME = "result.json"
 RESULT_COMMITTED_NAME = "COMMITTED"
+RESULT_EXECUTION_COST_NAME = "execution-cost.json"
+RESULT_OPTIONAL_OBSERVATION_FILES = frozenset({RESULT_EXECUTION_COST_NAME})
 _HASH_CHUNK_BYTES = 1024 * 1024
 
 
@@ -84,6 +90,28 @@ class ResultSnapshot:
                 f"ResultBundle 必须恰好包含一个 schema: {schema_id}"
             )
         return selected[0]
+
+    def support_content(self, artifact_key: str, source_path: str, *, max_bytes: int) -> bytes | None:
+        """按工件读取可选的支持文件，使用本次快照已验证的内容或读取时核对原始摘要。"""
+        matches = [item for item in self.bundle.support_files
+                   if item.artifact_key == artifact_key and item.source_path == source_path]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ResultContractError("ResultBundle 同一工件的支持文件不唯一")
+        item = matches[0]
+        for key in (item.relative_path, source_path):
+            if key in self.support_bytes:
+                content = self.support_bytes[key]
+                if len(content) > max_bytes:
+                    raise ValueError("支持文件读取超出声明预算")
+                return content
+        path = self.directory / item.relative_path
+        if path.stat().st_size > max_bytes:
+            raise ValueError("支持文件读取超出声明预算")
+        content, _ = ResultStore._read_verified_file(path, relative_path=item.relative_path,
+                                                     expected_hash=item.content_hash, load_content=True)
+        return content
 
     def table_schema(self, schema_id: str) -> pa.Schema:
         """读取正式表 schema；列式快照不需要为此物化数据。"""
@@ -264,8 +292,19 @@ class ResultStore:
         *,
         run_root: str | Path,
         phase_hook: Callable[[str], None] | None = None,
+        execution_cost: Mapping[str, object] | None = None,
+        control_payloads: Mapping[str, bytes] | None = None,
     ) -> Path:
         """从 Runtime 工件单次读取并复制，之后 Result 不再依赖 run-root。"""
+        provided_controls = dict(control_payloads or {})
+        if set(provided_controls) != set(bundle.control_files):
+            raise ResultContractError("ResultBundle control files 与待写入载荷集合不一致")
+        for control_name, expected_digest in bundle.control_files.items():
+            raw_bytes = provided_controls[control_name]
+            if not isinstance(raw_bytes, bytes):
+                raise ResultContractError(f"ResultBundle control file 必须是字节串: {control_name}")
+            if hashlib.sha256(raw_bytes).hexdigest() != expected_digest:
+                raise ResultContractError(f"ResultBundle control file 内容摘要不一致: {control_name}")
 
         try:
             runtime_root = PathRolePolicy().resolve_root(
@@ -307,9 +346,13 @@ class ResultStore:
                 support_bytes={},
                 verified_schema_ids=frozenset(table.schema_id for table in bundle.tables),
             ))
-            self._write_controls(staging, bundle)
-            staged = self._read_controls(staging, require_namespace=False)
-            if staged != bundle:
+            self._write_controls(
+                staging,
+                bundle,
+                execution_cost=execution_cost,
+                control_payloads=provided_controls,
+            )
+            if strict_audit_enabled() and self._read_controls(staging, require_namespace=False) != bundle:
                 raise ResultContractError("staged ResultBundle 与待发布对象不一致")
             if phase_hook:
                 phase_hook("prepared")
@@ -318,13 +361,12 @@ class ResultStore:
             os.replace(staging, target)
             if phase_hook:
                 phase_hook("renamed")
-            # 复制流已经逐文件完成内容/schema/行数校验；rename 后只复核小型控制文件。
-            if self._read_controls(target, require_namespace=True) != bundle:
+            if strict_audit_enabled() and self._read_controls(target, require_namespace=True) != bundle:
                 raise ResultContractError("ResultBundle 原子写后验证失败")
             return target
         except Exception:
             if staging.exists():
-                shutil.rmtree(staging, ignore_errors=True)
+                remove_tree(staging, ignore_errors=True)
             raise
 
     def verify(self, result_directory: str | Path) -> ResultBundle:
@@ -340,6 +382,7 @@ class ResultStore:
         verify_schema_ids: tuple[str, ...] = (),
         support_paths: tuple[str, ...] = (),
         verify_all_files: bool = True,
+        metric_context_tables: tuple[str, ...] | None = None,
     ) -> ResultSnapshot:
         directory = Path(result_directory).absolute()
         try:
@@ -354,6 +397,7 @@ class ResultStore:
             raise ResultContractError("ResultBundle 路径安全验证失败") from exc
         return self._verify_directory(
             directory.resolve(),
+            metric_context_tables=metric_context_tables,
             requested_schema_ids=schema_ids,
             requested_lazy_schema_ids=verify_schema_ids,
             requested_support_paths=support_paths,
@@ -471,6 +515,35 @@ class ResultStore:
         self._require_expected_bundle(snapshot, bundle)
         return dict(snapshot.support_bytes)
 
+    def read_control_bytes(self, bundle: ResultBundle, name: str) -> bytes:
+        """读取并校验 ResultBundle 中封存的顶层控制文件。"""
+
+        if name not in bundle.control_files:
+            raise ResultContractError(f"ResultBundle 不包含控制文件: {name}")
+        directory = self.result_directory(bundle)
+        verified = self._read_controls(directory, require_namespace=True)
+        if verified != bundle:
+            raise ResultContractError("ResultBundle 与磁盘校验内容不一致")
+        try:
+            control_path = PathRolePolicy().resolve_contained_path(
+                allowed_root=directory,
+                candidate=directory / name,
+                root_role="result_bundle",
+                path_role="result_control",
+                expected_kind="file",
+            )
+        except DataPlaneError as exc:
+            raise ResultContractError("ResultBundle 控制文件路径安全验证失败") from exc
+        raw, _ = self._read_verified_file(
+            control_path,
+            relative_path=name,
+            expected_hash=bundle.control_files[name],
+            load_content=True,
+        )
+        if raw is None:
+            raise ResultContractError(f"ResultBundle 控制文件读取为空: {name}")
+        return raw
+
     def read_support_bytes(
         self,
         bundle: ResultBundle,
@@ -500,9 +573,9 @@ class ResultStore:
         runtime_root: Path,
     ) -> None:
         reader = ExternalArtifactReader(runtime_root / "external-artifacts")
-        snapshots: dict[str, ExternalArtifactSnapshot] = {}
+        snapshots: dict[str, ExternalArtifactCommit] = {}
 
-        def commit(artifact_key: str) -> ExternalArtifactSnapshot:
+        def commit(artifact_key: str) -> ExternalArtifactCommit:
             selected = snapshots.get(artifact_key)
             if selected is None:
                 selected = reader.inspect(artifact_key)
@@ -539,13 +612,31 @@ class ResultStore:
                 source, support.source_path, staging / support.relative_path
             )
     @staticmethod
-    def _write_controls(directory: Path, bundle: ResultBundle) -> None:
+    def _write_controls(
+        directory: Path,
+        bundle: ResultBundle,
+        *,
+        execution_cost: Mapping[str, object] | None = None,
+        control_payloads: Mapping[str, bytes] | None = None,
+    ) -> None:
         manifest_path = directory / RESULT_MANIFEST_NAME
         marker_path = directory / RESULT_COMMITTED_NAME
         with manifest_path.open("x", encoding="utf-8") as handle:
             handle.write(canonical_json(bundle.to_dict()))
             handle.flush()
             os.fsync(handle.fileno())
+        for control_name, raw_bytes in sorted((control_payloads or {}).items()):
+            control_path = directory / control_name
+            with control_path.open("xb") as handle:
+                handle.write(raw_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+        if execution_cost is not None:
+            cost_path = directory / RESULT_EXECUTION_COST_NAME
+            with cost_path.open("x", encoding="utf-8") as handle:
+                handle.write(canonical_json(dict(execution_cost)))
+                handle.flush()
+                os.fsync(handle.fileno())
         with marker_path.open("x", encoding="ascii") as handle:
             handle.write(bundle.result_id)
             handle.flush()
@@ -592,8 +683,20 @@ class ResultStore:
         requested_lazy_schema_ids: tuple[str, ...],
         requested_support_paths: tuple[str, ...],
         verify_all_files: bool,
+        metric_context_tables: tuple[str, ...] | None = None,
     ) -> ResultSnapshot:
         bundle = self._read_controls(directory, require_namespace=True)
+        if metric_context_tables is not None:
+            by_id = {table.table_id: table.schema_id for table in bundle.tables}
+            unknown = set(metric_context_tables) - by_id.keys()
+            if unknown:
+                raise ResultContractError(f"Result 不包含请求的表: {sorted(unknown)}")
+            requested_lazy_schema_ids = tuple({
+                *requested_lazy_schema_ids, *(p.result_schema_id for p in bundle.metric_proofs),
+                *(by_id[name] for name in metric_context_tables),
+            })
+            if LEAN_METRICS_SCHEMA_ID in requested_lazy_schema_ids:
+                requested_schema_ids = (*requested_schema_ids, LEAN_METRICS_SCHEMA_ID)
         manifests = {}
         for schema_id in (*requested_schema_ids, *requested_lazy_schema_ids):
             selected = tuple(table for table in bundle.tables if table.schema_id == schema_id)
@@ -613,12 +716,28 @@ class ResultStore:
         expected_files = {
             RESULT_MANIFEST_NAME,
             RESULT_COMMITTED_NAME,
+            *bundle.control_files,
             *(path for table in bundle.tables for path in table.files),
             *(item.relative_path for item in bundle.support_files),
         }
         actual_files = self._result_payload_paths(directory)
-        if actual_files != expected_files:
+        missing_files = expected_files - actual_files
+        extra_files = actual_files - expected_files
+        if missing_files or extra_files - RESULT_OPTIONAL_OBSERVATION_FILES:
             raise ResultContractError("ResultBundle 文件集合不精确或含 extra file")
+        for control_name, expected_digest in bundle.control_files.items():
+            self._read_verified_file(
+                directory / control_name,
+                relative_path=control_name,
+                expected_hash=expected_digest,
+            )
+        if RESULT_EXECUTION_COST_NAME in actual_files:
+            try:
+                cost_payload = json.loads((directory / RESULT_EXECUTION_COST_NAME).read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ResultContractError("ResultBundle 执行成本文件无法读取") from exc
+            if not isinstance(cost_payload, dict):
+                raise ResultContractError("ResultBundle 执行成本文件必须是对象")
 
         requested_internal_paths = {
             path
@@ -711,11 +830,8 @@ class ResultStore:
     ) -> tuple[bytes | None, pa.Table | None]:
         try:
             with path.open("rb") as handle:
-                digest = _stream_sha256(handle)
-                content = None
-                if load_content:
-                    handle.seek(0)
-                    content = handle.read()
+                content = handle.read() if load_content else None
+                digest = hashlib.sha256(content).hexdigest() if load_content else _stream_sha256(handle)
         except OSError as exc:
             raise ResultContractError(f"ResultBundle 文件无法读取: {relative_path}") from exc
         if digest != expected_hash:
@@ -796,5 +912,6 @@ class ResultStore:
 
 
 __all__ = [
-    "RESULT_COMMITTED_NAME", "RESULT_MANIFEST_NAME", "ResultSnapshot", "ResultStore",
+    "RESULT_COMMITTED_NAME", "RESULT_EXECUTION_COST_NAME", "RESULT_MANIFEST_NAME",
+    "RESULT_OPTIONAL_OBSERVATION_FILES", "ResultSnapshot", "ResultStore",
 ]

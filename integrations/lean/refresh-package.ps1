@@ -3,6 +3,8 @@ $ErrorActionPreference='Stop'
 $LeanHome=(Resolve-Path -LiteralPath $LeanHome).Path
 $syncRecord=Join-Path $LeanHome 'source-sync.json'
 if(Test-Path -LiteralPath $syncRecord) { Remove-Item -LiteralPath $syncRecord }
+$runtimeAudit=Join-Path $LeanHome 'rp-integration/runtime-audit.json'
+if(Test-Path -LiteralPath $runtimeAudit) { Remove-Item -LiteralPath $runtimeAudit }
 $python=Join-Path $LeanHome 'python-env/Scripts/python.exe'
 $project=(Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $stamp=Get-Date -Format 'yyyyMMdd-HHmmss-fff'

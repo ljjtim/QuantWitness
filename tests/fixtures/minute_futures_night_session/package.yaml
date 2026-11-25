@@ -1,0 +1,10 @@
+package_slug: minute_futures_night_session
+display_name: 期货夜盘分钟参考研究
+package_version: 1.0.0
+builder_id: operator_graph_plan_v1
+metric_contract:
+  contract_id: minute_reference_metrics
+  version: v1
+  metrics: [minute.row_count@1.0.0]
+  semantics: {minute.row_count@1.0.0: 期货一分钟观察工件的已验证分区行数}
+claim_contract: {allowed_claim_levels: [research_observation], max_claim_level: research_observation}

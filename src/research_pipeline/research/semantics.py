@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+
+from functools import partial
 from dataclasses import dataclass
 from datetime import datetime
 import re
@@ -9,6 +11,9 @@ from typing import Mapping, Sequence
 
 from research_pipeline.platform import MainlineError, typed_canonical_hash
 from research_pipeline.platform.claim_levels import CLAIM_LEVELS, weakest_claim_level
+from research_pipeline.platform.validation import (
+    parse_iso_datetime, require_aware, require_exact_fields, require_sha256,
+)
 
 
 RESEARCH_TIME_WINDOW_VERSION = "research-time-window-v1"
@@ -19,7 +24,6 @@ HYPOTHESIS_SPEC_VERSION = "research-hypothesis-spec-v1"
 RESEARCH_SEMANTICS_VERSION = "research-semantics-v1"
 
 _ID = re.compile(r"^[a-z][a-z0-9_.:-]{1,127}$")
-_HASH = re.compile(r"^[0-9a-f]{64}$")
 class ResearchSemanticsError(MainlineError):
     """研究语义不闭合、时间倒置或身份漂移。"""
 
@@ -32,30 +36,14 @@ def _require_id(value: object, field: str) -> str:
     return value
 
 
-def _require_hash(value: object, field: str) -> str:
-    if not isinstance(value, str) or not _HASH.fullmatch(value):
-        raise ResearchSemanticsError(f"{field} 必须是 sha256 小写摘要")
-    return value
+_require_hash = partial(require_sha256, error=ResearchSemanticsError)
 
 
-def _require_aware(value: object, field: str) -> datetime:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise ResearchSemanticsError(f"{field} 必须是带时区时间")
-    return value
+_require_aware = partial(require_aware, error=ResearchSemanticsError)
 
 
 def _parse_aware(value: object, field: str) -> datetime:
-    if not isinstance(value, str):
-        raise ResearchSemanticsError(f"{field} 必须是 ISO 时间")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ResearchSemanticsError(f"{field} 必须是 ISO 时间") from exc
-    return _require_aware(parsed, field)
+    return _require_aware(parse_iso_datetime(value, field, error=ResearchSemanticsError), field)
 
 
 def _ordered_ids(values: Sequence[object], field: str) -> tuple[str, ...]:
@@ -79,12 +67,7 @@ def _ordered_text(values: Sequence[object], field: str) -> tuple[str, ...]:
     return normalized
 
 
-def _exact(payload: Mapping[str, object], expected: set[str], field: str) -> None:
-    if set(payload) != expected:
-        raise ResearchSemanticsError(
-            f"{field} schema 不匹配；缺失={sorted(expected - set(payload))}，"
-            f"未知={sorted(set(payload) - expected)}"
-        )
+_exact = partial(require_exact_fields, error=ResearchSemanticsError)
 
 
 @dataclass(frozen=True)

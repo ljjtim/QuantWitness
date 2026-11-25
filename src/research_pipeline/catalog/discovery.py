@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import glob
 from pathlib import Path
 import re
+from time import perf_counter
 from typing import Any
 
 from research_pipeline.platform.canonical import typed_canonical_hash
@@ -227,7 +230,7 @@ class ObjectExecutionEvidence:
             if self.json_array_projection.source_object not in self.dependency_chain:
                 raise CatalogDriftError("JSON 数组投影来源不在对象依赖链中")
 
-    @property
+    @cached_property
     def evidence_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -708,10 +711,7 @@ def _observe_json_expansion_scope(
     quoted_source = _quote_identifier(source_object)
     quoted_date = _quote_identifier(event_match.group(1))
     quoted_json = _quote_identifier(json_column)
-    end_operator = "<=" if end_inclusive else "<"
-    try:
-        statistics = connection.execute(
-            f"""SELECT COUNT(*),
+    statistics_sql = f"""SELECT COUNT(*),
                         COALESCE(SUM(CASE
                             WHEN {quoted_json} IS NULL THEN 0
                             WHEN json_type(TRY_CAST({quoted_json} AS JSON)) = 'ARRAY'
@@ -734,18 +734,31 @@ def _observe_json_expansion_scope(
                         )
                  FROM {quoted_source}
                  WHERE TRY_CAST({quoted_date} AS DATE) >= ?
-                   AND TRY_CAST({quoted_date} AS DATE) {end_operator} ?""",
-            [range_start, range_end],
-        ).fetchone()
+                   AND TRY_CAST({quoted_date} AS DATE) {{end_operator}} ?"""
+    start, end = _coerce_stat_time(range_start), _coerce_stat_time(range_end)
+    source_rows = expanded_rows = element_width = 0
+    try:
+        # 每批只解码一个月的数组；中间批次右端开区间，最后一批沿用原请求边界。
+        while start <= end:
+            stop = start + min(end - start, timedelta(days=31))
+            operator = "<=" if stop == end and end_inclusive else "<"
+            row = connection.execute(
+                statistics_sql.format(end_operator=operator), [start, stop]
+            ).fetchone()
+            if row is None or len(row) != 4:
+                raise CatalogDriftError("JSON 原始范围统计结果无效")
+            if row[3]:
+                raise CatalogDriftError("JSON 原始范围包含非法 JSON 或非数组值")
+            source_rows += int(row[0])
+            expanded_rows += int(row[1]) * multiplier
+            element_width = max(element_width, int(row[2]))
+            if stop == end:
+                break
+            start = stop
+    except CatalogDriftError:
+        raise
     except Exception as exc:
         raise CatalogDriftError("JSON 原始范围统计失败") from exc
-    if statistics is None or len(statistics) != 4:
-        raise CatalogDriftError("JSON 原始范围统计结果无效")
-    if int(statistics[3]) != 0:
-        raise CatalogDriftError("JSON 原始范围包含非法 JSON 或非数组值")
-    source_rows = int(statistics[0])
-    expanded_rows = int(statistics[1]) * multiplier
-    element_width = int(statistics[2])
     widths: list[tuple[str, int]] = []
     for field_id in variable_fields:
         output_column = projected_columns[field_id]
@@ -981,7 +994,7 @@ class DriftAttestation:
     policy_hash: str
     passed: bool
 
-    @property
+    @cached_property
     def attestation_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -1012,12 +1025,17 @@ class DuckDBSourceInspector:
         self.source_profile = source_profile
         self.environment = environment
         self._session_connection = None
+        self._session_objects = None
+        self.statistics_seconds = 0.0
+        self.statistics_queries = 0
 
     def __enter__(self):
         self._session_connection = _duckdb().connect(str(self.path), read_only=True)
+        self._session_objects = {}
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self._session_objects = None
         connection = self._session_connection
         self._session_connection = None
         return connection.__exit__(exc_type, exc_value, traceback)
@@ -1028,8 +1046,9 @@ class DuckDBSourceInspector:
             return nullcontext(self._session_connection)
         return _duckdb().connect(str(self.path), read_only=True)
 
-    def observe_current_schema(self, object_name: str) -> PhysicalInventory:
-        with self._connection_context() as connection:
+    def observe_current_schema(self, object_name: str, *, connection=None) -> PhysicalInventory:
+        context = self._connection_context() if connection is None else nullcontext(connection)
+        with context as connection:
             rows = connection.execute(
                 """SELECT column_name, data_type, is_nullable, column_index
                    FROM duckdb_columns()
@@ -1074,17 +1093,16 @@ class DuckDBSourceInspector:
         """读取对象定义与有限统计；JSON 展开不会通过执行 VIEW 来猜倍率。"""
 
         with self._connection_context() as connection:
-            rows = connection.execute(
-                """SELECT table_name, 'table' AS object_kind, NULL AS definition
-                   FROM duckdb_tables() WHERE schema_name = 'main'
-                   UNION ALL
-                   SELECT view_name, 'view' AS object_kind, sql AS definition
-                   FROM duckdb_views() WHERE schema_name = 'main'"""
-            ).fetchall()
-            objects = {
-                str(name): (str(kind), None if definition is None else str(definition))
-                for name, kind, definition in rows
-            }
+            objects = self._session_objects if self._session_objects is not None else {}
+            if not objects:
+                rows = connection.execute(
+                    """SELECT table_name, 'table' AS object_kind, NULL AS definition
+                       FROM duckdb_tables() WHERE schema_name = 'main'
+                       UNION ALL
+                       SELECT view_name, 'view' AS object_kind, sql AS definition
+                       FROM duckdb_views() WHERE schema_name = 'main'"""
+                ).fetchall()
+                objects.update((str(name), (str(kind), definition)) for name, kind, definition in rows)
             shape = classify_duckdb_object_shape(object_name, objects)
             source_rows = None
             expanded_rows = None
@@ -1162,10 +1180,13 @@ class DuckDBSourceInspector:
                 partition_key = raw_partition_key or None
                 partition_bound_method = "parquet_footer_month_scope_v1"
             elif statistics_sql is not None:
+                started = perf_counter()
                 statistics = connection.execute(
                     statistics_sql,
                     list(statistics_parameters),
                 ).fetchone()
+                self.statistics_seconds += perf_counter() - started
+                self.statistics_queries += 1
                 if statistics is None or len(statistics) != 1 + len(variable_fields):
                     raise CatalogDriftError("对象范围统计结果 schema 无效")
                 source_rows = int(statistics[0])

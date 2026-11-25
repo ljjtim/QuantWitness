@@ -49,7 +49,6 @@ include docs/direct-inputs.md
 include docs/lean-execution.md
 include docs/admission-execution.md
 include docs/minute-project-scope.md
-include docs/bar_tca.md
 include docs/catalog.md
 include docs/cli.md
 include docs/data_plane.md
@@ -133,10 +132,9 @@ include integrations/lean/sync_installation.py
 include integrations/lean/engine/Directory.Build.props
 include integrations/lean/engine/LeanStrategyHost.cs
 include integrations/lean/engine/QuantWitnessLeanHost.csproj
-include integrations/lean/engine/ResearchLeanAlgorithm.py
 include integrations/lean/engine/build.ps1
+include integrations/lean/engine/build_pythonnet.py
 include integrations/lean/engine/install_metadata.py
-include integrations/lean/engine/test_visible_market.py
 include integrations/lean/engine/china-rules/ChinaAStockModels.cs
 include integrations/lean/engine/china-rules/ChinaExecution.cs
 include integrations/lean/engine/china-rules/ChinaOrderProperties.cs
@@ -147,7 +145,10 @@ include integrations/lean/engine/corporate-actions/CorporateActionEvent.cs
 include integrations/lean/engine/corporate-actions/CorporateActionProcessor.cs
 include integrations/lean/engine/corporate-actions/CorporateActions.csproj
 include integrations/lean/engine/parquet-direct/MonthlyParquetStore.cs
-include integrations/lean/engine/parquet-direct/DirectDailyStreamStore.cs
+include integrations/lean/engine/parquet-direct/ManifestCache.cs
+include integrations/lean/engine/parquet-direct/FrozenFinancialDayStore.cs
+include integrations/lean/engine/parquet-direct/FrozenMinuteParquetStore.cs
+include integrations/lean/engine/parquet-direct/FrozenSpotRuleStore.cs
 include integrations/lean/engine/parquet-direct/ParquetDataFeed.cs
 include integrations/lean/engine/parquet-direct/ParquetInput.csproj
 
@@ -174,3 +175,30 @@ include docs/minute_simulation.md
 recursive-include examples/custom_metric *.md *.py
 prune examples/custom_metric/__pycache__
 prune examples/custom_metric/source/__pycache__
+
+include tests/README.md
+include docs/lean-native-results.md
+include integrations/lean/patch_native_lifecycle.py
+include integrations/lean/engine/NativeMarketLifecycle.cs
+include integrations/lean/engine/NativeResultRecorder.cs
+include integrations/lean/engine/NativeSpotResult.cs
+include integrations/lean/engine/parquet-direct/NativeData.cs
+include integrations/lean/engine/parquet-direct/NativeDirectReader.cs
+include integrations/lean/engine/parquet-direct/NativeHistoryProvider.cs
+include integrations/lean/engine/parquet-direct/tests/NativeSymbolContracts.csproj
+include integrations/lean/engine/parquet-direct/tests/Program.cs
+include integrations/lean/engine/parquet-direct/tests/FrozenMinuteContracts.cs
+include integrations/lean/engine/parquet-direct/tests/README.md
+include integrations/lean/engine/parquet-direct/README.md
+include integrations/lean/engine/test_visible_market.py
+include integrations/lean/engine/test_metadata_calendar.py
+include integrations/lean/engine/test_entry_module.py
+include integrations/lean/engine/tests/native_fixture.py
+include integrations/lean/engine/tests/fixture_financial_scope.py
+include integrations/lean/engine/tests/fixture_native_sources.py
+include integrations/lean/engine/tests/fixture_spot_algorithm.py
+include integrations/lean/engine/tests/fixture_future_algorithm.py
+include integrations/lean/engine/tests/fixture_universe_algorithm.py
+include integrations/lean/engine/tests/test_direct_launcher.py
+include integrations/lean/engine/tests/test_futures_launcher.py
+include scripts/refresh_operator_code_identity.py

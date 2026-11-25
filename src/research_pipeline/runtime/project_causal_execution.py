@@ -63,7 +63,7 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
     if progress is not None:
         progress.start_work_progress(_work_batch_count(plan, max_keys))
     with session_scope as worker_session:
-        static_plan = _freeze_payload({key: value for key, value in plan.to_dict().items() if key != "work_items"})
+        static_plan = _freeze_payload(plan.header())
         if worker_session is not None:
             identities, timezones, direct_sources = map(_freeze_payload, (identities, timezones, direct_sources))
         for index, item in enumerate(plan.iter_work_items(max_keys=max_keys)):
@@ -92,18 +92,13 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
             facts = result.causal_facts
             if facts is None or tuple(facts["key_columns"]) != plan.key_columns:
                 raise RuntimeIntegrityError("项目输出缺少核心键批事实")
-            # 核心在提交前再次验证状态来源与本次允许窗口，再用已有 attach 合同一一合并。
+            # 核心在提交前再次验证状态来源与本次允许窗口。
             checked = CausalReadTrace(plan, item, facts["lineage"], source_partition_identities=identities) if plan.state_scope == "carry" else None
-            core_facts = pd.DataFrame(facts["records"])
+            core_facts = pa.Table.from_pylist(facts["records"])
             batch_commits = []
             for output in result.outputs:
                 parquet = pq.ParquetFile(output.path)
                 metadata = parquet.metadata
-                output_facts = core_facts.copy()
-                if output.port == plan.output_port:
-                    for key in plan.key_columns:
-                        if pa.types.is_date(parquet.schema_arrow.field(key).type):
-                            output_facts[key] = pd.to_datetime(output_facts[key], errors="raise").dt.date
                 if metadata.num_rows != len(item.key_rows):
                     raise RuntimeIntegrityError("项目 causal 输出行数与冻结键批不一致")
                 uncompressed = sum(metadata.row_group(i).total_byte_size for i in range(metadata.num_row_groups))
@@ -116,7 +111,7 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
                 committed = external.commit(
                     staging, artifact_name=output.port, artifact_type=output.artifact_type,
                     producer_scope="project",
-                    core_time_facts=output_facts if output.port == plan.output_port else None,
+                    core_time_facts=core_facts if output.port == plan.output_port else None,
                     causal_time_key_columns=plan.key_columns if output.port == plan.output_port else (),
                     causal_lineage=facts["lineage"] if output.port == plan.output_port and any(
                         source.daily_time is not None for source in plan.sources) else None,
@@ -171,7 +166,11 @@ def execute_project_causal_node(service, *, node_context, run_id, attempt_id, en
             and pa.types.is_date(schema.field("observation_session").type)
         )
         if port == plan.output_port and is_daily_research:
-            _write_daily_causal_artifact(staging, commits, external, plan, environment)
+            reference = None
+            if "daily_schedule" in parameters["causal_plan"]:
+                reference = {"node_id": node_context.node.node_id,
+                             "configuration_hash": node_context.node.configuration_hash}
+            _write_daily_causal_artifact(staging, commits, external, plan, environment, schedule_reference=reference)
             final = external.commit(staging, artifact_name=port, artifact_type=commits[0].artifact_type)
             values[port] = RuntimeNodeValue.external(final)
             continue
@@ -220,7 +219,7 @@ def _work_batch_count(plan, max_keys):
     return total + (pending + max_keys - 1) // max_keys
 
 
-def _write_daily_causal_artifact(staging, commits, external, plan, environment):
+def _write_daily_causal_artifact(staging, commits, external, plan, environment, *, schedule_reference=None):
     """沿用模型表元数据合同，并保留键批分区以隔离 holdout 的物理读取。"""
     from .walk_forward_model_execution import _write_partitioned_artifact
 
@@ -255,10 +254,12 @@ def _write_daily_causal_artifact(staging, commits, external, plan, environment):
         fields = [field.with_metadata(source_schema.field(field.name).metadata) for field in schema]
         return pa.schema(fields, metadata={**(schema.metadata or {}), **(source_schema.metadata or {})})
 
+    schedule = ({"causal_plan": plan.to_dict()} if schedule_reference is None else
+                {"causal_plan": plan.header(), "schedule_reference": schedule_reference})
     _write_partitioned_artifact(
         staging, partitioned_tables={table_name: frames()}, tables=lambda: {}, status="pass",
         extra={"contract_version": "project-causal-daily-v1", "semantics_hash": semantics.semantics_hash,
-               "causal_plan": plan.to_dict()}, partition_schema=partition_schema,
+               **schedule}, partition_schema=partition_schema,
     )
 
 class _CausalInputs(tuple):

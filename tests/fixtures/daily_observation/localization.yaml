@@ -1,0 +1,8 @@
+decisions:
+  - decision_id: cn_stock_daily_scope
+    original_assumption: 日频证券记录可直接跨市场解释
+    local_market: cn_stock
+    local_adaptation: 仅观察一只A股的未复权日频记录，不外推收益规律
+    evidence_source_ids: [reference_paper]
+    status: proxy
+    claim_effect: downgrade_to_research_observation

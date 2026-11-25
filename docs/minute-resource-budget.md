@@ -16,7 +16,7 @@
 4. 检查失败和成功分区记录。
 5. 沿同一身份恢复未完成分区。
 
-`MinutePartitionRuntime.execute` 的 `max_temp_bytes` 由本次声明的 `worker_count` 共同使用。单分区临时空间验收上限为 `max_temp_bytes // worker_count`，余数不分配。
+统一主链分钟分区执行的临时空间预算（`max_temp_bytes`）由本次声明的 `worker_count` 共同使用。单分区临时空间验收上限为 `max_temp_bytes // worker_count`，余数不分配。
 
 启用 `ResourceGovernor` 且并行执行时，实际验收上限还受已取得的子租约 `scratch_bytes` 限制，取两者最小值。单 worker 直接使用父租约，取节点临时预算与父租约 scratch 的最小值。未启用 Governor 的并行执行仍按 worker 数分配节点临时预算。
 

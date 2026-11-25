@@ -10,7 +10,6 @@ from typing import Mapping
 from research_pipeline.runtime import (
     DagSpec,
     EventStore,
-    ResourceGovernorConfig,
     ResourceVector,
     RuntimeIntegrityError,
 )
@@ -20,7 +19,6 @@ from research_pipeline.runtime.liveness import (
     read_runtime_liveness,
     runtime_owner_alive,
 )
-from research_pipeline.runtime.resource_governor import read_resource_governor_state
 from research_pipeline.runtime.diagnostics import (
     read_finalize_status,
     safe_error_summary,
@@ -713,6 +711,8 @@ def _resource_pool_projection(
         return None
     if not isinstance(governance, Mapping) or not isinstance(capacity, Mapping):
         raise RuntimeIntegrityError("正式 invocation 资源治理身份无效")
+    from research_pipeline.runtime.resource_pool import ResourceGovernorConfig, read_resource_governor_state
+
     config = ResourceGovernorConfig(
         state_dir=Path(str(governance["state_dir"])),
         capacity=ResourceVector(

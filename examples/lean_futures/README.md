@@ -2,6 +2,8 @@
 
 生成并执行双合约期货合成研究。
 
+冻结的 `contracts` 限定可用合约范围，不自动订阅行情。算法通过原生 `AddSecurity(Symbol, ..., dataNormalizationMode=Raw)` 显式订阅真实合约；本例不使用 canonical Future 合约链。
+
 ## 开始前
 
 - 输入：Windows x64、PowerShell 7、框架和完整源码。
@@ -38,9 +40,9 @@ pwsh -NoProfile -File integrations/lean/run.ps1 -LeanHome "$env:LOCALAPPDATA/Qua
 
 源包在安装前生成。prepare.py冻结实际安装和实现，将策略转换为正式LEAN执行声明。运行按当前Catalog/PIT、规则、会话和资金约束准入，最终发布Result并生成报告。
 
-策略在首次可见bar中为近月提交一手买开、一手卖开，为远月提交一手买开，共享10万元初始资金。分钟订单在后续完成bar成交。下一交易日提交平昨仓。
+`FuturesAlgorithm`直接继承`QCAlgorithm`，使用原生MarketOrder和`ChinaFutureOrderProperties`声明开平、DAY、截止时刻及日线开盘执行。策略在首次可见bar中为近月提交一手买开、一手卖开，为远月提交一手买开，共享10万元初始资金。分钟订单在后续完成bar成交。下一交易日提交平昨仓。
 
-日线完整bar在下一会话开盘可见。因此两日窗口在第二交易日才开仓，期末继续持仓并处理独立结算。结算价分别比当日合成分钟价格高8点，能够区分结算与Close。
+日线完整bar在下一会话开盘可见。01-03开盘使用01-02的已完成日线做决策，成交使用01-03的独立开盘价。结算价比当日合成分钟价格高8点，用于区分结算价与收盘价。
 
 多空同时存在时，即使近月净仓为零，双向保证金仍保留。
 
@@ -53,7 +55,7 @@ python examples/lean_futures/verify.py --frequency 1d --result <日频正式Resu
 python examples/lean_futures/verify.py --frequency 1m --result <分钟正式Result目录>
 ```
 
-分钟三手开仓、三手平昨仓共收6元费用。近月双向盈亏相抵，远月上涨10点贡献100元，最终权益100094元。日线三手开仓共收3元费用，远月从210点开仓到218点结算贡献80元，最终权益100077元。近月双向和远月毛保证金合计454元。
+分钟与日线均在01-03三手开仓、01-04三手平昨仓，共收6元费用。近月双向盈亏相抵，远月上涨10点贡献100元，最终权益100094元，期末空仓且保证金为零。日线01-03的前日日线已可见，成交使用当日独立开盘100、100、200点；01-04平仓使用110、110、210点。
 
 ## 已知限制
 

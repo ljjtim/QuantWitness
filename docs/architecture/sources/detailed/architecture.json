@@ -171,7 +171,7 @@
     {
       "id": "simulation",
       "type": "backend",
-      "label": "金融类型 simulation",
+      "label": "原生交易 LEAN",
       "sublabel": "订单 · 账本 · 费用 · 规则",
       "pos": [
         360,
@@ -477,7 +477,7 @@
       "id": "adapters-simulation",
       "from": "engine_adapters",
       "to": "simulation",
-      "label": "金融类型与规则",
+      "label": "原生交易执行",
       "variant": "emphasis"
     },
     {
@@ -597,7 +597,7 @@
         "核心模块目录：cli、application、packages、catalog、data_plane、runtime、research、simulation、results、evidence、platform、domain、operations、extensions",
         "research 提供因子、模型和统计；Qlib 提供日频处理器与模型，训练、选择和 holdout 由主链约束",
         "simulation 与 domain 提供当前金融类型、账户与市场规则；股票和 ETF 日线 / 1m 策略经 integrations/lean 执行",
-        "operations/framework_boundary.py 检查核心依赖边界；extensions/governance.py 管理项目扩展",
+        "tools/framework_boundary.py 检查核心依赖边界；extensions/governance.py 管理项目扩展",
         "application/grid_data.py 组织数据节点；计划存储位于 application/research_plan_store.py",
         "Workspace 服务位于 workspace.py，流程在 application/workspace_flow.py；报告交付位于 application/result_delivery.py 与 application/report_output.py"
       ]

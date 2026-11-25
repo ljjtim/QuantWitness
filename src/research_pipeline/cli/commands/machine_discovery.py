@@ -1,4 +1,4 @@
-"""operator、artifact 与 recipe 的稳定机器发现命令。"""
+"""operator、artifact 与 capabilities 的稳定机器发现命令。"""
 
 from __future__ import annotations
 
@@ -6,14 +6,21 @@ from research_pipeline.cli.discovery import (
     artifact_describe,
     operator_describe,
     operator_list,
-    recipe_describe,
-    recipe_list,
-    recipe_scaffold,
 )
 from ..result import execute_guarded
 
 
 def execute(args) -> int:
+    if args.command == "capabilities":
+        from research_pipeline.operations.capabilities import discovery_payload, render_capabilities_text
+        from ..result import write_machine_json
+
+        payload = discovery_payload()
+        if args.format == "json":
+            write_machine_json(payload)
+        else:
+            print(render_capabilities_text(payload))
+        return 0
     args.json = args.format == "json"
     return execute_guarded(args, _execute)
 
@@ -27,19 +34,7 @@ def _execute(args) -> dict[str, object]:
         if args.operator_command == "scaffold":
             return _project_operator_scaffold(args)
         return _project_operator_bundle(args)
-    if args.command == "artifact":
-        return artifact_describe(args.artifact_type)
-    if args.recipe_command == "list":
-        return recipe_list()
-    if args.recipe_command == "describe":
-        return recipe_describe(args.recipe_id)
-    return recipe_scaffold(
-        args.recipe_id,
-        output=args.output,
-        catalog_lock=args.catalog_lock,
-        assignments=tuple(args.set or ()),
-        answers_file=args.answers,
-    )
+    return artifact_describe(args.artifact_type)
 
 
 def _project_operator_bundle(args) -> dict[str, object]:
@@ -72,6 +67,7 @@ def _project_operator_bundle(args) -> dict[str, object]:
             operator_spec=declaration.operator_spec,
             entry_module=declaration.entry_module,
             entry_function=declaration.entry_function,
+            lean_algorithm=declaration.lean_algorithm,
             dependency_lock=declaration.dependency_lock,
             registered_operator_specs=registered_operator_specs,
             project_artifact_types=declaration.project_artifact_types,

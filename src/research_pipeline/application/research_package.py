@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
-
 from .command_suggestion import command_suggestion
-from .report_output import prepare_qlib_request, report_table_ids, write_qlib_report, write_result_report
 
 
 def _execute(args, *, documents=None) -> dict[str, object]:
@@ -73,153 +70,16 @@ def _execute(args, *, documents=None) -> dict[str, object]:
             roles,
             read_only_roles=tuple(role for role in roles if role.endswith("_input")),
         )
-    if args.package_command in {"report", "compare", "export-result"}:
-        from research_pipeline.data_plane import PathRolePolicy
+    from research_pipeline.packages import verify_package_source_provenance
+    from research_pipeline.packages.lint import build_lint_report, validate_lint_declarations
 
-        roles = {
-            "package_input": args.package,
-        }
-        if args.package_command == "compare":
-            roles.update({
-                "left_result_input": args.left_result,
-                "left_result_store_input": args.left_result_store,
-                "right_result_input": args.right_result,
-                "right_result_store_input": args.right_result_store,
-            })
-            if args.right_package:
-                roles["right_package_input"] = args.right_package
-            if getattr(args, "right_source_archive_root", None):
-                roles["right_source_archive_input"] = args.right_source_archive_root
-        else:
-            roles.update({
-                "result_input": args.result,
-                "result_store_input": args.result_store,
-            })
-        if args.package_command == "export-result":
-            roles["export_result_output"] = args.output
-        elif args.package_command == "report" and args.output is not None:
-            roles["report_output"] = args.output
-        if getattr(args, "source_archive_root", None):
-            roles["source_archive_input"] = args.source_archive_root
-        roles = {role: path for role, path in roles.items() if path is not None}
-        PathRolePolicy().validate(
-            roles,
-            read_only_roles=tuple(role for role in roles if role.endswith("_input")),
-        )
-    from research_pipeline.packages import (
-        load_research_package,
-        verify_package_source_provenance,
+    package, queries, recipe, semantics = validate_lint_declarations(args.package, documents=documents)
+    source_verification = verify_package_source_provenance(package, getattr(args, "source_archive_root", None))
+    plan, registry = _compile_lint(package, args, query_result=queries, recipe=recipe, research_semantics=semantics)
+    return build_lint_report(
+        package, plan, catalog_lock=getattr(args, "catalog_lock", None),
+        source_verification=source_verification, resource_summary=_declared_resource_summary(plan, registry),
     )
-
-    if args.package_command == "lint":
-        from research_pipeline.packages.lint import validate_lint_declarations
-
-        package, queries, recipe, semantics = validate_lint_declarations(args.package, documents=documents)
-    else:
-        package = load_research_package(args.package, documents=documents)
-    source_verification = verify_package_source_provenance(
-        package,
-        getattr(args, "source_archive_root", None),
-    )
-    if args.package_command == "lint":
-        from research_pipeline.packages.lint import build_lint_report
-
-        plan, registry = _compile_lint(
-            package, args, query_result=queries, recipe=recipe, research_semantics=semantics,
-        )
-        report = build_lint_report(
-            package,
-            plan,
-            catalog_lock=getattr(args, "catalog_lock", None),
-            source_verification=source_verification,
-            resource_summary=_declared_resource_summary(plan, registry),
-        )
-        return report
-    plan = _compile_trusted_context(package, args)
-    from research_pipeline.results import (
-        build_result_report,
-        load_result_context,
-        render_result_report,
-        export_result,
-    )
-    base = {
-        "package_id": package.package_id,
-        "package_hash": package.package_hash,
-        "package_plan_hash": plan.plan_hash,
-        "query_count": len(plan.queries),
-        "metric_contract_hash": package.metric_contract.contract_hash,
-        "claim_contract_hash": package.claim_contract.contract_hash,
-        "source_provenance_hash": package.source_provenance_hash,
-        "source_verification": source_verification,
-    }
-    if args.package_command == "compare":
-        right_package = package if not args.right_package else load_research_package(args.right_package)
-        verify_package_source_provenance(
-            right_package,
-            getattr(args, "right_source_archive_root", None) or getattr(args, "source_archive_root", None),
-        )
-        right_plan = plan if not args.right_package else _compile_trusted_context(right_package, args)
-        left = load_result_context(
-            args.left_result,
-            result_store=args.left_result_store,
-        )
-        right = load_result_context(
-            args.right_result,
-            result_store=args.right_result_store,
-        )
-        from research_pipeline.packages.delivery import (
-            compare_research_package_results,
-        )
-
-        comparison = compare_research_package_results(
-            package,
-            plan,
-            left,
-            right,
-            right_package=right_package,
-            right_plan=right_plan,
-        )
-        return {**base, "comparison": asdict(comparison)}
-    if args.package_command == "report":
-        request = prepare_qlib_request(args)
-        context = load_result_context(
-            args.result,
-            result_store=args.result_store,
-            additional_table_ids=report_table_ids(request),
-        )
-        _validate_package_result(package, plan, context)
-        markdown = f"# {package.display_name}\n\n{render_result_report(context)}"
-        if args.output is not None:
-            if request is not None:
-                output = write_qlib_report(args.output, context=context, request=request, markdown=markdown)
-            else:
-                output = write_result_report(
-                    args.output,
-                    output_format=args.format,
-                    markdown=markdown,
-                    report={
-                        "package": base,
-                        "result": build_result_report(context).to_dict(),
-                    },
-                )
-            return {
-                **base,
-                "output": str(output),
-                "format": args.format,
-                "result_id": context.snapshot.bundle.result_id,
-                "claim_level": context.claim_level,
-            }
-        return {
-            **base,
-            "report": markdown,
-        }
-    context = load_result_context(
-        args.result,
-        result_store=args.result_store,
-    )
-    _validate_package_result(package, plan, context)
-    output = export_result(context, args.output)
-    return {**base, "output": str(output)}
 
 
 def _compile_lint(package, args, *, query_result=None, recipe=None, research_semantics=None):
@@ -249,10 +109,6 @@ def _compile_lint(package, args, *, query_result=None, recipe=None, research_sem
         package,
         admission=admission,
     ), admission
-
-
-def _compile_trusted_context(package, args):
-    return _compile_lint(package, args)[0]
 
 
 def _declared_resource_summary(plan, registry) -> dict[str, object]:
@@ -314,15 +170,6 @@ def _declared_resource_summary(plan, registry) -> dict[str, object]:
         },
         "changed_research_semantics": False,
     }
-
-
-def _validate_package_result(package, plan, context) -> None:
-    bundle = context.snapshot.bundle
-    if bundle.package_hash != package.package_hash or bundle.plan_hash != plan.plan_hash:
-        raise ValueError("Result 不属于当前 ResearchPackage/plan")
-    claim = context.claim_level
-    if claim not in package.claim_contract.allowed_claim_levels:
-        raise ValueError("Result claim 超过 ResearchPackage 允许范围")
 
 
 __all__ = ["_execute"]

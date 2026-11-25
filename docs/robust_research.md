@@ -30,11 +30,6 @@
 | 名称 | 用途 |
 | --- | --- |
 | HAC（异方差与自相关稳健误差） | 估计存在异方差和时间相关时的误差 |
-| block bootstrap（分块自助法） | 按连续块重采样，保留块内依赖 |
-| PSR（概率夏普比率） | 评价夏普比率超过基准的概率 |
-| DSR（折减夏普比率） | 估计试验选择对夏普比率的影响 |
-| PBO（回测过拟合概率） | 描述样本内选择在样本外失效的风险 |
-| Reality Check（现实检验） | 对候选全集检验优于基准的证据 |
 | SPA（优越预测能力检验） | 检验候选相对基准的预测能力 |
 | purge（清除跨界标签） | 删除跨越样本边界的标签 |
 | embargo（隔离区间） | 在样本边界保留隔离会话 |
@@ -42,10 +37,10 @@
 
 ## 能力
 
-- 统计：HAC、聚类稳健误差、重叠标签修正、block bootstrap、多重检验、PSR、DSR、PBO、Reality Check 和 SPA。
-- 验证：purge/embargo K-Fold、walk-forward、nested validation、fit 审计、唯一候选或完整候选族 holdout，以及完整试验账本。
+- 统计：HAC、重叠标签修正与多重检验校正。
+- 验证：purge/embargo K-Fold、walk-forward、fit 审计、唯一候选或完整候选族 holdout，以及完整试验账本。
 
-Bootstrap 的正式索引接口为 `iter_bootstrap_index_batches()`，selection-bias 的 Reality Check/SPA 消费批次，不创建 replication×样本数完整索引矩阵。固定 seed 的随机顺序不随批大小改变。模型使用六节点 Runtime，保留候选拟合和 holdout 内层状态机。结果结论沿用声明事实。
+模型使用六节点 Runtime，保留候选拟合和 holdout 内层状态机。结果结论沿用声明事实。
 
 IC、分组收益和公告市场模型这类完整研究方法留在项目。ResearchPackage、Operator bundle 和 metric_definitions 冻结算法、表、单位及指标定义。开发验收用手算与确定性样本。项目分析遵守生产 PIT、标签隔离、最终留出与 Result 合同。
 
@@ -68,8 +63,6 @@ IC、分组收益和公告市场模型这类完整研究方法不在公共 Opera
 无值预检失败不消耗，`opened` 后失败仍消耗，完整候选族随后永久退役。未参与预声明选择规则的区间统一叫 `diagnostic`。容量指标只是研究代理，不是成交能力承诺。
 
 真实统计输出使用版本化 `MetricDefinition`。定义绑定输入 Artifact 类型、输出 schema、单位和频率。定义还绑定年化、无风险利率、缺失值、方向和实现字节摘要。
-
-稳健统计目录同时写出 `metric-artifacts.json`。每个 `MetricArtifact` 绑定定义摘要、样本范围和来源 Artifact lineage。工件还绑定 implementation digest，并保存 `metric_id`、`version` 与组合引用。没有真实产物的指标不能仅靠名称或声明冒充已执行指标。
 
 项目使用多候选统计时，声明必须固定主估计量、候选全集和比较基准。声明还必须固定 HAC 或聚类政策、校正规则和随机协议。正式指标来自实际生产表。通用统计函数不会自动组成完整项目流程。
 

@@ -11,11 +11,19 @@
   <ItemGroup>
     <Compile Include="ParquetDataFeed.cs" />
     <Compile Include="MonthlyParquetStore.cs" />
-    <Compile Include="DirectDailyStreamStore.cs" />
+    <Compile Include="FrozenMinuteParquetStore.cs" />
+    <Compile Include="FrozenSpotRuleStore.cs" />
+    <Compile Include="FrozenFinancialDayStore.cs" />
+    <Compile Include="NativeData.cs" />
+    <Compile Include="ManifestCache.cs" />
+    <Compile Include="NativeDirectReader.cs" />
+    <Compile Include="NativeHistoryProvider.cs" />
     <ProjectReference Include="../china-rules/ChinaRules.csproj" />
     <InternalsVisibleTo Include="EngineContracts" />
+    <InternalsVisibleTo Include="NativeSymbolContracts" />
     <PackageReference Include="ParquetSharp" Version="25.0.1" />
     <Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Algorithm"><HintPath>$(LeanBin)/QuantConnect.Algorithm.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="QuantConnect.Lean.Engine"><HintPath>$(LeanBin)/QuantConnect.Lean.Engine.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="QuantConnect.Configuration"><HintPath>$(LeanBin)/QuantConnect.Configuration.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="QuantConnect.Logging"><HintPath>$(LeanBin)/QuantConnect.Logging.dll</HintPath><Private>false</Private></Reference>

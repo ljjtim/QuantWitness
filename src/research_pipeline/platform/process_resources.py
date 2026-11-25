@@ -14,6 +14,85 @@ from typing import Mapping
 import psutil
 
 
+_WINDOWS_JOB_KILL_ON_CLOSE = 0x00002000
+_WINDOWS_JOB_EXTENDED_LIMIT_INFORMATION = 9
+
+
+class _WindowsJobBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("per_process_user_time_limit", ctypes.c_longlong),
+        ("per_job_user_time_limit", ctypes.c_longlong),
+        ("limit_flags", ctypes.c_uint32),
+        ("minimum_working_set_size", ctypes.c_size_t),
+        ("maximum_working_set_size", ctypes.c_size_t),
+        ("active_process_limit", ctypes.c_uint32),
+        ("affinity", ctypes.c_size_t),
+        ("priority_class", ctypes.c_uint32),
+        ("scheduling_class", ctypes.c_uint32),
+    ]
+
+
+class _WindowsIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("read_operation_count", ctypes.c_uint64),
+        ("write_operation_count", ctypes.c_uint64),
+        ("other_operation_count", ctypes.c_uint64),
+        ("read_transfer_count", ctypes.c_uint64),
+        ("write_transfer_count", ctypes.c_uint64),
+        ("other_transfer_count", ctypes.c_uint64),
+    ]
+
+
+class _WindowsJobExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("basic_limit_information", _WindowsJobBasicLimitInformation),
+        ("io_info", _WindowsIoCounters),
+        ("process_memory_limit", ctypes.c_size_t),
+        ("job_memory_limit", ctypes.c_size_t),
+        ("peak_process_memory_used", ctypes.c_size_t),
+        ("peak_job_memory_used", ctypes.c_size_t),
+    ]
+
+
+def _windows_kill_job(name, process_handle=None):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
+    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel32.SetInformationJobObject.argtypes = (
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+    )
+    kernel32.SetInformationJobObject.restype = ctypes.c_int
+    kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+    kernel32.AssignProcessToJobObject.restype = ctypes.c_int
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+
+    handle = kernel32.CreateJobObjectW(None, name)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    limits = _WindowsJobExtendedLimitInformation()
+    limits.basic_limit_information.limit_flags = _WINDOWS_JOB_KILL_ON_CLOSE
+    configured = kernel32.SetInformationJobObject(
+        handle,
+        _WINDOWS_JOB_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(limits),
+        ctypes.sizeof(limits),
+    )
+    assigned = configured and kernel32.AssignProcessToJobObject(
+        handle,
+        kernel32.GetCurrentProcess() if process_handle is None else process_handle,
+    )
+    if not assigned:
+        error = ctypes.WinError(ctypes.get_last_error())
+        kernel32.CloseHandle(handle)
+        raise error
+    return int(handle)
+
+
 def _owned_process_descendants(root):
     """逐父子边核对出生时间，排除Windows退出父PID复用形成的旧链。"""
     root_started = root.create_time()

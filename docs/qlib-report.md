@@ -31,7 +31,7 @@ HTML 报告从已封存 Result 的预测表或正式组合表生成。请求绑�
 python -m research_pipeline report --result <Result目录> --result-store <ResultStore根目录> --format html --request <报告请求.yaml> --output <报告.html>
 ```
 
-包级入口使用相同服务：`package report --package <研究包目录>` 加上上述报告参数。`markdown` 与 `json` 继续生成正式指标摘要，不接受图形 request。
+携带研究包的报告使用同一入口：`report --package <研究包目录>` 加上上述报告参数。`markdown` 与 `json` 继续生成正式指标摘要，不接受图形 request。
 
 ## 模型请求
 

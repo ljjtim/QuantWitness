@@ -15,7 +15,7 @@ Python安装包不包含示例目录。
 
 本页用于创建自己的研究。
 `package init` 生成中性草稿，不能直接运行。
-现成示例与公共 Recipe 是不同入口，当前公共 Recipe 清单为空。
+现成示例可以直接复制到研究目录。
 
 ## Windows 当前会话使用 UTF-8
 
@@ -48,7 +48,6 @@ $env:PYTHONUTF8='1'
 python -m research_pipeline capabilities --format json
 python -m research_pipeline operator list --format json
 python -m research_pipeline artifact describe data.columnar-bundle.v1 --format json
-python -m research_pipeline recipe list --format json
 python -m research_pipeline catalog dataset search daily --catalog-lock <持久Catalog-Lock目录> --format json
 ```
 
@@ -63,7 +62,7 @@ dataset 命中项的 `bindings` 会列出 `source_profile`、
 
 ## 3. 创建当前 ResearchPackage
 
-当前公共 Recipe 清单为空，从中性声明草稿开始：
+使用中性研究包草稿开始研究。
 
 ```powershell
 python -m research_pipeline package init work/my_research --json
@@ -131,7 +130,7 @@ python -m research_pipeline compare --left-result <左Result目录> --right-resu
 python -m research_pipeline export-result --result <Result目录> --output work/exported --json
 ```
 
-报告、compare、analysis 和 Dashboard 使用正式 Result，不重新执行研究。
+报告、compare 和 Dashboard 使用正式 Result，不重新执行研究。
 归档时保留结果及其引用的持久输入，详见[Result](evidence.md)。
 
 普通 Workspace execute 将准备与准入合并为同次流程，不先完整调用独立 lint。

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+
+from functools import partial
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import re
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -11,6 +14,9 @@ from typing import Mapping, Sequence
 from research_pipeline.platform import typed_canonical_hash
 from research_pipeline.platform.claim_levels import CLAIM_LEVELS, weakest_claim_level
 from research_pipeline.platform.metric_contracts import MetricDefinition, MetricReachabilityProof
+from research_pipeline.platform.validation import (
+    require_exact_fields, require_sha256,
+)
 from .errors import ResultContractError
 
 
@@ -24,7 +30,6 @@ RESULT_REF_VERSION = "research-result-ref-v1"
 QLIB_MODEL_INVENTORY_SCHEMA_ID = "research.qlib-model-inventory.v1"
 
 _SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TABLE_ROLES = frozenset({"primary", "diagnostic", "metrics", "portfolio", "orders", "trades"})
 
 def _require_id(value: object, field: str) -> str:
@@ -33,18 +38,32 @@ def _require_id(value: object, field: str) -> str:
     return value
 
 
-def _require_hash(value: object, field: str) -> str:
-    if not isinstance(value, str) or not _SHA256.fullmatch(value):
-        raise ResultContractError(f"{field} 必须是 sha256 小写摘要")
+_require_hash = partial(require_sha256, error=ResultContractError)
+
+
+_require_exact = partial(require_exact_fields, error=ResultContractError)
+
+
+def _thaw_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_json_value(item) for item in value]
     return value
 
 
-def _require_exact(payload: Mapping[str, object], expected: set[str], field: str) -> None:
-    if set(payload) != expected:
-        raise ResultContractError(
-            f"{field} schema 不匹配；缺失={sorted(expected - set(payload))}，"
-            f"未知={sorted(set(payload) - expected)}"
-        )
+def _normalize_cost_assumption(raw: object) -> dict[str, object]:
+    if not isinstance(raw, Mapping):
+        raise ResultContractError("ResultBundle research_cost_assumption 必须是映射")
+    try:
+        normalized = json.loads(json.dumps(_thaw_json_value(raw), allow_nan=False, sort_keys=True))
+    except (TypeError, ValueError) as exc:
+        raise ResultContractError("ResultBundle research_cost_assumption 必须仅含有效 JSON 值") from exc
+    if "scenarios" in normalized:
+        scenarios = normalized["scenarios"]
+        if not isinstance(scenarios, list) or any(not isinstance(item, dict) for item in scenarios):
+            raise ResultContractError("research_cost_assumption.scenarios 必须是映射列表")
+    return normalized
 
 
 def _safe_prefix(value: object) -> str:
@@ -69,6 +88,23 @@ def _digest_mapping(value: Mapping[str, str], field: str) -> Mapping[str, str]:
         _require_hash(digest, f"{field}.{key}")
         normalized[key] = digest
     return MappingProxyType(dict(sorted(normalized.items())))
+
+
+_RESERVED_RESULT_CONTROL_FILES = frozenset({"result.json", "COMMITTED", "execution-cost.json"})
+
+
+def _normalize_control_files(value: Mapping[str, str] | None) -> Mapping[str, str]:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, Mapping):
+        raise ResultContractError("control_files 必须是映射")
+    if not value:
+        return MappingProxyType({})
+    normalized = _digest_mapping(value, "control_files")
+    for name in normalized:
+        if "/" in name or not name.endswith(".json") or name in _RESERVED_RESULT_CONTROL_FILES:
+            raise ResultContractError(f"control_files 文件名不受支持: {name}")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -98,7 +134,7 @@ class ResultTableSpec:
             raise ResultContractError("Result 表使用不受支持的退役 schema")
         if self.artifact_type in {
             "research.daily-simulation.v1", "research.shared-futures-simulation.v1",
-            "research.lean-simulation.v1",
+            "research.lean-simulation.v1", "research.lean-simulation.v2", "research.lean-simulation.v3",
         }:
             raise ResultContractError("Result 表使用不受支持的退役工件类型")
         object.__setattr__(self, "path_prefix", _safe_prefix(self.path_prefix))
@@ -539,6 +575,7 @@ class ResultBundle:
     support_files: tuple[ResultSupportFile, ...] = ()
     metric_definitions: tuple[MetricDefinition, ...] = ()
     research_cost_assumption: Mapping[str, object] | None = None
+    control_files: Mapping[str, str] = MappingProxyType({})
     status: str = "finalized"
     contract_version: str = RESULT_BUNDLE_VERSION
 
@@ -584,7 +621,7 @@ class ResultBundle:
         ):
             raise ResultContractError("Result 声明结论不得超过输入允许范围")
         if self.research_cost_assumption is not None:
-            object.__setattr__(self, "research_cost_assumption", MappingProxyType(dict(self.research_cost_assumption)))
+            object.__setattr__(self, "research_cost_assumption", MappingProxyType(_normalize_cost_assumption(self.research_cost_assumption)))
         definitions = tuple(item.metric_ref for item in self.metric_definitions)
         if definitions != tuple(sorted(set(definitions))):
             raise ResultContractError("Result 项目指标定义必须唯一并按 metric_ref 排序")
@@ -639,11 +676,12 @@ class ResultBundle:
             raise ResultContractError("ResultBundle 运行摘要与结果身份不一致")
         if self.status != "finalized" or self.contract_version != RESULT_BUNDLE_VERSION:
             raise ResultContractError("ResultBundle 状态或版本无效")
+        object.__setattr__(self, "control_files", _normalize_control_files(self.control_files))
         if self.result_id != typed_canonical_hash(self.payload()):
             raise ResultContractError("ResultBundle result_id 不一致")
 
     def payload(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "project_id": self.project_id,
             "run_id": self.run_id,
             "package_hash": self.package_hash,
@@ -668,6 +706,9 @@ class ResultBundle:
             "status": self.status,
             "contract_version": self.contract_version,
         }
+        if self.control_files:
+            result["control_files"] = dict(self.control_files)
+        return result
 
     def to_dict(self) -> dict[str, object]:
         return {**self.payload(), "result_id": self.result_id}
@@ -696,6 +737,11 @@ class ResultBundle:
                 weakest_claim_level(*input_claim_ceilings.values()),
             )
         )
+        normalized_cost = (
+            None if kwargs.get("research_cost_assumption") is None
+            else _normalize_cost_assumption(kwargs.get("research_cost_assumption"))
+        )
+        control_files = _normalize_control_files(kwargs.get("control_files"))
         payload = {
             "project_id": kwargs["project_id"],
             "run_id": kwargs["run_id"],
@@ -717,11 +763,15 @@ class ResultBundle:
             "run": kwargs["run"].to_dict(),
             "support_files": [item.to_dict() for item in kwargs.get("support_files", ())],
             "metric_definitions": [item.to_dict() for item in kwargs.get("metric_definitions", ())],
-            "research_cost_assumption": kwargs.get("research_cost_assumption"),
+            "research_cost_assumption": normalized_cost,
             "status": "finalized",
             "contract_version": RESULT_BUNDLE_VERSION,
         }
+        if control_files:
+            payload["control_files"] = dict(control_files)
         values = dict(kwargs)
+        values["research_cost_assumption"] = normalized_cost
+        values["control_files"] = control_files
         values["input_revisions"] = input_revisions
         values["formal_input_request_ids"] = formal_input_request_ids
         values["input_claim_ceilings"] = input_claim_ceilings
@@ -741,7 +791,17 @@ class ResultBundle:
             "metric_proofs", "metric_definitions", "research_cost_assumption", "tables", "run", "support_files", "result_id", "status",
             "contract_version",
         }
-        _require_exact(payload, expected, "ResultBundle")
+        _require_exact(
+            {key: value for key, value in payload.items() if key != "control_files"},
+            expected,
+            "ResultBundle",
+        )
+        control_files: Mapping[str, str] = MappingProxyType({})
+        if "control_files" in payload:
+            raw_controls = payload["control_files"]
+            if not isinstance(raw_controls, Mapping) or not raw_controls:
+                raise ResultContractError("ResultBundle control_files 必须是非空映射")
+            control_files = _normalize_control_files(raw_controls)
         for field in (
             "catalog_hashes",
             "input_claim_ceilings",
@@ -792,6 +852,7 @@ class ResultBundle:
             support_files=tuple(
                 ResultSupportFile.from_dict(item) for item in payload["support_files"]
             ),
+            control_files=control_files,
             result_id=str(payload["result_id"]),
             status=str(payload["status"]),
             contract_version=str(payload["contract_version"]),

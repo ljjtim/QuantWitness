@@ -33,7 +33,7 @@ def prepare_execution(root, design, *, own=None, lean_home=None):
             participation_ppm=1_000_000)
     else:
         execution = deepcopy(own['lean_execution'])
-        if not EXECUTION_FIELDS <= set(execution) or set(execution)-EXECUTION_FIELDS-{'lean_home'}:
+        if not EXECUTION_FIELDS <= set(execution) or set(execution)-EXECUTION_FIELDS-{'lean_home', 'trading_calendar_request_id'}:
             raise ValueError('自有组合必须完整声明LEAN来源、scope、窗口、滑点及参与率')
         lean_home = lean_home or execution.pop('lean_home', None)
         scope = load_minute_scope_input(execution['scope_root'], execution['minute_scope'])

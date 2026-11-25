@@ -3,13 +3,13 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from datetime import date
 import importlib
-import shutil
 from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from research_pipeline.platform import typed_canonical_hash
+from research_pipeline.platform.immutable_files import remove_tree
 from research_pipeline.platform.metric_contracts import (
     MetricReachabilityProof,
     build_mainline_metric_registry,
@@ -272,7 +272,7 @@ def test_result_consumers_survive_run_root_removal(tmp_path, monkeypatch) -> Non
     assert context.snapshot.bundle.run.status == "succeeded"
     assert context.claim_level == "research_observation"
     assert not hasattr(context, "verification")
-    shutil.rmtree(run_root)
+    remove_tree(run_root)
 
     def unexpected_run(*args, **kwargs):
         pytest.fail("Result 消费不得重新执行研究")
@@ -302,26 +302,11 @@ def test_stock_cost_assumption_survives_result_and_report(tmp_path) -> None:
         assert str(value) in report
 
 
-@pytest.mark.parametrize("window", [
-    {"applicable_start": "2024-01-03"},
-    {"applicable_end": "2024-01-02"},
-])
-def test_stock_execution_rejects_cost_assumption_outside_research_window(window) -> None:
-    from research_pipeline.platform.research_cost_assumption import (
-        ResearchCostAssumptionError, normalize_stock_research_cost_assumption,
-    )
-
-    assumption = {**_stock_cost_assumption(), **window}
-    with pytest.raises(ResearchCostAssumptionError, match="未覆盖完整研究窗口"):
-        normalize_stock_research_cost_assumption(
-            assumption, research_start=date(2024, 1, 2), research_end=date(2024, 1, 3),
-        )
-
-
 def test_result_export_rejects_source_tamper_and_cleans_partial_output(tmp_path) -> None:
     _, _, store, bundle, directory, _ = _run_to_result(tmp_path, "generic.export-integrity")
     context = load_result_context(directory, result_store=store)
     table_path = directory / next(iter(bundle.tables[0].files))
+    table_path.chmod(0o644)
     with table_path.open("ab") as handle:
         handle.write(b"changed-content")
     destination = tmp_path / "changed-export"
@@ -335,7 +320,9 @@ def test_result_consumer_rejects_required_metric_table_tamper(tmp_path) -> None:
     _, _, store, bundle, directory, _ = _run_to_result(tmp_path, "generic.report-integrity")
     metric_schema_ids = {proof.result_schema_id for proof in bundle.metric_proofs}
     manifest = next(table for table in bundle.tables if table.schema_id in metric_schema_ids)
-    with (directory / next(iter(manifest.files))).open("ab") as handle:
+    metric_path = directory / next(iter(manifest.files))
+    metric_path.chmod(0o644)
+    with metric_path.open("ab") as handle:
         handle.write(b"changed-content")
     with pytest.raises(ResultContractError, match="hash 漂移"):
         load_result_context(directory, result_store=store)

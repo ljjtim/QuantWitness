@@ -6,19 +6,26 @@ v1 保持历史封存字段和内容身份；v2 显式区分股份到账与可�
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Mapping
 
 from research_pipeline.platform.canonical import typed_canonical_hash
+from research_pipeline.platform.errors import DomainContractError
 
-from .models import DomainContractError
 from .time import require_aware_datetime
 
 
 CORPORATE_ACTION_KINDS = frozenset({
     "cash_dividend", "stock_dividend", "split", "reverse_split", "rights", "delisting_cash", "code_change",
 })
+
+class CorporateActionError(DomainContractError):
+    """公司行动来源或权益事实不满足合同。"""
+
+    error_code = "simulation_contract_invalid"
 
 
 @dataclass(frozen=True)
@@ -45,6 +52,7 @@ class CorporateAction:
     settlement_available_time: datetime | None = None
     trading_termination_date: date | None = None
     recovery_assumption: str | None = None
+    share_settlement_policy: str = "actual_arrival"
 
     def __post_init__(self) -> None:
         if not self.action_id.strip() or self.revision < 1 or self.kind not in CORPORATE_ACTION_KINDS:
@@ -54,6 +62,13 @@ class CorporateAction:
         require_aware_datetime(self.announcement_available_time, "announcement_available_time")
         if self.contract_version not in {1, 2}:
             raise DomainContractError("公司行为 contract_version 不受支持")
+        if self.share_settlement_policy not in {"actual_arrival", "sellable_date_receivable"}:
+            raise DomainContractError("股份结转政策无效")
+        if self.share_settlement_policy == "sellable_date_receivable" and (
+            self.contract_version != 2 or self.kind != "stock_dividend"
+            or self.shares_arrival_date is not None
+        ):
+            raise DomainContractError("按上市日结转应收仅适用于缺到账日的 v2 普通送转")
         if not (self.record_date <= self.ex_date <= self.effective_date <= self.pay_date):
             raise DomainContractError("公司行为 record/ex/effective/pay 日期顺序无效")
         if min(self.cash_per_share_units, self.cash_per_share_microunits, self.ratio_numerator, self.exercise_price_units) < 0 or self.ratio_denominator < 1:
@@ -86,9 +101,12 @@ class CorporateAction:
             if self.kind == "reverse_split" and self.ratio_numerator > self.ratio_denominator:
                 raise DomainContractError("并股的总股份比例不能大于一")
             if self.kind in {"stock_dividend", "split", "reverse_split"}:
-                if self.shares_arrival_date is None or self.shares_sellable_date is None:
+                receivable = self.share_settlement_policy == "sellable_date_receivable"
+                if self.shares_sellable_date is None or (self.shares_arrival_date is None and not receivable):
                     raise DomainContractError("v2 数量类公司行为必须声明股份到账日和可卖日")
-                if not (self.effective_date <= self.shares_arrival_date <= self.shares_sellable_date):
+                earliest_arrival = self.record_date if self.kind == "stock_dividend" else self.effective_date
+                if ((self.shares_arrival_date is not None and self.shares_arrival_date < earliest_arrival)
+                    or self.shares_sellable_date < max(self.effective_date, self.shares_arrival_date or self.effective_date)):
                     raise DomainContractError("公司行为生效、股份到账、可卖日期顺序无效")
             elif self.shares_arrival_date is not None or self.shares_sellable_date is not None:
                 raise DomainContractError("非数量类公司行为不能声明股份到账日和可卖日")
@@ -103,15 +121,18 @@ class CorporateAction:
             elif self.settlement_available_time is not None or self.trading_termination_date is not None:
                 raise DomainContractError("非退市现金清算不能声明退市清算事实")
 
-    @property
+    @cached_property
     def action_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
     def to_dict(self) -> dict[str, object]:
         payload = dict(self.__dict__)
+        payload.pop("action_hash", None)
         # 未声明假设的既有行动保持原封存身份。
         if self.recovery_assumption is None:
             payload.pop("recovery_assumption")
+        if self.share_settlement_policy == "actual_arrival":
+            payload.pop("share_settlement_policy")
         extension_fields = {
             "contract_version", "shares_arrival_date", "shares_sellable_date", "source_ref",
             "settlement_available_time", "trading_termination_date",
@@ -142,6 +163,8 @@ class CorporateAction:
         expected = set(cls.__dataclass_fields__)
         if "recovery_assumption" not in payload:
             expected.remove("recovery_assumption")
+        if "share_settlement_policy" not in payload:
+            expected.remove("share_settlement_policy")
         if "contract_version" not in payload:
             expected -= extension_fields
         elif payload["contract_version"] != 2:

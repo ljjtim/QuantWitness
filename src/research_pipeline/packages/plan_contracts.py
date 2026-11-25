@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 from types import MappingProxyType
 from typing import Mapping
 
@@ -15,6 +16,14 @@ from research_pipeline.research.semantics import ResearchSemantics
 from research_pipeline.results.contracts import ResultSpec
 
 from .models import ResearchPackageError
+
+
+def _thaw_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_json_value(item) for item in value]
+    return value
 
 
 OPERATOR_GRAPH_PLAN_VERSION = "research-operator-graph-package-v2"
@@ -75,6 +84,7 @@ class OperatorGraphPlan:
     project_bundle_hashes: tuple[str, ...] = ()
     project_implementation_hashes: Mapping[str, str] | None = None
     research_semantics: ResearchSemantics | None = None
+    research_cost_assumption: Mapping[str, object] | None = None
     contract_version: str = OPERATOR_GRAPH_PLAN_VERSION
 
     def __post_init__(self) -> None:
@@ -128,8 +138,13 @@ class OperatorGraphPlan:
         project_bundle_hashes: tuple[str, ...] = (),
         project_implementation_hashes: Mapping[str, str] | None = None,
         research_semantics: ResearchSemantics | None = None,
+        research_cost_assumption: Mapping[str, object] | None = None,
     ) -> "OperatorGraphPlan":
         result = object.__new__(cls)
+        frozen_cost = (
+            None if research_cost_assumption is None
+            else json.loads(json.dumps(_thaw_json_value(research_cost_assumption), allow_nan=False, sort_keys=True))
+        )
         for field, value in (
             ("research_id", research_id), ("package_hash", package_hash),
             ("request_ids", request_ids), ("queries", queries), ("recipe", recipe),
@@ -139,6 +154,7 @@ class OperatorGraphPlan:
             ("project_id", project_id), ("project_bundle_hashes", project_bundle_hashes),
             ("project_implementation_hashes", project_implementation_hashes),
             ("research_semantics", research_semantics),
+            ("research_cost_assumption", frozen_cost),
             ("contract_version", OPERATOR_GRAPH_PLAN_VERSION),
         ):
             object.__setattr__(result, field, value)
@@ -153,13 +169,23 @@ class OperatorGraphPlan:
         return self._payload(self.recipe.to_dict())
 
     def _payload(self, recipe) -> dict[str, object]:
+        universes = {}
+        refs = {}
+        requests = []
+        for request_id, query in zip(self.request_ids, self.queries, strict=True):
+            payload = query.to_dict()
+            universe = payload.pop("universe")
+            key = query.universe
+            if key not in refs:
+                refs[key] = f"u{len(refs) + 1}"
+                universes[refs[key]] = universe
+            payload["universe_ref"] = refs[key]
+            requests.append({"request_id": request_id, "query": payload})
         payload = {
             "research_id": self.research_id,
             "package_hash": self.package_hash,
-            "requests": [
-                {"request_id": request_id, "query": query.to_dict()}
-                for request_id, query in zip(self.request_ids, self.queries, strict=True)
-            ],
+            "universes": universes,
+            "requests": requests,
             "recipe": recipe,
             "topological_order": list(self.topological_order),
             "registry_hash": self.registry_hash,
@@ -172,6 +198,10 @@ class OperatorGraphPlan:
         }
         if self.research_semantics is not None:
             payload["research_semantics"] = self.research_semantics.to_dict()
+        if self.research_cost_assumption is not None:
+            payload["research_cost_assumption"] = json.loads(
+                json.dumps(_thaw_json_value(self.research_cost_assumption), allow_nan=False, sort_keys=True)
+            )
         if self.project_bundle_hashes:
             payload["project_admission"] = {
                 "project_id": self.project_id,

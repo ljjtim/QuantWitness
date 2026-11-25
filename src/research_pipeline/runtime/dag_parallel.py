@@ -15,7 +15,7 @@ from types import MappingProxyType
 import psutil
 
 from research_pipeline.platform.process_resources import (
-    _owned_process_descendants, _measure_scratch_scopes, _nonoverlapping_roots,
+    _owned_process_descendants, _measure_scratch_scopes,
 )
 
 from .errors import RuntimeAdmissionError, RuntimeIntegrityError, RuntimeWorkerError
@@ -123,15 +123,13 @@ class DagUsageSampler(ResourceUsageSampler):
                 except (psutil.Error, OSError):
                     self.measurement_status = "measurement_unavailable"
             roots = tuple(self.scratch_roots)
-            if force_scratch or roots != self._dag_scratch_roots or now - self._last_scratch_sample_at >= 1.0:
-                try:
-                    sizes = _measure_scratch_scopes(roots)
-                    size = sum(sizes[root] for root in _nonoverlapping_roots(roots))
-                    self.peak_scratch_bytes = max(self.peak_scratch_bytes, size)
-                    self._dag_scratch_roots = roots
-                    self._last_scratch_sample_at = time.monotonic()
-                except OSError:
-                    self.measurement_status = "measurement_unavailable"
+            if self._sample_scratch_unlocked(
+                force_scratch=force_scratch,
+                roots_changed=(roots != self._dag_scratch_roots),
+                measure_scratch=_measure_scratch_scopes,
+                monotonic=time.monotonic,
+            ):
+                self._dag_scratch_roots = roots
 
 
 class _Channel:
@@ -296,9 +294,9 @@ class SpawnCall:
             with activate_artifact_verification(self.verification):
                 return verified_table_descriptor(root, commit)
         if namespace == "parquet_snapshot":
-            from research_pipeline.data_plane.snapshots import _verify_parquet_snapshot_uncached
+            from research_pipeline.data_plane.snapshots import _verified_parquet_snapshot_entry
             def verify():
-                return _verify_parquet_snapshot_uncached(descriptor["path"])
+                return _verified_parquet_snapshot_entry(descriptor["path"])
         elif namespace == "dataset_artifact":
             from research_pipeline.data_plane.dataset_artifacts import ArtifactResolver
             def verify():

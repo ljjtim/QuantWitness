@@ -133,7 +133,7 @@ def test_request_rejects_ranked_label_and_ambiguous_fold():
 def test_html_request_parameters_and_parser():
     from research_pipeline.cli.parser import build_parser
 
-    for prefix in (["report"], ["package", "report", "--package", "fixture"]):
+    for prefix in (["report"], ["report", "--package", "fixture"]):
         args = build_parser().parse_args([*prefix, "--result", "result", "--result-store", "store", "--format", "html"])
         with pytest.raises(ValueError, match="--output.*--request"):
             prepare_qlib_request(args)

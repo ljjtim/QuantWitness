@@ -14,8 +14,8 @@ __all__ = [
     "SOURCE_SNAPSHOT_VERSION", "ingest_source_snapshot", "verify_package_source_provenance", "verify_source_snapshot",
     "compare_research_package_results", "compile_research_package", "default_research_package_template",
     "compile_package_queries",
-    "initialize_research_package", "load_research_package", "render_research_package_report",
-    "registered_package_builders", "RecipeCompileResult", "export_research_package_result", "validate_package_result",
+    "initialize_research_package", "load_research_package",
+    "registered_package_builders", "RecipeCompileResult", "validate_package_result",
 ]
 
 
@@ -24,8 +24,6 @@ _LAZY_EXPORTS = {
     "registered_package_builders": ".compilation",
     "compile_package_queries": ".compiler",
     "compare_research_package_results": ".delivery",
-    "render_research_package_report": ".delivery",
-    "export_research_package_result": ".delivery",
     "validate_package_result": ".delivery",
     "LocalizationDecision": ".models",
     "MetricContract": ".models",

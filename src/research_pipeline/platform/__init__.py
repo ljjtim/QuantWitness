@@ -30,37 +30,21 @@ __all__ = [
     "CURRENT_MINUTE_CAPABILITY_MANIFEST_REVISION",
     "BuildManifest",
     "MainlineError",
-    "EXECUTION_CAPABILITY_MATRIX",
-    "TradingCapabilityError",
     "MINUTE_INTERVALS",
     "MINUTE_CAPABILITY_BINDING_VERSION",
     "MINUTE_CAPABILITY_MANIFEST_VERSION",
     "MINUTE_CAPABILITY_REQUIRED_CONSUMERS",
-    "GATE_RECEIPT_VERSION",
-    "LOCAL_SUPPLY_CHAIN_STATUS",
-    "RELEASE_ACCEPTANCE_INPUT_VERSION",
-    "RELEASE_ENVELOPE_VERSION",
-    "REQUIRED_GATE_IDS",
     "MinuteInventoryObservation",
     "MinuteAssetCoverage",
     "MinuteCapabilityInstrument",
     "MinuteCapabilityManifest",
     "MinuteCapabilityManifestError",
-    "ReleaseAcceptanceInput",
-    "ReleaseEnvelope",
-    "ReleaseEnvelopeError",
-    "ReleaseGateReceipt",
-    "verify_release_envelope",
     "canonical_json",
-    "attach_core_feature_time_facts",
-    "attach_core_label_time_facts",
-    "build_core_feature_time_facts",
     "error_code_for_exception",
     "fingerprint",
     "installed_distribution_digest",
     "load_build_manifest",
     "load_minute_capability_manifest",
-    "require_declared_trading_capability",
     "typed_canonical_bytes",
     "typed_canonical_hash",
     "validate_feature_time_facts",
@@ -91,30 +75,10 @@ _MINUTE_CAPABILITY_EXPORTS = {
     "MinuteCapabilityManifestError",
     "load_minute_capability_manifest",
 }
-_TRADING_CAPABILITY_EXPORTS = {
-    "EXECUTION_CAPABILITY_MATRIX",
-    "TradingCapabilityError",
-    "require_declared_trading_capability",
-}
-_RELEASE_ENVELOPE_EXPORTS = {
-    "GATE_RECEIPT_VERSION",
-    "LOCAL_SUPPLY_CHAIN_STATUS",
-    "RELEASE_ACCEPTANCE_INPUT_VERSION",
-    "RELEASE_ENVELOPE_VERSION",
-    "REQUIRED_GATE_IDS",
-    "ReleaseAcceptanceInput",
-    "ReleaseEnvelope",
-    "ReleaseEnvelopeError",
-    "ReleaseGateReceipt",
-    "verify_release_envelope",
-}
 _CAUSAL_TIME_EXPORTS = {
     "CausalTimeContractError",
     "CORE_FEATURE_TIME_COLUMNS",
     "CORE_LABEL_TIME_COLUMNS",
-    "attach_core_feature_time_facts",
-    "attach_core_label_time_facts",
-    "build_core_feature_time_facts",
     "validate_feature_time_facts",
     "validate_label_time_facts",
 }
@@ -126,10 +90,6 @@ def __getattr__(name: str):
         module_name = ".build_manifest"
     elif name in _MINUTE_CAPABILITY_EXPORTS:
         module_name = ".minute_reference"
-    elif name in _TRADING_CAPABILITY_EXPORTS:
-        module_name = ".trading_capabilities"
-    elif name in _RELEASE_ENVELOPE_EXPORTS:
-        module_name = ".release_envelope"
     elif name in _CAUSAL_TIME_EXPORTS:
         module_name = ".causal_time"
     else:

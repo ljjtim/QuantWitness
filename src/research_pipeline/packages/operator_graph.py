@@ -100,7 +100,7 @@ def validate_operator_graph_scopes(package, prepared):
         raise ResearchPackageError(f"operator graph 准入失败: {exc}") from exc
 
 
-def bind_operator_graph_platform(prepared, platform_admission):
+def bind_operator_graph_platform(prepared, platform_admission, *, scheduled_nodes=None):
     """仅绑定平台生成的来源证明，保留已检查的研究图及输出闭包。"""
     plan = prepared.plan
     values = _platform_admission_values(
@@ -109,7 +109,7 @@ def bind_operator_graph_platform(prepared, platform_admission):
     recipe = OperatorGraphRecipe.build(
         graph_id=plan.recipe.graph_id,
         nodes=tuple(replace(node, parameters=values)
-                    if node.operator_id == "data.catalog.admission" else node
+                    if node.operator_id == "data.catalog.admission" else (scheduled_nodes or {}).get(node.node_id, node)
                     for node in plan.recipe.nodes),
     )
     payload = {**prepared.admitted.payload(), "recipe_hash": recipe.recipe_hash}
@@ -296,6 +296,10 @@ def prepare_operator_graph_package(
         root_seed=root_seed,
         fixed_clock=fixed_clock,
         research_semantics=research_semantics,
+        research_cost_assumption=_resolve_package_cost_assumption(
+            payload.get("research_cost_assumption"),
+            compiled_recipe.recipe,
+        ),
         project_id=project_id,
         project_bundle_hashes=project_bundle_hashes,
         project_implementation_hashes=project_implementation_hashes,
@@ -304,12 +308,55 @@ def prepare_operator_graph_package(
     return PreparedOperatorGraph(plan, admitted)
 
 
+def _resolve_package_cost_assumption(raw_cost: object, recipe: OperatorGraphRecipe) -> dict[str, object] | None:
+    """校验研究级费用假设，并为未显式声明的 LEAN 策略自动投影规则与滑点摘要。"""
+    from .plan_contracts import _thaw_json_value
+
+    if raw_cost is not None:
+        if not isinstance(raw_cost, Mapping):
+            raise ResearchPackageError("spec.research_cost_assumption 必须是映射")
+        try:
+            normalized = json.loads(json.dumps(_thaw_json_value(raw_cost), allow_nan=False, sort_keys=True))
+        except (TypeError, ValueError) as exc:
+            raise ResearchPackageError("spec.research_cost_assumption 必须仅含有效 JSON 值") from exc
+        if "scenarios" in normalized:
+            scenarios = normalized["scenarios"]
+            if not isinstance(scenarios, list) or any(not isinstance(item, dict) for item in scenarios):
+                raise ResearchPackageError("research_cost_assumption.scenarios 必须是映射列表")
+        return normalized
+    lean_strategies = []
+    for node in recipe.nodes:
+        if node.parameters.get("execution_backend") != "lean":
+            continue
+        scope = node.parameters.get("minute_scope")
+        entry = {
+            "node_id": node.node_id,
+            "execution_model": node.parameters.get("execution_model"),
+            "initial_cash_units": node.parameters.get("initial_cash_units"),
+            "slippage_bps": node.parameters.get("slippage_bps"),
+            "slippage_ticks": node.parameters.get("slippage_ticks"),
+            "participation_ppm": node.parameters.get("participation_ppm"),
+            "rule_bundle_hash": node.parameters.get("rule_bundle_hash"),
+        }
+        if isinstance(scope, Mapping) and "rules_hash" in scope:
+            entry["minute_scope_rules_hash"] = scope["rules_hash"]
+        lean_strategies.append(entry)
+    if not lean_strategies:
+        return None
+    lean_strategies.sort(key=lambda item: str(item["node_id"]))
+    return {
+        "contract_version": "research-cost-assumption-v1",
+        "source": "lean_strategy_projection",
+        "strategies": lean_strategies,
+    }
+
+
 def _validate_operator_graph_spec(payload: Mapping[str, object]) -> None:
     required_fields = {
         "contract_version", "research_id", "as_of", "requests", "root_seed", "fixed_clock",
         "graph", "result",
     }
-    optional_fields = {"research_semantics", "metric_definitions"}
+    optional_fields = {"research_semantics", "research_cost_assumption", "metric_definitions", "universes"}
     if not required_fields.issubset(payload) or set(payload) - required_fields - optional_fields:
         expected = required_fields | optional_fields
         raise ResearchPackageError(
@@ -608,7 +655,7 @@ def _validate_operator_graph_special_contracts(
                 raise ResearchPackageError("股票和 ETF 分钟 target 必须按 100 股/份声明")
             if type(leverage) not in {int, float} or float(leverage) < 1.0:
                 raise ResearchPackageError("分钟 target leverage_limit 无效")
-        elif node.operator_id == "finance.simulation.intraday" or "strategy_declaration" in parameters:
+        elif "strategy_declaration" in parameters:
             participation = parameters.get("participation_ppm")
             initial_cash = parameters.get("initial_cash_units")
             rule_hash = parameters.get("rule_bundle_hash")

@@ -7,7 +7,7 @@ from datetime import date, datetime
 import json
 from pathlib import Path
 import shutil
-from typing import Mapping
+from typing import Callable, Mapping
 from zoneinfo import ZoneInfo
 from research_pipeline.platform import canonical_json
 from research_pipeline.data_plane.research_data_bundle import merge_research_data_bundles
@@ -34,8 +34,10 @@ class ResearchRunEnvironment:
     workers: int
     resource_timeout_seconds: float | None
     strategy_spec_hashes: Mapping[str, str]
+    load_published_snapshot: Callable | None = None
     minute_scope_inputs: Mapping[str, object] = field(default_factory=dict)
     minute_scan_plans: Mapping[str, object] = field(default_factory=dict)
+    research_cost_assumption: Mapping[str, object] | None = None
 
 
 def _environment(context: OperatorRuntimeContext) -> ResearchRunEnvironment:

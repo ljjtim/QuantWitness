@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .canonical import typed_canonical_hash
+from .validation import require_sha256
 
 
 BUILD_MANIFEST_VERSION = "research-build-manifest-v1"
@@ -23,11 +24,7 @@ _DISTRIBUTION_IDENTITY_VERSION = "research-distribution-content-record-v2"
 
 
 def _hash(value: object, field: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
-    ):
-        raise ValueError(f"BuildManifest {field} 必须是 sha256 小写摘要")
-    return value
+    return require_sha256(value, f"BuildManifest {field}", error=ValueError)
 
 
 def _hash_mapping(value: object, field: str) -> Mapping[str, str]:

@@ -132,32 +132,10 @@ def merge_research_data_bundles(
     )
 
 
-def select_research_data_references(
-    payload: Mapping[str, Any],
-    *,
-    request_ids: Iterable[str],
-) -> dict[str, object]:
-    """从混合 bundle 取出指定请求，供对应数据节点恢复和复验。"""
-
-    current = validate_research_data_bundle(payload)
-    selected = tuple(sorted(set(request_ids)))
-    hashes = current["admitted_plan_hashes"]
-    references = current["references"]
-    missing = [request_id for request_id in selected if request_id not in references]
-    if missing:
-        raise ValueError(f"研究数据 bundle 缺少请求: {missing}")
-    return build_research_data_bundle(
-        admitted_plan_hashes={request_id: hashes[request_id] for request_id in selected},
-        references={request_id: references[request_id] for request_id in selected},
-        database_fingerprints=current["database_fingerprints"],
-    )
-
-
 __all__ = [
     "RESEARCH_DATA_BUNDLE_CONTRACT",
     "build_research_data_bundle",
     "merge_research_data_bundles",
     "merge_research_data_reference",
-    "select_research_data_references",
     "validate_research_data_bundle",
 ]

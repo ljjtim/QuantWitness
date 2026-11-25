@@ -1,0 +1,8 @@
+decisions:
+  - decision_id: stock_pre_source_boundary
+    original_assumption: 股票分钟源可按 raw 价格直接用于历史交易仿真
+    local_market: cn_stock
+    local_adaptation: 仅观察已完成的一分钟行情、PIT复权和研究统计；不执行交易，股票策略通过LEAN的1m或1d接口声明
+    evidence_source_ids: [minute_scope_v5]
+    status: proxy
+    claim_effect: downgrade_to_research_observation

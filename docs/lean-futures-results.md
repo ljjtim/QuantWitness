@@ -2,6 +2,8 @@
 
 读取期货及现货的正式执行表和研究收益。
 
+报告需要尾部账户时，按同一仿真工件读取已封存的 `lean/account.json`，在读取预算内核对文件内容与正式 Result 摘要。
+
 ## 开始前
 
 - 输入：同一 simulation 工件的 8 张执行表及指标。
@@ -16,22 +18,20 @@
 4. 按本页口径汇总指标。
 5. 绑定 9 张表生成正式 HTML 报告。
 
-当前执行工件为 `research.lean-simulation.v2`。股票、ETF和期货共用八张执行表，正式 Result 使用当前版本重新准入和发布。每张执行表的 Arrow schema 均为非空 `payload_json:string`，每行保存一个完整 JSON 事实。空表仍保存同一 schema。
+当前执行工件为 `research.lean-simulation.v4`。股票、ETF 和期货共用八张业务列式 Parquet 表。空表也包含列定义。交易日为日期，事件时间带 UTC 时区，金额和价格使用十进制定点数。明细和估值保留为有类型的嵌套列。
 
 | 表 | schema ID | 内容 |
 | --- | --- | --- |
-| orders | `research.lean.orders.v2` | 原生订单与订单事件，保留订单ID、状态、实际时间和数量 |
-| intents | `research.lean.intents.v2` | 策略请求及其原生订单关联 |
-| daily | `research.lean.daily.v2` | 每个交易日的实际账户快照、估值时间与已结算范围 |
-| trace | `research.lean.trace.v2` | 策略回调、可见输入与策略状态 |
-| fills | `research.lean.fills.v2` | 实际成交腿、今昨桶、费用、已实现盈亏和规则引用 |
-| positions | `research.lean.positions.v2` | 多空方向×今昨桶的持仓快照 |
-| account_events | `research.lean.account_events.v2` | 实际账户变化、原因、所属交易日和可见时间 |
-| lifecycle | `research.lean.lifecycle.v2` | 资金预占与释放、结算、风险、换月及订单/合约/计划引用 |
+| orders | `research.lean.orders.v4` | 原生订单与订单事件，保留订单ID、状态、实际时间和数量 |
+| intents | `research.lean.intents.v4` | 策略请求及其原生订单关联 |
+| daily | `research.lean.daily.v4` | 每个交易日的实际账户快照、估值时间与已结算范围 |
+| trace | `research.lean.trace.v4` | 原生订单请求及响应、订单事件和算法生命周期 |
+| fills | `research.lean.fills.v4` | 实际成交腿、今昨桶、费用、已实现盈亏和规则引用 |
+| positions | `research.lean.positions.v4` | 多空方向×今昨桶的持仓快照 |
+| account_events | `research.lean.account_events.v4` | 实际账户变化、原因、所属交易日和可见时间 |
+| lifecycle | `research.lean.lifecycle.v4` | 资金预占与释放、结算、风险、换月及订单/合约/计划引用 |
 
-八表来自同一策略节点的 `simulation` 端口和同一已提交工件，路径为 `lean/{表名}`。现货的 fills、positions 两张专用表为空。实际分笔成交读取 orders 中非零 quantity 的 Filled/PartiallyFilled 事件，持仓读取 daily.positions 及正式终态账户。
-
-不能把空 fills 表解释为没有成交，也不能把空 positions 表解释为空仓。原生 trace 文件名为 `strategy-trace.jsonl`，其他表为 `{表名}.jsonl`。
+八张表来自同一策略节点的 `simulation` 端口。现货 fills 保存实际逐笔成交，positions 保存账户事件发生时的持仓，daily 保存每日执行终点的账户快照。现货指标沿用 orders 中非零 quantity 的 Filled/PartiallyFilled 事件。发布时 Python 顺序读取每份引擎流水一次，写 Parquet 的同时计算指标。
 
 现货 lifecycle 保存已确认退市后的零估值记录。account_events 可保存 terminal 尾部账户观察，不保证为空。开盘涨幅前两名2025-10-01至2026-09-30正式Result保存23条退市lifecycle记录，均为零持仓数量，account_events为0条。这两个数量是该Result的事实，不是所有现货运行的固定表形状。
 
@@ -103,7 +103,7 @@ daily、account_events 和 `lean/account.json` 保存真实发生时点，不改
 
 HTML报告请求使用 `lean-research-report-v2`，显式绑定八表和metrics，预算覆盖读取总行数和字节。表ID以实际Result为准：
 
-`integrations/lean/accept.py`按实际Result中的当前schema唯一匹配九张表，再生成请求，不依赖示例表ID。公开ETF、期货和Qlib组合示例的LEAN指标均引用`@2.0.0`。ETF手算脚本读取八张v2执行表，其合成案例的fills、positions、account_events、lifecycle为空，不构成所有现货Result的空表要求。
+`integrations/lean/accept.py` 按实际 Result 中的 schema 匹配九张表。报告按业务列读取 Parquet，内存预算计算实际投影的 Arrow 批次和终态账户文件大小。现货账户事件按 `reason = 'terminal'` 下推，只读取尾部估值所需记录。期货读取按顺序发生的账户事件，核对结算和终态。公开 ETF、期货和 Qlib 组合示例的指标引用为 `@2.0.0`。
 
 ```json
 {

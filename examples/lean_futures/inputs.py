@@ -86,7 +86,7 @@ def minute_contracts(root):
     return contracts, [('minute_bars', dataset, table, original, archived)]
 
 
-def prepare_inputs(root, frequency):
+def prepare_inputs(root, frequency, scope_reference):
     contracts, sources = daily_contracts() if frequency == '1d' else minute_contracts(root)
     contracts += [DRIFT, PolicyContract('revision.none.v1', 1, 'revision', {'mode': 'none'})]
     kinds = {FieldContract: ('field', 'field_id'), DatasetContract: ('dataset', 'dataset_id'),
@@ -111,7 +111,10 @@ def prepare_inputs(root, frequency):
             as_of=synthetic.AS_OF if minute else synthetic.AS_OF[:10], ir_version='query-ir-v2' if minute else 'query-ir-v1')
         attestation = DriftAttestation(catalog.catalog_hash, binding.binding_id, binding.source_profile, binding.environment,
             binding.expected_schema_revision, binding.expected_schema_revision, DRIFT.content_hash, True)
-        plan = admit_query(query, catalog=catalog, binding=catalog.bindings[binding.binding_id], attestation=attestation)
+        from research_pipeline.domain.minute_scope_input import load_minute_scope_calendar
+        calendar = load_minute_scope_calendar(root/'package', scope_reference)
+        plan = admit_query(query, catalog=catalog, binding=catalog.bindings[binding.binding_id],
+            attestation=attestation, session_calendar=calendar)
         if minute:
             scan = build_minute_scan_plan(plan, source=root/'minute/futures', allowed_root=root/'minute')
             reference = build_minute_partitioned_dataset(scan)

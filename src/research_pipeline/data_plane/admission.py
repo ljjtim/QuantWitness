@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from types import MappingProxyType
@@ -142,7 +144,7 @@ class AdmittedQueryPlan:
     def column_map(self) -> MappingProxyType:
         return MappingProxyType(dict(self.columns))
 
-    @property
+    @cached_property
     def plan_hash(self) -> str:
         return typed_canonical_hash(self.identity_payload())
 
@@ -684,6 +686,11 @@ def _compile_temporal_selection(
             if query.purpose.value == "audit"
             else "consumer_decision_time"
         )
+    elif available_field is not None and availability_rules.get("available_after") in {
+        "next_session_open_after_publication_date", "next_session_open_following_publication_date",
+    }:
+        # 公告日期是原始事实，须与消费者决策比较，不能与同一行公告日期自比较。
+        source = "query_as_of" if query.purpose.value == "audit" else "consumer_decision_time"
     elif model == "market_event" and available_field == event_time_field:
         source = "event_time"
     else:

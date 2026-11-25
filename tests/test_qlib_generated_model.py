@@ -9,6 +9,9 @@ from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle,
 from test_qlib_model_integration import synthetic_samples, candidate
 
 
+pytestmark = pytest.mark.ml
+
+
 def generated_candidate():
     item = candidate()
     item['candidate_id'] = 'generated_skip'

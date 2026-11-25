@@ -69,7 +69,9 @@ ResourceBudget 与进程测量、清理工具由 platform 提供。Runtime 按�
 
 项目 Worker 与 LEAN 宿主的父进程及后代计入同一预算。Windows 虚拟环境启动器同样计数。实际超限返回 actual、limit、测量状态和清理状态。进程退出后仍完成末端资源核对，清理不完整禁止发布成功。
 
-运行容量使用 --resource-memory-bytes、--resource-cpu-slots、--resource-scratch-bytes。共享池额外声明总进程槽。--workers 不增加总预算。run --no-node-timeout 仅取消主 DAG 节点累计时长上限，资源租约等待和单次策略回调限时继续生效。
+运行容量使用 `--resource-memory-bytes`、`--resource-cpu-slots`、`--resource-scratch-bytes` 和 `--resource-process-slots`。默认串行使用 6 个进程槽，包含 Supervisor 和节点进程树。`--workers` 不增加总预算。指定 `--resource-state-dir` 后才启用跨进程租约，并须显式设置进程总槽位和租约等待时间。`run --no-node-timeout` 仅取消主 DAG 节点累计时长上限，资源租约等待和单次策略回调限时继续生效。
+
+默认单机串行在节点开始和 checkpoint 发布前测量内存、临时磁盘和进程树，执行中每秒更新一次，收尾不等待下一轮。成功 checkpoint 的事件保留实际峰值和运行时长。超限时无法发布。
 
 `run --no-temp-limit`取消本次运行的临时磁盘额度，节点有效预算和运行容量的`temp_bytes`记录为JSON `null`。`0`仍表示零额度。该选择随invocation冻结，恢复使用原选择。
 

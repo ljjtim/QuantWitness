@@ -14,9 +14,9 @@ from research_pipeline.research.modeling.qlib import QlibModelError, fit_bundle,
 from test_qlib_gru_integration import inputs as sequence_inputs
 from test_qlib_transformer_contract import transformer_candidate
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.ml, pytest.mark.skipif(
     importlib.util.find_spec("torch") is None, reason="需要 ml-sequence 可选依赖",
-)
+)]
 
 
 def inputs(model_class="TransformerModel"):

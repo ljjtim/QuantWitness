@@ -7,6 +7,7 @@ from research_pipeline.extensions import (
     TrustedOperatorRegistry,
 )
 from research_pipeline.platform import typed_canonical_hash
+from research_pipeline.platform.audit_mode import strict_cache_identity
 from research_pipeline.platform.operator_contracts import OperatorGraphRecipe, OperatorNodeRecipe
 from research_pipeline.platform.metric_contracts import MetricReachabilityProof
 
@@ -23,7 +24,7 @@ from .operator_definitions import build_mainline_operator_manifest
 from .operator_registry_builder import build_operator_registry_from_manifest
 
 
-NODE_IDENTITY_PROJECTION_CURRENT = "node-local-v4"
+NODE_IDENTITY_PROJECTION_CURRENT = "node-local-v5"
 
 
 def _project_cross_run_cacheable(manifest: object) -> bool:
@@ -44,6 +45,7 @@ def _node_configuration_hash(
     node_payload: OperatorNodeRecipe,
     *,
     identity_projection: str = NODE_IDENTITY_PROJECTION_CURRENT,
+    project_manifest=None,
 ) -> str:
     if identity_projection != NODE_IDENTITY_PROJECTION_CURRENT:
         raise ValueError("operator graph 节点身份投影版本不受支持")
@@ -54,6 +56,22 @@ def _node_configuration_hash(
     query_by_id = dict(zip(request_ids, queries, strict=True))
     consumed_request_ids = node_payload.declared_request_ids
     node_content_hash = node_payload.content_hash
+    if (
+        not strict_cache_identity()
+        and project_manifest is not None
+        and project_manifest.lean_algorithm is not None
+        and node_payload.parameters.get("execution_backend") == "lean"
+    ):
+        from research_pipeline.platform.lean_runtime import lean_runtime_semantic_identity
+
+        projected = node_payload.to_dict()
+        parameters = projected["parameters"]
+        parameters["lean_runtime"] = lean_runtime_semantic_identity(parameters["lean_runtime"])
+        declaration = parameters["strategy_declaration"]
+        if declaration["bundle_id"] != project_manifest.bundle_hash:
+            raise ValueError("策略配置未绑定当前算法 bundle")
+        declaration["bundle_id"] = project_manifest.cache_bundle_hash()
+        node_content_hash = typed_canonical_hash(projected)
     unknown = tuple(
         request_id
         for request_id in consumed_request_ids
@@ -135,7 +153,9 @@ def compile_operator_graph_dag(
         if isinstance(token, ProjectOperatorImplementationToken):
             implementation_id = token.implementation_id
             implementation_identity = {
-                "bundle_hash": token.manifest.bundle_hash,
+                "bundle_hash": (
+                    token.manifest.bundle_hash if strict_cache_identity() else token.manifest.cache_bundle_hash()
+                ),
             }
             partition = PartitionSpec(False, ())
             cacheable = _project_cross_run_cacheable(token.manifest)
@@ -151,6 +171,7 @@ def compile_operator_graph_dag(
             plan,
             node,
             identity_projection=identity_projection,
+            project_manifest=token.manifest if isinstance(token, ProjectOperatorImplementationToken) else None,
         )
         if implementation_identity is not None:
             configuration_hash = typed_canonical_hash(

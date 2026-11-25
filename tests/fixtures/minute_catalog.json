@@ -1,0 +1,1875 @@
+{
+  "lock_format_version": "catalog-lock-v2",
+  "compiler_version": "catalog-compiler-v2",
+  "compile_id": "0123456789abcdef01234567",
+  "fields": [
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "date32",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_date",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.trading_date",
+      "nullable": false,
+      "semantic_type": "date",
+      "status": "approved",
+      "unit": "day"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "string",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_code",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "instrument.equity.id",
+      "nullable": false,
+      "semantic_type": "identifier",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [
+        "unadjusted"
+      ],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_open",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.bar.open",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "unadjusted"
+      ],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_high",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.bar.high",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "unadjusted"
+      ],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_low",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.bar.low",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "unadjusted"
+      ],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_close",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.bar.close",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_volume",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.bar.volume",
+      "nullable": true,
+      "semantic_type": "volume",
+      "status": "approved",
+      "unit": "share"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_high_limit",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.limit.high",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_low_limit",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.limit.low",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_pre_close",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.bar.pre_close",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "bool",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_paused",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.paused",
+      "nullable": false,
+      "semantic_type": "flag",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_daily_factor",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "daily"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.adjustment.factor",
+      "nullable": false,
+      "semantic_type": "ratio",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "timestamp[us]",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_dt",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.minute.raw.end_time",
+      "nullable": false,
+      "semantic_type": "datetime",
+      "status": "approved",
+      "unit": "minute"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "string",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_code",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "instrument.minute_equity.raw.id",
+      "nullable": false,
+      "semantic_type": "identifier",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_open",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.minute.raw.open",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_close",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.minute.raw.close",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_high",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.minute.raw.high",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_low",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.minute.raw.low",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_volume",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.minute.raw.volume",
+      "nullable": true,
+      "semantic_type": "volume",
+      "status": "approved",
+      "unit": "source_native_volume"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_money",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.minute.raw.money",
+      "nullable": true,
+      "semantic_type": "turnover",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_equity_minute_avg",
+      "field_version": 4,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "market.equity.minute.raw.avg",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "timestamp[us]",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_dt",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.end_time",
+      "nullable": false,
+      "semantic_type": "datetime",
+      "status": "approved",
+      "unit": "minute"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "string",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_code",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "instrument.minute_futures.raw.id",
+      "nullable": false,
+      "semantic_type": "identifier",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_open",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.open",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "source_quote_unit"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_close",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.close",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "source_quote_unit"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_high",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.high",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "source_quote_unit"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_low",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.low",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "source_quote_unit"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_volume",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.volume",
+      "nullable": true,
+      "semantic_type": "volume",
+      "status": "approved",
+      "unit": "contract"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_money",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.money",
+      "nullable": true,
+      "semantic_type": "turnover",
+      "status": "approved",
+      "unit": "CNY"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_avg",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.avg",
+      "nullable": true,
+      "semantic_type": "price",
+      "status": "approved",
+      "unit": "source_quote_unit"
+    },
+    {
+      "adjustment_allowed": [
+        "raw"
+      ],
+      "aliases": [],
+      "availability_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "data_type": "float64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_futures_minute_open_interest",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "minute"
+      ],
+      "instrument_scope": [
+        "future_contract"
+      ],
+      "logical_name": "market.futures.minute.raw.open_interest",
+      "nullable": true,
+      "semantic_type": "position",
+      "status": "approved",
+      "unit": "contract"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "int64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_id",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.source_id",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "identifier",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "string",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_code",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.instrument_id",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "identifier",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "date32",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_implementation_pub_date",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.implementation_publication_date",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "date",
+      "status": "approved",
+      "unit": "day"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "decimal128",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_cash_per_ten",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.cash_per_ten",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "cash_amount",
+      "status": "approved",
+      "unit": "CNY/10share"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "decimal128",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_stock_per_ten",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.stock_dividend_per_ten",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "ratio",
+      "status": "approved",
+      "unit": "share/10share"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "decimal128",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_transfer_per_ten",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.transfer_per_ten",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "ratio",
+      "status": "approved",
+      "unit": "share/10share"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "date32",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_record_date",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.record_date",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "date",
+      "status": "approved",
+      "unit": "day"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "date32",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_ex_date",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.ex_date",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "date",
+      "status": "approved",
+      "unit": "day"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "date32",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_cash_arrival_date",
+      "field_version": 3,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.cash_arrival_date",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "date",
+      "status": "approved",
+      "unit": "day"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "date32",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_stock_arrival_date",
+      "field_version": 3,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.stock_arrival_date",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "date",
+      "status": "approved",
+      "unit": "day"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "date32",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_transfer_arrival_date",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.transfer_arrival_date",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "date",
+      "status": "approved",
+      "unit": "day"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "date32",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_listing_date",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.listing_date",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "date",
+      "status": "approved",
+      "unit": "day"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "string",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_plan_progress",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.plan_progress",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "category",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "int64",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_plan_progress_code",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.plan_progress_code",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "category",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "int8",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_status",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.status",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "category",
+      "status": "approved",
+      "unit": "dimensionless"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "timestamp",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_add_time",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.source_added_at",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "datetime",
+      "status": "approved",
+      "unit": "microsecond"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "timestamp",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_mod_time",
+      "field_version": 2,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.source_revised_at",
+      "nullable": false,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "datetime",
+      "status": "approved",
+      "unit": "microsecond"
+    },
+    {
+      "adjustment_allowed": [],
+      "aliases": [],
+      "availability_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "data_type": "string",
+      "evidence_refs": [
+        "fixture://minute-observation-contracts"
+      ],
+      "field_id": "fld_ca_note",
+      "field_version": 1,
+      "finance_semantics": {},
+      "frequency_scope": [
+        "event"
+      ],
+      "instrument_scope": [
+        "equity"
+      ],
+      "logical_name": "corporate_action.stock.note",
+      "nullable": true,
+      "observation_keys": {
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "revision_field": "fld_ca_implementation_pub_date"
+      },
+      "observation_model": "point_in_time",
+      "semantic_type": "text",
+      "status": "approved",
+      "unit": "dimensionless"
+    }
+  ],
+  "datasets": [
+    {
+      "available_time_policy": "available.daily.v1",
+      "contract_version": "catalog-contract-v1",
+      "dataset_id": "cn_equity.daily_bar",
+      "dataset_version": 3,
+      "drift_policy_id": "drift.strict.v1",
+      "event_time_field": "fld_equity_daily_date",
+      "fields": [
+        "fld_equity_daily_date",
+        "fld_equity_daily_code",
+        "fld_equity_daily_open",
+        "fld_equity_daily_high",
+        "fld_equity_daily_low",
+        "fld_equity_daily_close",
+        "fld_equity_daily_volume",
+        "fld_equity_daily_high_limit",
+        "fld_equity_daily_low_limit",
+        "fld_equity_daily_pre_close",
+        "fld_equity_daily_paused",
+        "fld_equity_daily_factor"
+      ],
+      "frequency": "daily",
+      "instrument_type": "equity",
+      "market": "cn_stock",
+      "primary_key": [
+        "fld_equity_daily_date",
+        "fld_equity_daily_code"
+      ],
+      "revision_policy_id": "revision.none.v1",
+      "sort_order": [
+        "fld_equity_daily_date",
+        "fld_equity_daily_code"
+      ],
+      "status": "approved"
+    },
+    {
+      "available_time_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "dataset_id": "cn_equity.minute_bar",
+      "dataset_version": 4,
+      "drift_policy_id": "drift.strict.v1",
+      "event_time_field": "fld_equity_minute_dt",
+      "fields": [
+        "fld_equity_minute_dt",
+        "fld_equity_minute_code",
+        "fld_equity_minute_open",
+        "fld_equity_minute_close",
+        "fld_equity_minute_high",
+        "fld_equity_minute_low",
+        "fld_equity_minute_volume",
+        "fld_equity_minute_money",
+        "fld_equity_minute_avg"
+      ],
+      "frequency": "minute",
+      "instrument_type": "equity",
+      "market": "cn_stock",
+      "minute_semantics": {
+        "asset_class": "cn_stock",
+        "availability_policy_ref": "available.minute.completed_bar.v1",
+        "bar_interval": "1m",
+        "instrument_role": "tradable",
+        "quality_policy_refs": [
+          "quality.minute.common_fields.v1",
+          "quality.minute.stock.v1"
+        ],
+        "scope_policy_ref": "scope.minute.catalog.v4",
+        "semantics_version": "minute-dataset-semantics-v1",
+        "session_policy_ref": "session.cn_stock.minute.v1",
+        "source_delivery": "historical_batch",
+        "timestamp_role": "completed_bar_end",
+        "timestamp_storage": "naive_local_wall_clock",
+        "timezone": "Asia/Shanghai"
+      },
+      "primary_key": [
+        "fld_equity_minute_dt",
+        "fld_equity_minute_code"
+      ],
+      "revision_policy_id": "revision.none.v1",
+      "sort_order": [
+        "fld_equity_minute_dt",
+        "fld_equity_minute_code"
+      ],
+      "status": "approved"
+    },
+    {
+      "available_time_policy": "available.minute.completed_bar.v1",
+      "contract_version": "catalog-contract-v1",
+      "dataset_id": "cn_futures.minute_bar",
+      "dataset_version": 2,
+      "drift_policy_id": "drift.strict.v1",
+      "event_time_field": "fld_futures_minute_dt",
+      "fields": [
+        "fld_futures_minute_dt",
+        "fld_futures_minute_code",
+        "fld_futures_minute_open",
+        "fld_futures_minute_close",
+        "fld_futures_minute_high",
+        "fld_futures_minute_low",
+        "fld_futures_minute_volume",
+        "fld_futures_minute_money",
+        "fld_futures_minute_avg",
+        "fld_futures_minute_open_interest"
+      ],
+      "frequency": "minute",
+      "instrument_type": "future_contract",
+      "market": "cn_future",
+      "minute_semantics": {
+        "asset_class": "cn_future",
+        "availability_policy_ref": "available.minute.completed_bar.v1",
+        "bar_interval": "1m",
+        "instrument_role": "tradable",
+        "quality_policy_refs": [
+          "quality.minute.common_fields.v1",
+          "quality.minute.futures.avg_coverage.v1",
+          "quality.minute.futures.open_interest.v1"
+        ],
+        "scope_policy_ref": "scope.minute.catalog.v4",
+        "semantics_version": "minute-dataset-semantics-v1",
+        "session_policy_ref": "session.cn_futures.minute.v1",
+        "source_delivery": "historical_batch",
+        "timestamp_role": "completed_bar_end",
+        "timestamp_storage": "naive_local_wall_clock",
+        "timezone": "Asia/Shanghai"
+      },
+      "primary_key": [
+        "fld_futures_minute_dt",
+        "fld_futures_minute_code"
+      ],
+      "revision_policy_id": "revision.none.v1",
+      "sort_order": [
+        "fld_futures_minute_dt",
+        "fld_futures_minute_code"
+      ],
+      "status": "approved"
+    },
+    {
+      "available_time_policy": "available.stock.corporate_action.v1",
+      "contract_version": "catalog-contract-v2",
+      "dataset_id": "cn_corporate_action.events",
+      "dataset_version": 5,
+      "drift_policy_id": "drift.strict.v1",
+      "event_time_field": "fld_ca_ex_date",
+      "fields": [
+        "fld_ca_id",
+        "fld_ca_code",
+        "fld_ca_implementation_pub_date",
+        "fld_ca_cash_per_ten",
+        "fld_ca_stock_per_ten",
+        "fld_ca_transfer_per_ten",
+        "fld_ca_record_date",
+        "fld_ca_ex_date",
+        "fld_ca_cash_arrival_date",
+        "fld_ca_stock_arrival_date",
+        "fld_ca_transfer_arrival_date",
+        "fld_ca_listing_date",
+        "fld_ca_plan_progress",
+        "fld_ca_plan_progress_code",
+        "fld_ca_status",
+        "fld_ca_add_time",
+        "fld_ca_mod_time",
+        "fld_ca_note"
+      ],
+      "frequency": "event",
+      "instrument_type": "equity",
+      "market": "cn_stock",
+      "primary_key": [
+        "fld_ca_id"
+      ],
+      "result_cardinality": "zero_or_more",
+      "revision_policy_id": "revision.stock.corporate_action.v1",
+      "sort_order": [
+        "fld_ca_id"
+      ],
+      "status": "approved"
+    }
+  ],
+  "policies": [
+    {
+      "contract_version": "catalog-contract-v1",
+      "policy_id": "available.daily.v1",
+      "policy_type": "availability",
+      "policy_version": 1,
+      "rules": {
+        "available_after": "next_session_open"
+      },
+      "status": "approved"
+    },
+    {
+      "contract_version": "catalog-contract-v1",
+      "policy_id": "available.minute.completed_bar.v1",
+      "policy_type": "availability",
+      "policy_version": 1,
+      "rules": {
+        "market_visible_after": "completed_bar_end",
+        "same_day_realtime": false,
+        "source_delivery": "historical_batch",
+        "timezone": "Asia/Shanghai"
+      },
+      "status": "approved"
+    },
+    {
+      "applicability": {},
+      "contract_version": "catalog-contract-v2",
+      "policy_id": "available.stock.corporate_action.v1",
+      "policy_type": "availability",
+      "policy_version": 4,
+      "rules": {
+        "available_after": "next_session_open_after_implementation_publication",
+        "available_time_field": "fld_ca_implementation_pub_date",
+        "date_granularity": "day",
+        "missing_available_time": "reject",
+        "same_day_use": "reject",
+        "snapshot_semantics": "current_source_event",
+        "source_maintenance_time_as_visibility": false,
+        "timezone": "Asia/Shanghai"
+      },
+      "status": "approved",
+      "validator_id": null
+    },
+    {
+      "contract_version": "catalog-contract-v1",
+      "policy_id": "drift.strict.v1",
+      "policy_type": "schema_drift",
+      "policy_version": 1,
+      "rules": {
+        "schema_changed": "reject",
+        "unknown": "reject"
+      },
+      "status": "approved"
+    },
+    {
+      "contract_version": "catalog-contract-v1",
+      "policy_id": "revision.none.v1",
+      "policy_type": "revision",
+      "policy_version": 1,
+      "rules": {
+        "mode": "none"
+      },
+      "status": "approved"
+    },
+    {
+      "applicability": {},
+      "contract_version": "catalog-contract-v2",
+      "policy_id": "revision.stock.corporate_action.v1",
+      "policy_type": "revision",
+      "policy_version": 2,
+      "rules": {
+        "duplicate_winner": "reject",
+        "future_revision": "reject",
+        "historical_source_versions_required": false,
+        "revision_field": "fld_ca_implementation_pub_date",
+        "selection": "current_source_event_by_publication"
+      },
+      "status": "approved",
+      "validator_id": null
+    },
+    {
+      "applicability": {
+        "frequency": "minute",
+        "market": "cn"
+      },
+      "contract_version": "catalog-contract-v2",
+      "policy_id": "scope.minute.catalog.v4",
+      "policy_type": "reference_scope",
+      "policy_version": 8,
+      "rules": {
+        "binding_hash": "0edad9a4c0cbe708abaf90bd3bc87fa1bc2cebe39eb0fbe39ef129291406fb54",
+        "consumer_id": "catalog.minute.contracts",
+        "contract_version": "minute-capability-binding-v1",
+        "minute_capability_manifest_hash": "5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838"
+      },
+      "status": "approved",
+      "validator_id": "catalog.minute.capability-manifest.v1"
+    }
+  ],
+  "bindings": [
+    {
+      "binding_id": "cn_equity.daily_bar.local.v1",
+      "binding_version": 3,
+      "column_bindings": {
+        "fld_equity_daily_close": {
+          "column": "close",
+          "kind": "direct"
+        },
+        "fld_equity_daily_code": {
+          "column": "code",
+          "kind": "direct"
+        },
+        "fld_equity_daily_date": {
+          "column": "date",
+          "kind": "direct"
+        },
+        "fld_equity_daily_factor": {
+          "column": "factor",
+          "kind": "direct"
+        },
+        "fld_equity_daily_high": {
+          "column": "high",
+          "kind": "direct"
+        },
+        "fld_equity_daily_high_limit": {
+          "column": "high_limit",
+          "kind": "direct"
+        },
+        "fld_equity_daily_low": {
+          "column": "low",
+          "kind": "direct"
+        },
+        "fld_equity_daily_low_limit": {
+          "column": "low_limit",
+          "kind": "direct"
+        },
+        "fld_equity_daily_open": {
+          "column": "open",
+          "kind": "direct"
+        },
+        "fld_equity_daily_paused": {
+          "column": "paused",
+          "kind": "direct"
+        },
+        "fld_equity_daily_pre_close": {
+          "column": "pre_close",
+          "kind": "direct"
+        },
+        "fld_equity_daily_volume": {
+          "column": "volume",
+          "kind": "direct"
+        }
+      },
+      "contract_version": "catalog-contract-v1",
+      "dataset_id": "cn_equity.daily_bar",
+      "dataset_revision_constraint": "any",
+      "dataset_version": 3,
+      "drift_policy_id": "drift.strict.v1",
+      "environment": "prod",
+      "expected_schema_revision": "666461bfd0d69af9d6878812694f38926058fa056241e44fdec5a29ded8ac0df",
+      "object_name": "daily_price_unadjusted",
+      "source_profile": "source",
+      "status": "approved"
+    },
+    {
+      "binding_id": "cn_equity.minute_bar.local.v1",
+      "binding_version": 7,
+      "column_bindings": {
+        "fld_equity_minute_avg": {
+          "column": "avg",
+          "kind": "direct"
+        },
+        "fld_equity_minute_close": {
+          "column": "close",
+          "kind": "direct"
+        },
+        "fld_equity_minute_code": {
+          "column": "code",
+          "kind": "direct"
+        },
+        "fld_equity_minute_dt": {
+          "column": "dt",
+          "kind": "direct"
+        },
+        "fld_equity_minute_high": {
+          "column": "high",
+          "kind": "direct"
+        },
+        "fld_equity_minute_low": {
+          "column": "low",
+          "kind": "direct"
+        },
+        "fld_equity_minute_money": {
+          "column": "money",
+          "kind": "direct"
+        },
+        "fld_equity_minute_open": {
+          "column": "open",
+          "kind": "direct"
+        },
+        "fld_equity_minute_volume": {
+          "column": "volume",
+          "kind": "direct"
+        }
+      },
+      "contract_version": "catalog-contract-v1",
+      "dataset_id": "cn_equity.minute_bar",
+      "dataset_revision_constraint": "any",
+      "dataset_version": 4,
+      "drift_policy_id": "drift.strict.v1",
+      "environment": "prod",
+      "expected_schema_revision": "081cbdfc9da7bc9510a11b426c4f7f2ddfc36d9b782f425e2fc9a285f37e57d6",
+      "minute_source_semantics": {
+        "adjustment_anchor": "none",
+        "adjustment_mode": "raw",
+        "adjustment_usage": "pit_allowed",
+        "evidence_refs": [
+          "fixture://minute-observation-contracts"
+        ],
+        "factor_snapshot_policy": "not_applicable",
+        "scope_binding_hash": "0edad9a4c0cbe708abaf90bd3bc87fa1bc2cebe39eb0fbe39ef129291406fb54",
+        "semantics_version": "minute-source-semantics-v1",
+        "source_kind": "collected"
+      },
+      "object_name": "min1_stock",
+      "source_profile": "source",
+      "status": "approved"
+    },
+    {
+      "binding_id": "cn_futures.minute_bar.local.v1",
+      "binding_version": 5,
+      "column_bindings": {
+        "fld_futures_minute_avg": {
+          "column": "avg",
+          "kind": "direct"
+        },
+        "fld_futures_minute_close": {
+          "column": "close",
+          "kind": "direct"
+        },
+        "fld_futures_minute_code": {
+          "column": "code",
+          "kind": "direct"
+        },
+        "fld_futures_minute_dt": {
+          "column": "dt",
+          "kind": "direct"
+        },
+        "fld_futures_minute_high": {
+          "column": "high",
+          "kind": "direct"
+        },
+        "fld_futures_minute_low": {
+          "column": "low",
+          "kind": "direct"
+        },
+        "fld_futures_minute_money": {
+          "column": "money",
+          "kind": "direct"
+        },
+        "fld_futures_minute_open": {
+          "column": "open",
+          "kind": "direct"
+        },
+        "fld_futures_minute_open_interest": {
+          "column": "open_interest",
+          "kind": "direct"
+        },
+        "fld_futures_minute_volume": {
+          "column": "volume",
+          "kind": "direct"
+        }
+      },
+      "contract_version": "catalog-contract-v1",
+      "dataset_id": "cn_futures.minute_bar",
+      "dataset_revision_constraint": "any",
+      "dataset_version": 2,
+      "drift_policy_id": "drift.strict.v1",
+      "environment": "prod",
+      "expected_schema_revision": "7e086f50f3718e21bb2240544a139f3db13971654eb7aeeb1381bdee30647666",
+      "minute_source_semantics": {
+        "adjustment_anchor": "none",
+        "adjustment_mode": "raw",
+        "adjustment_usage": "pit_allowed",
+        "evidence_refs": [
+          "fixture://minute-observation-contracts"
+        ],
+        "factor_snapshot_policy": "not_applicable",
+        "scope_binding_hash": "0edad9a4c0cbe708abaf90bd3bc87fa1bc2cebe39eb0fbe39ef129291406fb54",
+        "semantics_version": "minute-source-semantics-v1",
+        "source_kind": "collected"
+      },
+      "object_name": "min1_futures",
+      "source_profile": "source",
+      "status": "approved"
+    },
+    {
+      "binding_id": "cn_corporate_action.events.local.v1",
+      "binding_version": 5,
+      "column_bindings": {
+        "fld_ca_add_time": {
+          "column": "addTime",
+          "kind": "direct"
+        },
+        "fld_ca_cash_arrival_date": {
+          "column": "a_bonus_date",
+          "kind": "direct"
+        },
+        "fld_ca_cash_per_ten": {
+          "column": "bonus_ratio_rmb",
+          "kind": "direct"
+        },
+        "fld_ca_code": {
+          "column": "code",
+          "kind": "direct"
+        },
+        "fld_ca_ex_date": {
+          "column": "a_xr_date",
+          "kind": "direct"
+        },
+        "fld_ca_id": {
+          "column": "id",
+          "kind": "direct"
+        },
+        "fld_ca_implementation_pub_date": {
+          "column": "implementation_pub_date",
+          "kind": "direct"
+        },
+        "fld_ca_listing_date": {
+          "column": "a_increment_listing_date",
+          "kind": "direct"
+        },
+        "fld_ca_mod_time": {
+          "column": "modTime",
+          "kind": "direct"
+        },
+        "fld_ca_note": {
+          "column": "note",
+          "kind": "direct"
+        },
+        "fld_ca_plan_progress": {
+          "column": "plan_progress",
+          "kind": "direct"
+        },
+        "fld_ca_plan_progress_code": {
+          "column": "plan_progress_code",
+          "kind": "direct"
+        },
+        "fld_ca_record_date": {
+          "column": "a_registration_date",
+          "kind": "direct"
+        },
+        "fld_ca_status": {
+          "column": "status",
+          "kind": "direct"
+        },
+        "fld_ca_stock_arrival_date": {
+          "column": "dividend_arrival_date",
+          "kind": "direct"
+        },
+        "fld_ca_stock_per_ten": {
+          "column": "dividend_ratio",
+          "kind": "direct"
+        },
+        "fld_ca_transfer_arrival_date": {
+          "column": "a_transfer_arrival_date",
+          "kind": "direct"
+        },
+        "fld_ca_transfer_per_ten": {
+          "column": "transfer_ratio",
+          "kind": "direct"
+        }
+      },
+      "contract_version": "catalog-contract-v2",
+      "dataset_id": "cn_corporate_action.events",
+      "dataset_revision_constraint": "any",
+      "dataset_version": 5,
+      "drift_policy_id": "drift.strict.v1",
+      "environment": "prod",
+      "expected_schema_revision": "6e9f2c9720702f328e56bd80f8e3b7216b42297fbafd666549a27174195f0749",
+      "object_name": "finance_stk_xr_xd",
+      "source_profile": "source",
+      "status": "approved"
+    }
+  ],
+  "transforms": [],
+  "catalog_hash": "460af6e0dffe086fdeb29714aa23b3e4404e9a4ee54b41447703c131d607a63a"
+}

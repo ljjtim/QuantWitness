@@ -63,23 +63,6 @@ def _require_columns(
         raise CausalTimeContractError(f"{field} 缺少列: {missing}")
 
 
-def _require_key_columns(
-    frame: pd.DataFrame,
-    key_columns: Sequence[str],
-    field: str,
-) -> tuple[str, ...]:
-    keys = tuple(key_columns)
-    if (
-        not keys
-        or len(keys) != len(set(keys))
-        or any(not isinstance(column, str) or not column for column in keys)
-    ):
-        raise CausalTimeContractError(f"{field} 行键必须是非空唯一列名")
-    _require_columns(frame, keys, field)
-    if frame.loc[:, list(keys)].isna().any(axis=None):
-        raise CausalTimeContractError(f"{field} 行键不能包含空值")
-    return keys
-
 
 def _aware_utc(value: object, field: str) -> pd.Timestamp:
     import pandas as pd
@@ -139,162 +122,6 @@ def validate_feature_time_facts(frame: pd.DataFrame) -> None:
     _normalized_feature_facts(_require_frame(frame, "Feature 核心时间事实"))
 
 
-def build_core_feature_time_facts(
-    source: pd.DataFrame,
-    *,
-    key_columns: Sequence[str],
-    decision_time_column: str,
-    observation_time_column: str,
-    available_time_column: str,
-    source_partition_column: str,
-) -> pd.DataFrame:
-    """从核心实际输入生成每个 Feature 行的最大源时间。"""
-
-    frame = _require_frame(source, "Feature 实际输入")
-    keys = _require_key_columns(frame, key_columns, "Feature 实际输入")
-    source_columns = (
-        decision_time_column,
-        observation_time_column,
-        available_time_column,
-        source_partition_column,
-    )
-    if any(not isinstance(column, str) or not column for column in source_columns):
-        raise CausalTimeContractError("Feature 实际输入时间列名无效")
-    _require_columns(frame, source_columns, "Feature 实际输入")
-
-    working = frame.loc[:, [*keys, *source_columns]].copy()
-    working["_decision_time"] = _normalized_time_column(
-        working, decision_time_column
-    )
-    working["_observation_time"] = _normalized_time_column(
-        working, observation_time_column
-    )
-    working["_available_time"] = _normalized_time_column(
-        working, available_time_column
-    )
-    raw_partitions = working[source_partition_column]
-    normalized_partitions: list[tuple[str, ...]] = []
-    for value in raw_partitions:
-        if isinstance(value, str):
-            items = (value,)
-        elif isinstance(value, Iterable):
-            items = tuple(value)
-        else:
-            items = ()
-        if (
-            not items
-            or any(not isinstance(item, str) or not item for item in items)
-            or tuple(sorted(set(items))) != items
-        ):
-            raise CausalTimeContractError(
-                "Feature source partition 必须是非空唯一字符串序列"
-            )
-        normalized_partitions.append(items)
-    working["_source_partition_ids"] = normalized_partitions
-    if (working["_observation_time"] > working["_decision_time"]).any():
-        raise CausalTimeContractError("Feature 源观测时间晚于决策时间")
-    if (working["_available_time"] > working["_decision_time"]).any():
-        raise CausalTimeContractError("Feature 源可见时间晚于决策时间")
-
-    rows: list[dict[str, object]] = []
-    grouped = working.groupby(list(keys), sort=False, dropna=False, observed=True)
-    for raw_key, group in grouped:
-        if not group["_observation_time"].is_monotonic_increasing:
-            raise CausalTimeContractError("Feature 实际输入未按观测时间有序")
-        decisions = group["_decision_time"].drop_duplicates()
-        if len(decisions) != 1:
-            raise CausalTimeContractError("同一 Feature 行键存在多个决策时间")
-        key_values = raw_key if isinstance(raw_key, tuple) else (raw_key,)
-        row = dict(zip(keys, key_values))
-        row.update(
-            {
-                "decision_time": decisions.iloc[0],
-                "max_source_observation_time": group["_observation_time"].max(),
-                "max_source_available_time": group["_available_time"].max(),
-                "source_partition_ids": sorted(
-                    {
-                        partition_id
-                        for partition_ids in group["_source_partition_ids"]
-                        for partition_id in partition_ids
-                    }
-                ),
-            }
-        )
-        rows.append(row)
-    import pandas as pd
-
-    result = pd.DataFrame(rows, columns=[*keys, *CORE_FEATURE_TIME_COLUMNS])
-    validate_feature_time_facts(result)
-    return result
-
-
-def attach_core_feature_time_facts(
-    project_values: pd.DataFrame,
-    core_time_facts: pd.DataFrame,
-    *,
-    key_columns: Sequence[str],
-) -> pd.DataFrame:
-    """把核心事实按一一对应行键附到项目特征值。"""
-
-    values = _require_frame(project_values, "项目 Feature 输出")
-    facts = _require_frame(core_time_facts, "Feature 核心时间事实")
-    keys = _require_key_columns(values, key_columns, "项目 Feature 输出")
-    _require_key_columns(facts, keys, "Feature 核心时间事实")
-    protected = sorted(set(values.columns).intersection(CORE_FEATURE_TIME_COLUMNS))
-    if protected:
-        raise CausalTimeContractError(
-            f"项目扩展不得填写核心时间事实: {protected}"
-        )
-    if values.duplicated(list(keys)).any() or facts.duplicated(list(keys)).any():
-        raise CausalTimeContractError("Feature 行键必须一一对应且唯一")
-    normalized_facts = _normalized_feature_facts(facts)
-    merged = values.merge(
-        normalized_facts.loc[:, [*keys, *CORE_FEATURE_TIME_COLUMNS]],
-        on=list(keys),
-        how="outer",
-        validate="one_to_one",
-        indicator=True,
-        sort=False,
-    )
-    if not (merged["_merge"] == "both").all():
-        raise CausalTimeContractError("项目 Feature 输出与核心时间事实行键不闭合")
-    return merged.drop(columns="_merge")
-
-
-def attach_core_label_time_facts(
-    project_values: pd.DataFrame,
-    core_time_facts: pd.DataFrame,
-    *,
-    key_columns: Sequence[str],
-) -> pd.DataFrame:
-    """把核心生成的未来观测事实按一一对应行键附到项目 Label 值。"""
-
-    values = _require_frame(project_values, "项目 Label 输出")
-    facts = _require_frame(core_time_facts, "Label 核心时间事实")
-    keys = _require_key_columns(values, key_columns, "项目 Label 输出")
-    _require_key_columns(facts, keys, "Label 核心时间事实")
-    protected = sorted(set(values.columns).intersection(CORE_LABEL_TIME_COLUMNS))
-    if protected:
-        raise CausalTimeContractError(
-            f"项目扩展不得填写核心时间事实: {protected}"
-        )
-    if values.duplicated(list(keys)).any() or facts.duplicated(list(keys)).any():
-        raise CausalTimeContractError("Label 行键必须一一对应且唯一")
-    validate_label_time_facts(facts)
-    merged = values.merge(
-        facts.loc[:, [*keys, *CORE_LABEL_TIME_COLUMNS]],
-        on=list(keys),
-        how="outer",
-        validate="one_to_one",
-        indicator=True,
-        sort=False,
-    )
-    if not (merged["_merge"] == "both").all():
-        raise CausalTimeContractError("项目 Label 输出与核心时间事实行键不闭合")
-    result = merged.drop(columns="_merge")
-    validate_label_time_facts(result)
-    return result
-
 
 def validate_label_time_facts(frame: pd.DataFrame) -> None:
     """验证 Label 的实际未来观测区间，而非只信整体时间声明。"""
@@ -321,13 +148,120 @@ def validate_label_time_facts(frame: pd.DataFrame) -> None:
         raise CausalTimeContractError("Label 可见时间不能早于实际末观测")
 
 
+def attach_core_time_facts_arrow(values, facts, *, key_columns, is_feature: bool):
+    """按稳定键附加核心时间列，保留项目值、列类型与原始行序。"""
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    keys = tuple(key_columns)
+    columns = CORE_FEATURE_TIME_COLUMNS if is_feature else CORE_LABEL_TIME_COLUMNS
+    if not keys or len(set(keys)) != len(keys):
+        raise CausalTimeContractError("项目因果行键必须是非空唯一列名")
+    if not values.num_rows or values.num_rows != facts.num_rows:
+        raise CausalTimeContractError("项目输出与核心时间事实行数不一致")
+
+    left_keys = []
+    right_keys = []
+    for key in keys:
+        left = values[key]
+        right = facts[key]
+        value_type = left.type.value_type if pa.types.is_dictionary(left.type) else left.type
+        fact_type = right.type.value_type if pa.types.is_dictionary(right.type) else right.type
+        value_string = pa.types.is_string(value_type) or pa.types.is_large_string(value_type)
+        fact_string = pa.types.is_string(fact_type) or pa.types.is_large_string(fact_type)
+        if pa.types.is_floating(value_type) and pa.types.is_floating(fact_type):
+            value_type = pa.float64()
+        elif value_type != fact_type and not (
+            value_string and fact_string
+            or pa.types.is_integer(value_type) and pa.types.is_integer(fact_type)
+            or pa.types.is_date(value_type) and (pa.types.is_date(fact_type) or fact_string)
+            or pa.types.is_timestamp(value_type) and pa.types.is_timestamp(fact_type)
+            and (value_type.tz is None) == (fact_type.tz is None)
+        ):
+            raise CausalTimeContractError(f"项目因果行键类型不匹配: {key}")
+        left = pc.cast(left, value_type)
+        right = pc.cast(right, value_type)
+        if left.null_count or right.null_count or (
+            pa.types.is_floating(value_type) and (
+                pc.any(pc.is_nan(left)).as_py() or pc.any(pc.is_nan(right)).as_py()
+            )
+        ):
+            raise CausalTimeContractError("项目因果行键不能包含空值")
+        left_keys.append(left)
+        right_keys.append(right)
+
+    left_table = pa.Table.from_arrays(left_keys, names=keys)
+    right_table = pa.Table.from_arrays(right_keys, names=keys)
+    sort_keys = [(key, "ascending") for key in keys]
+    left_order = pc.sort_indices(left_table, sort_keys=sort_keys)
+    right_order = pc.sort_indices(right_table, sort_keys=sort_keys)
+    ordered = left_table.take(left_order)
+    if not ordered.equals(right_table.take(right_order)):
+        raise CausalTimeContractError("项目输出与核心时间事实行键不闭合")
+    adjacent_equal = None
+    for key in keys:
+        column = ordered[key]
+        same = pc.equal(column.slice(0, len(column) - 1), column.slice(1))
+        adjacent_equal = same if adjacent_equal is None else pc.and_(adjacent_equal, same)
+    if pc.any(adjacent_equal).as_py():
+        raise CausalTimeContractError("项目因果行键必须唯一")
+
+    time_columns = columns[:3] if is_feature else columns
+    times = {}
+    for column in time_columns:
+        data = facts[column]
+        aware_timestamp = pa.types.is_timestamp(data.type) and data.type.tz is not None
+        if data.null_count or not (
+            aware_timestamp or pa.types.is_string(data.type) or pa.types.is_large_string(data.type)
+        ):
+            raise CausalTimeContractError(f"{column} 必须是带时区时间")
+        times[column] = pc.cast(data, pa.timestamp("ns", tz="UTC"))
+
+    decision = times["decision_time"]
+    if is_feature:
+        if (
+            pc.any(pc.greater(times["max_source_observation_time"], decision)).as_py()
+            or pc.any(pc.greater(times["max_source_available_time"], decision)).as_py()
+        ):
+            raise CausalTimeContractError("Feature 源观测或可见时间晚于决策时间")
+        partitions = facts["source_partition_ids"]
+        lengths = pc.list_value_length(partitions)
+        flattened = pc.list_flatten(partitions)
+        if (
+            lengths.null_count
+            or pc.any(pc.equal(lengths, 0)).as_py()
+            or flattened.null_count
+            or not (pa.types.is_string(flattened.type) or pa.types.is_large_string(flattened.type))
+            or pc.any(pc.equal(flattened, "")).as_py()
+        ):
+            raise CausalTimeContractError("source_partition_ids 必须是非空唯一字符串序列")
+        parents = pc.list_parent_indices(partitions.combine_chunks())
+        preceding = len(flattened) - 1
+        same_parent = pc.equal(parents.slice(0, preceding), parents.slice(1))
+        unordered = pc.greater_equal(flattened.slice(0, preceding), flattened.slice(1))
+        if pc.any(pc.and_(same_parent, unordered)).as_py():
+            raise CausalTimeContractError("source_partition_ids 必须有序且唯一")
+        times["source_partition_ids"] = partitions
+    else:
+        first = times["first_actual_observation_time"]
+        last = times["last_actual_observation_time"]
+        if (
+            pc.any(pc.less_equal(first, decision)).as_py()
+            or pc.any(pc.less(last, first)).as_py()
+            or pc.any(pc.less(times["available_time"], last)).as_py()
+        ):
+            raise CausalTimeContractError("Label 实际观测与可见时间未按合同排序")
+
+    fact_order = pc.take(right_order, pc.sort_indices(left_order))
+    for column in columns:
+        values = values.append_column(column, pc.take(times[column], fact_order))
+    return values
+
+
 __all__ = [
     "CausalTimeContractError",
     "CORE_FEATURE_TIME_COLUMNS",
     "CORE_LABEL_TIME_COLUMNS",
-    "attach_core_feature_time_facts",
-    "attach_core_label_time_facts",
-    "build_core_feature_time_facts",
     "validate_feature_time_facts",
     "validate_label_time_facts",
 ]

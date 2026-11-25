@@ -26,7 +26,7 @@ GitHub 的 HTML 文件页只显示源码，不能代替图册浏览。
 ## 概览与总体架构的区别
 
 总体概览按研究者的任务组织，不展开全部代码模块。
-总体架构保留 `catalog`、`packages`、`data_plane`、`application`、`runtime`、`research`、`domain`、`simulation`、`results`、`evidence`、`extensions`、`cli`、`operations`、`platform` 共 14 个模块，并标出外部输入、可选 AI 与算法组件。
+总体架构保留 `catalog`、`packages`、`data_plane`、`application`、`runtime`、`research`、`domain`、LEAN 执行集成、`results`、`evidence`、`extensions`、`cli`、`operations`、`platform` 共 14 个模块，并标出外部输入、可选 AI 与算法组件。
 两张图对应不同阅读深度。
 
 ## RD-Agent 在哪

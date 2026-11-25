@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import subprocess
 import sys
@@ -224,17 +225,31 @@ def test_internal_project_references_are_rejected_in_public_documents() -> None:
     assert not _INTERNAL_REFERENCE.search("project_extensions/README.md")
 
 
-def test_public_test_helper_imports_are_included():
-    """发行测试不能引用未随公开源码交付的本仓库测试helper。"""
-    import ast
-    paths = set(public_source_paths(ROOT))
-    for relative in sorted(paths):
-        if not relative.startswith("tests/") or not relative.endswith(".py"):
+def test_public_tests_include_imported_local_support_modules() -> None:
+    public = set(public_source_paths(ROOT))
+    missing = []
+    for relative in sorted(public):
+        path = ROOT / relative
+        if "tests" not in path.parts or path.suffix != ".py":
             continue
-        tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                module = node.module.removeprefix("tests.")
-                if module.startswith("test_"):
-                    dependency = "tests/" + module.replace(".", "/") + ".py"
-                    assert dependency in paths, (relative, dependency)
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules = [node.module]
+            elif isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            else:
+                continue
+            for module in modules:
+                # pytest把当前测试目录加入导入路径，支持文件必须一起发行。
+                module_path = Path(*module.split(".")).with_suffix(".py")
+                for base in (path.parent, ROOT):
+                    dependency = base / module_path
+                    if dependency.is_file():
+                        dependency_name = dependency.relative_to(ROOT).as_posix()
+                        if dependency_name not in public:
+                            missing.append((relative, dependency_name))
+                if module.startswith("test_") and "." not in module:
+                    dependency_name = (path.parent / module_path).relative_to(ROOT).as_posix()
+                    if dependency_name not in public:
+                        missing.append((relative, dependency_name))
+    assert not missing, missing

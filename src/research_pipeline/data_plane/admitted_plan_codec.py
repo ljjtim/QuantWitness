@@ -34,6 +34,13 @@ _RETIRED_MINUTE_VISIBILITY_FIELDS = {
 
 
 def admitted_plan_from_dict(payload: dict[str, Any]) -> AdmittedQueryPlan:
+    plan = _decode_plan(payload)
+    if payload.get("plan_hash") != plan.plan_hash:
+        raise QueryIRInvalidError("序列化 QueryPlan hash 校验失败")
+    return plan
+
+
+def _decode_plan(payload: dict[str, Any]) -> AdmittedQueryPlan:
     retired_fields = sorted(_RETIRED_MINUTE_VISIBILITY_FIELDS & set(payload))
     if retired_fields:
         raise QueryIRInvalidError(
@@ -149,9 +156,20 @@ def admitted_plan_from_dict(payload: dict[str, Any]) -> AdmittedQueryPlan:
             else FactorPublicationBinding.from_dict(payload["factor_publication"])
         ),
     )
-    if payload.get("plan_hash") != plan.plan_hash:
-        raise QueryIRInvalidError("序列化 QueryPlan hash 校验失败")
     return plan
 
 
 __all__ = ["admitted_plan_from_dict"]
+
+
+def validate_pit_binding(plan, binding):
+    """直读支持单日期时钟的已准入事实，复杂版本选择沿用专用读取器。"""
+    temporal = plan.temporal_selection
+    clocks = temporal.visibility_filter.time_fields if temporal.visibility_filter else ()
+    if (not binding.daily_time or binding.resolution != "event"
+            or plan.event_time_field not in plan.query.field_ids
+            or dict(plan.field_types).get(plan.event_time_field) != "date32"
+            or any(field != plan.event_time_field for field, _ in clocks)
+            or temporal.revision_selector or temporal.effective_interval_selector
+            or temporal.session_close_selection or plan.factor_publication or plan.query.limit is not None):
+        raise ValueError("PIT 直读要求已绑定单日期可见时钟的原始事实")

@@ -5059,7 +5059,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </g>
         <g data-graph-role="automatic-crossover" style="--step:9">
           <path data-graph-role="automatic-crossover-underlay" d="M 460 570 L 460 670" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
-          <path data-edge-from="engine_adapters" data-edge-to="simulation" data-edge-label="金融类型与规则" data-edge-key="9" data-edge-id="adapters-simulation" data-composition-points="460,570;460,670" data-composition-crossover="halo" data-composition-independent="true" d="M 460 570 L 460 670" class="a-emphasis" data-animate="edge" style="--step:9" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+          <path data-edge-from="engine_adapters" data-edge-to="simulation" data-edge-label="原生交易执行" data-edge-key="9" data-edge-id="adapters-simulation" data-composition-points="460,570;460,670" data-composition-crossover="halo" data-composition-independent="true" d="M 460 570 L 460 670" class="a-emphasis" data-animate="edge" style="--step:9" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         </g>
         <g data-graph-role="automatic-crossover" style="--step:10">
           <path data-graph-role="automatic-crossover-underlay" d="M 170 570 L 170 670" fill="none" stroke="var(--mask)" stroke-width="5.8" stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>
@@ -5236,14 +5236,14 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="context" x="460" y="349" class="t-muted" font-size="9" text-anchor="middle">RuntimeExecutionService</text>
         </g>
 
-        <g id="node-simulation" data-node-id="simulation" data-node-label="金融类型 simulation" tabindex="0" role="button" aria-label="聚焦金融类型 simulation，订单 · 账本 · 费用 · 规则, 框架核心 Framework Core" aria-pressed="false" data-node-kind="backend" data-node-sublabel="订单 · 账本 · 费用 · 规则" data-node-context="框架核心 Framework Core">
-          <title>金融类型 simulation · 订单 · 账本 · 费用 · 规则 · 框架核心 Framework Core</title>
+        <g id="node-simulation" data-node-id="simulation" data-node-label="原生交易 LEAN" tabindex="0" role="button" aria-label="聚焦原生交易 LEAN，订单 · 账本 · 费用 · 规则, 框架核心 Framework Core" aria-pressed="false" data-node-kind="backend" data-node-sublabel="订单 · 账本 · 费用 · 规则" data-node-context="框架核心 Framework Core">
+          <title>原生交易 LEAN · 订单 · 账本 · 费用 · 规则 · 框架核心 Framework Core</title>
           <rect x="360" y="670" width="200" height="90" rx="6" class="c-mask"/>
           <rect x="360" y="670" width="200" height="90" rx="6" class="c-backend" data-animate="node" style="--step:10" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(366 676) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="460" y="713" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">金融类型 simulation</text>
+          <text data-node-label="" data-detail-anchor="" x="460" y="713" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">原生交易 LEAN</text>
         <text data-detail="context" x="460" y="729" class="t-muted" font-size="9" text-anchor="middle">订单 · 账本 · 费用 · 规则</text>
         </g>
 
@@ -5438,9 +5438,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="573.6" y="513.05" width="62.8" height="14" rx="3" class="c-mask"/>
           <text x="605" y="523.05" class="t-edge-emphasis" font-size="8" text-anchor="middle">研究 / 模型</text>
         </g>
-        <g data-detail="context" data-edge-from="engine_adapters" data-edge-to="simulation" data-edge-label="金融类型与规则" data-edge-key="9" data-edge-id="adapters-simulation">
+        <g data-detail="context" data-edge-from="engine_adapters" data-edge-to="simulation" data-edge-label="原生交易执行" data-edge-key="9" data-edge-id="adapters-simulation">
           <rect x="376.79999999999995" y="613" width="77.2" height="14" rx="3" class="c-mask"/>
-          <text x="415.4" y="623" class="t-edge-emphasis" font-size="8" text-anchor="middle">金融类型与规则</text>
+          <text x="415.4" y="623" class="t-edge-emphasis" font-size="8" text-anchor="middle">原生交易执行</text>
         </g>
         <g data-detail="context" data-edge-from="application" data-edge-to="data_plane" data-edge-label="直接读 / 可选保存" data-edge-key="10" data-edge-id="application-plane">
           <rect x="72.4" y="613" width="91.6" height="14" rx="3" class="c-mask"/>
@@ -5745,7 +5745,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <li>核心模块目录：cli、application、packages、catalog、data_plane、runtime、research、simulation、results、evidence、platform、domain、operations、extensions</li>
           <li>research 提供因子、模型和统计；Qlib 提供日频处理器与模型，训练、选择和 holdout 由主链约束</li>
           <li>simulation 与 domain 提供当前金融类型、账户与市场规则；股票和 ETF 日线 / 1m 策略经 integrations/lean 执行</li>
-          <li>operations/framework_boundary.py 检查核心依赖边界；extensions/governance.py 管理项目扩展</li>
+          <li>tools/framework_boundary.py 检查核心依赖边界；extensions/governance.py 管理项目扩展</li>
           <li>application/grid_data.py 组织数据节点；计划存储位于 application/research_plan_store.py</li>
           <li>Workspace 服务位于 workspace.py，流程在 application/workspace_flow.py；报告交付位于 application/result_delivery.py 与 application/report_output.py</li>
         </ul>

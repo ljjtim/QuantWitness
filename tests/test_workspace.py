@@ -137,6 +137,40 @@ def test_workspace_run_maps_paths_without_opening_database(tmp_path) -> None:
     assert rebuild_workspace_index(root)["index_hash"] == rebuilt["index_hash"]
 
 
+@pytest.mark.parametrize("resume", [False, True], ids=["run", "resume"])
+def test_workspace_interleaved_executions_keep_both_results(tmp_path, resume) -> None:
+    root = tmp_path / "workspace"
+    initialize_workspace(root)
+    clock = "2026-08-06T09:00:00+08:00"
+    first = allocate_execution(root, clock=clock, root_seed=1, label="先启动")
+    run_options = dict(plan=tmp_path / "plan", data_db=None, clock=clock, root_seed=1)
+
+    def finish_second(*args, **kwargs):
+        second = allocate_execution(root, clock=clock, root_seed=1, label="先完成")
+        run_workspace_execution(
+            root, execution_id=second["execution_id"], **run_options,
+            handler=lambda args: {"status": "result_finalized", "result_id": "b" * 64},
+        )
+        return {"status": "result_finalized", "result_id": "a" * 64}
+
+    if resume:
+        invocation = Path(first["execution_path"]) / "run/operator-dag-invocation.json"
+        invocation.write_text("{}", encoding="utf-8")
+        resume_workspace_execution(root, execution_id=first["execution_id"], handler=finish_second)
+    else:
+        run_workspace_execution(root, execution_id=first["execution_id"], **run_options,
+                                handler=finish_second)
+    index = inspect_workspace(root)
+    assert {item["label"]: item["result_id"] for item in index["executions"]} == {
+        "先启动": "a" * 64, "先完成": "b" * 64,
+    }
+    for item in index["executions"]:
+        execution = inspect_workspace(root, item["execution_id"])
+        assert execution["status"] == "result_finalized"
+        assert execution["result_id"] == item["result_id"]
+    assert rebuild_workspace_index(root) == index
+
+
 def test_workspace_run_rejects_execution_clock_or_seed_drift_before_handler(tmp_path) -> None:
     root = tmp_path / "workspace"
     initialize_workspace(root)

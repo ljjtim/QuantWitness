@@ -42,7 +42,9 @@ sdist 包含 LEAN 安装资源，解压后可按相同步骤使用。Linux/macOS
 
 源数据库严格只读。报告直接读取本次正式 Result。入口不删除已有运行或历史结果，不提交文件。
 
-纯日线研究可以省略 `-MinuteRoot`。一分钟请求须提供分钟根。输入默认直接读取，添加 `-PersistInputs` 才保存普通查询输入。日行情与逐日规则通过本机数据流交给 LEAN，执行当日时预读下一交易日，不写交接副本。
+纯日线研究可以省略 `-MinuteRoot`。一分钟请求须提供分钟根。输入默认直接读取，添加 `-PersistInputs` 才保存普通查询输入。LEAN 在 Launcher 内读取已冻结的分钟 Parquet、日线原始行情和开盘来源。日线使用只读 DuckDB 或现有 Parquet 工件，现货规则直接读取冻结规则 Parquet，期货按会话读取规则和结算。交接按交易日限制内存；执行过程不生成行情副本。
+
+安装和源码同步成功后保存完整的安装审计凭证。正常运行核对安装版本和关键文件元数据。添加 `-StrictAudit` 可在本次研究中复验完整的执行依赖 SHA-256。
 
 已提交的 Parquet 归档使用 `-InputSnapshotManifest '<输入清单JSON>'` 替换 `-DataDb`，两者必须且只能提供一个。归档经过同一 Catalog 和 PIT 准入，运行不连接数据库。含分钟请求时仍需显式提供 `-MinuteRoot`。
 
@@ -63,7 +65,7 @@ run 的内存、CPU、运行临时空间、进程及节点时限沿用原包声�
 
 安装继续读取来源包全部配套bundle的 `dependency_lock`，冲突时拒绝，按精确版本安装后逐项复验并执行pip check。证据保存在 `dependency-evidence/bundle-dependencies.json`。从仓库源码构建并安装独立wheel，编译固定LEAN版本 `a3bf4cc3e1e11a461b44d43894b0c6445f1100e6` 的Launcher及本目录插件。
 
-安装对本地上游源码应用Python.NET关闭GIL处理和Windows虚拟环境路径初始化兼容补丁。后者直接过滤site-packages，不将Windows路径插入Python代码，保留用户及系统site-packages隔离。两项均不修改交易撮合、账户计算或仓库engine C#。
+安装从固定源码构建本地 Launcher 和 Python.NET。Launcher 将解释器锁交给 Python.NET 管理，等待跨语言垃圾回收完成。Windows 虚拟环境初始化直接过滤 site-packages，保留用户及系统包隔离。离线缓存文件名见[引擎安装说明](engine/README.md)。
 
 `NugetCache` 可显式提供本地NuGet下载缓存。它只复用依赖包，不复用已编译引擎或现有Python site-packages。包缓存不构成研究输出或checkpoint复用。
 
@@ -79,6 +81,8 @@ run 的内存、CPU、运行临时空间、进程及节点时限沿用原包声�
 
 转换保留四份包声明、QueryIR、minute-scope、数据和因果Feature节点、策略源码及参数。唯一策略节点声明 `execution_backend=lean` 和完整安装锁，一分钟采用 `lean_next_completed_close_v1`，日线采用 `lean_next_session_open_v1`。原生声明的输出包含 `package/`、`bundles/` 和 `conversion.json`。
 
+策略声明的执行频率须与实际 `bars` 端口一致。股票 `price_scale` 为整数 `2`，ETF 为整数 `3`。
+
 统一运行入口对已有 LEAN 声明冻结当前安装。安装内容变化时生成新的 `package/` 和配套 `bundles/`，只更新安装绑定，保持数据请求、策略、指标和结果表声明。安装内容未变时沿用原包。
 
 单独调用 `prepare.py` 保留来源包的冻结安装，不自动重绑。
@@ -91,13 +95,15 @@ run 的内存、CPU、运行临时空间、进程及节点时限沿用原包声�
 
 安装冻结与内容检查使用固定四路文件读取，仍逐个计算实际内容并按文件名排序交付身份。不使用文件大小或修改时间替代内容检查。
 
-正式结果为同一 `research.lean-simulation.v2` 工件的 orders、intents、daily、trace、fills、positions、account_events、lifecycle 八张执行表，以及金融指标表 metrics。HTML报告请求使用 `lean-research-report-v2` 并绑定九表，字段与期货收益口径见[期货结果合同](../../docs/lean-futures-results.md)。行情、规则和公司行动保留在准入输入及运行依赖中，Result 不再复制这些输入。
+正式结果为同一 `research.lean-simulation.v4` 工件的 orders、intents、daily、trace、fills、positions、account_events、lifecycle 八张执行表，以及金融指标表 metrics。HTML报告请求使用 `lean-research-report-v2` 并绑定九表，字段与期货收益口径见[期货结果合同](../../docs/lean-futures-results.md)。行情、规则和公司行动保留在准入输入及运行依赖中，Result 不再复制这些输入。
 
 原Feature源表单独保留，schema为`research.lean-signal-source.v1`。收益、风险、换手、费用与交易数量进入正式指标及报告。报告直接读取Result。
 
 HTML请求与执行边界见[执行合同](../../docs/lean-execution.md)和[引擎接口](engine/README.md)。
 
 ## 计时和交付
+
+原生结果写完后，Launcher 等待 Python.NET 清理结束。引擎日志按顺序记录 `PythonInitializer.Shutdown(): ended` 和 `Program.Main(): Exiting Lean...`。回收轮数输出到标准输出；策略转发控制台消息时，使用引擎日志的两个时间戳核对关闭。关闭异常使 Launcher 返回非零，宿主在发布 Result 前检查退出码。退出期间继续执行节点资源预算。
 
 每次运行保留 `acceptance-timing.json`、prepare/admit/run/report各自日志、正式Result、`report.md`和`report.html`。计时从prepare之前开始，到report完成结束。完整端到端时间包含来源准备、上游节点、执行、正式封存和report，不扣除上游工作或缓存收益。入口记录实际耗时，不设置固定秒数的性能通过门槛。
 
@@ -110,7 +116,7 @@ report阶段连续生成Markdown与自包含HTML，HTML请求绑定本次Result 
 
 ## 自动同步源码
 
-`run.ps1` 默认比较当前源码与安装的 `source-sync.json`：Python 源码或打包输入变化时重建并安装 wheel。插件源码变化时执行 `engine/build.ps1 -Install`。未变化时跳过相应构建。
+`run.ps1` 默认比较当前源码与安装的 `source-sync.json`：Python 源码或打包输入变化时重建并安装 wheel。引擎构建脚本、补丁、生产工程、工程引用的源码或资源变化时执行 `engine/build.ps1 -Install`。只修改引擎测试或引擎文档时跳过插件构建。
 
 记录缺失时首次同步两部分。干净安装成功后直接记录源码，不重复构建。摘要只用于避免重复安装，正式安装锁仍由准备与执行流程验证。
 

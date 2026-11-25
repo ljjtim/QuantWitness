@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from research_pipeline.operations.framework_boundary import audit_framework_boundary
+from tools.framework_boundary import audit_framework_boundary
 
 
 def test_public_core_matches_framework_boundary_policy() -> None:

@@ -7,7 +7,7 @@ import shlex
 import pytest
 
 from research_pipeline.cli.parser import FINAL_COMMANDS, build_parser
-from research_pipeline.operations.documentation import (
+from tools.documentation import (
     REQUIRED_DOCS,
     audit_documentation,
 )
@@ -157,35 +157,6 @@ def test_getting_started_single_line_commands_parse_with_current_cli() -> None:
         assert build_parser().parse_args(arguments).command == arguments[0]
 
 
-def test_retired_getting_started_arguments_do_not_parse() -> None:
-    parser = build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                "catalog",
-                "dataset",
-                "search",
-                "--query",
-                "daily",
-                "--format",
-                "json",
-            ]
-        )
-    with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                "verify",
-                "--result-id",
-                "old",
-                "--result-store",
-                "results",
-                "--output",
-                "verification.json",
-                "--json",
-            ]
-        )
-
-
 @pytest.mark.parametrize(
     "arguments",
     (
@@ -206,47 +177,6 @@ def test_public_catalog_consumers_require_explicit_lock(
 ) -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args(arguments)
-
-
-def test_public_guides_use_current_research_pipeline_workflow() -> None:
-    current_flow = (
-        "研究声明",
-        "准备与准入",
-        "列式输入",
-        "可恢复 DAG",
-        "Result",
-        "报告",
-    )
-    retired_fragments = (
-        "`package validate` → `plan`",
-        "可信证据封存",
-        "`catalog`、`package`、`plan`、`run`",
-        "VerificationResult",
-        "--verification-result",
-        "--verification-process-slots",
-        "--verifier-bundle",
-    )
-
-    for name in (
-        "README.md",
-        "docs/framework-contracts.md",
-        "CONTRIBUTING.md",
-        "EXTENSIONS.md",
-    ):
-        content = (PACKAGE_ROOT / name).read_text(encoding="utf-8")
-        if name == "README.md":
-            assert "(docs/framework-contracts.md)" in content
-        if name == "docs/framework-contracts.md":
-            flow_match = re.search(
-                r"^研究声明\s*→(?P<flow>[^\n]+)",
-                content,
-                flags=re.MULTILINE,
-            )
-            assert flow_match is not None
-            positions = [flow_match.group(0).index(stage) for stage in current_flow]
-            assert positions == sorted(positions)
-        assert "--source-visibility PROFILE=PATH" not in content
-        assert all(fragment not in content for fragment in retired_fragments)
 
 
 def test_direct_result_report_arguments_parse() -> None:

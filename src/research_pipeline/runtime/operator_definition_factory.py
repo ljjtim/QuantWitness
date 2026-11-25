@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import ast
+from functools import lru_cache
 import hashlib
 from pathlib import Path
 
@@ -17,7 +17,10 @@ from research_pipeline.extensions import (
 )
 from research_pipeline.extensions.operators import OperatorRuntimeAdapterRef
 from research_pipeline.platform import typed_canonical_hash
-from research_pipeline.platform.source_identity import canonical_python_source_bytes
+from research_pipeline.platform.source_identity import (
+    canonical_python_source_bytes,
+    semantic_python_source_bytes,
+)
 from .errors import RuntimeRegistryError
 
 
@@ -25,7 +28,7 @@ def _source_module_path(module_name: str, label: str) -> Path:
     prefix = "research_pipeline."
     if not module_name.startswith(prefix):
         raise RuntimeRegistryError(f"正式源码模块不属于主线: {label}")
-    package_root = Path(__file__).resolve().parents[1]
+    package_root = Path(__file__).parents[1]
     relative = module_name.removeprefix(prefix).split(".")
     source_path = package_root.joinpath(*relative).with_suffix(".py")
     if source_path.is_file():
@@ -44,6 +47,7 @@ _ADAPTER_MODULES_BY_SYMBOL = {
     "execute_data_catalog_admission_v1": "research_pipeline.runtime.adapters.catalog",
     "execute_data_columnar_materialize_v1": "research_pipeline.application.grid_data",
     "execute_data_minute_adjustment_snapshot_v1": "research_pipeline.runtime.adapters.minute_adjustment",
+    "execute_data_minute_adjustment_snapshot_import_v1": "research_pipeline.runtime.adjustment_snapshot_import",
     "execute_data_minute_scan_v1": "research_pipeline.runtime.adapters.minute_data",
     "execute_research_bars_minute_adjust_v1": "research_pipeline.runtime.adapters.minute_adjustment",
     "execute_research_bars_minute_resample_v1": "research_pipeline.runtime.adapters.minute_data",
@@ -77,6 +81,8 @@ _COMMON_ADAPTER_DEPENDENCIES = (
 )
 _MINUTE_IO_DEPENDENCIES = (
     "research_pipeline.domain.minute_scope_input",
+    "research_pipeline.domain.minute_scope_columnar",
+    "research_pipeline.domain.minute_scope_columnar_coverage",
     "research_pipeline.runtime.adapters.minute_io",
     "research_pipeline.data_plane.minute_scan",
     "research_pipeline.data_plane.archived_inputs",
@@ -87,10 +93,15 @@ _MINUTE_IO_DEPENDENCIES = (
     "research_pipeline.data_plane.partitioned_artifacts",
     "research_pipeline.domain.session_calendar",
     "research_pipeline.domain.minute_request_scope",
+    "research_pipeline.domain.cash_price_limits",
     "research_pipeline.domain.minute_rule_snapshots",
     "research_pipeline.research.minute_operators",
 )
 _ADAPTER_FAMILY_DEPENDENCIES = {
+    "research_pipeline.runtime.adjustment_snapshot_import": (
+        "research_pipeline.application.published_adjustment_snapshot",
+        "research_pipeline.runtime.external_artifact",
+    ),
 
 
     "research_pipeline.runtime.adapters.model": (
@@ -119,7 +130,10 @@ _ADAPTER_FAMILY_DEPENDENCIES = {
         "research_pipeline.data_plane.dataset_files",
         "research_pipeline.data_plane.archive_read",
         "research_pipeline.data_plane.direct_sources",
-        "research_pipeline.simulation.corporate_actions",
+        "research_pipeline.data_plane.providers.epoch_date",
+        "research_pipeline.data_plane.providers.sql",
+        "research_pipeline.domain.corporate_action_source",
+        "research_pipeline.domain.financial_events",
     ),
     "research_pipeline.runtime.adapters.minute_research": (
         *_MINUTE_IO_DEPENDENCIES,
@@ -160,37 +174,6 @@ def _choice_parameter(
     return ParameterSpec(name, value_type, allowed_values=allowed_values)
 
 
-def _bar_tca_parameters(
-    *,
-    claim_ceilings: tuple[str, ...],
-) -> tuple[ParameterSpec, ...]:
-    """Bar TCA 不允许任何会改变结果的隐式参数。"""
-    parameters = (
-        _choice_parameter(
-            "tca_impact_model",
-            ParameterType.STRING,
-            ("fixed_bps_v1", "sqrt_participation_v1"),
-        ),
-        _parameter("tca_spread_slippage_bps", ParameterType.INTEGER),
-        _parameter("tca_fixed_impact_bps", ParameterType.INTEGER),
-        _parameter("tca_sqrt_impact_coefficient_bps", ParameterType.INTEGER),
-        _parameter("tca_participation_cap_ppm", ParameterType.INTEGER),
-        _choice_parameter(
-            "tca_delay_benchmark",
-            ParameterType.STRING,
-            ("decision_price_v1",),
-        ),
-        _choice_parameter(
-            "tca_rounding_rule",
-            ParameterType.STRING,
-            ("price_half_up_cost_ceil_v1",),
-        ),
-        _parameter("tca_policy_available_at", ParameterType.STRING),
-        _choice_parameter("tca_claim_ceiling", ParameterType.STRING, claim_ceilings),
-    )
-    return parameters
-
-
 def _walk_forward_model_parameters() -> tuple[ParameterSpec, ...]:
     """Qlib 候选、目标及确定性合同。"""
     return (
@@ -215,17 +198,12 @@ def _implementation_code_hash(
 ) -> str:
     modules = (module_name, *dependency_modules)
     source_hashes = {}
-    for index, dependency in enumerate(modules):
+    for dependency in modules:
         source_path = _resolve_source_module(dependency, implementation_id)
-        source = canonical_python_source_bytes(source_path.read_bytes())
-        source_hashes[dependency] = hashlib.sha256(source).hexdigest()
-        if index == 0:
-            _require_static_symbol(
-                source,
-                module_name=dependency,
-                symbol_name=symbol_name,
-                implementation_id=implementation_id,
-            )
+        stat = source_path.stat()
+        source_hashes[dependency] = _module_source_hash(
+            source_path, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+        )
     return typed_canonical_hash(
         {
             "implementation_id": implementation_id,
@@ -241,40 +219,44 @@ def _resolve_source_module(module_name: str, implementation_id: str) -> Path:
     return _source_module_path(module_name, implementation_id)
 
 
-def _require_static_symbol(
-    source: bytes,
-    *,
-    module_name: str,
-    symbol_name: str,
-    implementation_id: str,
-) -> None:
-    try:
-        tree = ast.parse(source, filename=module_name)
-    except SyntaxError as exc:
-        raise RuntimeRegistryError(
-            f"正式 implementation 源码无法解析: {implementation_id}"
-        ) from exc
-    definitions = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    }
-    definitions.update(
-        target.id
-        for node in tree.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign))
-        for target in (node.targets if isinstance(node, ast.Assign) else (node.target,))
-        if isinstance(target, ast.Name)
-    )
-    if symbol_name not in definitions:
-        raise RuntimeRegistryError(
-            f"正式 implementation 没有真实代码落点: {implementation_id}"
+@lru_cache(maxsize=512)
+def _module_source_hash(path: Path, size: int, mtime_ns: int, ctime_ns: int) -> str:
+    """同一个源码版本供依赖该模块的各算子共享。"""
+    return hashlib.sha256(canonical_python_source_bytes(path.read_bytes())).hexdigest()
+
+
+@lru_cache(maxsize=512)
+def _semantic_module_source_hash(path: Path, size: int, mtime_ns: int, ctime_ns: int) -> str:
+    """同一个语义源码版本（忽略注释与空行）供语义缓存键复用。"""
+    return hashlib.sha256(semantic_python_source_bytes(path.read_bytes())).hexdigest()
+
+
+def semantic_implementation_code_hash(implementation: OperatorImplementationRef) -> str:
+    """计算算子实现与其依赖模块的语义源码哈希（不含 adapter 与 build 工件）。"""
+    modules = (implementation.module_name, *implementation.dependency_modules)
+    source_hashes = {}
+    for dependency in modules:
+        source_path = _resolve_source_module(dependency, implementation.implementation_id)
+        stat = source_path.stat()
+        source_hashes[dependency] = _semantic_module_source_hash(
+            source_path, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
         )
+    return typed_canonical_hash(
+        {
+            "implementation_id": implementation.implementation_id,
+            "fingerprint": implementation.code_fingerprint,
+            "module": implementation.module_name,
+            "symbol": implementation.symbol_name,
+            "source_hashes": dict(sorted(source_hashes.items())),
+        }
+    )
 
 
 def _runtime_adapter_ref(
     implementation_id: str,
     implementation_modules: tuple[str, ...],
+    *,
+    code_hash: str | None = None,
 ) -> OperatorRuntimeAdapterRef:
     adapter_id = f"{implementation_id}.runtime-adapter.v1"
     symbol_name = "execute_" + implementation_id.replace(".", "_").replace("-", "_")
@@ -291,7 +273,7 @@ def _runtime_adapter_ref(
             - {module_name}
         )
     )
-    code_hash = _implementation_code_hash(
+    code_hash = code_hash or _implementation_code_hash(
         implementation_id=adapter_id,
         code_fingerprint="operator-runtime-adapter-v1",
         module_name=module_name,
@@ -362,11 +344,10 @@ def _definition(
         operator_spec=specification,
         implementation_ref=implementation,
         runtime_adapter_ref=_runtime_adapter_ref(
-            implementation_id, (module_name, *dependency_modules)
+            implementation_id, (module_name, *dependency_modules),
         ),
         cache_profile_ref="cache.semantic-pure.v1",
         cache_compatibility_mode=cache_compatibility_mode,
         resource_hint_ref=f"resource.{operator_id}@{operator_version}",
         partition_keys=partition_keys,
     )
-

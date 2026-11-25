@@ -12,7 +12,7 @@ from research_pipeline.domain.minute_scope_input import write_minute_scope_input
 from research_pipeline.domain.session_calendar import PROJECT_SESSION_BUNDLE_VERSION, PROJECT_SESSION_POLICY_VERSION
 from research_pipeline.data_plane.minute_adjustment import build_adjustment_factor_snapshot
 from research_pipeline.platform import typed_canonical_hash
-from research_pipeline.simulation.corporate_actions import corporate_action_snapshot_hash
+from research_pipeline.domain.corporate_action_source import corporate_action_snapshot_hash
 
 import synthetic
 

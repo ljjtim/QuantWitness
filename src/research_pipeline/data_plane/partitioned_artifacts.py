@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+from functools import partial
+
+
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -13,6 +16,7 @@ from types import MappingProxyType
 from typing import Iterator, Mapping
 
 from research_pipeline.platform import typed_canonical_hash
+from research_pipeline.platform.validation import require_sha256, require_text
 
 from .errors import SnapshotIntegrityError
 from .path_policy import PathRolePolicy
@@ -22,21 +26,12 @@ from .verification_lifecycle import current_artifact_verification
 
 PARTITIONED_DATASET_CONTRACT = "partitioned-dataset"
 PARTITIONED_DATASET_REF_CONTRACT = "partitioned-dataset-ref"
-_HASH_LENGTH = 64
 
 
-def _require_text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise SnapshotIntegrityError(f"{field} 必须是非空字符串")
-    return value
+_require_text = partial(require_text, error=SnapshotIntegrityError)
 
 
-def _require_hash(value: object, field: str) -> str:
-    if not isinstance(value, str) or len(value) != _HASH_LENGTH or any(
-        character not in "0123456789abcdef" for character in value
-    ):
-        raise SnapshotIntegrityError(f"{field} 必须是 sha256 小写摘要")
-    return value
+_require_hash = partial(require_sha256, error=SnapshotIntegrityError)
 
 
 def _require_relative_path(value: object) -> str:

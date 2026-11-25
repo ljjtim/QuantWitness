@@ -40,7 +40,7 @@ def _execute(args) -> dict[str, object]:
         )
         return {"workspace_id": config.workspace_id, "root": str(config.root), "status": "initialized"}
     if args.workspace_command == "execute":
-        from .workspace_flow import execute_workspace
+        from research_pipeline.application.workspace_flow import execute_workspace
 
         return execute_workspace(args)
     if args.workspace_command == "validate":
@@ -63,7 +63,7 @@ def _execute(args) -> dict[str, object]:
         return rebuild_workspace_index(args.workspace)
     if args.workspace_command == "run":
         def run_with_diagnostics(runtime_args):
-            from . import research_run
+            from research_pipeline.application import research_run
 
             # 服务已校验 execution；将实际运行目录交给统一异常投影。
             args.run_root = runtime_args.run_root
@@ -98,7 +98,7 @@ def _execute(args) -> dict[str, object]:
         )
     if args.workspace_command in {"resume", "retry-node"}:
         def resume_with_diagnostics(*, run_root, retry_node_id):
-            from . import research_run
+            from research_pipeline.application import research_run
 
             args.run_root = run_root
             return research_run.resume_operator_graph(

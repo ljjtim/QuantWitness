@@ -24,7 +24,7 @@ import research_pipeline.runtime.walk_forward_model_execution as runtime
 from test_qlib_sequence_runtime import source, split, parameters, BUDGET
 from test_qlib_model_integration import _read, research_series
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="需要ml-sequence可选依赖")
+pytestmark = [pytest.mark.ml, pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="需要ml-sequence可选依赖")]
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio"
 
 

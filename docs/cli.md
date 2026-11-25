@@ -24,8 +24,8 @@
 
 ```text
 catalog, package, run, resume, retry-node, inspect, rerun-from,
-report, compare, analysis, export-result, doctor, gc, capabilities,
-operator, artifact, recipe, workspace
+report, compare, export-result, doctor, gc, capabilities,
+operator, artifact, workspace
 ```
 
 参数以 `python -m research_pipeline --help` 及各子命令 `--help` 为准。操作型命令提供互斥的 `--json` 与 `--summary`：前者返回完整 data 和 summary，后者返回摘要、错误和下一条命令。机器输出采用 UTF-8。
@@ -36,13 +36,12 @@ operator, artifact, recipe, workspace
 python -m research_pipeline capabilities --format json
 python -m research_pipeline operator list --format json
 python -m research_pipeline artifact describe data.columnar-bundle.v1 --format json
-python -m research_pipeline recipe list --format json
 python -m research_pipeline catalog dataset search daily --catalog-lock <持久Catalog-Lock目录> --format json
 python -m research_pipeline package init <新研究包目录> --json
 python -m research_pipeline package lint --package <研究包目录> --catalog-lock <持久Catalog-Lock目录> --json
 ```
 
-当前公共 Recipe 清单为空。`package init` 生成待填写的中性草稿。补齐四份声明后才能准入。`package lint` 不打开研究数据库，报告声明、算子端口、指标、结果表、来源与资源缺口。
+`package init` 生成待填写的中性草稿。补齐四份声明后才能准入。`package lint` 不打开研究数据库，报告声明、算子端口、指标、结果表、来源与资源缺口。
 
 Catalog 搜索返回本次实际加载的 `catalog_context.lock_reference`、来源 profile 和物理 bindings。按这些事实提供数据库路径，不猜测本机位置。公开源码不附带个人或供应商 Catalog。使用自己的定义与审批文件编译持久 Lock。
 
@@ -91,7 +90,7 @@ python -m research_pipeline rerun-from --run-root <父run目录> --output-run-ro
 
 正式主 DAG 默认 `deterministic_serial`、workers=1。并行显式选择 `bounded_parallel` 或 `partitioned_batch`，通过 `--workers N` 设置并发上限。总预算不随 workers 增加。
 
-`--resource-memory-bytes`、`--resource-cpu-slots`、`--resource-scratch-bytes` 设置运行容量。多个独立 CLI 共用资源时，显式提供仓库外 `--resource-state-dir`、进程总额度与等待超时。`run --no-node-timeout` 取消主 DAG 节点累计时长限制。
+`--resource-memory-bytes`、`--resource-cpu-slots`、`--resource-scratch-bytes` 和 `--resource-process-slots` 设置运行容量。单机串行默认 6 个进程槽。多个独立 CLI 共用资源时，显式提供仓库外 `--resource-state-dir`、进程总额度与等待超时。`run --no-node-timeout` 取消主 DAG 节点累计时长限制。
 
 内存、磁盘、进程与单次回调限时继续生效。详见[资源预算](project_resource_budgets.md)。
 
@@ -118,20 +117,9 @@ python -m research_pipeline export-result --result <Result目录> --output <新�
 
 HTML 请求格式见[报告说明](qlib-report.md)与[LEAN 报告](lean-execution.md)。
 
-直接 compare 比较正式指标事实，返回 `formal_metric_facts`。指标定义、单位、样本、状态或声明结论不一致时不给部分 delta。包级语义比较使用 `package compare`，返回 `package_contract_and_metric_facts`，额外检查两侧 metric/claim 合同。包级 report、compare、export-result 同样使用 Result 参数，并显式指定 `--package`。
+直接 compare 比较正式指标事实，返回 `formal_metric_facts`。指标定义、单位、样本、状态或声明结论不一致时不给部分 delta。包级语义比较使用 `compare --package`，返回 `package_contract_and_metric_facts`，额外检查两侧 metric/claim 合同。report、compare、export-result 可以指定 `--package` 核对已发布 Result 的包身份、指标和结论范围。比较不同研究包时，另用 `--right-package` 指定右侧声明。该核对直接读取结果，无需重新编译算子图。
 
 export-result 复制正式 Result，不重新执行研究。迁移时同时保留 Result 引用的持久输入依赖。
-
-## 时间序列分析
-
-```powershell
-python -m research_pipeline analysis run --result <Result目录> --request <AnalysisRequest.yaml> --output <新AnalysisResult.json> --analysis-memory-bytes <字节> --json
-python -m research_pipeline analysis compare --analysis-result <左AnalysisResult.json> --analysis-result <右AnalysisResult.json> --measure overall.compounded_return --direction higher_is_better --output <新AnalysisComparison.json> --json
-```
-
-AnalysisRequest 显式绑定 Result ID、表列、窗口、值语义、频率、单位、费用口径、缺失值与年度处理政策。只读取日期和值两列。memory 参数约束批次工作集。
-
-非重叠期间收益才能计算复合收益、几何年化和回撤。水平值与普通观察不套收益公式。analysis compare 要求同规格、实际窗口和声明事实，条件不一致时返回原因及空排名。
 
 ## Workspace
 
@@ -155,7 +143,7 @@ python -m research_pipeline doctor --run-root <run目录> --json
 python -m research_pipeline gc --root <工件根> --ttl-seconds 86400 --json
 ```
 
-doctor 只读诊断。gc 默认只列清理计划，`--apply` 仅隔离候选。数据库写入和历史研究删除须另行授权，见[运维](operations.md)。
+doctor 只读诊断。`--run-root` 检查运行记录、checkpoint、实际 LEAN 安装及调用记录指向的冻结计划。分钟范围执行完整规则与日历复验。gc 默认只列清理计划，`--apply` 仅隔离候选。数据库写入和历史研究删除须另行授权，见[运维](operations.md)。
 
 `--reuse-failed-run-root` 配合显式 `--require-reused-node` 也支持已中断的非终态来源。来源必须具有绑定该run的有效存活记录，原owner与事件写者均已退出。导入前后核对来源身份和事件链稳定。
 

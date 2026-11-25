@@ -21,6 +21,8 @@ def diagnose_research_package(root: str | Path, *, documents: PackageDocuments |
     from .models import _freeze, _require_text
 
     directory = Path(root).resolve()
+    if documents is None:
+        documents = store.read_package_documents(directory)
     issues: list[dict[str, str]] = []
 
     def check(file: str, field: str, validate: Callable[[], object], *, code: str = "package_field_invalid") -> bool:
@@ -63,7 +65,7 @@ def diagnose_research_package(root: str | Path, *, documents: PackageDocuments |
     payloads: dict[str, dict[str, object]] = {}
     for file in store.PACKAGE_FILES:
         try:
-            payloads[file] = store._load_yaml(directory, file, documents=documents)
+            payloads[file] = documents.declaration(directory, file)
         except ResearchPackageError as exc:
             issues.append({
                 "code": "package_yaml_invalid", "file": file, "field": "$",
@@ -111,7 +113,7 @@ def diagnose_research_package(root: str | Path, *, documents: PackageDocuments |
         as_of_valid = check(file, "as_of", lambda: _text(spec.get("as_of"), "spec.as_of"))
         requests_valid = check(file, "requests", lambda: _sequence(spec.get("requests"), "spec.requests"))
         if as_of_valid and requests_valid:
-            check(file, "requests", lambda: compile_query_requests(spec["requests"], as_of=spec["as_of"]))
+            check(file, "requests", lambda: compile_query_requests(spec["requests"], as_of=spec["as_of"], universes=spec.get("universes")))
         if package is not None and package.get("builder_id") == store.OPERATOR_GRAPH_BUILDER_ID:
             from research_pipeline.platform.operator_contracts import OperatorGraphRecipe
             from research_pipeline.research.semantics import ResearchSemantics

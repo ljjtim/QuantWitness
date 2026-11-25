@@ -59,7 +59,7 @@ def native_runtime(tmp_path, monkeypatch):
 
 
 def make_coder(request):
-    from test_linux_live_generation import SyntaxTestBridge
+    from syntax_bridge_support import SyntaxTestBridge
     from quantwitness_rdagent.coder import build_coder
     from quantwitness_rdagent.scenario import RPScenario
     return build_coder(RPScenario(request), SyntaxTestBridge(request))

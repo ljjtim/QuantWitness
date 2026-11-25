@@ -93,7 +93,7 @@ AG常规会话为当晚21:00，IF为下一交易日09:30。节假日由日历决
 
 ## 结果与恢复
 
-`research.lean-simulation.v2`保存八张执行表和metrics。fills按成交腿记录金额，account_events保存转换后余额，lifecycle记录预占、结算、风险和换月原因。不把净仓TradeBuilder统计当作双向成交统计。
+`research.lean-simulation.v4`保存八张执行表和metrics。fills按成交腿记录金额，account_events保存转换后余额，lifecycle记录预占、结算、风险和换月原因。不把净仓TradeBuilder统计当作双向成交统计。
 
 收益按权益计算，末日结算计入所属交易日的研究收益。同时保留实际valuation_at，不回填历史盘中可用资金。
 

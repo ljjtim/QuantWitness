@@ -69,16 +69,8 @@ def load_result_context(
             raise ResultContractError("Result 路径必须指向结果目录或 result.json")
         directory = directory.parent
     store = ResultStore(result_store if result_store is not None else directory.parents[2], create=False)
-    bundle = store.inspect_directory(directory)
-    by_id = {table.table_id: table for table in bundle.tables}
-    unknown = set(additional_table_ids) - set(by_id)
-    if unknown:
-        raise ResultContractError(f"Result 不包含请求的表: {sorted(unknown)}")
-    schema_ids = tuple(sorted({
-        *(proof.result_schema_id for proof in bundle.metric_proofs),
-        *(by_id[name].schema_id for name in additional_table_ids),
-    }))
-    snapshot = store.open_snapshot(directory, verify_schema_ids=schema_ids, verify_all_files=False)
+    snapshot = store.open_snapshot(directory, metric_context_tables=additional_table_ids, verify_all_files=False)
+    bundle = snapshot.bundle
     limitations = tuple(sorted(set(bundle.run.limitations) | {
         f"input_claim_ceiling:{request_id}:{level}"
         for request_id, level in bundle.input_claim_ceilings.items()
@@ -94,6 +86,25 @@ def build_result_report(context: ResultContext) -> ResultReport:
     )
 
 
+def _render_cost_assumption_lines(cost: Mapping[str, object]) -> list[str]:
+    lines = ["", "## 研究费用假设", ""]
+    scenarios = cost.get("scenarios")
+    strategies = cost.get("strategies")
+    for key, value in cost.items():
+        if key in {"scenarios", "strategies"}:
+            continue
+        lines.append(f"- `{key}`：{value}")
+    for label, group in (("情景", scenarios), ("策略", strategies)):
+        if isinstance(group, list) and group:
+            for idx, item in enumerate(group, 1):
+                if isinstance(item, Mapping):
+                    detail = ", ".join(f"{k}={v}" for k, v in item.items())
+                    lines.append(f"- {label} {idx}：{detail}")
+                else:
+                    lines.append(f"- {label} {idx}：{item}")
+    return lines
+
+
 def render_result_report(context: ResultContext) -> str:
     report = build_result_report(context)
     rows = [
@@ -103,7 +114,7 @@ def render_result_report(context: ResultContext) -> str:
     if report.limitations:
         rows.extend(("", "## 数据限制", "", *(f"- {item}" for item in report.limitations)))
     if report.research_cost_assumption is not None:
-        rows.extend(("", "## 研究费用假设", "", str(dict(report.research_cost_assumption))))
+        rows.extend(_render_cost_assumption_lines(report.research_cost_assumption))
     rows.extend(("", "## 正式指标", ""))
     rows.extend(
         f"- `{metric.metric_ref}`：{metric.value} {metric.unit}；"
@@ -119,6 +130,10 @@ def compare_results(left: ResultContext, right: ResultContext) -> ResultComparis
         reasons.add("comparison.claim_level_mismatch")
     if left.snapshot.bundle.effective_input_claim_ceiling != right.snapshot.bundle.effective_input_claim_ceiling:
         reasons.add("comparison.claim_ceiling_mismatch")
+    left_cost = None if left.research_cost_assumption is None else dict(left.research_cost_assumption)
+    right_cost = None if right.research_cost_assumption is None else dict(right.research_cost_assumption)
+    if left_cost != right_cost:
+        reasons.add("comparison.cost_assumption_mismatch")
     left_metrics = {row.metric_ref: row for row in left.metrics}
     right_metrics = {row.metric_ref: row for row in right.metrics}
     if set(left_metrics) != set(right_metrics):

@@ -27,6 +27,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 from build_gate_c_evidence import build_gate_c_evidence, _numeric_acceptance  # noqa: E402
 
 
+pytestmark = pytest.mark.integration
+
+
 EXPECTED_METRICS = {
     "equity_cross_section": {
         "metric_ref": "project.quantwitness.equity_cross_section.spread@1.0.0",
@@ -160,7 +163,9 @@ def test_requested_diagnostic_table_rejects_modified_content(tmp_path, gate_inpu
     shutil.copytree(source, result)
     manifest = _json(result / "result.json")
     table = next(row for row in manifest["tables"] if row["role"] == "diagnostic")
-    with (result / next(iter(table["files"]))).open("ab") as handle:
+    target = result / next(iter(table["files"]))
+    target.chmod(0o644)
+    with target.open("ab") as handle:
         handle.write(b"tampered")
     with pytest.raises(ResultContractError):
         load_result_context(result, result_store=store, additional_table_ids=(table["table_id"],))
@@ -178,7 +183,9 @@ def test_result_rejects_modified_plan_identity(tmp_path, gate_inputs):
     shutil.copytree(source, result)
     manifest = _json(result / "result.json")
     manifest["plan_hash"] = "f" * 64
-    (result / "result.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path = result / "result.json"
+    manifest_path.chmod(0o644)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ResultContractError):
         load_result_context(result, result_store=store)
 

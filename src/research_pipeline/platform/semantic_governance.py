@@ -7,6 +7,8 @@ import re
 from types import MappingProxyType
 from typing import Iterable
 
+from .lean_contract import LEAN_ARTIFACT_TYPE, LEAN_METRICS_SCHEMA_ID, LEAN_SCHEMA_IDS, LEAN_SIGNAL_SOURCE_SCHEMA_ID
+
 
 SEMANTIC_PROMOTION_VERSION = "research-semantic-promotion-v1"
 PUBLIC_SEMANTIC_KINDS = frozenset({
@@ -73,12 +75,8 @@ MAINLINE_SEMANTIC_PROMOTION_REVIEWS: tuple["SemanticPromotionReview", ...] = ()
 
 # LEAN仅登记本地项目结果类型，不进入公共算子或能力晋级记录。
 LEAN_LOCAL_SEMANTIC_IDENTITIES = MappingProxyType({
-    "artifact_type": frozenset({"research.lean-simulation.v2"}),
-    "result_schema": frozenset(
-        {f"research.lean.{name}.v2"
-         for name in ("orders", "intents", "daily", "trace", "fills", "positions", "account_events", "lifecycle")}
-        | {"research.lean-signal-source.v1", "research.lean.metrics.v2"}
-    ),
+    "artifact_type": frozenset({LEAN_ARTIFACT_TYPE}),
+    "result_schema": frozenset((*LEAN_SCHEMA_IDS.values(), LEAN_SIGNAL_SOURCE_SCHEMA_ID, LEAN_METRICS_SCHEMA_ID)),
 })
 
 

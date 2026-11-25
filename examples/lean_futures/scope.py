@@ -21,7 +21,7 @@ def write_scope(package):
     visible = synthetic.DAYS[0]+'T00:00:00+08:00'
     for code in synthetic.CODES:
         row = deepcopy(template)
-        row.update(policy_id='session.public.synthetic.future.v1', revision=1,
+        row.update(policy_id='session.public.synthetic.future.'+code.split('.')[0]+'.v1', revision=1,
                    contract_version=PROJECT_SESSION_POLICY_VERSION, effective_from=synthetic.DAYS[0],
                    effective_to=synthetic.DAYS[-1], trading_dates=list(synthetic.DAYS), available_at=visible,
                    previous_policy_hash=None)
@@ -53,7 +53,7 @@ def write_scope(package):
         add(code, 'contract_lifecycle', dict(product_code='IF', listed_date='2023-01-01', last_trade_date=expiry, exit_deadline=deadline))
         add(code, 'contract_multiplier', dict(contract_multiplier=10, quote_unit='CNY/point'))
         add(code, 'price_tick', dict(price_scale=0, price_tick_units=1))
-        add(code, 'session', dict(session_policy_id='session.public.synthetic.future.v1', session_policy_revision=1))
+        add(code, 'session', dict(session_policy_id='session.public.synthetic.future.'+code.split('.')[0]+'.v1', session_policy_revision=1))
         add(code, 'margin', dict(long_margin_ppm=100000, short_margin_ppm=100000))
         add(code, 'fee_schedule', dict(open_fee_per_contract_units=100, close_fee_per_contract_units=100,
                                       close_today_fee_per_contract_units=100))

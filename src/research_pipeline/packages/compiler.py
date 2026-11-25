@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from functools import partial
 from typing import Mapping
 
 from research_pipeline.data_plane import (
@@ -19,6 +20,8 @@ from research_pipeline.data_plane import (
     SortKey,
     UniverseSelection,
 )
+from research_pipeline.platform.validation import require_exact_fields, require_integer, require_text
+
 from .models import ResearchPackage, ResearchPackageError
 from .plan_contracts import QueryCompileResult
 
@@ -29,18 +32,29 @@ def compile_package_queries(package: ResearchPackage) -> QueryCompileResult:
     as_of = payload.get("as_of")
     if not isinstance(as_of, str) or not as_of.strip():
         raise ResearchPackageError("spec.as_of 必须是规范 ISO 日期或带时区时间")
-    return compile_query_requests(payload.get("requests"), as_of=as_of)
+    return compile_query_requests(payload.get("requests"), as_of=as_of, universes=payload.get("universes", {}))
 
 
-def compile_query_requests(requests: object, *, as_of: str) -> QueryCompileResult:
+def compile_query_requests(requests: object, *, as_of: str, universes: object = None) -> QueryCompileResult:
     """供所有声明式 builder 复用的 Query IR 编译入口。"""
     if not isinstance(requests, (list, tuple)) or not requests:
         raise ResearchPackageError("spec.requests 必须是非空序列")
+    if universes is None:
+        universes = {}
+    if not isinstance(universes, Mapping):
+        raise ResearchPackageError("spec.universes 必须是映射")
     request_ids: list[str] = []
     queries: list[QueryIR] = []
     for index, raw in enumerate(requests):
         if not isinstance(raw, Mapping):
             raise ResearchPackageError(f"spec.requests[{index}] 必须是映射")
+        if "universe_ref" in raw:
+            ref = _text(raw["universe_ref"], f"spec.requests[{index}].universe_ref")
+            if "universe" in raw or ref not in universes:
+                raise ResearchPackageError(f"股票池引用冲突或没有定义: {ref}")
+            raw = dict(raw)
+            del raw["universe_ref"]
+            raw["universe"] = universes[ref]
         _exact(raw, {"request_id", "dataset_id", "dataset_version", "field_ids", "purpose", "time_range", "universe", "filters", "sort", "budget", "adjustment", "limit"}, f"spec.requests[{index}]")
         request_id = _text(raw["request_id"], f"spec.requests[{index}].request_id")
         query = _build_query(raw, as_of=as_of, index=index)
@@ -161,9 +175,7 @@ def _build_sort(value: object, prefix: str, index: int) -> SortKey:
     return SortKey(_text(payload["field_id"], "sort.field_id"), payload["descending"])
 
 
-def _exact(value: Mapping[str, object], expected: set[str], field: str) -> None:
-    if set(value) != expected:
-        raise ResearchPackageError(f"{field} schema 不匹配；缺失={sorted(expected - set(value))}，未知={sorted(set(value) - expected)}")
+_exact = partial(require_exact_fields, error=ResearchPackageError)
 
 
 def _mapping(value: object, expected: set[str], field: str) -> Mapping[str, object]:
@@ -186,16 +198,10 @@ def _strings(value: object, field: str, *, allow_empty: bool = False) -> tuple[s
     return tuple(values)
 
 
-def _text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ResearchPackageError(f"{field} 必须是非空字符串")
-    return value
+_text = partial(require_text, error=ResearchPackageError)
 
 
-def _integer(value: object, field: str) -> int:
-    if type(value) is not int:
-        raise ResearchPackageError(f"{field} 必须是整数")
-    return value
+_integer = partial(require_integer, error=ResearchPackageError)
 
 
 __all__ = [

@@ -216,6 +216,7 @@ def prepare_failed_run_reuse(
             target_external=target_external,
             root_seed=root_seed,
             fixed_clock=fixed_clock,
+            require_same_audit_identity=True,
         )
         if reused is None:
             raise RuntimeIntegrityError(

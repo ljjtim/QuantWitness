@@ -36,14 +36,14 @@
 | 特征表达式与基线 | [Qlib 表达式](qlib-expressions.md) · [量价与选定 Alpha](qlib-factor-baselines.md) |
 | 模型交付与报告 | [模型文件](qlib-model-results.md) · [模型和组合报告](qlib-report.md) |
 | 风险约束组合 | [组合风险目标](qlib-portfolio-risk.md) |
-| 项目分钟策略 | [LEAN 执行](lean-execution.md) · [策略协议](strategy-protocol.md) · [一分钟规则与执行](minute_simulation.md) |
+| 项目分钟策略 | [LEAN 执行](lean-execution.md) · [原生算法声明](strategy-protocol.md) · [一分钟规则与执行](minute_simulation.md) |
 | 准入与选股、账户的分工 | [准入与执行边界](admission-execution.md) |
 | 分钟数据与规则 | [项目范围](minute-project-scope.md) · [参考范围](minute_reference_scope.md) · [规则快照](minute_market_rules.md) · [规则来源](minute_rule_provenance.md) |
 | 分钟计算与可见性 | [分钟算子](minute_operators.md) · [股票原始成交量与 PIT](equity_minute_raw_volume_pit.md) |
-| 订单、成交和账户 | [金融计算](financial_simulation.md) · [策略协议](strategy-protocol.md) |
+| 原生结果、Chart和ObjectStore | [原生结果封存](lean-native-results.md) |
+| 订单、成交和账户 | [金融计算](financial_simulation.md) · [原生算法声明](strategy-protocol.md) |
 | 期货账户、结算与换月 | [中国期货LEAN执行](lean-futures.md) · [期货结果合同](lean-futures-results.md) · [公开合成示例](../examples/lean_futures/README.md) |
 | 股票、ETF 账户和公司行动 | [现货账户与权益](spot_account.md) |
-| 库级成交成本归因 | [Bar TCA](bar_tca.md) |
 | 统计与选择偏差 | [稳健研究](robust_research.md) |
 
 数据可见性、标签、holdout、可用资金和交易规则在生产读取及状态转换处执行。
@@ -61,6 +61,7 @@
 ## 扩展与交付
 
 - [项目扩展](../EXTENSIONS.md)、[扩展接口](../project_extensions/README.md)、[贡献](../CONTRIBUTING.md)。
+- [测试选择与覆盖边界](../tests/README.md)。
 - [安装与发布](release.md)、[独立使用验收](external-acceptance.md)。
 - [第三方许可](../THIRD_PARTY_NOTICES.md)、[许可证](../LICENSE)与[安全报告](../SECURITY.md)。
 

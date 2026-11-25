@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
 
 from research_pipeline.platform import typed_canonical_hash
@@ -35,7 +37,7 @@ class RecoveryPlan:
             "reason": self.reason, "contract_version": self.contract_version,
         }
 
-    @property
+    @cached_property
     def plan_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 

@@ -9,14 +9,15 @@ import math
 from pathlib import Path
 import time
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import TYPE_CHECKING, Callable, Mapping
 
 from research_pipeline.platform import canonical_json, typed_canonical_hash
 
 from .contracts import ArtifactRef, NodeSpec, ResourceBudget
 from .errors import RuntimeIntegrityError, RuntimeWorkerError
 from .external_artifact import ExternalArtifactCommit, ExternalArtifactStore
-from .resource_governor import ResourceGovernor, ResourceLease
+if TYPE_CHECKING:
+    from .resource_pool import ResourceGovernor, ResourceLease
 
 
 RUNTIME_NODE_VALUE_VERSION = "research-runtime-node-value-v2"

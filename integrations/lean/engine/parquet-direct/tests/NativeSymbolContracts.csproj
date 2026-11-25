@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../ParquetInput.csproj" />
+    <Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath></Reference>
+    <Reference Include="NodaTime"><HintPath>$(LeanBin)/NodaTime.dll</HintPath></Reference>
+    <Reference Include="QuantConnect.Configuration"><HintPath>$(LeanBin)/QuantConnect.Configuration.dll</HintPath></Reference>
+    <Reference Include="QuantConnect.Lean.Engine"><HintPath>$(LeanBin)/QuantConnect.Lean.Engine.dll</HintPath></Reference>
+    <Reference Include="Python.Runtime"><HintPath>$(LeanBin)/Python.Runtime.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

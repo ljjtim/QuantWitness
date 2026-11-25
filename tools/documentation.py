@@ -1,0 +1,181 @@
+"""现行文档集合的只读审计。"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+import re
+from urllib.parse import unquote
+
+from research_pipeline.platform.canonical import fingerprint
+
+
+REQUIRED_DOCS = frozenset(
+    {
+        "architecture.md",
+        "completed-model-input.md",
+        "admission-execution.md",
+        "direct-inputs.md",
+        "equity_minute_raw_volume_pit.md",
+        "minute_market_rules.md",
+        "minute_operators.md",
+        "minute_reference_scope.md",
+        "minute_simulation.md",
+        "ai_workflow.md",
+        "catalog.md",
+        "cli.md",
+        "data_plane.md",
+        "snapshot-layout.md",
+        "artifact-lifecycle.md",
+        "evidence.md",
+        "framework-contracts.md",
+        "getting-started.md",
+        "workspace-quickstart.md",
+        "workspace-continuation.md",
+        "runtime-progress.md",
+        "implementation-identity-scope.md",
+        "research-execution-improvements.md",
+        "index.md",
+        "minute_rule_provenance.md",
+        "minute-project-scope.md",
+        "strategy-protocol.md",
+        "lean-execution.md",
+        "lean-futures.md",
+        "lean-futures-results.md",
+        "lean-native-results.md",
+        "operations.md",
+        "release.md",
+        "external-acceptance.md",
+        "research_package.md",
+        "runtime.md",
+        "resource-history.md",
+        "walk_forward_model.md",
+        "holdout-series.md",
+        "qlib-model-results.md",
+        "qlib-report.md",
+        "qlib-expressions.md",
+        "qlib-factor-baselines.md",
+        "qlib-portfolio-risk.md",
+        "project_resource_budgets.md",
+        "spot_account.md",
+        "financial_simulation.md",
+        "robust_research.md",
+        "minute-resource-budget.md",
+    }
+)
+
+FORBIDDEN_PATTERNS = (
+    re.compile(r"python\s+-m\s+research_pipeline\s+(?:v2|project|run-study|init-study)\b"),
+    re.compile(
+        r"python\s+-m\s+research_pipeline\s+catalog\s+"
+        r"(?:dataset|field)\s+search\s+--query\b"
+    ),
+    re.compile(
+        r"python\s+-m\s+research_pipeline\s+verify\b"
+    ),
+    re.compile(r"--(?:verification-result|verification-process-slots|verifier-bundle)\b"),
+    re.compile(r"--source-visibility\b"),
+    re.compile(r"minute-source-visibility-v1\b"),
+    re.compile(r"cn_equity\.minute_bar\.raw_reconstructed\b"),
+    re.compile(r"(?:开发中|尚未完成|等待\s+G)"),
+)
+LINK_PATTERN = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+IGNORED_LINK_PREFIXES = ("http://", "https://", "mailto:", "#")
+def _markdown_files(root: Path) -> tuple[Path, ...]:
+    files = [root / "README.md"]
+    files.extend(sorted(root / "docs" / name for name in REQUIRED_DOCS))
+    return tuple(path for path in files if path.is_file())
+
+
+def _relative_link_target(source: Path, raw_target: str) -> Path | None:
+    target = raw_target.strip().split("#", 1)[0]
+    if not target or target.startswith(IGNORED_LINK_PREFIXES):
+        return None
+    return (source.parent / unquote(target)).resolve()
+
+
+def audit_documentation(root: Path) -> dict[str, object]:
+    """检查现行文档集合、索引、相对链接和退役入口。"""
+
+    root = root.resolve()
+    docs_root = root / "docs"
+    errors: list[dict[str, str]] = []
+    available_docs = {path.name for path in docs_root.glob("*.md") if path.is_file()}
+    for name in sorted(REQUIRED_DOCS - available_docs):
+        errors.append({"kind": "missing_doc", "path": f"docs/{name}"})
+
+    indexed_text = (docs_root / "index.md").read_text(encoding="utf-8")
+    for name in sorted(REQUIRED_DOCS - {"index.md"}):
+        if f"({name})" not in indexed_text:
+            errors.append({"kind": "missing_current_doc_link", "path": f"docs/{name}"})
+    history = re.search(r"^## 历史记录\s*\n(?P<links>.*?)(?=^## |\Z)", indexed_text, flags=re.MULTILINE | re.DOTALL)
+    for match in LINK_PATTERN.finditer(indexed_text):
+        raw_target = match.group(1)
+        historical = history is not None and history.start("links") <= match.start() < history.end("links")
+        target = _relative_link_target(docs_root / "index.md", raw_target)
+        if (
+            target is not None
+            and target.parent == docs_root.resolve()
+            and target.suffix.lower() == ".md"
+            and target.name not in REQUIRED_DOCS
+            and not historical
+        ):
+            errors.append(
+                {
+                    "kind": "non_current_doc_link",
+                    "path": "docs/index.md",
+                    "target": raw_target,
+                }
+            )
+
+    scanned_files = _markdown_files(root)
+    audited_documents: list[dict[str, object]] = []
+    for path in scanned_files:
+        content = path.read_bytes()
+        text = content.decode("utf-8")
+        relative = path.relative_to(root).as_posix()
+        audited_documents.append(
+            {
+                "path": relative,
+                "bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+        for pattern in FORBIDDEN_PATTERNS:
+            if pattern.search(text):
+                errors.append(
+                    {
+                        "kind": "forbidden_text",
+                        "path": relative,
+                        "pattern": pattern.pattern,
+                    }
+                )
+        for raw_target in LINK_PATTERN.findall(text):
+            target = _relative_link_target(path, raw_target)
+            if target is not None and not target.exists():
+                errors.append(
+                    {
+                        "kind": "broken_link",
+                        "path": relative,
+                        "target": raw_target,
+                    }
+                )
+
+    identity = {
+        "current_docs": sorted(REQUIRED_DOCS),
+        "audited_documents": audited_documents,
+        "errors": errors,
+    }
+    return {
+        "schema_version": "research-documentation-audit-v1",
+        "status": "pass" if not errors else "fail",
+        "database_accessed": False,
+        "current_docs": sorted(REQUIRED_DOCS),
+        "audited_documents": audited_documents,
+        "scanned_file_count": len(scanned_files),
+        "errors": errors,
+        "audit_hash": fingerprint(identity),
+    }
+
+
+__all__ = ["REQUIRED_DOCS", "audit_documentation"]

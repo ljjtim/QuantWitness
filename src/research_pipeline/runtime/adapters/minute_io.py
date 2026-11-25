@@ -198,6 +198,30 @@ def _operator_bar_batches(
     return dataset, partition_streams()
 
 
+def _shanghai_local_times(values):
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    try:
+        return pc.assume_timezone(values, "Asia/Shanghai")
+    except pa.ArrowInvalid:
+        # Windows 的 Arrow 文本时区库可缺失；历史夏令时歧义沿用原异常类型。
+        from datetime import time, timedelta
+        from pytz import timezone
+        zone = timezone("Asia/Shanghai")
+        days = pc.dictionary_encode(pc.cast(values, pa.date32()))
+        offsets = []
+        for day in days.dictionary.to_pylist():
+            start = datetime.combine(day, time())
+            offset = zone.localize(start, is_dst=None).utcoffset()
+            if zone.localize(start + timedelta(days=1), is_dst=None).utcoffset() != offset:
+                encoded = pc.dictionary_encode(values)
+                local = [zone.localize(v, is_dst=None) for v in encoded.dictionary.to_pylist()]
+                return pc.take(pa.array(local, type=pa.timestamp("us", tz="Asia/Shanghai")), encoded.indices)
+            offsets.append(offset)
+        utc = pc.subtract(values, pc.take(pa.array(offsets, type=pa.duration("us")), days.indices))
+        return pc.cast(utc, pa.timestamp("us", tz="Asia/Shanghai"))
+
+
 def _normalized_bar_batch(batch, snapshot_hash, partition_key, *, columns=None):
     """在列式边界统一分钟字段；仅交付时才转换为Python行。"""
     import pyarrow as pa
@@ -211,12 +235,7 @@ def _normalized_bar_batch(batch, snapshot_hash, partition_key, *, columns=None):
         values = column(name)
         values = pc.cast(values, pa.timestamp("us", tz=values.type.tz), safe=False)
         if values.type.tz is None:
-            import pandas as pd
-            encoded = pc.dictionary_encode(values)
-            localized = pa.Array.from_pandas(
-                pd.DatetimeIndex(encoded.dictionary.to_numpy(zero_copy_only=False)).tz_localize("Asia/Shanghai"),
-                type=pa.timestamp("us", tz="Asia/Shanghai"))
-            values = pc.take(localized, encoded.indices)
+            values = _shanghai_local_times(values)
         return values
 
     def constant(value):

@@ -361,6 +361,9 @@ def _publish_release(root: Path, compile_id: str, manifest: dict[str, Any], lock
     os.replace(pointer_tmp, root / "CURRENT")
 
 
+_LOADED_CATALOG_CACHE: dict[tuple[object, ...], "CompiledCatalog"] = {}
+
+
 @dataclass(frozen=True)
 class CompiledCatalog:
     payload: MappingProxyType
@@ -373,6 +376,10 @@ class CompiledCatalog:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "CompiledCatalog":
+        return cls._from_lock(payload, validate_contracts=True)
+
+    @classmethod
+    def _from_lock(cls, payload, *, validate_contracts):
         lock_format_version = payload.get("lock_format_version")
         compiler_version = payload.get("compiler_version")
         if lock_format_version not in _SUPPORTED_LOCK_COMPILERS:
@@ -386,17 +393,18 @@ class CompiledCatalog:
         unsigned = {key: value for key, value in payload.items() if key != "catalog_hash"}
         if expected != typed_canonical_hash(unsigned):
             raise CatalogReferenceError("Catalog Lock hash 校验失败")
-        reconstructed: list[CatalogContract] = []
-        for group, kind in (
-            ("fields", "field"),
-            ("datasets", "dataset"),
-            ("policies", "policy"),
-            ("bindings", "binding"),
-            ("transforms", "transform"),
-        ):
-            for item in payload.get(group, []):
-                reconstructed.append(load_contract_payload({"kind": kind, **item}))
-        validate_contract_set(reconstructed)
+        if validate_contracts:
+            reconstructed: list[CatalogContract] = []
+            for group, kind in (
+                ("fields", "field"),
+                ("datasets", "dataset"),
+                ("policies", "policy"),
+                ("bindings", "binding"),
+                ("transforms", "transform"),
+            ):
+                for item in payload.get(group, []):
+                    reconstructed.append(load_contract_payload({"kind": kind, **item}))
+            validate_contract_set(reconstructed)
         def index(group: str, key: str) -> MappingProxyType:
             return MappingProxyType({str(item[key]): MappingProxyType(dict(item)) for item in payload.get(group, [])})
         binding_index = index("bindings", "binding_id")
@@ -429,11 +437,28 @@ class CompiledCatalog:
         if re.fullmatch(r"[0-9a-f]{24}", compile_id) is None:
             raise CatalogReferenceError("CURRENT compile ID 非法")
         release = root / compile_id
-        payload = json.loads((release / "catalog.lock.json").read_text(encoding="utf-8"))
-        manifest = json.loads(
-            (release / "catalog.source-manifest.json").read_text(encoding="utf-8")
+        lock_path = release / "catalog.lock.json"
+        manifest_path = release / "catalog.source-manifest.json"
+        audit_path = release / "catalog.audit.json"
+        lock_stat = lock_path.stat()
+        manifest_stat = manifest_path.stat()
+        audit_stat = audit_path.stat()
+        from research_pipeline.platform.audit_mode import strict_audit_enabled
+        strict = strict_audit_enabled()
+        cache_key = (
+            root.resolve(),
+            compile_id,
+            strict,
+            (lock_stat.st_size, lock_stat.st_mtime_ns),
+            (manifest_stat.st_size, manifest_stat.st_mtime_ns),
+            (audit_stat.st_size, audit_stat.st_mtime_ns),
         )
-        audit = json.loads((release / "catalog.audit.json").read_text(encoding="utf-8"))
+        cached = _LOADED_CATALOG_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
         manifest_hash = manifest.get("manifest_core_hash")
         unsigned_manifest = {
             key: value for key, value in manifest.items() if key != "manifest_core_hash"
@@ -480,7 +505,11 @@ class CompiledCatalog:
         ):
             if audit.get(name) != [item for item in decisions if predicate(item)]:
                 raise CatalogReferenceError(f"catalog audit {name} 与 decisions 不一致")
-        return cls.from_payload(payload)
+        compiled = cls._from_lock(payload, validate_contracts=strict)
+        if len(_LOADED_CATALOG_CACHE) >= 16:
+            _LOADED_CATALOG_CACHE.pop(next(iter(_LOADED_CATALOG_CACHE)))
+        _LOADED_CATALOG_CACHE[cache_key] = compiled
+        return compiled
 
     @classmethod
     def load_default(cls) -> "CompiledCatalog":

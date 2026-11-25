@@ -8,7 +8,7 @@ from typing import Any
 
 from research_pipeline.platform.process_budget_advice import resource_failure_advice
 
-from .command_suggestion import render_powershell_command
+from research_pipeline.application.command_suggestion import render_powershell_command
 
 
 _DETAIL_FIELDS = (

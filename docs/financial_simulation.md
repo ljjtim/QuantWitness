@@ -18,7 +18,7 @@
 
 本页说明 ResearchPackage 中股票和 ETF 策略的当前执行边界，以及正式 Result 中保存的金融事实。当前生产策略统一使用本地 LEAN：日线频率为 `1d`，分钟频率为 `1m`，声明 `execution_backend=lean`。
 
-完整的安装、策略声明、准入、恢复和资源约束见[LEAN 执行](lean-execution.md)。研究主链仍是 ResearchPackage → 准入 → 执行 → Result。使用 `report`、`analysis` 或 `export-result` 时直接读取正式 Result，不从运行目录猜测账户事实。
+完整的安装、策略声明、准入、恢复和资源约束见[LEAN 执行](lean-execution.md)。研究主链仍是 ResearchPackage → 准入 → 执行 → Result。使用 `report`、`compare` 或 `export-result` 时直接读取正式 Result，不从运行目录猜测账户事实。
 
 ## LEAN 执行
 
@@ -26,7 +26,7 @@
 
 日线使用 `lean_next_session_open_v1`：收盘后形成的信号在下一交易日开盘执行，日线独立开盘价来源必须在 Catalog 中声明。分钟使用 `lean_next_completed_close_v1`：策略在分钟完成后获得该 bar，成交按后续完成分钟 Close 加声明滑点。执行模型、频率和 bars 端口必须一致。
 
-LEAN 负责事件驱动、订单、成交、账户和指标。项目策略通过冻结的 Python bundle 接收事件并返回交易意图。当前订单类型为 DAY 市价单，策略可以提交金额买入、数量买卖或撤单意图。股票价格按 `price_scale=2` 记账，ETF 按 `price_scale=3` 记账，现金统一按人民币分记账。
+LEAN 负责事件驱动、订单、成交、账户和指标。项目以冻结的 Python 或 C# `QCAlgorithm` 提交原生委托。日线使用开盘市价模型，分钟支持 Market、Limit 和 MarketOnOpen。股票价格按 `price_scale=2` 记账，ETF 按 `price_scale=3` 记账，现金统一按人民币分记账。
 
 执行期间。系统检查可见性、后续完成 bar、滑点、费用、数量格点、保护价、T+1、可用现金、可卖数量和日终权益。现金红利按登记日持仓确认，到账后进入现金。
 
@@ -34,7 +34,7 @@ LEAN 负责事件驱动、订单、成交、账户和指标。项目策略通过
 
 ## 账户和金融规则
 
-`research_pipeline.domain` 与 `research_pipeline.simulation` 仍保存金额、费用、订单、成交、结算、公司行动、现货账本和期货账本这些纯金融类型。它们服务于金融算法、公共事实合同和LEAN边界。
+`research_pipeline.domain` 定义金额、订单、市场规则和公司行动事实。`research_pipeline.domain.corporate_action_source` 把供应商记录编译为带可见时间的权益事实。正式策略的成交、费用、账户和结算由 LEAN 市场模型执行。
 
 当前股票和 ETF 账户从 ResearchPackage 声明的期初现金及空仓开始。账户状态区分现金、持仓、可卖数量、活动订单和预占金额。账户估值记录 `equity_semantics`、`valuation_at`、价格来源和可见时间。
 
@@ -46,7 +46,7 @@ LEAN 负责事件驱动、订单、成交、账户和指标。项目策略通过
 
 ## LEAN 正式输出
 
-LEAN simulation 端口使用 `research.lean-simulation.v2`。Result 保存 8 张执行表和指标表：
+LEAN simulation 端口使用 `research.lean-simulation.v4`。Result 保存 8 张执行表和指标表：
 
 | 路径 | 内容 |
 | --- | --- |
@@ -54,13 +54,13 @@ LEAN simulation 端口使用 `research.lean-simulation.v2`。Result 保存 8 张
 | `lean/intents` | 策略交易意图与实际提交数量 |
 | `lean/daily` | 逐交易日日终账户与持仓 |
 | `lean/trace` | 实际回调、可见报价、应答和状态 |
-| `lean/fills` | 期货成交腿，现货使用 orders 的成交事件 |
-| `lean/positions` | 期货四桶持仓，现货使用 daily 和终态账户 |
+| `lean/fills` | 现货逐笔成交及期货实际成交腿 |
+| `lean/positions` | 现货持仓、可卖量及期货四桶持仓 |
 | `lean/account_events` | 账户事件及必要终态观察 |
 | `lean/lifecycle` | 生命周期、退市归零及期货流程事实 |
 | `lean/metrics` | 金融指标、定义、单位及样本范围 |
 
-同时保存 `lean/account.json`、`lean/strategy-state.json`、`lean/runtime-lock.json`、`lean/strategy-input.json`、引擎终态和 Launcher 摘要。行情、规则、公司行动和信号以计划引用或持久工件保留。归档和迁移时必须保留这些依赖。
+同时保存账户终态、`lean/algorithm-state.json`、`lean/runtime-lock.json`、`lean/strategy-input.json`、引擎终态和 Launcher 摘要。行情、规则、公司行动和信号以计划引用或持久工件保留。归档和迁移时必须保留这些依赖。
 
 报告使用正式 Result 的订单、成交、日终账户、指标和配置引用。HTML 报告可通过：
 

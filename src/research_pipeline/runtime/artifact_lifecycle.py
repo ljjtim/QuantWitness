@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Mapping
 
 from research_pipeline.platform import canonical_json
+from research_pipeline.platform.immutable_files import unlink_readonly_file
 
 PROTECTION_MARKERS = (".pin", ".lease", ".active")
 _CURRENT_OWNER: ContextVar = ContextVar("artifact_lifecycle_owner", default=None)
@@ -112,7 +113,7 @@ class CausalBatchLifecycle:
             if reasons:
                 return record
             for path in files:
-                path.unlink()
+                unlink_readonly_file(path)
             for directory in sorted((path for path in source.rglob("*") if path.is_dir()),
                                     key=lambda path: len(path.parts), reverse=True):
                 directory.rmdir()
@@ -350,7 +351,7 @@ class AttemptArtifactLifecycle:
                 sizes[relative] = source_size
             # 仅删除本次登记且已经逐项找到正式替代位置的载荷文件。
             for relative, path in sources.items():
-                path.unlink()
+                unlink_readonly_file(path)
                 item["released_files"] += 1
                 item["released_bytes"] += sizes[relative]
         except Exception as exc:

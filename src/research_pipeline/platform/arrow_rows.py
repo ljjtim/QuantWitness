@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-def record_batch_rows(batch):
+def record_batch_rows(batch, *, as_dict=True):
     """保留Arrow的时区、精度及空值；缓存仅存在于当前批次。"""
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -24,6 +24,10 @@ def record_batch_rows(batch):
             columns.append(column.to_numpy(zero_copy_only=False).tolist())
         else:
             columns.append(column.to_pylist())
-    names = batch.schema.names
-    for values in zip(*columns):
-        yield dict(zip(names, values))
+    rows = zip(*columns)
+    if as_dict:
+        names = batch.schema.names
+        for values in rows:
+            yield dict(zip(names, values))
+    else:
+        yield from rows

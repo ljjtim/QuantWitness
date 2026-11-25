@@ -56,11 +56,11 @@ def rebuild_bundle(path, manifest, spec, output, registered_specs, *, source_roo
         "parameter_preflight_function": preflight["function"],
         "parameter_preflight_parameters": tuple(preflight["parameters"]),
     }
-    raw = manifest.to_dict()
     return compile_project_operator_bundle(
         source_root=source_root or path / "sources", output_root=output,
         project_id=manifest.project_id, operator_spec=spec,
-        entry_module=raw["entry"]["module"], entry_function=raw["entry"]["function"],
+        entry_module=manifest.entry_module, entry_function=manifest.entry_function,
+        lean_algorithm=manifest.lean_algorithm,
         dependency_lock=dict(manifest.dependency_lock), registered_operator_specs=registered_specs,
         project_artifact_types=(LEAN_ARTIFACT_TYPE,),
         permissions=manifest.permissions, reuse_scope=manifest.reuse_scope, **options,
@@ -76,7 +76,7 @@ def prepare_package(from_package, output, lean_home, *, refresh_runtime=False):
     from research_pipeline.packages.store import PACKAGE_FILES, PackageDocuments
     from research_pipeline.platform.lean_runtime import freeze_lean_runtime, validate_lean_runtime
     from research_pipeline.platform.lean_contract import (
-        LEAN_ARTIFACT_TYPE, LEAN_PATHS, LEAN_SCHEMA_IDS, LEAN_SIGNAL_SOURCE_SCHEMA_ID,
+        LEAN_ARTIFACT_TYPE, LEAN_PATHS, LEAN_SCHEMA_IDS,
         LEAN_METRICS_SCHEMA_ID, LEAN_METRICS_PATH,
     )
     from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
@@ -86,10 +86,11 @@ def prepare_package(from_package, output, lean_home, *, refresh_runtime=False):
         raise ValueError("输出目录必须不存在")
     payloads = {name: read_mapping(package / name) for name in PACKAGE_FILES}
     # 迁移来源只验证完整声明与输入闭包；执行准入在转换完成后进行。
-    source_package = load_research_package(package, documents=PackageDocuments(package, payloads, {}))
+    documents = PackageDocuments(package, payloads, {})
+    source_package = load_research_package(package, documents=documents)
     research = payloads["spec/research.yaml"]
-    original = deepcopy(research)
-    strategies = [node for node in research["graph"]["nodes"] if "strategy_declaration" in node["parameters"]]
+    original_requests = deepcopy(research.get("requests"))
+    strategies = [node for node in research["graph"]["nodes"] if "strategy_declaration" in node.get("parameters", {})]
     if len(strategies) != 1:
         raise ValueError("原完整包必须恰好包含一个项目策略节点")
     strategy = strategies[0]
@@ -99,59 +100,63 @@ def prepare_package(from_package, output, lean_home, *, refresh_runtime=False):
     ports = {i["input_port"] for i in strategy["inputs"]}
     is_future = strategy["parameters"]["strategy_declaration"]["asset_class"] == "cn_future"
     required_ports = {"bars"} if is_future else {"bars", "snapshot"}
-    optional_ports = {"signals", "futures"} if is_future else {"signals"}
-    if not required_ports <= ports or ports - required_ports - optional_ports:
-        raise ValueError("转换要求行情及对应资产的必要输入；期货可绑定结算列式来源")
+    if not required_ports <= ports:
+        raise ValueError("原生策略缺少行情或对应资产的必要金融输入")
     catalog = bundle_catalog(package)
     path, manifest = catalog[strategy["operator_id"], strategy["operator_version"]]
     if manifest.bundle_hash != strategy["parameters"]["strategy_declaration"]["bundle_id"]:
         raise ValueError("原策略声明与配套bundle身份不一致")
+    from research_pipeline.domain.lean_algorithm import parse_lean_strategy_declaration
+    native = parse_lean_strategy_declaration(strategy["parameters"]["strategy_declaration"])
+    if manifest.lean_algorithm != native.algorithm:
+        raise ValueError("原生策略入口与已封存算法不一致")
     from research_pipeline.packages.project_strategy_admission import strategy_bars_frequency
     frequency = strategy_bars_frequency(strategy["parameters"], {
         port.port: port.artifact_type for port in manifest.operator_spec.input_ports})
     execution_model = "lean_next_session_open_v1" if frequency == "1d" else "lean_next_completed_close_v1"
-    declaration_frequency = strategy["parameters"]["strategy_declaration"].get("frequency", "1m")
+    if native.frequency != frequency:
+        raise ValueError("原生策略执行频率与bars端口不一致")
     budget = dict(manifest.operator_spec.resource_profile)
     minimum_slots = 3 + int(sys.platform == "win32" and sys.prefix != sys.base_prefix)
     if budget["process_slots"] < minimum_slots:
         raise ValueError(f"原包策略预算须至少{minimum_slots}个进程槽；转换不自动扩大额度")
     if strategy["parameters"].get("execution_backend") == "lean":
-        runtime = validate_lean_runtime(strategy["parameters"]["lean_runtime"], verify_files=False)
-        if Path(runtime["installation_root"]).resolve() != lean_home:
+        configured = strategy["parameters"]["lean_runtime"]
+        if Path(configured["installation_root"]).resolve() != lean_home:
             raise ValueError("研究声明绑定的 LEAN 安装与本次 lean-home 不一致")
         if refresh_runtime:
             runtime = freeze_lean_runtime(lean_home)
-        if declaration_frequency == frequency:
-            output.mkdir(parents=True)
-            destination, prepared = package, source_package
-            bundles = [path for path, _ in catalog.values()]
-            if refresh_runtime and runtime != strategy["parameters"]["lean_runtime"]:
-                destination = output / "package"
-                shutil.copytree(package, destination)
-                strategy["parameters"]["lean_runtime"] = runtime
-                write_mapping(destination / "spec/research.yaml", research)
-                bundles = []
-                for bundle, _ in catalog.values():
-                    copied = output / "bundles" / bundle.name
-                    shutil.copytree(bundle, copied)
-                    bundles.append(copied)
-                prepared = ResearchPackage.build(
-                    package_slug=source_package.package_slug, display_name=source_package.display_name,
-                    package_version=source_package.package_version, builder_id=source_package.builder_id,
-                    sources=source_package.sources, localizations=source_package.localizations,
-                    metric_contract=source_package.metric_contract, claim_contract=source_package.claim_contract,
-                    spec_payload=research,
-                    minute_scope_inputs={name: replace(scope, root=destination)
-                                         for name, scope in source_package.minute_scope_inputs.items()},
-                )
-            summary = {"package": str(destination), "bundles": [str(path) for path in bundles],
-                       "from_package": str(package), "execution_backend": "lean", "run_budget": budget,
-                       "database_access": "not_opened", "research_executed": False}
-            write_mapping(output / "conversion.json", summary)
-            return summary, prepared
+        else:
+            runtime = validate_lean_runtime(configured, verify_files=False)
+        output.mkdir(parents=True)
+        destination, prepared = package, source_package
+        bundles = [path for path, _ in catalog.values()]
+        if refresh_runtime and runtime != strategy["parameters"]["lean_runtime"]:
+            destination = output / "package"
+            shutil.copytree(package, destination)
+            strategy["parameters"]["lean_runtime"] = runtime
+            write_mapping(destination / "spec/research.yaml", research)
+            bundles = []
+            for bundle, _ in catalog.values():
+                copied = output / "bundles" / bundle.name
+                shutil.copytree(bundle, copied)
+                bundles.append(copied)
+            prepared = ResearchPackage.build(
+                package_slug=source_package.package_slug, display_name=source_package.display_name,
+                package_version=source_package.package_version, builder_id=source_package.builder_id,
+                sources=source_package.sources, localizations=source_package.localizations,
+                metric_contract=source_package.metric_contract, claim_contract=source_package.claim_contract,
+                spec_payload=documents.declaration(package, "spec/research.yaml"),
+                minute_scope_inputs={name: replace(scope, root=destination)
+                                     for name, scope in source_package.minute_scope_inputs.items()},
+            )
+        summary = {"package": str(destination), "bundles": [str(path) for path in bundles],
+                   "from_package": str(package), "execution_backend": "lean", "run_budget": budget,
+                   "database_access": "not_opened", "research_executed": False}
+        write_mapping(output / "conversion.json", summary)
+        return summary, prepared
     registry = build_mainline_operator_registry()
-    runtime = (runtime if strategy["parameters"].get("execution_backend") == "lean"
-               else freeze_lean_runtime(lean_home))
+    runtime = freeze_lean_runtime(lean_home)
     parameters = tuple(replace(item, allowed_values=(execution_model,))
                        if item.name == "execution_model" else item for item in manifest.operator_spec.parameters
                        if item.name not in {"execution_backend", "lean_runtime"})
@@ -172,18 +177,7 @@ def prepare_package(from_package, output, lean_home, *, refresh_runtime=False):
     strategy["parameters"].update(execution_backend="lean", lean_runtime=runtime,
                                   execution_model=execution_model)
     strategy["parameters"]["strategy_declaration"]["bundle_id"] = execution_bundle.name
-    strategy["parameters"]["strategy_declaration"]["frequency"] = frequency
     bundles = [execution_bundle]
-    retired = set()
-    for node in research["graph"]["nodes"]:
-        entry = catalog.get((node["operator_id"], node["operator_version"]))
-        if node["operator_id"].startswith("research.validity.") or (
-            entry is not None and any(port.artifact_type == "research.validity-facts.v1"
-                                      for port in entry[1].operator_spec.output_ports)
-        ):
-            retired.add(node["node_id"])
-    research["graph"]["nodes"] = [node for node in research["graph"]["nodes"] if node["node_id"] not in retired]
-    research["result"]["tables"] = [table for table in research["result"]["tables"] if table["source_node_id"] not in retired]
     replaced = {strategy["operator_id"]}
     for node in research["graph"]["nodes"]:
         key = node["operator_id"], node["operator_version"]
@@ -193,13 +187,6 @@ def prepare_package(from_package, output, lean_home, *, refresh_runtime=False):
             shutil.copytree(old_path, destination)
             bundles.append(destination)
     research["result"]["tables"] = [t for t in research["result"]["tables"] if t["source_node_id"] != strategy["node_id"]]
-    signal = next((binding for binding in strategy["inputs"] if binding["input_port"] == "signals"), None)
-    for table in research["result"]["tables"]:
-        if (signal is not None and table["schema_id"] == "research.strategy.signal-source.v1"
-                and table["source_node_id"] == signal["source_node_id"]
-                and table["source_port"] == signal["source_output_port"]
-                and table["artifact_type"] == "research.feature-set.v1"):
-            table["schema_id"] = LEAN_SIGNAL_SOURCE_SCHEMA_ID
     has_primary = any(table["role"] == "primary" for table in research["result"]["tables"])
     research["result"]["tables"].extend({
         "table_id": "lean_" + name, "role": "primary" if name == "daily" and not has_primary else "diagnostic", "source_node_id": strategy["node_id"],
@@ -211,7 +198,7 @@ def prepare_package(from_package, output, lean_home, *, refresh_runtime=False):
         "source_port": "simulation", "artifact_type": LEAN_ARTIFACT_TYPE,
         "schema_id": LEAN_METRICS_SCHEMA_ID, "path_prefix": LEAN_METRICS_PATH,
     })
-    if research["requests"] != original["requests"]:
+    if research["requests"] != original_requests:
         raise ValueError("转换不得改变原数据请求")
     destination = output / "package"
     shutil.copytree(package, destination)
@@ -236,7 +223,7 @@ def prepare_package(from_package, output, lean_home, *, refresh_runtime=False):
             contract_id=metric["contract_id"], version=metric["version"],
             metrics=tuple(metric["metrics"]), semantics=metric["semantics"],
         ),
-        claim_contract=source_package.claim_contract, spec_payload=research,
+        claim_contract=source_package.claim_contract, spec_payload=documents.declaration(package, "spec/research.yaml"),
         minute_scope_inputs={name: replace(scope, root=destination)
                              for name, scope in source_package.minute_scope_inputs.items()},
     )

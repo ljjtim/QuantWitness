@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+
+from functools import lru_cache, partial
 from dataclasses import dataclass
 import hashlib
 import importlib.util
@@ -15,11 +17,13 @@ from research_pipeline.platform.semantic_governance import (
     MAINLINE_SEMANTIC_PROMOTION_REVIEWS,
     validate_public_semantic_inventory,
 )
+from .validation import (
+    require_sha256, require_text,
+)
 
 
 LEGACY_METRIC_DEFINITION_VERSION = "research-metric-definition-v2"
 METRIC_DEFINITION_VERSION = "research-metric-definition-v3"
-METRIC_ARTIFACT_VERSION = "research-metric-artifact-v1"
 METRIC_REACHABILITY_VERSION = "research-metric-reachability-v2"
 BUILTIN_METRIC_IDENTITIES = frozenset({
     "data.row_count@1.0.0",
@@ -28,7 +32,6 @@ BUILTIN_METRIC_IDENTITIES = frozenset({
 })
 _ID = re.compile(r"^[a-z][a-z0-9_.-]{1,127}$")
 _VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
-_HASH = re.compile(r"^[0-9a-f]{64}$")
 
 
 class MetricContractError(MainlineError):
@@ -43,16 +46,10 @@ class UnreachableMetricError(MetricContractError):
     error_code = "metric_unreachable"
 
 
-def _text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise MetricContractError(f"{field} 必须是非空字符串")
-    return value
+_text = partial(require_text, error=MetricContractError)
 
 
-def _digest(value: object, field: str) -> str:
-    if not isinstance(value, str) or not _HASH.fullmatch(value):
-        raise MetricContractError(f"{field} 必须是 sha256 摘要")
-    return value
+_digest = partial(require_sha256, error=MetricContractError, requirement="必须是 sha256 摘要")
 
 
 def _string_mapping(value: Mapping[str, str], field: str) -> Mapping[str, str]:
@@ -374,107 +371,6 @@ class MetricReachabilityProof:
         return cls(**values, proof_digest=typed_canonical_hash(values))
 
 
-@dataclass(frozen=True)
-class MetricArtifact:
-    metric_ref: str
-    definition_digest: str
-    unit: str
-    sample_scope: Mapping[str, str]
-    implementation_digest: str
-    source_artifact_digests: Mapping[str, str]
-    values: tuple[Mapping[str, object], ...]
-    artifact_digest: str
-    contract_version: str = METRIC_ARTIFACT_VERSION
-
-    def __post_init__(self) -> None:
-        _text(self.metric_ref, "metric_ref")
-        metric_id, separator, version = self.metric_ref.rpartition("@")
-        if (
-            separator != "@"
-            or not _ID.fullmatch(metric_id)
-            or not _VERSION.fullmatch(version)
-        ):
-            raise MetricContractError("MetricArtifact metric_ref 无效")
-        _digest(self.definition_digest, "definition_digest")
-        _text(self.unit, "unit")
-        object.__setattr__(self, "sample_scope", _string_mapping(self.sample_scope, "sample_scope"))
-        _digest(self.implementation_digest, "implementation_digest")
-        sources = {
-            _text(key, "source_artifact_digests.key"): _digest(
-                value,
-                f"source_artifact_digests.{key}",
-            )
-            for key, value in self.source_artifact_digests.items()
-        }
-        if not sources:
-            raise MetricContractError("MetricArtifact 必须绑定源 Artifact")
-        object.__setattr__(
-            self,
-            "source_artifact_digests",
-            MappingProxyType(dict(sorted(sources.items()))),
-        )
-        if not self.values or any(not isinstance(item, Mapping) for item in self.values):
-            raise MetricContractError("MetricArtifact values 必须是非空映射序列")
-        if self.contract_version != METRIC_ARTIFACT_VERSION:
-            raise MetricContractError("MetricArtifact 版本不受支持")
-        if self.artifact_digest != typed_canonical_hash(self.payload()):
-            raise MetricContractError("MetricArtifact digest 不一致")
-
-    @property
-    def metric_id(self) -> str:
-        return self.metric_ref.rpartition("@")[0]
-
-    @property
-    def version(self) -> str:
-        return self.metric_ref.rpartition("@")[2]
-
-    def payload(self) -> dict[str, object]:
-        return {
-            "metric_ref": self.metric_ref,
-            "metric_id": self.metric_id,
-            "version": self.version,
-            "definition_digest": self.definition_digest,
-            "unit": self.unit,
-            "sample_scope": dict(self.sample_scope),
-            "implementation_digest": self.implementation_digest,
-            "source_artifact_digests": dict(self.source_artifact_digests),
-            "values": [dict(item) for item in self.values],
-            "contract_version": self.contract_version,
-        }
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        definition: MetricDefinition,
-        sample_scope: Mapping[str, str],
-        source_artifact_digests: Mapping[str, str],
-        values: Sequence[Mapping[str, object]],
-    ) -> "MetricArtifact":
-        payload = {
-            "metric_ref": definition.metric_ref,
-            "metric_id": definition.metric_id,
-            "version": definition.version,
-            "definition_digest": definition.definition_digest,
-            "unit": definition.unit,
-            "sample_scope": dict(sorted(sample_scope.items())),
-            "implementation_digest": definition.implementation_digest,
-            "source_artifact_digests": dict(sorted(source_artifact_digests.items())),
-            "values": [dict(item) for item in values],
-            "contract_version": METRIC_ARTIFACT_VERSION,
-        }
-        return cls(
-            payload["metric_ref"],
-            payload["definition_digest"],
-            payload["unit"],
-            payload["sample_scope"],
-            payload["implementation_digest"],
-            payload["source_artifact_digests"],
-            tuple(payload["values"]),
-            typed_canonical_hash(payload),
-        )
-
-
 class MetricRegistry:
     def __init__(self, definitions: Sequence[MetricDefinition]) -> None:
         items = tuple(sorted(definitions, key=lambda item: item.metric_ref))
@@ -644,6 +540,7 @@ def compose_metric_registry(project_definitions: Sequence[MetricDefinition]) -> 
     ))
 
 
+@lru_cache(maxsize=1)
 def build_mainline_metric_registry() -> MetricRegistry:
     minute_module = "research_pipeline.research.statistics.minute_profile"
     definitions = (
@@ -717,10 +614,8 @@ def build_mainline_metric_registry() -> MetricRegistry:
 
 __all__ = [
     "BUILTIN_METRIC_IDENTITIES",
-    "METRIC_ARTIFACT_VERSION",
     "METRIC_DEFINITION_VERSION",
     "METRIC_REACHABILITY_VERSION",
-    "MetricArtifact",
     "MetricContractError",
     "MetricDefinition",
     "MetricMeasurementSemantics",

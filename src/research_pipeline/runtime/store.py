@@ -8,15 +8,18 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TextIO
 import uuid
 
 import psutil
+from research_pipeline.platform.audit_mode import strict_audit_enabled
 from research_pipeline.platform.canonical import canonical_json
 
 from .errors import RuntimeIntegrityError, RuntimeStateError
 from .events import RuntimeEvent
 from .state import RuntimeProjection, _ProjectionAccumulator
+
+OPERATOR_DAG_RUN_VERSION = "research-runtime-operator-dag-run-v3"
 
 
 def process_identity_alive(pid: int, process_started_at: float) -> bool:
@@ -76,7 +79,7 @@ class _EventSession:
         self.by_command: dict[str, RuntimeEvent] = {}
         self.by_node: dict[str, list[RuntimeEvent]] = {}
         for event in events:
-            self.accept(event, self.state.validate(event))
+            self.accept(event, self.state.validate_transition(event))
 
     def accept(self, event: RuntimeEvent, target: str) -> None:
         self.state.accept(event, target)
@@ -90,37 +93,46 @@ def _copy_event(event: RuntimeEvent) -> RuntimeEvent:
     return replace(event, payload=deepcopy(event.payload))
 
 
+def _is_durability_boundary(kind: str, status: str) -> bool:
+    return (
+        kind == "checkpoint_committed"
+        or kind == "run_status_changed" and status in {"succeeded", "failed", "cancelled"}
+    )
+
+
 class EventStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.events_path = self.root / "events.jsonl"
-        self.projection_path = self.root / "projection.json"
         self.lock_path = self.root / ".writer.lock"
         self._writer_active = False
         self._append_active = False
         self._session: _EventSession | None = None
+        self._handle: TextIO | None = None
+        self._has_unsynced_events = False
 
     @contextmanager
     def writer_session(self):
-        """独占期间增量记账；正常退出落盘投影，不保留日志信任。"""
+        """独占期间增量记账，退出时同步日志并释放句柄。"""
         if self._writer_active:
             raise RuntimeStateError("事件写者会话不能嵌套")
         with _StoreLock(self.lock_path):
             self._writer_active = True
             try:
-                initial_seq = self._current_session().state.last_seq
+                self._current_session()
                 yield self
-                if self._session is not None and self._session.state.last_seq != initial_seq:
-                    temporary = self.projection_path.with_suffix(".tmp")
-                    temporary.write_text(
-                        canonical_json(self._session.state.snapshot().to_dict()),
-                        encoding="utf-8",
-                    )
-                    os.replace(temporary, self.projection_path)
             finally:
-                self._session = None
-                self._writer_active = False
+                try:
+                    if self._handle is not None:
+                        with self._handle as handle:
+                            if self._has_unsynced_events:
+                                os.fsync(handle.fileno())
+                finally:
+                    self._handle = None
+                    self._session = None
+                    self._has_unsynced_events = False
+                    self._writer_active = False
 
     def _current_session(self) -> _EventSession:
         if self._session is None:
@@ -160,8 +172,25 @@ class EventStore:
         return tuple(event for event in self._read_events() if event.node_id == node_id)
 
     def replay(self) -> RuntimeProjection:
+        return self._read_state().snapshot()
+
+    def _read_state(self) -> _ProjectionAccumulator:
         session = self._current_session() if self._writer_active else _EventSession(self._read_events())
-        return session.state.snapshot()
+        return session.state
+
+    def node_status(self, node_id: str) -> str | None:
+        return self._read_state().node_statuses.get(node_id)
+
+    def attempt_status(self, attempt_id: str) -> str | None:
+        return self._read_state().attempt_statuses.get(attempt_id)
+
+    @property
+    def run_status(self) -> str | None:
+        return self._read_state().run_status
+
+    @property
+    def chain_head(self) -> str:
+        return self._read_state().chain_head
 
     def append(self, run_id: str, kind: str, payload: dict[str, object], *, command_id: str, node_id: str | None = None, attempt_id: str | None = None, before_append: Callable[[RuntimeEvent], None] | None = None) -> RuntimeEvent:
         if self._append_active:
@@ -183,14 +212,19 @@ class EventStore:
                 previous_hash=session.state.chain_head, command_id=command_id,
                 node_id=node_id, attempt_id=attempt_id,
             )
-            target = session.state.validate(event)
+            target = session.state.validate_transition(event)
             if before_append is not None:
                 before_append(_copy_event(event))
+            sync_now = strict_audit_enabled() or _is_durability_boundary(event.kind, target)
             try:
-                with self.events_path.open("a", encoding="utf-8", newline="") as handle:
-                    handle.write(canonical_json(event.to_dict()) + "\n")
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                if self._handle is None:
+                    self._handle = self.events_path.open("a", encoding="utf-8", newline="")
+                self._has_unsynced_events = True
+                self._handle.write(canonical_json(event.to_dict()) + "\n")
+                self._handle.flush()
+                if sync_now:
+                    os.fsync(self._handle.fileno())
+                    self._has_unsynced_events = False
                 session.accept(event, target)
             except BaseException:
                 # 日志写入是否完成以再次重放为准，不沿用不确定的内存状态。

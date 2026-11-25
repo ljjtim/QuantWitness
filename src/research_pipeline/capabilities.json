@@ -43,7 +43,7 @@
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/packages/compilation.py::compile_research_package",
         "research_pipeline/src/research_pipeline/packages/lint.py::build_lint_report",
-        "research_pipeline/src/research_pipeline/cli/commands/research_plan.py::admit_package"
+        "research_pipeline/src/research_pipeline/application/research_plan.py::admit_package"
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_mainline_research_package.py::test_explicit_package_load_compile_is_immutable_and_deterministic",
@@ -111,30 +111,25 @@
       "commands": [
         "report",
         "export-result",
-        "compare",
-        "analysis run",
-        "analysis compare"
+        "compare"
       ],
       "required_inputs": [
         "正式 Result 目录",
-        "ResultStore",
-        "analysis run 使用显式 AnalysisRequest；analysis compare 使用同规格 AnalysisResult"
+        "ResultStore"
       ],
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/results/delivery.py::load_result_context",
         "research_pipeline/src/research_pipeline/results/delivery.py::compare_results",
         "research_pipeline/src/research_pipeline/results/delivery.py::export_result",
-        "research_pipeline/src/research_pipeline/evidence/result_analysis.py::analyze_result",
         "research_pipeline/src/research_pipeline/packages/delivery.py::compare_research_package_results"
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_direct_result_cli.py",
-        "research_pipeline/tests/test_direct_result_workspace.py",
-        "research_pipeline/tests/test_generic_result_analysis.py"
+        "research_pipeline/tests/test_direct_result_workspace.py"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "report、compare、analysis、export-result 和 Dashboard 直接消费正式 Result，不依赖 run-root。报告只投影需要的表与列。analysis 的请求显式声明窗口、值语义、单位、费用和处理政策；只有规格与实际窗口相同的结果才能排名。package compare 另检查研究包的指标与结论合同。Result 中的结论级别是研究声明及输入范围，不是独立认证。"
+      "notes": "report、compare、export-result 和 Dashboard 直接消费正式 Result，不依赖 run-root。报告只投影需要的表与列。compare --package 另检查研究包的指标与结论合同。Result 中的结论级别是研究声明及输入范围，不是独立认证。"
     },
     {
       "id": "operator_graph.generic_run",
@@ -165,7 +160,6 @@
         "research_pipeline/tests/test_artifact_verification_lifecycle.py::test_two_real_project_workers_share_supervisor_validation_without_rehash",
         "research_pipeline/tests/test_generic_run_admission.py::test_generic_run_with_explicit_observation_package",
         "research_pipeline/tests/test_runtime_operator_dag.py::test_operator_dag_failure_retry_resume_and_external_artifact",
-        "research_pipeline/tests/test_runtime_shadow_equivalence.py::test_generic_shadow_is_exact_within_financial_tolerances",
         "research_pipeline/tests/test_result_bundle.py::test_result_survives_run_root_deletion_and_reads_each_parquet_once",
         "research_pipeline/tests/test_cli_mainline.py::test_structured_cli_consumers_work_without_run_root"
       ],
@@ -193,7 +187,7 @@
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_walk_forward_model_mainline.py::test_model_split_rejects_mixed_label_row_group_before_target_scan",
-        "research_pipeline/tests/test_qlib_model_integration.py::test_three_models_frozen_bundle_round_trip_and_future_labels",
+        "research_pipeline/tests/test_qlib_model_integration.py::test_model_frozen_bundle_round_trip_and_future_labels",
         "research_pipeline/tests/test_walk_forward_model_mainline.py::test_locked_holdout_is_reserved_once_and_cannot_be_reused",
         "research_pipeline/tests/test_walk_forward_model_mainline.py::test_model_split_adapter_verifies_label_before_starting_split"
       ],
@@ -224,7 +218,6 @@
         "research_pipeline/tests/test_minute_reference_packages.py::test_reference_packages_compile_and_jointly_cover_assets_at_one_minute",
         "research_pipeline/tests/test_minute_cli_contract.py::test_formal_minute_run_records_serial_seed_workers",
         "research_pipeline/tests/test_minute_cli_contract.py::test_formal_minute_run_preserves_parallel_mode",
-        "research_pipeline/tests/test_daily_stream.py::test_month_scan_once_and_stable_clipping",
         "research_pipeline/tests/test_lean_daily_admission.py::test_frequency_rejects_other_intervals_and_port_conflicts"
       ],
       "evidence_level": "local_acceptance",
@@ -256,65 +249,39 @@
       "notes": "公开包提供四资产分钟输入和只读 Result 合同，不附带供应商原始数据或个人运行记录。真实数据观察由使用者在自己的来源、窗口和规则下执行；当前能力为 local_only，不代表供应商历史版本精确重放或分钟交易仿真。"
     },
     {
-      "id": "simulation.bar_tca",
-      "state": "local_only",
-      "commands": [
-        "capabilities --format json"
-      ],
-      "required_inputs": [
-        "显式正式订单与成交事实",
-        "决策时可见的价格基准、费用和政策",
-        "可选的当时可见容量基准"
-      ],
-      "implementation_anchors": [
-        "research_pipeline/src/research_pipeline/simulation/bar_tca.py::run_bar_tca"
-      ],
-      "verification_anchors": [
-        "research_pipeline/tests/test_bar_tca.py::test_tca_attributes_each_formal_fill_without_generating_another_fill",
-        "research_pipeline/tests/test_bar_tca.py::test_artifact_writer_preserves_formal_fill_set",
-        "research_pipeline/tools/bar_tca_oracle.py"
-      ],
-      "evidence_level": "local_acceptance",
-      "trust_level": "local_only",
-      "notes": "Bar TCA 提供库级成交成本归因，消费调用方提供的正式订单、成交、可见价格基准和政策，不重新撮合。当前没有主 DAG 算子或 Result 报告入口；缺少正式成交或必要可见事实时拒绝计算。"
-    },
-    {
       "id": "capability.discovery",
       "state": "local_only",
       "commands": [
         "capabilities --format json",
         "operator list/describe/scaffold/validate/build",
         "artifact describe",
-        "recipe list/describe/scaffold",
         "catalog dataset/field search",
         "package lint",
         "package expand-variants"
       ],
       "required_inputs": [
         "本清单",
-        "OperatorDefinition 与 Recipe registry",
+        "OperatorDefinition 与 ResearchPackage 声明",
         "Catalog 搜索必须显式提供持久 Catalog Lock",
         "package lint 使用的 ResearchPackage"
       ],
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/operations/capabilities.py::load_capability_manifest",
         "research_pipeline/src/research_pipeline/cli/discovery.py::_payload",
-        "research_pipeline/src/research_pipeline/operations/ai_gate.py::score_gate_ia_trials",
+        "research_pipeline/tools/ai_gate.py::score_gate_ia_trials",
         "research_pipeline/src/research_pipeline/cli/commands/machine_discovery.py::execute"
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_capability_discovery.py::test_capabilities_json_is_exact_manifest_projection",
         "research_pipeline/tests/test_capability_discovery.py::test_planned_capability_is_discoverable_but_not_selectable",
         "research_pipeline/tests/test_ai_discovery_cli.py::test_gate_ia_three_public_cli_trials_pass_without_internal_ids",
-        "research_pipeline/tests/test_executable_recipes.py::test_public_recipe_inventory_is_empty_until_formal_promotion",
-        "research_pipeline/tests/test_executable_recipes.py::test_removed_project_recipe_cannot_be_described_or_scaffolded",
         "research_pipeline/tests/test_project_operator_scaffold.py::test_scaffold_round_trips_validate_build_and_refuses_overwrite",
         "research_pipeline/tests/test_project_operator_scaffold.py::test_scaffold_bundle_enters_package_lint_and_admit",
         "research_pipeline/tests/test_project_causal_service.py::test_runtime_causal_node_uses_real_snapshot_and_bounded_key_batches"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "capabilities 命令逐字段读取本清单；operator、artifact、catalog 和 package lint 的发现结果来自正式 registry、schema、Catalog Lock 或 package compiler。package expand-variants 只覆盖基包中已存在的 node 参数，原子生成普通完整包，不接受深层 YAML 合并、模板、Python 或 SQL。当前没有获准的公共 recipe，使用 package init 创建通用起点；项目完整拓扑由 ResearchPackage 声明。operator scaffold 生成可验证的最小项目算子；正式 Feature/Label 需必填 causal_plan，且来源必须可由已准入请求证明。validate/build 只复验显式源码闭包，不扫描目录或自动安装。"
+      "notes": "capabilities 命令逐字段读取本清单；operator、artifact、catalog 和 package lint 的发现结果来自正式 registry、schema、Catalog Lock 或 package compiler。package expand-variants 只覆盖基包中已存在的 node 参数，原子生成普通完整包，不接受深层 YAML 合并、模板、Python 或 SQL。使用 package init 创建研究包；项目完整拓扑由 ResearchPackage 声明。operator scaffold 生成可验证的最小项目算子；正式 Feature/Label 需必填 causal_plan，且来源必须可由已准入请求证明。validate/build 只复验显式源码闭包，不扫描目录或自动安装。"
     },
     {
       "id": "resource.governance",
@@ -332,9 +299,8 @@
       "implementation_anchors": [
         "research_pipeline/src/research_pipeline/data_plane/execution_budget.py::build_provider_execution_plan",
         "research_pipeline/src/research_pipeline/runtime/project_table_input.py::ProjectTableInput",
-        "research_pipeline/src/research_pipeline/runtime/resource_governor.py::ResourceGovernor",
-        "research_pipeline/src/research_pipeline/runtime/execution_service.py::RuntimeExecutionService",
-        "research_pipeline/src/research_pipeline/runtime/project_table_input.py::ProjectTableInput"
+        "research_pipeline/src/research_pipeline/runtime/resource_pool.py::ResourceGovernor",
+        "research_pipeline/src/research_pipeline/runtime/execution_service.py::RuntimeExecutionService"
       ],
       "verification_anchors": [
         "research_pipeline/tests/test_data_plane_execution_budget.py::test_provider_budget_is_not_reported_as_total_runtime_bound",
@@ -344,12 +310,11 @@
         "research_pipeline/tests/test_runtime_operator_dag.py::test_formal_worker_count_is_serial_within_runtime_capacity",
         "research_pipeline/tests/test_resource_governor.py::test_cross_process_fifo_and_no_oversell",
         "research_pipeline/tests/test_resource_governor.py::test_parent_child_conservation_and_idempotent_release",
-        "research_pipeline/tests/test_resource_governor.py::test_calibration_19_20_and_49_50_boundaries_use_real_success_only",
-        "research_pipeline/tests/test_resource_governor.py::test_runtime_uses_parent_lease_records_actual_and_releases_on_failure"
+        "research_pipeline/tests/test_resource_governor.py::test_runtime_uses_parent_lease_reports_resource_usage_and_releases_on_failure"
       ],
       "evidence_level": "local_acceptance",
       "trust_level": "local_only",
-      "notes": "数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。合成探针不进入正式运行校准总体。"
+      "notes": "数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。运行资源用量按节点记录。"
     }
   ]
 }

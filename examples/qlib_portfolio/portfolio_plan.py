@@ -1,5 +1,5 @@
 """把冻结组合目标接到 LEAN 日频执行和正式结果。"""
-from research_pipeline.domain.strategy_protocol import StrategyDeclaration, StrategyInputBinding, StrategyLimits
+from research_pipeline.domain.lean_algorithm import LeanAlgorithm, LeanStrategyDeclaration, LeanDataBinding, LeanAlgorithmLimits
 from research_pipeline.platform.lean_contract import LEAN_ARTIFACT_TYPE, LEAN_SCHEMA_IDS, LEAN_PATHS, LEAN_METRICS_SCHEMA_ID, LEAN_METRICS_PATH
 
 
@@ -16,12 +16,15 @@ def extend_portfolio(nodes, declarations, tables, design, node, declaration):
     target_type = 'research.portfolio-targets.v1'
     instruments = [dict(instrument_id=code, asset_class='cn_etf', venue=code.rsplit('.', 1)[-1],
         currency='CNY', contract_kind='etf', contract_version='research-instrument-key-v1') for code in design['entities']]
-    strategy = StrategyDeclaration(strategy_id='qlib.portfolio', bundle_id='pending', state_schema_id='qlib.portfolio.state.v1',
-        subscriptions=('bar', 'execution_feedback'), schedules=(), asset_class='cn_etf', frequency='1d',
-        input_bindings=(StrategyInputBinding(binding_id='prices', columns=('close',), lookback_bars=1),
-            StrategyInputBinding(binding_id='portfolio_targets', source='signals', columns=('weight_ppb',), lookback_bars=1)),
-        limits=StrategyLimits(max_state_bytes=65536, max_context_bytes=4*1024**2,
-            max_response_bytes=1024**2, max_intents_per_event=max(32, len(instruments)*2), callback_wall_seconds=60))
+    algorithm = LeanAlgorithm(language='Python', entry_file='algorithm.py', type_name='QlibPortfolioAlgorithm')
+    strategy = LeanStrategyDeclaration(strategy_id='qlib.portfolio', bundle_id='pending', algorithm=algorithm,
+        asset_class='cn_etf', frequency='1d',
+        input_bindings=(LeanDataBinding(binding_id='prices', input_port='bars', request_id=execution['bars_request_id'],
+            kind='bars', resolution='1d', columns=('fld_etf_date','fld_etf_code','fld_etf_open','fld_etf_high','fld_etf_low','fld_etf_close','fld_etf_volume'),
+            daily_time=dict(rule='next_session_open', timezone='Asia/Shanghai', sessions=design['calendar_sessions'])),
+            LeanDataBinding(binding_id='portfolio_targets', input_port='targets', request_id=None,
+                kind='targets', resolution='event', columns=('weight_ppb', 'batch_id'))),
+        limits=LeanAlgorithmLimits(initialize_seconds=60, time_step_seconds=60))
     parameters = dict(execution_backend='lean', execution_mode='strategy', frequency='1d', price_scale=3,
         execution_model='lean_next_session_open_v1', claim_ceiling='bar_level_research_only',
         strategy_declaration=strategy.to_dict(), instruments=instruments,
@@ -29,9 +32,7 @@ def extend_portfolio(nodes, declarations, tables, design, node, declaration):
         minute_scope=execution['minute_scope'], rule_bundle_hash=execution['minute_scope']['rules_hash'],
         lean_runtime=execution['lean_runtime'], initial_cash_units=execution['initial_cash_units'],
         slippage_bps=execution['slippage_bps'], slippage_ticks=execution['slippage_ticks'],
-        participation_ppm=execution['participation_ppm'],
-        strategy_worker_projection={'parameters': ['strategy_declaration', 'frequency', 'price_scale'],
-            'rule_ids': ['rule.cn_fund.lot_size.v1']})
+        participation_ppm=execution['participation_ppm'])
     nodes.extend([
         node('portfolio_targets', 'project.qlib_demo.targets',
             [('selection', 'model_selection', 'selection'), ('data', 'data_plane', 'data')],
@@ -40,7 +41,9 @@ def extend_portfolio(nodes, declarations, tables, design, node, declaration):
             dict(factor_request_id=execution['factor_request_id'], corporate_action_request_id=execution['corporate_action_request_id'],
                 instrument_ids=design['entities'], asset_class='cn_etf', as_of=execution['as_of'],
                 applicable_start=execution['applicable_start'], applicable_end=execution['applicable_end'],
-                availability_policy_ref=execution['availability_policy_ref']), '1.0.0'),
+                availability_policy_ref=execution['availability_policy_ref'],
+                **({'trading_calendar_request_id': execution['trading_calendar_request_id']}
+                   if 'trading_calendar_request_id' in execution else {})), '1.0.0'),
         node('portfolio_simulation', 'project.qlib_demo.lean_portfolio',
             [('bars', 'data_plane', 'data'), ('snapshot', 'portfolio_snapshot', 'snapshot'),
              ('targets', 'portfolio_targets', 'targets')], parameters, '1.0.0'),
@@ -49,10 +52,11 @@ def extend_portfolio(nodes, declarations, tables, design, node, declaration):
                            for name, value in parameters.items()]
     strategy_declaration = declaration('lean_portfolio',
         [('bars', 'data.columnar-bundle.v1'), ('snapshot', 'data.adjustment-factor-snapshot.v1'), ('targets', target_type)],
-        [('simulation', LEAN_ARTIFACT_TYPE)], strategy_parameters, (target_type, LEAN_ARTIFACT_TYPE), module='lean_strategy', function='run')
+        [('simulation', LEAN_ARTIFACT_TYPE)], strategy_parameters, (target_type, LEAN_ARTIFACT_TYPE), module='algorithm', function='run')
+    strategy_declaration['entry'] = algorithm.to_dict()
     strategy_declaration['operator']['resource_profile'].update(memory_bytes=4*1024**3, cpu_slots=1,
         process_slots=6, temp_bytes=1024**3, wall_seconds=3600)
-    # LEAN回调只运行标准库策略；模型训练依赖留在模型Worker。
+    # 原生算法依赖由LEAN安装提供；模型训练依赖留在模型Worker。
     strategy_declaration['dependency_lock'] = {}
     declarations.extend([
         ('targets', declaration('targets', [('selection', 'research.model-selection.v2'), ('data', 'data.columnar-bundle.v1')],

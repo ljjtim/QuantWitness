@@ -1,0 +1,122 @@
+contract_version: research-operator-graph-package-v2
+research_id: reference.minute.futures.night_session
+as_of: '2024-01-04T15:01:00+08:00'
+root_seed: 20260717
+fixed_clock: '2026-07-17T00:00:00+08:00'
+requests:
+- request_id: futures_minute
+  dataset_id: cn_futures.minute_bar
+  dataset_version: 2
+  field_ids:
+  - fld_futures_minute_dt
+  - fld_futures_minute_code
+  - fld_futures_minute_open
+  - fld_futures_minute_close
+  - fld_futures_minute_high
+  - fld_futures_minute_low
+  - fld_futures_minute_volume
+  - fld_futures_minute_money
+  - fld_futures_minute_avg
+  - fld_futures_minute_open_interest
+  purpose: feature
+  time_range:
+    contract_version: instant-range-v2
+    start_at: '2024-01-02T21:01:00+08:00'
+    end_at: '2024-01-04T15:01:00+08:00'
+    timezone: Asia/Shanghai
+  universe:
+    instruments:
+    - AG2406.XSGE
+    snapshot_id: null
+  filters: []
+  sort:
+  - field_id: fld_futures_minute_dt
+    descending: false
+  - field_id: fld_futures_minute_code
+    descending: false
+  budget:
+    max_rows: 1110
+    max_bytes: 33554432
+    batch_size: 1110
+  adjustment: raw
+  limit: 1110
+result:
+  contract_version: research-result-spec-v1
+  tables:
+  - table_id: futures_observation
+    role: primary
+    source_node_id: observe_futures
+    source_port: observation
+    artifact_type: research.minute-observation.v1
+    schema_id: research.minute-observation.metrics.v1
+    path_prefix: observation
+  - table_id: minute_features
+    role: diagnostic
+    source_node_id: features
+    source_port: features
+    artifact_type: research.minute-features.v1
+    schema_id: research.minute-features.v1
+    path_prefix: features
+graph:
+  contract_version: research-operator-graph-recipe-v1
+  graph_id: reference.minute.futures.night_session
+  nodes:
+  - node_id: scan
+    operator_id: data.minute.scan
+    operator_version: 1.0.0
+    inputs: []
+    parameters:
+      request_ids:
+      - futures_minute
+      scope_binding_hash: 5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838
+      max_source_bytes: 17179869184
+      max_returned_rows: 1110
+      max_batch_bytes: 33554432
+      availability_policy_ref: available.minute.completed_bar.v1
+    strategies: []
+  - node_id: bars_1m
+    operator_id: research.bars.minute_resample
+    operator_version: 1.0.0
+    inputs:
+    - input_port: minute_1m
+      source_node_id: scan
+      source_output_port: minute_1m
+    parameters:
+      interval_minutes: 1
+      session_policy_ref: session.cn_futures.minute.v1
+      quality_policy_refs:
+      - quality.minute.common_fields.v1
+      - quality.minute.futures.open_interest.v1
+      adjustment_mode: none
+      asset_class: cn_future
+      availability_policy_ref: available.minute.completed_bar.v1
+    strategies: []
+  - node_id: features
+    operator_id: research.features.intraday
+    operator_version: 1.0.0
+    inputs:
+    - input_port: bars
+      source_node_id: bars_1m
+      source_output_port: bars
+    parameters:
+      feature_ids:
+      - lagged_return
+      lookback_bars: 30
+      warmup_bars: 30
+      gap_policy: reset
+      cross_session: false
+      adjustment_mode: none
+      asset_class: cn_future
+      interval_minutes: 1
+      availability_policy_ref: available.minute.completed_bar.v1
+    strategies: []
+  - node_id: observe_futures
+    operator_id: research.observation.minute-bars
+    operator_version: 1.0.0
+    inputs:
+    - input_port: bars
+      source_node_id: bars_1m
+      source_output_port: bars
+    parameters:
+      request_id: futures_minute
+    strategies: []

@@ -14,13 +14,24 @@ class PortfolioTargetReader:
     """运行内顺序读取；全流时间校验一次，目标载荷只消费一次。"""
 
     def __init__(self, context):
-        self.root = _input_external_root(context, 'targets')
+        root = _input_external_root(context, 'targets')
         value = context.inputs['targets']
         if value.external_commit.artifact_type != 'research.portfolio-targets.v1':
             raise ValueError('组合目标须绑定正式portfolio-targets工件')
-        self.files = tuple(relative for relative in sorted(value.external_commit.files)
+        files = tuple(relative for relative in sorted(value.external_commit.files)
                            if relative.startswith('targets/') and relative.endswith('.parquet'))
-        self.limit = context.effective_resource_budget.memory_bytes // 8
+        self._initialize(root, files, context.effective_resource_budget.memory_bytes // 8)
+
+    @classmethod
+    def from_files(cls, root, files, memory_bytes):
+        reader = cls.__new__(cls)
+        reader._initialize(root, files, memory_bytes)
+        return reader
+
+    def _initialize(self, root, files, memory_bytes):
+        self.root = root
+        self.files = files
+        self.limit = memory_bytes
         self._rows = None
         self._pending = None
         self._last_day = None
@@ -33,10 +44,9 @@ class PortfolioTargetReader:
                         raise ValueError('组合目标批超过内存预算')
                     yield batch
 
-    def _validated_rows(self):
-        # 先只读时间列验证完整流，后续日期的错误也不能被当前日筛选隐藏。
+    def _validated_stream(self, columns):
         last = None
-        for batch in self._batches(('decision_time', 'order_time')):
+        for batch in self._batches(columns):
             for row in batch.to_pylist():
                 decision, execution = row['decision_time'], row['order_time']
                 if not isinstance(decision, datetime) or not isinstance(execution, datetime) or decision.utcoffset() is None or execution.utcoffset() is None:
@@ -47,9 +57,19 @@ class PortfolioTargetReader:
                 if last is not None and execution <= last:
                     raise ValueError('组合执行时点重复或倒退')
                 last = execution
+                yield row, execution
+
+    def read_index_rows(self):
+        return self._validated_stream(('decision_time', 'order_time', 'target_json'))
+
+    def _validated_rows(self):
+        # 顺序消费者开始执行前，先核对全流时点。
+        for _ in self._validated_stream(('decision_time', 'order_time')):
+            pass
         for batch in self._batches(('decision_time', 'order_time', 'target_json')):
             for row in batch.to_pylist():
                 yield row, row['order_time'].astimezone(ZoneInfo('Asia/Shanghai'))
+
 
     def rows_for_day(self, day):
         if day is not None and self._last_day is not None and day <= self._last_day:
@@ -83,23 +103,28 @@ def portfolio_target_rows(context, *, instruments, day, reader=None):
             reader.close()
 
 
+def _target_weights(row, identities):
+    target = PortfolioTarget.from_dict(json.loads(row['target_json']))
+    if target.decision_time != row['decision_time'] or target.target_type != 'weight':
+        raise ValueError('组合目标类型或决策时点与生产表不一致')
+    weights = {}
+    for entry in target.entries:
+        code = entry.instrument.instrument_id
+        weight = Decimal(str(entry.value))
+        if (identities.get(code) != entry.instrument or code in weights
+                or not weight.is_finite() or not 0 <= weight <= 1):
+            raise ValueError('组合目标证券或权重无效')
+        weights[code] = int((weight * 1_000_000_000).to_integral_value(rounding=ROUND_FLOOR))
+    if sum(weights.values()) > 1_000_000_000:
+        raise ValueError('组合目标权重超过全额权益')
+    return weights
+
+
 def _target_rows(rows, instruments):
-    codes = {item.instrument_id for item in instruments}
     identities = {item.instrument_id: item for item in instruments}
+    codes = sorted(identities)
     for row, execution in rows:
-        target = PortfolioTarget.from_dict(json.loads(row['target_json']))
-        if target.decision_time != row['decision_time'] or target.target_type != 'weight':
-            raise ValueError('组合目标类型或决策时点与生产表不一致')
-        weights = {}
-        for entry in target.entries:
-            code = entry.instrument.instrument_id
-            weight = Decimal(str(entry.value))
-            if (code not in codes or entry.instrument != identities[code] or code in weights
-                    or not weight.is_finite() or not 0 <= weight <= 1):
-                raise ValueError('组合目标证券或权重无效')
-            weights[code] = int((weight*1_000_000_000).to_integral_value(rounding=ROUND_FLOOR))
-        if sum(weights.values()) > 1_000_000_000:
-            raise ValueError('组合目标权重超过全额权益')
-        for code in sorted(codes):
+        weights = _target_weights(row, identities)
+        for code in codes:
             yield dict(event_id=f"{execution.isoformat()}:{code}", entity_id=code,
                        decision_time=execution, weight_ppb=weights.get(code, 0))

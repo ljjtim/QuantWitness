@@ -28,6 +28,25 @@ class PackageDocuments:
     _payloads: Mapping[str, dict[str, object]]
     _errors: Mapping[str, str]
 
+    def declaration(self, root: Path, name: str) -> dict[str, object]:
+        """读取本次解析的声明，按文件合同补齐省略项。"""
+        payload = _load_yaml(root, name, documents=self)
+        if name == "package.yaml":
+            return {"builder_id": OPERATOR_GRAPH_BUILDER_ID, **payload}
+        if name != "spec/research.yaml":
+            return payload
+        spec = dict(payload)
+        requests = spec.get("requests")
+        if isinstance(requests, list):
+            spec["requests"] = [{"filters": [], "limit": None, **item} if isinstance(item, dict) else item
+                                for item in requests]
+        graph = spec.get("graph")
+        if isinstance(graph, dict) and isinstance(graph.get("nodes"), list):
+            nodes = [{"inputs": [], "parameters": {}, "strategies": [], **item} if isinstance(item, dict) else item
+                     for item in graph["nodes"]]
+            spec["graph"] = {**graph, "nodes": nodes}
+        return spec
+
     @cached_property
     def minute_scope_inputs(self):
         spec = self._payloads.get("spec/research.yaml", {})
@@ -66,10 +85,10 @@ def load_research_package(root: str | Path, *, documents: PackageDocuments | Non
     directory = Path(root).resolve()
     if documents is None:
         documents = read_package_documents(directory)
-    package = _load_yaml(directory, "package.yaml", documents=documents)
-    source_payload = _load_yaml(directory, "sources/sources.yaml", documents=documents)
-    localization_payload = _load_yaml(directory, "localization.yaml", documents=documents)
-    spec_payload = _load_yaml(directory, "spec/research.yaml", documents=documents)
+    package = documents.declaration(directory, "package.yaml")
+    source_payload = documents.declaration(directory, "sources/sources.yaml")
+    localization_payload = documents.declaration(directory, "localization.yaml")
+    spec_payload = documents.declaration(directory, "spec/research.yaml")
     _exact(package, _PACKAGE_KEYS, "package.yaml")
     if package.get("builder_id") == OPERATOR_GRAPH_BUILDER_ID:
         _validate_declarative_layout(directory)

@@ -9,11 +9,17 @@ from pathlib import Path
 
 import pytest
 
-from research_pipeline.cli.capability_containment import evaluate_public_capability_release
+from tools.capability_policy import evaluate_public_capability_release
 from research_pipeline.operations.capabilities import load_capability_manifest
 from research_pipeline.platform import (
-    BuildManifest, REQUIRED_GATE_IDS, ReleaseAcceptanceInput, ReleaseEnvelope,
-    ReleaseGateReceipt, typed_canonical_hash,
+    BuildManifest,
+    typed_canonical_hash,
+)
+from tools.release_envelope import (
+    REQUIRED_GATE_IDS,
+    ReleaseAcceptanceInput,
+    ReleaseEnvelope,
+    ReleaseGateReceipt,
 )
 
 

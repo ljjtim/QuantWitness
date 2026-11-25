@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="ChinaRuleBook.cs" />
+    <InternalsVisibleTo Include="ParquetInput" />
     <Compile Include="ChinaOrderProperties.cs" />
     <Compile Include="ChinaAStockModels.cs" />
     <Compile Include="ChinaExecution.cs" />

@@ -517,60 +517,6 @@ def build_minute_statistics_artifact(
     )
 
 
-def recompute_minute_statistics_artifact(
-    payload: Mapping[str, object],
-    *,
-    observations: Iterable[Mapping[str, object]],
-    split_assignments: Iterable[Mapping[str, object]],
-) -> dict[str, object]:
-    expected = {
-        "contract_version", "profile", "observation_table",
-        "split_assignment_table", "reported", "artifact_hash",
-    }
-    if set(payload) != expected or payload.get("contract_version") != MINUTE_STATISTICS_ARTIFACT_VERSION:
-        raise StatisticsError("分钟统计 artifact schema 或版本无效")
-    original_hash = payload.get("artifact_hash")
-    body = {key: value for key, value in payload.items() if key != "artifact_hash"}
-    if original_hash != typed_canonical_hash(body):
-        raise StatisticsError("分钟统计 artifact hash 漂移")
-    raw_profile = payload.get("profile")
-    if not isinstance(raw_profile, Mapping):
-        raise StatisticsError("分钟统计 artifact 容器字段无效")
-    declared_assignments = iter(split_assignments)
-    assignment_count = 0
-
-    def compare_assignment(expected_assignment: Mapping[str, object]) -> None:
-        nonlocal assignment_count
-        try:
-            actual = next(declared_assignments)
-        except StopIteration as exc:
-            raise StatisticsError("分钟统计 split assignment 缺行") from exc
-        if dict(actual) != dict(expected_assignment):
-            raise StatisticsError("分钟统计 split assignment 与独立重算不一致")
-        assignment_count += 1
-
-    rebuilt = stream_minute_statistics_artifact(
-        observations=(
-            MinuteLabelReturn.from_dict(item)
-            for item in observations
-        ),
-        profile=MinuteStatisticsProfile.from_dict(raw_profile),
-        emit_observation=lambda _item: None,
-        emit_assignment=compare_assignment,
-    )
-    try:
-        next(declared_assignments)
-    except StopIteration:
-        pass
-    else:
-        raise StatisticsError("分钟统计 split assignment 多出行")
-    if assignment_count != int(rebuilt["observation_table"]["row_count"]):
-        raise StatisticsError("分钟统计 split assignment 行数不闭合")
-    if rebuilt != dict(payload):
-        raise StatisticsError("分钟统计上游 reported pass/split/trial 不能通过独立重算")
-    return rebuilt
-
-
 __all__ = [
     "MINUTE_STATISTICS_ARTIFACT_VERSION",
     "MINUTE_STATISTICS_CLAIM_CEILING",
@@ -582,6 +528,5 @@ __all__ = [
     "build_minute_statistics_artifact",
     "derive_minute_overlap_floors",
     "derive_minute_trial_universe_hash",
-    "recompute_minute_statistics_artifact",
     "stream_minute_statistics_artifact",
 ]

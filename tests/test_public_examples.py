@@ -19,6 +19,9 @@ from research_pipeline.results import ResultContext, load_result_context
 from research_pipeline.runtime.operator_definitions import build_mainline_operator_manifest
 
 
+pytestmark = pytest.mark.integration
+
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -37,6 +40,7 @@ def test_public_qlib_prediction_metric_matches_hand_calculated_mse() -> None:
     )
 
 
+@pytest.mark.ml
 def test_public_qlib_development_complete_cli_workflow(tmp_path: Path) -> None:
     pytest.importorskip("qlib")
     output = tmp_path / "development"

@@ -19,7 +19,7 @@
 
 本文说明尚未达到框架核心晋级条件的项目算子合同。扩展源码目录只允许 Python 文件，以便生成内容寻址的受控 bundle。薄声明放在源码目录旁，不进入源码闭包。
 
-项目策略通过 ResearchPackage 声明并交给 LEAN 执行。回调接收 context、event 和 state，返回交易意图与 JSON 状态。合同和限制见[策略事件协议](../docs/strategy-protocol.md)。
+项目策略继承 Python 或 C# 的 `QCAlgorithm`，在原生 LEAN 回调中处理行情、提交订单和接收订单事件。ResearchPackage 绑定算法入口与数据来源。见[原生 LEAN 算法声明](../docs/strategy-protocol.md)。
 
 Python 项目算子的公开构建路径为：
 
@@ -233,11 +233,16 @@ Feature 仅收到决定时点已可见的窗口内输入。Label 使用未来观
 | `next_session_open` | D 日 15:00 | 下一实际交易日 09:30 | 含全部输入日及末日的下一交易日 |
 | `session_open` | D 日 09:30 | D 日 09:30 | 开盘日期须在冻结日历中，覆盖请求范围 |
 | `business_effective_date` | D 日 00:00 | D 日 00:00 | 覆盖请求日期范围，业务生效日可为非交易日 |
+| `next_session_open_following_publication_date` | 公告日 D 日 00:00 | 严格晚于 D 的首个交易日 09:30 | 覆盖全部公告日期及末日后的下一交易日，公告可在周末或长假 |
+
+公告日期规则用于Feature事件输入，决策在来源时区的日期不得晚于QueryIR的as_of。查询层保留已准入的原始公告记录，由因果消费者按冻结交易日历裁剪可见性；直接读取与Parquet归档使用相同边界。公告日期不能与自身比较。该输入不得声明QueryIR limit，也不支持需要修订选择、有效区间选择的来源或Label消费者。
 
 时间统一按 `Asia/Shanghai` 解释。原始日期列保持不变。`session_open` 必须与 Catalog 的
 开盘可见日期角色一致。
 
 `business_effective_date` 只接纳已批准的逐日业务状态记录。上市日期不能代替整条证券参考记录的观测日期。退市属性必须按其实际可见时间交付。
+
+公告日期规则用于`frequency=event`且公告只有日期的来源。Catalog须声明`publication_time_granularity=date`、`same_publication_day_use=reject`，并将`available_time_field`与事件公告日期列绑定；准入要求排除公告当天的可见性边界。公告日期可以不是交易日，不套用行情日期必须为交易日的约束。周五、周六及周日公告在下周一正常交易时均于周一09:30可见；节假日按冻结日历顺延。观测日期的零点只是日期表示，不表示当时已经公开，交付始终受下一交易日可见时间约束。
 
 `current_source_snapshot` 与 `research_observation` 的来源和结论上限继续保留，不表示存在
 供应商历史发布版本链。日期窗口按来源本地日期核对，不随固定时钟显示时区改变。

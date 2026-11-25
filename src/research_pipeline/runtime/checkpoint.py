@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 from typing import Callable, Mapping
 
+from research_pipeline.platform.audit_mode import strict_audit_enabled
 from research_pipeline.platform.canonical import canonical_json
 
 from .artifacts import CheckpointExpectation, CheckpointManifest
@@ -85,31 +86,40 @@ class CheckpointStore:
             shutil.rmtree(stage)
         stage.mkdir(parents=False)
         content_path = stage / "content.bin"
+        strict_audit = strict_audit_enabled()
         with content_path.open("wb") as handle:
             handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
+            if strict_audit:
+                handle.flush()
+                os.fsync(handle.fileno())
         with (stage / "manifest.json").open("w", encoding="utf-8") as handle:
             handle.write(canonical_json(manifest.to_dict()))
-            handle.flush()
-            os.fsync(handle.fileno())
+            if strict_audit:
+                handle.flush()
+                os.fsync(handle.fileno())
         if phase_hook:
             phase_hook("checkpoint_prepared")
-        prepared = self._verify_content(stage, node_execution_id)
-        prepared.require_expectation(expectation)
+        if strict_audit:
+            prepared = self._verify_content(stage, node_execution_id)
+            if prepared != manifest:
+                raise RuntimeIntegrityError("checkpoint 暂存 manifest 与发布内容不一致")
+        elif content_path.stat().st_size != manifest.content_size:
+            raise RuntimeIntegrityError("checkpoint 暂存内容大小不一致")
+        manifest.require_expectation(expectation)
         if before_publish is not None:
             before_publish()
         marker = stage / "COMMITTED"
         with marker.open("w", encoding="ascii") as handle:
             handle.write(manifest.manifest_hash)
-            handle.flush()
-            os.fsync(handle.fileno())
+            if strict_audit:
+                handle.flush()
+                os.fsync(handle.fileno())
         if phase_hook:
-            phase_hook("marker_fsynced")
+            phase_hook("marker_written")
         os.replace(stage, target)
         if phase_hook:
             phase_hook("renamed")
-        return prepared
+        return manifest
 
     def verify(
         self,

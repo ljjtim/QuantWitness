@@ -1,0 +1,13 @@
+package_slug: minute_stock_session
+display_name: A 股分钟时段参考研究
+package_version: 1.0.0
+builder_id: operator_graph_plan_v1
+metric_contract:
+  contract_id: minute_reference_metrics
+  version: v1
+  metrics: [statistics.adjusted_p@1.0.0]
+  semantics:
+    statistics.adjusted_p@1.0.0: 锁定测试集上完整候选族的多重检验校正值
+claim_contract:
+  allowed_claim_levels: [research_observation]
+  max_claim_level: research_observation

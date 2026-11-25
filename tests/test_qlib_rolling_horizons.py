@@ -14,6 +14,9 @@ from test_qlib_model_integration import _read
 from test_research_locked_holdout import _freeze_payload
 from test_walk_forward_model_mainline import _write_input_artifact
 
+
+pytestmark = pytest.mark.ml
+
 BUDGET = 128 * 1024**2
 
 

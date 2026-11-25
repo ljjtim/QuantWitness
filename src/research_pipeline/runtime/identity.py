@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import os
+from pathlib import Path
 import platform
 import re
 import sys
@@ -53,8 +56,100 @@ def _payload_string_mapping(value: object, field: str) -> dict[str, str]:
     return dict(value)
 
 
+_WORKER_HELPER_FILES = (
+    "project_table_input.py", "project_output.py", "walk_forward_model_execution.py", "project_causal.py",
+    "project_causal_worker.py", "project_causal_execution.py", "artifact_lifecycle.py",
+    "project_causal_minute.py", "causal_facts_codec.py", "causal_worker_session.py",
+    "worker_process_session.py", "lean_strategy_execution.py", "lean_execution_writer.py",
+    "lean_strategy_inputs.py", "lean_market_source.py", "lean_minute_parquet.py",
+    "lean_financial_day.py", "lean_futures_inputs.py", "lean_native_data.py",
+    "lean_native_direct.py", "lean_native_inputs.py", "portfolio_target_inputs.py",
+)
+_SNAPSHOT_EXCLUDED_HELPERS = frozenset({
+    "walk_forward_model_execution.py", "project_causal.py",
+    "project_causal_worker.py", "project_causal_execution.py",
+    "project_causal_minute.py", "causal_facts_codec.py",
+    "portfolio_target_inputs.py",
+})
+_STRATEGY_CONTRACT_FILES = (
+    "domain/strategy_declaration.py", "domain/lean_algorithm.py",
+    "results/contracts.py", "platform/lean_contract.py", "platform/lean_native_support.py",
+    "platform/lean_execution_schema.py", "platform/lean_result_projection.py", "research/lean_metrics.py",
+    "platform/lean_runtime.py", "platform/daily_projection.py", "extensions/project_bundle.py", "data_plane/dataset_files.py",
+    "data_plane/dataset_artifacts.py", "data_plane/direct_sources.py", "data_plane/archive_read.py",
+    "data_plane/providers/epoch_date.py", "data_plane/providers/sql.py", "lean_data.py",
+)
+_SNAPSHOT_EXCLUDED_CONTRACTS = frozenset({
+    "lean_algorithm.py", "lean_contract.py", "lean_native_support.py",
+    "lean_execution_schema.py", "lean_result_projection.py",
+    "lean_metrics.py", "lean_runtime.py", "lean_data.py",
+})
+_CAUSAL_WORKER_HELPERS = frozenset({
+    "project_causal.py", "project_causal_worker.py",
+    "project_causal_execution.py", "project_causal_minute.py",
+    "causal_facts_codec.py", "causal_worker_session.py",
+})
+_RESOURCE_CONTRACT_FILES = ("resource_budget.py", "process_resources.py")
+
+
+def project_worker_adapter_hash(manifest=None) -> str:
+    """绑定实际 Worker adapter 与 Runtime bridge 源码，按能力裁剪 LEAN/causal 边界。"""
+    runtime_path = Path(__file__).with_name("project_operator_runtime.py").resolve(strict=True)
+    worker_path = runtime_path.with_name("project_operator_worker.py")
+    snapshot_type = "data.adjustment-factor-snapshot.v1"
+    spec = manifest.operator_spec if manifest is not None else None
+    snapshot_only = (
+        spec is not None and manifest.lean_algorithm is None and not spec.strategy_roles
+        and bool(spec.input_ports) and all(port.artifact_type == snapshot_type
+                                          for port in (*spec.input_ports, *spec.output_ports))
+    )
+    uses_lean = manifest is None or manifest.lean_algorithm is not None
+    uses_causal = manifest is None or (
+        spec is not None and any(param.name == "causal_plan" for param in spec.parameters)
+    )
+    # 共享 Worker 和桥接负责快照端口校验、文件交付与资源验收，继续绑定其实现。
+    def source_digest(path):
+        source = path.read_bytes()
+        return hashlib.sha256(source.replace(b"\r\n", b"\n") if snapshot_only else source).hexdigest()
+
+    payload = {
+        "contract_version": (
+            "project-snapshot-worker-adapter-code-v2" if snapshot_only
+            else "project-operator-worker-adapter-code-v1"
+        ),
+        "runtime_bridge_sha256": source_digest(runtime_path),
+        "worker_adapter_sha256": source_digest(worker_path),
+        "helpers": {
+            name: source_digest(runtime_path.with_name(name))
+            for name in _WORKER_HELPER_FILES
+            if (not snapshot_only or name not in _SNAPSHOT_EXCLUDED_HELPERS)
+            and (uses_lean or not name.startswith("lean_"))
+            and (uses_causal or name not in _CAUSAL_WORKER_HELPERS)
+        },
+        "strategy_contracts": {
+            name: hashlib.sha256(runtime_path.parent.parent.joinpath(name).read_bytes()).hexdigest()
+            for name in _STRATEGY_CONTRACT_FILES
+            if (uses_lean and not snapshot_only) or name.rsplit("/", 1)[-1] not in _SNAPSHOT_EXCLUDED_CONTRACTS
+        },
+        "resource_contracts": {
+            name: hashlib.sha256(
+                runtime_path.parent.parent.joinpath("platform", name).read_bytes()
+            ).hexdigest()
+            for name in _RESOURCE_CONTRACT_FILES
+        },
+    }
+    if uses_causal:
+        payload["causal_contract"] = hashlib.sha256(
+            runtime_path.parent.parent.joinpath("platform", "project_causal_contract.py").read_bytes()
+        ).hexdigest()
+        payload["causal_time_contract"] = hashlib.sha256(
+            runtime_path.parent.parent.joinpath("platform", "causal_time.py").read_bytes()
+        ).hexdigest()
+    return typed_canonical_hash(payload)
+
 class CacheCompatibilityMode(str, Enum):
     BYTE_EXACT = "byte_exact"
+    SEMANTIC = "semantic"
     NUMERICAL = "numerical"
 
 
@@ -126,7 +221,7 @@ class AuditEnvironmentManifest:
         }
         return payload
 
-    @property
+    @cached_property
     def manifest_digest(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -276,6 +371,9 @@ class CacheCompatibilityProfile:
             if self.build_artifact_digest is None or not self.dependency_digests:
                 raise RuntimeIntegrityError("byte_exact 画像必须绑定构建制品和关键依赖")
             _require_digest(self.build_artifact_digest, "build_artifact_digest")
+        elif self.mode is CacheCompatibilityMode.SEMANTIC:
+            if self.build_artifact_digest is not None or not self.dependency_digests:
+                raise RuntimeIntegrityError("semantic 画像必须绑定实际依赖身份")
         elif not self.numerical_backend_digests:
             raise RuntimeIntegrityError("numerical 画像必须绑定数值后端")
         if any(not _ENVIRONMENT_NAME.fullmatch(name) for name in self.environment_input_digests):
@@ -293,7 +391,7 @@ class CacheCompatibilityProfile:
             "contract_version": self.contract_version,
         }
 
-    @property
+    @cached_property
     def profile_digest(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -352,7 +450,7 @@ class CacheCompatibilityProfile:
             "platform_machine": audit.platform_machine,
             "byteorder": audit.byteorder,
         }
-        if mode is CacheCompatibilityMode.BYTE_EXACT:
+        if mode in {CacheCompatibilityMode.BYTE_EXACT, CacheCompatibilityMode.SEMANTIC}:
             return cls(
                 mode,
                 implementation_digest,
@@ -365,7 +463,7 @@ class CacheCompatibilityProfile:
                 audit.dependency_distribution_digests,
                 {},
                 environment,
-                audit.build_artifact_digest,
+                audit.build_artifact_digest if mode is CacheCompatibilityMode.BYTE_EXACT else None,
             )
         names = tuple(sorted(set(numerical_backend_names)))
         backends = {
@@ -387,11 +485,14 @@ class ExecutionIdentity:
     operator_definition_digest: str
     input_digests: Mapping[str, str]
     contract_version: str = EXECUTION_IDENTITY_VERSION
+    audit_implementation_digest: str | None = None
 
     def __post_init__(self) -> None:
         _require_digest(self.audit_manifest_digest, "audit_manifest_digest")
         _require_digest(self.cache_profile_digest, "cache_profile_digest")
         _require_digest(self.operator_definition_digest, "operator_definition_digest")
+        if self.audit_implementation_digest is not None:
+            _require_digest(self.audit_implementation_digest, "audit_implementation_digest")
         object.__setattr__(self, "input_digests", _digest_mapping(self.input_digests, "input_digests", allow_empty=False))
         if self.contract_version != EXECUTION_IDENTITY_VERSION:
             raise RuntimeIntegrityError("ExecutionIdentity 版本不受支持")
@@ -403,9 +504,11 @@ class ExecutionIdentity:
             "operator_definition_digest": self.operator_definition_digest,
             "input_digests": dict(self.input_digests),
             "contract_version": self.contract_version,
+            **({"audit_implementation_digest": self.audit_implementation_digest}
+               if self.audit_implementation_digest is not None else {}),
         }
 
-    @property
+    @cached_property
     def identity_digest(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -424,6 +527,9 @@ class ExecutionIdentity:
             "audit_manifest_digest", "cache_profile_digest", "operator_definition_digest",
             "input_digests", "contract_version",
         }
+        audit_implementation = payload.get("audit_implementation_digest")
+        if isinstance(audit_implementation, str):
+            expected.add("audit_implementation_digest")
         input_digests = payload.get("input_digests")
         if set(payload) != expected or not isinstance(input_digests, Mapping):
             raise RuntimeIntegrityError("ExecutionIdentity schema 无效")
@@ -439,6 +545,7 @@ class ExecutionIdentity:
             str(payload["operator_definition_digest"]),
             _payload_string_mapping(input_digests, "input_digests"),
             str(payload["contract_version"]),
+            audit_implementation,
         )
 
     @classmethod
@@ -453,6 +560,7 @@ class ExecutionIdentity:
         cache_profile: CacheCompatibilityProfile,
         operator_definition_digest: str,
         partition_key: str | None = None,
+        audit_implementation_digest: str | None = None,
     ) -> "ExecutionIdentity":
         digests = {
             f"artifact.{index:04d}.{item.name}": typed_canonical_hash(item.to_dict())
@@ -469,6 +577,7 @@ class ExecutionIdentity:
             cache_profile.profile_digest,
             operator_definition_digest,
             digests,
+            audit_implementation_digest=audit_implementation_digest,
         )
 
 

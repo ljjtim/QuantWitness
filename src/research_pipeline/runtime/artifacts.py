@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -118,7 +120,7 @@ class CheckpointManifest:
             "contract_version": self.contract_version,
         }
 
-    @property
+    @cached_property
     def manifest_hash(self) -> str:
         return typed_canonical_hash(self.identity_payload())
 

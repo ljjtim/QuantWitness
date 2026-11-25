@@ -12,17 +12,20 @@ import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = PROJECT_ROOT / "src"
-if str(SOURCE_ROOT) not in sys.path:
-    sys.path.insert(0, str(SOURCE_ROOT))
+for location in (PROJECT_ROOT, SOURCE_ROOT):
+    if str(location) not in sys.path:
+        sys.path.insert(0, str(location))
 
 from research_pipeline.platform import (  # noqa: E402
+    canonical_json,
+    load_build_manifest,
+    verify_dependency_distribution_lock,
+)
+from tools.release_envelope import (  # noqa: E402
     REQUIRED_GATE_IDS,
     ReleaseAcceptanceInput,
     ReleaseEnvelope,
     ReleaseGateReceipt,
-    canonical_json,
-    load_build_manifest,
-    verify_dependency_distribution_lock,
     verify_release_envelope,
 )
 

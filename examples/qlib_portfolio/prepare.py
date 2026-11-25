@@ -379,10 +379,10 @@ def prepare(root, mode="model", input_config=None, feature_expressions=None, seq
         if name == 'lean_portfolio':
             source_root = root/'lean-strategy-source'
             source_root.mkdir()
-            shutil.copyfile(HERE/'extension/lean_strategy.py', source_root/'lean_strategy.py')
+            shutil.copyfile(HERE/'lean_algorithm/algorithm.py', source_root/'algorithm.py')
         decl=load_project_operator_declaration(path,source_root=source_root)
         bundle_path = compile_project_operator_bundle(source_root=source_root,output_root=root/"bundles"/name,project_id=decl.project_id,
-            operator_spec=decl.operator_spec,entry_module=decl.entry_module,entry_function=decl.entry_function,dependency_lock=decl.dependency_lock,
+            operator_spec=decl.operator_spec,entry_module=decl.entry_module,entry_function=decl.entry_function,lean_algorithm=decl.lean_algorithm,dependency_lock=decl.dependency_lock,
             project_artifact_types=decl.project_artifact_types,permissions=decl.permissions,registered_operator_specs=builtin.operator_specs)
         built.append(str(bundle_path))
         if name == 'lean_portfolio':

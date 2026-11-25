@@ -17,18 +17,10 @@ __all__ = [
     "ResearchSemantics",
     "ResearchSemanticsError",
     "ResearchTimeWindow",
-    "assign_quantile_buckets",
-    "portfolio_metric_values",
-    "select_top_n_codes",
-    "stable_score_order",
 ]
 
 
 _LAZY_EXPORTS = {
-    "portfolio_metric_values": ".portfolio_metrics",
-    "assign_quantile_buckets": ".ranking",
-    "select_top_n_codes": ".ranking",
-    "stable_score_order": ".ranking",
     "ESTIMAND_SPEC_VERSION": ".semantics",
     "FEATURE_SET_ARTIFACT_VERSION": ".semantics",
     "HYPOTHESIS_SPEC_VERSION": ".semantics",

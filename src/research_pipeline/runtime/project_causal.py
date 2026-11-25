@@ -244,6 +244,14 @@ def daily_source_times(values: pd.Series, binding: Mapping) -> tuple[pd.Series, 
                 raise CausalTimeContractError("开盘日期不在冻结日历中")
             observations = (dates + pd.Timedelta(hours=9, minutes=30)).dt.tz_localize(binding["timezone"]).dt.tz_convert("UTC")
             available = observations.copy()
+        elif rule == "next_session_open_following_publication_date":
+            session_dates = pd.DatetimeIndex(calendar.sessions)
+            indices = session_dates.searchsorted(dates, side="right")
+            if (dates < session_dates[0]).any() or (indices >= len(session_dates)).any():
+                raise CausalTimeContractError("公告日期超出冻结日历或缺少后续交易日")
+            observations = dates.dt.tz_localize(binding["timezone"]).dt.tz_convert("UTC")
+            next_dates = pd.Series(session_dates.take(indices), index=dates.index)
+            available = (next_dates + pd.Timedelta(hours=9, minutes=30)).dt.tz_localize(binding["timezone"]).dt.tz_convert("UTC")
         elif rule == "next_session_open":
             next_dates = dates.dt.date.map(following)
             if next_dates.isna().any():

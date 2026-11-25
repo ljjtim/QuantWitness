@@ -13,7 +13,7 @@ wheel 是可安装程序包，sdist 是用于构建的源码包，完整公开�
 - 构建维护者准备干净源码、离线依赖和仓库外输出目录。
 - 发布维护者准备已通过验收的候选提交及平台审批。
 
-当前源码版本为 `1.6.0`。
+当前源码版本为 `1.7.0`。
 协议、工件和数据规则各自保留独立版本。
 软件版本升级不代表协议编号全部改变。
 
@@ -43,6 +43,8 @@ wheel 只安装运行所需的包代码和资源。
 本页命令从独立公开源码仓库根目录执行。
 完整单仓使用者先进入 `research_pipeline/`。
 发布工具、`tests/test_release_metadata_ssot.py` 及通用研究示例的可执行源码随独立公开源码仓库提供。
+
+发布门禁从源码根目录运行。能力封存证据、目录边界和发布封套的实现位于 `tools/`。安装 wheel 仍可用 `python -m research_pipeline capabilities --format json` 查看当前能力。
 sdist 和源码 zip 包含 `integrations/lean/` 安装源码。可执行示例包含 `lean_quickstart`、`lean_futures`、`custom_metric` 和 `turnover_factor`。按各示例 README 安装依赖并运行。
 
 wheel 只提供 Python 框架。
@@ -108,7 +110,7 @@ METADATA、WHEEL 和 RECORD 由标准构建后端生成。
 
 还需显式提供一个持久 Catalog Lock，供安装后资源读取测试使用。
 它不是发行包资源。
-验收还检查公共 Recipe 为空、`package init` 可用。
+验收检查 `operator list` 能列出已安装算子、未知算子有结构化诊断，以及 `package init` 可创建中性草稿。
 新建中性草稿的 `lint` 必须返回 exit=1，且 JSON 中 `status=fail`、`error_code=research_package_invalid`、`data.execution_ready=false`，聚合 `data.issues` 明确指出 `sources/sources.yaml` 的 `sources` 为空。
 意外成功、其他错误或无效 JSON 都使验收失败：
 
@@ -350,8 +352,8 @@ Gate D/F/L 使用候选内的 `release/gate-test-protocol.json`，测试源码�
 有失败、跳过或零测试均不生成通过收据。
 Gate L 的前置 Gate C 必须属于相同候选，不能沿用其他批次的通过记录。
 
-Gate C 先通过正式 Recipe codec 复验完整定义与 `recipe_hash`，再按正式计划的 `validated-recipe-ref-v1` 身份投影核对 `plan_hash`。
-日期或 Recipe 内容变动仍须与 Result的原计划绑定一致。
+Gate C 先重新解析正式计划中的完整算子图并核对 `recipe_hash`，再按 `validated-recipe-ref-v1` 身份投影核对 `plan_hash`。
+运行日期和算子图须与 Result 绑定的原计划一致。
 
 `tools/build_release_envelope.py` 接受六个 `--gate-evidence gate-id=path`，校验候选、BuildManifest 和 Gate 类型，并把原始证据、能力清单、依赖锁与 BuildManifest 一起封存。
 能力清单和依赖锁必须与构建输入一致。

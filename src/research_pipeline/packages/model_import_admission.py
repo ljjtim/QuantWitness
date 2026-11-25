@@ -5,9 +5,51 @@ from pathlib import Path
 from .models import ResearchPackageError
 
 SOURCE_FIELDS=('source_run_root','source_fit_artifact','source_split_artifact','source_fit_node_id','source_split_node_id')
+RESULT_SOURCE_FIELDS=('source_result_directory','source_result_store')
+
+
+def _validate_published_result_parameters(parameters, *, require_frozen=False):
+    for field in SOURCE_FIELDS:
+        if parameters.get(field) not in (None, ''):
+            raise ResearchPackageError('模型导入 source_result_directory 与 source_run_root 来源字段互斥: ' + field)
+    result_dir = parameters.get('source_result_directory')
+    if not isinstance(result_dir, str) or not result_dir.strip():
+        raise ResearchPackageError('模型导入缺少显式来源字段: source_result_directory')
+    if not Path(result_dir).is_absolute():
+        raise ResearchPackageError('模型来源Result目录必须为绝对路径')
+    result_store = parameters.get('source_result_store')
+    if result_store is not None:
+        if not isinstance(result_store, str) or not result_store.strip():
+            raise ResearchPackageError('模型导入 source_result_store 必须为非空字符串')
+        if not Path(result_store).is_absolute():
+            raise ResearchPackageError('模型来源ResultStore必须为绝对路径')
+    raw = parameters.get('source_manifest_json')
+    if raw is None:
+        if require_frozen:
+            raise ResearchPackageError('模型导入计划缺少冻结source_manifest_json')
+        return
+    try:
+        manifest = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ResearchPackageError('模型导入source_manifest_json无效') from exc
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get('source_kind') != 'published_result'
+        or any(key not in manifest for key in ('source_result_directory', 'source_result_id', 'fit_files', 'split_files', 'fit_tables', 'split_tables'))
+    ):
+        raise ResearchPackageError('模型导入冻结Result来源缺少引用')
+    if Path(manifest['source_result_directory']).resolve() != Path(result_dir).resolve():
+        raise ResearchPackageError('模型导入冻结Result目录不一致')
+    if result_store is not None and Path(manifest.get('source_result_store', '')).resolve() != Path(result_store).resolve():
+        raise ResearchPackageError('模型导入冻结ResultStore不一致')
 
 
 def validate_model_import_parameters(parameters, *, require_frozen=False):
+    if parameters.get('source_result_directory') not in (None, ''):
+        _validate_published_result_parameters(parameters, require_frozen=require_frozen)
+        return
+    if parameters.get('source_result_store') not in (None, ''):
+        raise ResearchPackageError('模型导入指定 source_result_store 时必须提供 source_result_directory')
     for field in SOURCE_FIELDS:
         value=parameters.get(field)
         if not isinstance(value,str) or not value.strip():

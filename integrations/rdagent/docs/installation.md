@@ -1,8 +1,8 @@
 # 安装RD-Agent可选集成
 
-核心包为`quantwitness`。可选包为`quantwitness-rdagent`。可选包0.2.0依赖核心1.6.x。
+核心包为`quantwitness`。可选包为`quantwitness-rdagent`。可选包0.3.0依赖核心1.7.x。
 
-安装器会拒绝核心小于1.6.0或不小于1.7的组合。研究调度使用固定上游RD-Agent源码。完整调度需要Linux环境。
+安装器会拒绝核心小于1.7.0或不小于1.8的组合。研究调度使用固定上游RD-Agent源码。完整调度需要Linux环境。
 
 Windows通过WSL运行调度。
 

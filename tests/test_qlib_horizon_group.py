@@ -8,6 +8,9 @@ import subprocess
 
 import pytest
 
+
+pytestmark = pytest.mark.ml
+
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio"
 
 

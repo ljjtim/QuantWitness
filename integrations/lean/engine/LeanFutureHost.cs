@@ -5,6 +5,7 @@ using QuantConnect.Data.Market;
 using QuantConnect.Orders;
 using QuantConnect.Securities;
 using QuantWitness.Lean.China;
+using QuantWitness.LeanInput;
 
 namespace QuantWitness.Lean.Research;
 
@@ -19,7 +20,7 @@ public sealed partial class LeanStrategyHost
     private Dictionary<string, DateTime> _futureDayEnds;
     private int _futureLoadIndex, _futureSessionIndex;
     private DateTime _lastFutureEnd;
-    private readonly Dictionary<DateTime, JsonElement> _futureHeaders = new();
+    private readonly Dictionary<DateTime, FrozenFinancialDay> _futureHeaders = new();
     private readonly HashSet<(string, string)> _startedFutureSessions = new();
     private readonly HashSet<(string, string)> _futureSettled = new();
     private readonly HashSet<string> _futureClosedDays = new();
@@ -33,9 +34,9 @@ public sealed partial class LeanStrategyHost
     private bool _maintainingFutureRisk;
     private DateTime? _riskLastAttemptAt;
     private DateTime? _riskRecoveredAt;
+    private DateTime _futureObservationEndUtc;
     private string _futureTradingDate;
     private const string FutureAccountId = "futures-CNY";
-    public string TradingDateText => IsFuture ? _futureTradingDate : _algorithm.Time.ToString("yyyy-MM-dd");
     public bool FutureObservationOnly => IsFuture && _lastFutureEnd < _algorithm.UtcTime;
     public bool FutureDayCanClose => IsFuture && _futureTradingDate != null && !_futureClosedDays.Contains(_futureTradingDate)
         && _futureDayEnds[_futureTradingDate] <= _algorithm.UtcTime;
@@ -54,8 +55,8 @@ public sealed partial class LeanStrategyHost
 
     private void InitializeFutures(JsonElement input, JsonElement settings)
     {
-        if (_direct == null) throw new InvalidOperationException("期货行情必须通过已准入的逐交易日交接");
         _futureContracts = input.GetProperty("contracts").Clone();
+        _futureObservationEndUtc = FutureTime(input, "end_at");
         _futureSessions = input.GetProperty("sessions").EnumerateArray().Select(x => x.Clone())
             .OrderBy(x => FutureTime(x, "start_at")).ThenBy(x => x.GetProperty("instrument_id").GetString(), StringComparer.Ordinal).ToArray();
         foreach (var session in _futureSessions)
@@ -95,14 +96,20 @@ public sealed partial class LeanStrategyHost
             SymbolPropertiesDatabase.FromDataFolder().SetEntry(market, product, SecurityType.Future,
                 new SymbolProperties(code, "CNY", multiplier, tick, 1, product, 1));
             var symbol = Symbol.CreateFuture(product, market, DateTime.Parse(contract.GetProperty("expiry_date").GetString()), code);
-            var security = _algorithm.AddSecurity(symbol, IsDaily ? Resolution.Daily : Resolution.Minute,
-                fillForward: false, extendedMarketHours: false, dataNormalizationMode: DataNormalizationMode.Raw);
-            _symbols.Add(code, security.Symbol); _codes.Add(security.Symbol, code); _history.Add(code, new());
+            _symbols.Add(code, symbol); _codes.Add(symbol, code);
         }
         FutureModels = new(_algorithm.Portfolio, FutureRuleAt);
         var parameters = settings.GetProperty("parameters");
         FutureModels.ConfigureExecution(parameters.GetProperty("slippage_bps").GetDecimal(),
             parameters.GetProperty("slippage_ticks").GetInt32(), parameters.GetProperty("participation_cap_ppm").GetInt32());
+        FutureModels.SecurityInitialized = security =>
+        {
+            if (!_codes.TryGetValue(security.Symbol, out var code))
+                throw new InvalidOperationException($"期货合约未包含在冻结输入中：{security.Symbol}");
+            if (_currentFutureSessions.TryGetValue(code, out var session))
+                ((ChinaFutureHolding)security.Holdings).AdvanceTradingDate(
+                    DateOnly.Parse(session.GetProperty("trading_date").GetString()));
+        };
         FutureModels.Install(_algorithm);
         InitializeFutureLifecycle(settings);
         FutureModels.BeforeExecution = (_, order) =>
@@ -131,22 +138,35 @@ public sealed partial class LeanStrategyHost
 
     private FutureRule FutureRuleAt(Symbol symbol, DateTime utc)
     {
-        var code = _codes[symbol];
         var currentDay = ((ChinaFutureHolding)_algorithm.Securities[symbol].Holdings).TradingDate?.ToString("yyyy-MM-dd") ?? _futureTradingDate;
-        var candidates = _futureHeaders.Values.SelectMany(x => x.GetProperty("rules").EnumerateArray())
-            .Where(x => x.GetProperty("instrument_id").GetString() == code && FutureTime(x, "available_at") <= utc
-                && string.CompareOrdinal(x.GetProperty("effective_from").GetString(), currentDay) <= 0
-                && string.CompareOrdinal(x.GetProperty("effective_to").GetString(), currentDay) >= 0)
-            .OrderBy(x => FutureTime(x, "available_at")).ToArray();
-        if (candidates.Length == 0) throw new InvalidOperationException($"期货缺少当时可见有效规则：{code} {utc:O}");
-        var row = candidates[^1]; var p = row.GetProperty("parameters");
-        FutureFee Fee(string prefix) => new(p.GetProperty(prefix + "_fee_per_contract_units").GetDecimal() / 100,
-            p.GetProperty(prefix + "_fee_rate_ppm").GetDecimal() / 1_000_000);
-        return new(p.GetProperty("long_margin_ppm").GetDecimal() / 1_000_000,
-            p.GetProperty("short_margin_ppm").GetDecimal() / 1_000_000,
-            Fee("open"), Fee("close"), Fee("close_today"), FutureDecimal(_futureContracts.GetProperty(code), "tick_size"),
-            FutureDecimal(p, "lower_limit"), FutureDecimal(p, "upper_limit"),
-            p.GetProperty("close_priority").GetString(), row.GetProperty("source_ref").GetString());
+        return ResolveFutureRule(_codes[symbol], currentDay, utc);
+    }
+
+    internal NativeMarketLifecycle.FutureOrderRuleView FutureOrderRules(Symbol symbol)
+    {
+        var utc = _algorithm.UtcTime;
+        var code = _codes[symbol];
+        var session = SessionAt(code, utc);
+        if (session.ValueKind == JsonValueKind.Undefined)
+            throw new InvalidOperationException($"当前时点没有准入的期货会话：{code} {utc:O}");
+        var tradingDate = session.GetProperty("trading_date").GetString();
+        return new(tradingDate, ResolveFutureRule(code, tradingDate, utc));
+    }
+
+    private FutureRule ResolveFutureRule(string code, string currentDay, DateTime utc)
+    {
+        var day = DateOnly.ParseExact(currentDay, "yyyy-MM-dd");
+        var row = _futureHeaders.Values.SelectMany(header => header.Rules)
+            .Where(rule => rule.InstrumentId == code && rule.AvailableAt <= utc
+                && rule.EffectiveFrom <= day && rule.EffectiveTo >= day)
+            .OrderBy(rule => rule.AvailableAt).LastOrDefault();
+        if (row == null) throw new InvalidOperationException($"期货缺少当时可见有效规则：{code} {utc:O}");
+        FutureFee Fee(long units, long ppm) => new(units / 100m, ppm / 1_000_000m);
+        return new(row.LongMarginPpm / 1_000_000m, row.ShortMarginPpm / 1_000_000m,
+            Fee(row.OpenFeeUnits, row.OpenFeePpm), Fee(row.CloseFeeUnits, row.CloseFeePpm),
+            Fee(row.CloseTodayFeeUnits, row.CloseTodayFeePpm), FutureDecimal(_futureContracts.GetProperty(code), "tick_size"),
+            row.LowerLimit, row.UpperLimit, row.ClosePriority, row.SourceRef);
+
     }
 
     public void AdvanceFutureClock()
@@ -161,23 +181,23 @@ public sealed partial class LeanStrategyHost
                 var day = _futureLoadSchedule[_futureLoadIndex++].Day;
                 _futureHeaders.Add(day, _direct.Header(day));
             }
-            foreach (var settlement in _futureHeaders.Values.SelectMany(x => x.GetProperty("settlements").EnumerateArray())
-                .Where(x => FutureTime(x, "available_at") <= now).OrderBy(x => FutureTime(x, "available_at"))
-                .ThenBy(x => x.GetProperty("instrument_id").GetString(), StringComparer.Ordinal))
+            foreach (var settlement in _futureHeaders.Values.SelectMany(header => header.Settlements)
+                .Where(row => row.AvailableAt <= now).OrderBy(row => row.AvailableAt)
+                .ThenBy(row => row.InstrumentId, StringComparer.Ordinal))
             {
-                var code = settlement.GetProperty("instrument_id").GetString();
-                var day = settlement.GetProperty("trading_date").GetString();
+                var code = settlement.InstrumentId;
+                var day = settlement.TradingDate.ToString("yyyy-MM-dd");
                 if (!_futureSettled.Add((code, day))) continue;
-                var security = _algorithm.Securities[_symbols[code]];
+                if (!_algorithm.Securities.TryGetValue(_symbols[code], out var security)) continue;
                 var holding = (ChinaFutureHolding)security.Holdings;
-                if (!holding.TradingDate.HasValue) holding.AdvanceTradingDate(DateOnly.Parse(day));
-                var amount = FutureModels.Settle(security, DateOnly.Parse(day), FutureDecimal(settlement, "price"),
-                    FutureTime(settlement, "available_at"), now);
-                _futureMarks[code] = new DateTimeOffset(FutureTime(settlement, "available_at"));
+                if (!holding.TradingDate.HasValue) holding.AdvanceTradingDate(settlement.TradingDate);
+                var amount = FutureModels.Settle(security, settlement.TradingDate, settlement.Price,
+                    settlement.AvailableAt, now);
+                _futureMarks[code] = new DateTimeOffset(settlement.AvailableAt);
                 _futureMarkSources[code] = "published_settlement"; _settledThrough[code] = day;
                 WriteFutureLifecycle("settlement", new { instrument_id = code, trading_date = day, amount,
-                    price = FutureDecimal(settlement, "price"), source_ref = settlement.GetProperty("source_ref").GetString(),
-                    available_at = settlement.GetProperty("available_at").GetString() });
+                    price = settlement.Price, source_ref = settlement.SourceRef,
+                    available_at = new DateTimeOffset(settlement.AvailableAt).ToOffset(TimeSpan.FromHours(8)) });
                 WriteFutureAccount("settlement", day);
             }
             while (_futureSessionIndex < _futureSessions.Length && FutureTime(_futureSessions[_futureSessionIndex], "start_at") <= now)
@@ -186,19 +206,20 @@ public sealed partial class LeanStrategyHost
                 var code = session.GetProperty("instrument_id").GetString();
                 var day = session.GetProperty("trading_date").GetString();
                 if (!_startedFutureSessions.Add((code, day))) continue;
-                var holding = (ChinaFutureHolding)_algorithm.Securities[_symbols[code]].Holdings;
+                _currentFutureSessions[code] = session;
+                if (_futureTradingDate == null || string.CompareOrdinal(day, _futureTradingDate) > 0) _futureTradingDate = day;
+                if (!_algorithm.Securities.TryGetValue(_symbols[code], out var security)) continue;
+                var holding = (ChinaFutureHolding)security.Holdings;
                 if (holding.TradingDate.HasValue && holding.Invested && !_futureSettled.Contains((code, holding.TradingDate.Value.ToString("yyyy-MM-dd"))))
                     throw new InvalidOperationException($"下一交易日前持仓必要结算缺失：{code} {holding.TradingDate}");
                 holding.AdvanceTradingDate(DateOnly.Parse(day));
-                _currentFutureSessions[code] = session;
-                if (_futureTradingDate == null || string.CompareOrdinal(day, _futureTradingDate) > 0) _futureTradingDate = day;
             }
             if (_futureTradingDate == null) return;
             var marked = false;
             foreach (var security in _algorithm.Securities.Values)
             {
                 var last = security.GetLastData();
-                if (last is TradeBar bar && bar.EndTime <= _algorithm.Time && bar is not DailyCloseMark)
+                if (last is TradeBar bar && bar.EndTime <= _algorithm.Time)
                 {
                     var code = _codes[security.Symbol];
                     var at = new DateTimeOffset(DateTime.SpecifyKind(bar.EndTime, DateTimeKind.Unspecified), TimeSpan.FromHours(8));
@@ -224,7 +245,7 @@ public sealed partial class LeanStrategyHost
     private object[] FuturePositions(bool protocol = false)
     {
         var rows = new List<object>();
-        foreach (var pair in _symbols.OrderBy(x => x.Key, StringComparer.Ordinal))
+        foreach (var pair in _symbols.Where(x => _algorithm.Securities.ContainsKey(x.Value)).OrderBy(x => x.Key, StringComparer.Ordinal))
         {
             var security = _algorithm.Securities[pair.Value]; var holding = (ChinaFutureHolding)security.Holdings;
             foreach (var item in holding.Positions())
@@ -245,18 +266,9 @@ public sealed partial class LeanStrategyHost
         return rows.ToArray();
     }
 
-    private string FutureSnapshot(string codesJson)
+    private string FutureAccountView()
     {
         AdvanceFutureClock();
-        var needed = JsonSerializer.Deserialize<string[]>(codesJson).ToHashSet();
-        foreach (var pair in _symbols.Where(x => _algorithm.Securities[x.Value].Holdings.Invested)) needed.Add(pair.Key);
-        var quotes = new Dictionary<string, object>(); var missing = new List<string>();
-        foreach (var code in needed.Order())
-        {
-            RememberCurrent(code); var visible = _history[code].LastOrDefault();
-            if (visible == null || visible.AvailableAt > _algorithm.Time) missing.Add(code);
-            else quotes.Add(code, Quote(code, visible));
-        }
         var cash = RoundMoney(_algorithm.Portfolio.CashBook["CNY"].Amount);
         var equity = RoundMoney(_algorithm.Portfolio.TotalPortfolioValue);
         var margin = RoundMoney(_algorithm.Portfolio.TotalMarginUsed); var frozen = RoundMoney(FutureModels.Frozen);
@@ -267,13 +279,11 @@ public sealed partial class LeanStrategyHost
             position_effect = ((ChinaFutureOrderProperties)x.Properties).PositionEffect,
             status = _filled.GetValueOrDefault(x.Id) > 0 ? "partially_filled" : "accepted", submitted_at = new DateTimeOffset(x.Time, TimeSpan.Zero),
             reserved_cash = Money(FutureModels.OrderFrozen(x.Id)) }).ToArray();
-        return JsonSerializer.Serialize(new { order_event_count = _orderEventCount, event_sequence = _futureSequence,
-            account = new { asset_class = "cn_future", account_seq = _futureSequence, as_of = Now,
+        return JsonSerializer.Serialize(new { asset_class = "cn_future", account_seq = _futureSequence, as_of = Now,
                 total_cash = Money(cash), available_cash = Money(available), frozen_cash = Money(frozen), withdrawable_cash = Money(Math.Max(0, available)),
                 net_asset = Money(equity), settled_cash = Money(cash), unrealized_pnl = Money(equity - cash), equity = Money(equity),
                 margin = Money(margin), frozen_funds = Money(frozen), available_funds = Money(available),
-                positions = FuturePositions(true), active_orders = orders, risk_active = FutureModels.RiskActive },
-            quotes, missing_instruments = missing }, JsonOptions);
+                positions = FuturePositions(true), active_orders = orders, risk_active = FutureModels.RiskActive }, JsonOptions);
     }
 
     private void WriteFutureLifecycle(string kind, object detail)
@@ -337,71 +347,18 @@ public sealed partial class LeanStrategyHost
         if (!_advancingFutureClock) { MaintainFutureRisk(); MaintainFutureLifecycle(); }
     }
 
-    private void ValidateFutureIntent(string json)
-    {
-        using var document = JsonDocument.Parse(json); var intent = document.RootElement;
-        if (intent.GetProperty("kind").GetString() == "cancel") return;
-        if (FutureObservationOnly) throw new InvalidOperationException("结算观察阶段不接受策略交易");
-        if (intent.GetProperty("kind").GetString() != "quantity"
-            || intent.GetProperty("position_effect").GetString() is not ("open" or "close" or "close_today" or "close_yesterday")
-            || intent.GetProperty("order_type").GetString() is not ("market" or "limit")
-            || intent.GetProperty("time_in_force").GetString() is not ("DAY" or "IOC"))
-            throw new InvalidOperationException("期货必须为数量单、显式开平及market/limit、DAY/IOC");
-        var code = intent.GetProperty("instrument").GetProperty("instrument_id").GetString();
-        if (!_symbols.ContainsKey(code) || !IsFutureTradingTime(code, _algorithm.UtcTime))
-            throw new InvalidOperationException("期货合约不在当前可交易会话");
-        if (IsDaily && _dailyDecisionTime != _algorithm.Time) throw new InvalidOperationException("日线委托仅在独立开盘决策阶段提交");
-        var quantity = intent.GetProperty("quantity").GetDecimal();
-        if (quantity <= 0 || quantity != decimal.Truncate(quantity)) throw new InvalidOperationException("期货手数必须为正整数");
-    }
-
-    private void SubmitFutureIntent(string json)
-    {
-        AdvanceFutureClock(); ValidateFutureIntent(json);
-        using var document = JsonDocument.Parse(json); var intent = document.RootElement;
-        if (intent.GetProperty("kind").GetString() == "cancel")
-        {
-            var id = int.Parse(intent.GetProperty("order_id").GetString());
-            _algorithm.Transactions.GetOrderTicket(id).Cancel("策略主动撤单");
-            _intents.WriteLine(JsonSerializer.Serialize(new { at = Now, event_sequence = ++_futureSequence, intent = intent.Clone(), order_id = id }));
-        }
-        else
-        {
-            var code = intent.GetProperty("instrument").GetProperty("instrument_id").GetString();
-            var quantity = intent.GetProperty("quantity").GetDecimal() * (intent.GetProperty("side").GetString() == "buy" ? 1 : -1);
-            var requested = quantity;
-            decimal limit = 0;
-            if (intent.GetProperty("order_type").GetString() == "limit")
-            {
-                var value = intent.GetProperty("limit_price");
-                limit = value.GetProperty("units").GetDecimal() / (decimal)Math.Pow(10, value.GetProperty("scale").GetInt32());
-            }
-            decimal? protection = null;
-            if (intent.TryGetProperty("protection_price", out var protectedValue) && protectedValue.ValueKind != JsonValueKind.Null)
-                protection = protectedValue.GetProperty("units").GetDecimal() / (decimal)Math.Pow(10, protectedValue.GetProperty("scale").GetInt32());
-            var effect = intent.GetProperty("position_effect").GetString();
-            if (effect == "open" && intent.TryGetProperty("funds_policy", out var policy) && policy.GetString() == "resize")
-                quantity = FutureModels.AffordableOpeningQuantity(_algorithm.Securities[_symbols[code]], quantity, limit, _algorithm.UtcTime);
-            var ticket = SubmitFutureOrder(code, quantity, effect,
-                intent.GetProperty("intent_id").GetString(), limit, intent.GetProperty("time_in_force").GetString(), protection: protection);
-            _intents.WriteLine(JsonSerializer.Serialize(new { at = Now, event_sequence = ++_futureSequence,
-                intent = intent.Clone(), order_id = ticket.OrderId, requested_quantity = requested, submitted_quantity = quantity }));
-        }
-        _intents.Flush();
-    }
-
     private OrderTicket SubmitFutureOrder(string code, decimal quantity, string effect, string tag,
-        decimal limit = 0, string duration = "DAY", bool risk = false, string roll = null, decimal? protection = null)
+        bool risk = false, string roll = null)
     {
         var session = SessionAt(code, _algorithm.UtcTime);
         if (session.ValueKind == JsonValueKind.Undefined) throw new InvalidOperationException("期货委托缺少当时会话");
         var rule = FutureRuleAt(_symbols[code], _algorithm.UtcTime);
         var properties = new ChinaFutureOrderProperties { PositionEffect = effect, ClosePriority = rule.ClosePriority,
-            Duration = duration, ValidUntilUtc = FutureTime(session, "end_at"), TimeInForce = new ChinaFutureTimeInForce(),
+            ValidUntilUtc = FutureTime(session, "end_at"), TimeInForce = new ChinaFutureTimeInForce(),
             DailyOpenDecision = IsDaily && (!risk || !_futureExecutedOpens.Contains((code, _algorithm.UtcTime))),
-            RiskOrder = risk, RollPlanId = roll, ProtectionPrice = protection };
-        return _algorithm.SubmitOrderRequest(new SubmitOrderRequest(limit > 0 ? OrderType.Limit : OrderType.Market,
-            SecurityType.Future, _symbols[code], quantity, 0, limit, _algorithm.UtcTime, tag, properties));
+            RiskOrder = risk, RollPlanId = roll };
+        return _algorithm.SubmitOrderRequest(new SubmitOrderRequest(OrderType.Market,
+            SecurityType.Future, _symbols[code], quantity, 0, 0, _algorithm.UtcTime, tag, properties));
     }
 
     public void FinishFutureOpportunity()
@@ -444,7 +401,7 @@ public sealed partial class LeanStrategyHost
             return;
         }
         if (FutureObservationOnly || _riskLastAttemptAt == _algorithm.UtcTime) return;
-        var candidates = _symbols.Where(x => IsFutureTradingTime(x.Key, _algorithm.UtcTime)).SelectMany(pair =>
+        var candidates = _symbols.Where(x => _algorithm.Securities.ContainsKey(x.Value) && IsFutureTradingTime(x.Key, _algorithm.UtcTime)).SelectMany(pair =>
         {
             var security = _algorithm.Securities[pair.Value]; var rule = FutureRuleAt(pair.Value, _algorithm.UtcTime);
             return ((ChinaFutureHolding)security.Holdings).Positions().Select(position => new { code = pair.Key, symbol = pair.Value, position,
@@ -498,10 +455,12 @@ public sealed partial class LeanStrategyHost
 
     private void FinishFutures()
     {
-        if (HasRuntimeError || _futureClosedDays.Count != _sessions.Count || _algorithm.Transactions.GetOpenOrders().Count != 0)
+        if (_algorithm.UtcTime < _futureObservationEndUtc)
+            throw new InvalidOperationException("期货金融观察尾点未完成，不能结束Host");
+        if (HasRuntimeError || _futureClosedDays.Count != _sessionCount || _algorithm.Transactions.GetOpenOrders().Count != 0)
             throw new InvalidOperationException("期货交易日、订单或引擎终态未完成");
         AdvanceFutureClock();
-        foreach (var pair in _symbols)
+        foreach (var pair in _symbols.Where(x => _algorithm.Securities.ContainsKey(x.Value)))
         {
             var holding = (ChinaFutureHolding)_algorithm.Securities[pair.Value].Holdings;
             if (holding.Invested && (!_settledThrough.TryGetValue(pair.Key, out var day)
@@ -520,7 +479,7 @@ public sealed partial class LeanStrategyHost
             positions = FuturePositions(), settled_through = _settledThrough, valuation_at = Now, trading_date = _futureTradingDate,
             equity_semantics = "latest_visible_mark_not_session_close", rows = _rows,
             algorithm_wall_seconds = _clock.Elapsed.TotalSeconds }, JsonOptions));
-        _orders.Dispose(); _intents.Dispose(); _daily.Dispose(); _fillsOutput.Dispose(); _positionsOutput.Dispose();
+        _orders.Dispose(); _daily.Dispose(); _fillsOutput.Dispose(); _positionsOutput.Dispose();
         _accountOutput.Dispose(); _lifecycleOutput.Dispose();
     }
 }

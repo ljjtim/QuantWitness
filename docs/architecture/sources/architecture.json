@@ -164,15 +164,15 @@
     },
     {
       "id": "simulation",
-      "label": "金融类型与规则",
-      "sub": "simulation/",
+      "label": "原生交易执行",
+      "sub": "LEAN/",
       "x": 410,
       "y": 820,
       "w": 270,
       "h": 90,
       "kind": "core",
-      "source": "src/research_pipeline/simulation/__init__.py",
-      "detail": "提供金额、费用、订单、结算、公司行动和账本等当前金融类型与规则。股票与 ETF 日线和一分钟策略由 LEAN 执行，资金、可卖量、T+1 和权益到账在实际转换处检查。"
+      "source": "src/research_pipeline/runtime/lean_strategy_execution.py",
+      "detail": "提供金额、费用、订单、结算、公司行动和账本等当前原生交易执行。股票与 ETF 日线和一分钟策略由 LEAN 执行，资金、可卖量、T+1 和权益到账在实际转换处检查。"
     },
     {
       "id": "results",
@@ -365,7 +365,7 @@
     {
       "from_id": "runtime",
       "to_id": "simulation",
-      "label": "金融类型与规则",
+      "label": "原生交易执行",
       "kind": "main",
       "points": [
         [
@@ -520,7 +520,7 @@
     "Workspace execute 一次 prepare + admit；独立 package lint 是主动诊断入口。",
     "只读查询默认直接读取来源，--persist-inputs 才保存查询输入；PIT 和持久 holdout 约束继续执行。",
     "Runtime 成功后由应用层发布 Result；报告、比较、分析、导出与开发反馈直接消费正式结果。",
-    "Qlib 负责日频模型；LEAN 负责股票与 ETF 日线和一分钟执行，入口见 integrations/lean；simulation 提供金融类型与规则。",
+    "Qlib 负责日频模型；LEAN 负责股票与 ETF 日线和一分钟执行，入口见 integrations/lean；simulation 提供原生交易执行。",
     "全部节点成功但 Result 未发布时，resume 只重试组装；报告失败保留 Result，单独重报。operations 与 platform 为全链提供支持。"
   ]
 }

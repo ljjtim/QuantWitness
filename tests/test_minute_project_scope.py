@@ -4,9 +4,11 @@ from datetime import datetime
 from types import SimpleNamespace
 import pytest
 from research_pipeline.domain import SessionPolicyBundle, SessionCalendarResolver, MinuteRuleSnapshotBundle, MinuteRuleResolver, load_session_policy_bundle
-from research_pipeline.domain.minute_request_scope import require_minute_request_coverage
+from research_pipeline.domain.minute_request_scope import (
+    MinuteRequestCalendar, minute_request_sessions, require_minute_request_coverage,
+)
 from research_pipeline.domain.minute_rule_snapshots import PROJECT_RULE_BUNDLE_VERSION, MinuteRuleSnapshotError
-from research_pipeline.domain.session_calendar import PROJECT_SESSION_BUNDLE_VERSION, PROJECT_SESSION_POLICY_VERSION, SessionCalendarError
+from research_pipeline.domain.session_calendar import PROJECT_SESSION_BUNDLE_VERSION, PROJECT_SESSION_POLICY_VERSION, SessionCalendarError, SessionPolicyRevision
 from research_pipeline.platform import typed_canonical_hash
 from minute_rule_fixture import _bundle
 CODE = '000002.XSHE'
@@ -58,6 +60,16 @@ def project_inputs(codes=(CODE, OTHER)):
 def admit(sessions, rules, **changes):
     return require_minute_request_coverage(rules, sessions, **{**dict(instruments=(CODE,), start_at=START, end_at=END), **changes})
 
+def test_raw_stock_scope_without_factor_rule_is_only_valid_for_raw_requests():
+    sessions, rules = project_inputs(codes=(CODE,))
+    payload = rules.to_dict()
+    payload["rules"] = [rule for rule in payload["rules"]
+                        if rule["rule_id"] != "rule.cn_stock.adjustment_factor_snapshot.v1"]
+    direct = seal(payload, MinuteRuleSnapshotBundle)
+    admit(sessions, direct, stock_raw=True)
+    with pytest.raises(MinuteRuleSnapshotError, match="缺少复权快照规则"):
+        admit(sessions, direct)
+
 def test_new_instrument_dates_and_subset_are_covered_without_editing_reference_manifest():
     (sessions, rules) = project_inputs()
     admit(sessions, rules)
@@ -65,6 +77,81 @@ def test_new_instrument_dates_and_subset_are_covered_without_editing_reference_m
     assert len(sessions.policies) == 2
     assert SessionPolicyBundle.from_dict(sessions.to_dict()) == sessions
     assert MinuteRuleSnapshotBundle.from_dict(rules.to_dict()) == rules
+
+
+def test_matching_calendars_share_sessions_and_keep_security_policy_and_visibility():
+    sessions, _ = project_inputs()
+    payload = sessions.to_dict()
+    payload["policies"][1]["policy_id"] += ".other"
+    sessions = seal(payload, SessionPolicyBundle)
+    request = MinuteRequestCalendar(sessions)
+    first_policy, first_days = request.sessions(CODE, START, END)
+    other_policy, other_days = request.sessions(OTHER, START, END)
+    assert first_days is other_days
+    assert first_policy[0].instrument.instrument_id == CODE
+    assert other_policy[0].instrument.instrument_id == OTHER
+    rows = list(minute_request_sessions(sessions, instruments=(CODE, OTHER), start_at=START, end_at=END))
+    assert [row[0].instrument.instrument_id for row in rows] == [CODE, CODE, OTHER, OTHER]
+    with pytest.raises(SessionCalendarError, match=f"session政策身份不一致: {OTHER}"):
+        request.sessions(OTHER, START, END, first_policy[0].policy_id)
+
+    payload["policies"][1]["available_at"] = "2024-01-08T09:31:00+08:00"
+    request = MinuteRequestCalendar(seal(payload, SessionPolicyBundle))
+    request.sessions(CODE, START, END)
+    with pytest.raises(SessionCalendarError, match=f"session可见版本缺失: {OTHER} 2024-01-08"):
+        request.sessions(OTHER, START, END)
+
+
+def test_project_stock_calendar_covers_prelisting_without_fabricating_sessions(tmp_path):
+    from research_pipeline.domain.minute_request_scope import minute_request_sessions
+    from research_pipeline.domain.minute_scope_input import load_minute_scope_input, write_minute_scope_input
+
+    calendar, rules = project_inputs(codes=(CODE,))
+    payload = calendar.to_dict()
+    live = payload["policies"][0]
+    early = deepcopy(live)
+    early.update(effective_from="2023-10-25", effective_to="2024-01-07", trading_dates=[],
+                 available_at="2023-10-24T09:00:00+08:00")
+    live.update(revision=2, previous_policy_hash=SessionPolicyRevision.from_dict(early).policy_hash)
+    payload["policies"] = [early, live]
+    with_empty = seal(payload, SessionPolicyBundle)
+    rules_value = rules.to_dict()
+    for source in rules_value["sources"]:
+        if source["source_kind"] == "repository_snapshot":
+            source["locator"] = "fixture://project-calendar#" + with_empty.bundle_hash
+    rules = seal(rules_value, MinuteRuleSnapshotBundle)
+
+    start = datetime.fromisoformat("2023-10-25T09:30:00+08:00")
+    assert list(minute_request_sessions(with_empty, instruments=(CODE,), start_at=start, end_at=START)) == []
+    assert len(list(minute_request_sessions(with_empty, instruments=(CODE,), start_at=start, end_at=END))) == 2
+    admit(with_empty, rules, start_at=start)
+    with pytest.raises(SessionCalendarError, match="日期覆盖缺失"):
+        list(minute_request_sessions(calendar, instruments=(CODE,), start_at=start, end_at=END))
+    with pytest.raises(SessionCalendarError, match="可见版本缺失"):
+        late = {**early, "available_at": "2023-10-26T09:00:00+08:00"}
+        live["previous_policy_hash"] = SessionPolicyRevision.from_dict(late).policy_hash
+        hidden = seal({**payload, "policies": [late, live]}, SessionPolicyBundle)
+        list(minute_request_sessions(hidden, instruments=(CODE,), start_at=start, end_at=END))
+
+    reference = write_minute_scope_input(tmp_path, name="market", calendar=with_empty, rules=rules)
+    loaded = load_minute_scope_input(tmp_path, reference)
+    assert loaded.calendar == with_empty
+    assert loaded.calendar.bundle_hash == reference["calendar_hash"]
+    assert loaded.calendar.policies[0].to_dict()["trading_dates"] == []
+    assert loaded.calendar.policies[0].policy_hash == with_empty.policies[0].policy_hash
+
+
+def test_empty_dates_remain_invalid_for_published_calendar_and_project_futures():
+    published = load_session_policy_bundle()
+    spot = next(item for item in published.policies if item.instrument.asset_class == "cn_stock")
+    future = next(item for item in published.policies if item.instrument.asset_class == "cn_future")
+    with pytest.raises(SessionCalendarError, match="非空"):
+        SessionPolicyRevision.from_dict({**spot.to_dict(), "trading_dates": []})
+    with pytest.raises(SessionCalendarError, match="非空"):
+        SessionPolicyRevision.from_dict({
+            **future.to_dict(), "trading_dates": [], "contract_version": PROJECT_SESSION_POLICY_VERSION,
+            "available_at": "2023-10-24T09:00:00+08:00",
+        })
 
 @pytest.mark.parametrize('change,pattern', [({'instruments': ('000004.XSHE',)}, '证券缺失'), ({'end_at': datetime.fromisoformat('2024-01-10T15:00:00+08:00')}, '日期覆盖缺失')])
 def test_missing_requested_scope_is_rejected(change, pattern):
@@ -140,7 +227,7 @@ def test_calendar_source_and_previous_close_are_not_interchangeable():
     for row in payload['rules']:
         if row['instrument_id'] == CODE and row['rule_id'].endswith('.price_limit.v1'):
             row['parameters']['reference_price_available_at'] = END.isoformat()
-    with pytest.raises(MinuteRuleSnapshotError, match='前收盘价尚不可见'):
+    with pytest.raises(MinuteRuleSnapshotError, match='参考价.*尚不可见'):
         admit(sessions, seal(payload, MinuteRuleSnapshotBundle))
 
 def _project_package(tmp_path):
@@ -148,7 +235,7 @@ def _project_package(tmp_path):
     import yaml
     from pathlib import Path
     (sessions, rules) = project_inputs()
-    source = Path(__file__).parents[1] / 'research_packages/references/minute_stock_session'
+    source = Path(__file__).resolve().parent / 'fixtures/minute_stock_session'
     target = tmp_path / 'project'
     shutil.copytree(source, target)
     spec = target / 'spec/research.yaml'
@@ -165,8 +252,6 @@ def _project_package(tmp_path):
     for node in payload['graph']['nodes']:
         if node['operator_id'] == 'research.bars.minute_resample':
             node['parameters']['minute_scope'] = reference
-        if node['operator_id'] == 'finance.simulation.intraday':
-            node['parameters'].update(minute_scope=reference, rule_bundle_hash=rules.bundle_hash)
     spec.write_text(yaml.safe_dump(payload, allow_unicode=True), encoding='utf-8')
     return (target, spec, payload, sessions, rules)
 
@@ -207,7 +292,7 @@ def test_causal_declaration_failure_precedes_full_rule_coverage(tmp_path, monkey
     with pytest.raises(ResearchPackageError, match='因果声明窗口错误'):
         compile_research_package(load_research_package(target), admission=build_mainline_operator_registry())
 
-def test_project_scope_is_checked_on_bars_branch_only(tmp_path):
+def test_project_scope_is_checked_on_bars_branch_only(tmp_path, monkeypatch):
     from research_pipeline.packages.minute_scope_admission import validate_minute_scope_graph
     (sessions, rules) = project_inputs()
     from research_pipeline.domain.minute_scope_input import write_minute_scope_input, load_minute_scope_input
@@ -220,9 +305,14 @@ def test_project_scope_is_checked_on_bars_branch_only(tmp_path):
     unrelated = node('unrelated', 'data.minute.scan', {'request_ids': ['unrelated']})
     bars = node('bars', 'research.bars.minute_resample', {'session_policy_ref': sessions.policies[0].policy_id, 'minute_scope': reference}, (('minute_1m', 'scan'),))
     adjusted = node('adjusted', 'research.bars.minute_adjust', {}, (('bars', 'bars'), ('snapshot', 'unrelated')))
-    simulation = node('sim', 'finance.simulation.intraday', {'minute_scope': reference, 'rule_bundle_hash': rules.bundle_hash}, (('bars', 'adjusted'),))
+    from research_pipeline.packages import project_strategy_admission
+    monkeypatch.setattr(project_strategy_admission, "validate_strategy_schedules", lambda _declaration: None)
+    simulation = node("sim", "project.lean_strategy", {
+        "minute_scope": reference, "rule_bundle_hash": rules.bundle_hash,
+        "strategy_declaration": {"asset_class": "cn_stock"},
+    }, (("bars", "adjusted"),))
     recipe = SimpleNamespace(nodes=(scan, unrelated, bars, adjusted, simulation))
-    query = SimpleNamespace(dataset_id='cn_equity.minute_bar', universe=SimpleNamespace(instruments=(CODE,)), time_range=SimpleNamespace(start_at=START, end_at=END), visible_end_at=END)
+    query = SimpleNamespace(dataset_id='cn_equity.minute_bar', adjustment='raw', universe=SimpleNamespace(instruments=(CODE,)), time_range=SimpleNamespace(start_at=START, end_at=END), visible_end_at=END)
     validate_minute_scope_graph(recipe, {'prices': query}, scope_inputs=scope_inputs)
     bars.parameters.pop('minute_scope')
     from research_pipeline.packages import ResearchPackageError
@@ -283,7 +373,7 @@ def test_runtime_resample_preserves_project_calendar_and_consumes_it(tmp_path, m
     parameters = {node.node_id: dict(node.parameters) for node in plan.recipe.nodes}
     bars_node = next((node for node in plan.recipe.nodes if node.operator_id == 'research.bars.minute_resample'))
     parameters[bars_node.node_id]['interval_minutes'] = interval
-    environment = ResearchRunEnvironment(tmp_path, {}, {'stock_minute': admitted}, None, {}, root, tmp_path / 'artifacts', parameters, None, plan.fixed_clock, plan.root_seed, 1, None, {}, package.minute_scope_inputs, minute_scan_plans={'stock_minute': scan})
+    environment = ResearchRunEnvironment(tmp_path, {}, {'stock_minute': admitted}, None, {}, root, tmp_path / 'artifacts', parameters, None, plan.fixed_clock, plan.root_seed, 1, None, {}, minute_scope_inputs=package.minute_scope_inputs, minute_scan_plans={'stock_minute': scan})
     context = SimpleNamespace(environment=environment, external_store=ExternalArtifactStore(tmp_path / 'external'), node=SimpleNamespace(node_id=bars_node.node_id, output_types=(('bars', 'data.minute-bars.v1'),)), effective_resource_budget=SimpleNamespace(memory_bytes=1024 ** 3))
     monkeypatch.setattr(minute_data, '_input_external_payload', lambda context, port: payload)
     if interval != 1:

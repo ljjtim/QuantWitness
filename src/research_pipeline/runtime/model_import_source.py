@@ -1,18 +1,25 @@
 """封存模型输入的共同来源验收；不加载pickle或改写来源运行。"""
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import platform
+import shutil
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 
-from research_pipeline.platform import typed_canonical_hash
+from research_pipeline.data_plane import DataPlaneError, PathRolePolicy
+from research_pipeline.platform import canonical_json, typed_canonical_hash
 from research_pipeline.research.dataframe_budget import PandasFrameBudget
 from research_pipeline.research.modeling.project_model import validate_project_model_adapter
 from research_pipeline.research.modeling.qlib import SEQUENCE_MODEL_CLASSES, normalize_candidates
+from research_pipeline.results.contracts import QLIB_MODEL_INVENTORY_SCHEMA_ID, ResultBundle
 from .checkpoint import CheckpointStore
 from .errors import RuntimeIntegrityError
 from .external_artifact import ExternalArtifactStore
@@ -187,7 +194,263 @@ def _source_research_facts(root, split_metadata):
     return semantics, identity
 
 
+LEGACY_GUIDANCE = (
+    "该历史 Result 未封存正式模型导入所需的 model-provenance.json 或模型元数据；"
+    "历史已发布 Result 可改用 `ResultStore.open_snapshot` 与 `predict_bundle` 读取预测，"
+    "如需通过 `research.model.import` 复训/导入，请使用当前版本重新运行并发布 Result。"
+)
+
+
+def _stream_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_published_result_bundle(result_dir: Path, store_root: Path) -> ResultBundle:
+    """在不跨层依赖 ResultStore 的前提下完成已发布 Result 全量校验。"""
+    try:
+        policy = PathRolePolicy()
+        resolved_store = policy.resolve_root(store_root, role="result_store")
+        resolved_dir = policy.resolve_contained_path(
+            allowed_root=resolved_store,
+            candidate=result_dir,
+            root_role="result_store",
+            path_role="result_bundle",
+            expected_kind="directory",
+        )
+        manifest_path, marker_path = policy.resolve_manifest_files(
+            allowed_root=resolved_dir,
+            relative_paths=("result.json", "COMMITTED"),
+            root_role="result_bundle",
+            file_role="result_control",
+        )
+        raw = manifest_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
+        marker = marker_path.read_text(encoding="ascii")
+        if not isinstance(payload, dict):
+            raise RuntimeIntegrityError("Result manifest 必须是对象")
+        bundle = ResultBundle.from_dict(payload)
+        if raw != canonical_json(bundle.to_dict()) or marker != bundle.result_id:
+            raise RuntimeIntegrityError("Result manifest 或 COMMITTED 发生漂移")
+        relative = resolved_dir.relative_to(resolved_store)
+        if relative.parts[-3:] != (bundle.project_id, bundle.run_id, bundle.result_id):
+            raise RuntimeIntegrityError("Result namespace 与内容身份不一致")
+        actual_files: set[str] = set()
+        for directory, dirnames, filenames in policy.walk(resolved_dir):
+            directory_path = Path(directory)
+            for name in sorted(dirnames):
+                policy.resolve_contained_path(
+                    allowed_root=resolved_dir,
+                    candidate=directory_path / name,
+                    root_role="result_bundle",
+                    path_role="result_directory",
+                    expected_kind="directory",
+                )
+            for name in sorted(filenames):
+                policy.resolve_contained_path(
+                    allowed_root=resolved_dir,
+                    candidate=directory_path / name,
+                    root_role="result_bundle",
+                    path_role="result_file",
+                    expected_kind="file",
+                )
+                actual_files.add((directory_path / name).relative_to(resolved_dir).as_posix())
+        expected_files = {
+            "result.json",
+            "COMMITTED",
+            *bundle.control_files,
+            *(path for table in bundle.tables for path in table.files),
+            *(item.relative_path for item in bundle.support_files),
+        }
+        missing_files = expected_files - actual_files
+        extra_files = actual_files - expected_files - {"execution-cost.json"}
+        if missing_files or extra_files:
+            raise RuntimeIntegrityError("Result 文件集合不精确或含额外文件")
+        if "execution-cost.json" in actual_files:
+            cost_payload = json.loads((resolved_dir / "execution-cost.json").read_text(encoding="utf-8"))
+            if not isinstance(cost_payload, dict):
+                raise RuntimeIntegrityError("Result execution-cost.json 必须是对象")
+        for control_name, expected_digest in bundle.control_files.items():
+            digest = _stream_file_sha256(resolved_dir / control_name)
+            if digest != expected_digest:
+                raise RuntimeIntegrityError(f"Result 控制文件摘要漂移: {control_name}")
+        for support in bundle.support_files:
+            digest = _stream_file_sha256(resolved_dir / support.relative_path)
+            if digest != support.content_hash:
+                raise RuntimeIntegrityError(f"Result 支持文件摘要漂移: {support.relative_path}")
+        for table in bundle.tables:
+            for rel_path, expected_digest in table.files.items():
+                file_path = resolved_dir / rel_path
+                digest = _stream_file_sha256(file_path)
+                if digest != expected_digest:
+                    raise RuntimeIntegrityError(f"Result Parquet 摘要漂移: {rel_path}")
+                parquet = pq.ParquetFile(file_path)
+                schema = parquet.metadata.schema.to_arrow_schema()
+                if (
+                    typed_canonical_hash({"schema": str(schema)}) != table.schema_hashes[rel_path]
+                    or parquet.metadata.num_rows != table.row_counts[rel_path]
+                ):
+                    raise RuntimeIntegrityError(f"Result Parquet schema 或行数漂移: {rel_path}")
+        return bundle
+    except RuntimeIntegrityError:
+        raise
+    except Exception as exc:
+        raise RuntimeIntegrityError(f"已发布 Result 校验失败: {exc}") from exc
+
+
+def _freeze_published_result_model_source(parameters):
+    from research_pipeline.research.semantics import ResearchSemantics
+    from .walk_forward_model_execution import _read_artifact_metadata
+
+    raw_dir = parameters.get("source_result_directory")
+    _require(isinstance(raw_dir, str) and bool(raw_dir.strip()), "缺少 source_result_directory")
+    try:
+        result_dir = Path(raw_dir).resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeIntegrityError(f"已发布 Result 目录不可访问: {exc}") from exc
+    raw_store = parameters.get("source_result_store")
+    if raw_store:
+        try:
+            store_root = Path(raw_store).resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeIntegrityError(f"已发布 ResultStore 目录不可访问: {exc}") from exc
+    else:
+        _require(len(result_dir.parents) >= 3, "已发布 Result 目录层级无效，无法推断 ResultStore 根目录")
+        store_root = result_dir.parents[2]
+    bundle = _verify_published_result_bundle(result_dir, store_root)
+    if "model-provenance.json" not in bundle.control_files:
+        raise RuntimeIntegrityError(LEGACY_GUIDANCE)
+    try:
+        provenance = json.loads((result_dir / "model-provenance.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeIntegrityError(f"模型 Result provenance 无法读取: {exc}") from exc
+    _require(isinstance(provenance, dict) and provenance.get("schema") == "research.result-model-provenance.v1", "模型 Result provenance schema 不受支持")
+    fit_tables = tuple(t for t in bundle.tables if t.artifact_type == "research.model-fits.v2")
+    split_tables = tuple(t for t in bundle.tables if t.artifact_type == "research.model-split-manifest.v2")
+    inventory_tables = tuple(t for t in fit_tables if t.schema_id == QLIB_MODEL_INVENTORY_SCHEMA_ID)
+    audit_tables = tuple(t for t in fit_tables if t.path_prefix == "fit_audit")
+    sample_tables = tuple(t for t in split_tables if t.path_prefix == "samples")
+    if len(inventory_tables) != 1 or len(audit_tables) != 1 or len(sample_tables) != 1:
+        raise RuntimeIntegrityError(LEGACY_GUIDANCE)
+    fit_keys = {t.artifact_key for t in fit_tables}
+    split_keys = {t.artifact_key for t in split_tables}
+    _require(len(fit_keys) == 1 and len(split_keys) == 1, "模型 Result 中的 fit/split 工件不唯一")
+    fit_key = next(iter(fit_keys))
+    split_key = next(iter(split_keys))
+    has_fit_meta = any(s.artifact_key == fit_key and s.source_path == "artifact-metadata.json" for s in bundle.support_files)
+    has_split_meta = any(s.artifact_key == split_key and s.source_path == "artifact-metadata.json" for s in bundle.support_files)
+    if not (has_fit_meta and has_split_meta):
+        raise RuntimeIntegrityError(LEGACY_GUIDANCE)
+
+    semantics = provenance.get("research_semantics")
+    identity = provenance.get("research_identity")
+    _require(isinstance(semantics, dict) and isinstance(identity, dict), "模型 Result provenance 缺少语义或身份")
+    semantic_payload = {k: v for k, v in semantics.items() if k != "effective_claim_level"}
+    parsed = ResearchSemantics.from_dict(semantic_payload)
+    _require(provenance.get("source_run_id") == bundle.run_id, "模型 Result 来源 run_id 不一致")
+    dag_nodes = provenance.get("dag_nodes")
+    _require(isinstance(dag_nodes, list), "模型 Result provenance 缺少 DAG 节点声明")
+    split_node_id = sample_tables[0].source_node_id
+    fit_node_id = inventory_tables[0].source_node_id
+    nodes_by_id = {n.get("node_id"): n for n in dag_nodes if isinstance(n, dict)}
+    _require(nodes_by_id.get(split_node_id, {}).get("implementation_id") == "research.model.split-manifest.v2", "来源split不是正式模型生产节点")
+    _require(nodes_by_id.get(fit_node_id, {}).get("implementation_id") in {"research.model.fit.v2", "research.model.import.v1"}, "来源fit不是正式模型生产节点")
+    outputs = {o.get("artifact_type") for n in dag_nodes if isinstance(n, dict) for o in n.get("output_types", ()) if isinstance(o, dict)}
+    _require("research.feature-set.v1" in outputs and bool(outputs & {"research.label.v1", "research.event-window.v1"}), "来源缺乏Feature及Label生产证明")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        split_root = tmp / "split"
+        fit_root = tmp / "fit"
+        split_root.mkdir()
+        fit_root.mkdir()
+        split_files: dict[str, str] = {}
+        fit_files: dict[str, str] = {}
+        for table in split_tables:
+            prefix = f"tables/{table.table_id}/"
+            for rel_path, expected_digest in table.files.items():
+                artifact_rel = f"{table.path_prefix}/{rel_path.removeprefix(prefix)}"
+                _require(artifact_rel not in split_files, f"模型 Result split 表文件重复: {artifact_rel}")
+                dest = split_root / artifact_rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(result_dir / rel_path, dest)
+                split_files[artifact_rel] = expected_digest
+        for table in fit_tables:
+            prefix = f"tables/{table.table_id}/"
+            for rel_path, expected_digest in table.files.items():
+                artifact_rel = f"{table.path_prefix}/{rel_path.removeprefix(prefix)}"
+                _require(artifact_rel not in fit_files, f"模型 Result fit 表文件重复: {artifact_rel}")
+                dest = fit_root / artifact_rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(result_dir / rel_path, dest)
+                fit_files[artifact_rel] = expected_digest
+        for support in bundle.support_files:
+            if support.artifact_key == split_key:
+                _require(support.source_path not in split_files, f"模型 Result split 支持文件重复: {support.source_path}")
+                dest = split_root / support.source_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(result_dir / support.relative_path, dest)
+                split_files[support.source_path] = support.content_hash
+            elif support.artifact_key == fit_key:
+                _require(support.source_path not in fit_files, f"模型 Result fit 支持文件重复: {support.source_path}")
+                dest = fit_root / support.source_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(result_dir / support.relative_path, dest)
+                fit_files[support.source_path] = support.content_hash
+        fit_metadata = _read_artifact_metadata(fit_root)
+        split_metadata = _read_artifact_metadata(split_root)
+        _require(split_metadata.get("semantics_hash") == parsed.semantics_hash, "来源split未绑定研究语义")
+        record = {
+            "run_id": bundle.run_id,
+            "status": bundle.run.status,
+            "root_seed": provenance.get("root_seed"),
+            "fixed_clock": provenance.get("fixed_clock"),
+            "audit_manifest_digest": provenance.get("audit_manifest_digest"),
+            "dag": {"nodes": dag_nodes},
+        }
+        models = _validate_models(
+            fit_root, split_root, SimpleNamespace(files=set(fit_files)),
+            fit_metadata, split_metadata, record,
+        )
+    return {
+        "schema": SCHEMA,
+        "source_kind": "published_result",
+        "source_result_directory": str(result_dir),
+        "source_result_store": str(store_root),
+        "source_result_id": bundle.result_id,
+        "source_run_id": bundle.run_id,
+        "source_fit_node_id": fit_node_id,
+        "source_split_node_id": split_node_id,
+        "source_fit_artifact": fit_key,
+        "source_split_artifact": split_key,
+        "source_record": record,
+        "research_semantics": semantics,
+        "research_identity": identity,
+        "fit_execution": {
+            "diagnostics": [],
+            "training_node_succeeded": True,
+            "source_result_id": bundle.result_id,
+        },
+        "fit_tables": [
+            {"table_id": t.table_id, "path_prefix": t.path_prefix, "files": dict(sorted(t.files.items()))}
+            for t in fit_tables
+        ],
+        "split_tables": [
+            {"table_id": t.table_id, "path_prefix": t.path_prefix, "files": dict(sorted(t.files.items()))}
+            for t in split_tables
+        ],
+        "fit_files": dict(sorted(fit_files.items())),
+        "split_files": dict(sorted(split_files.items())),
+        "models": models,
+    }
+
+
 def freeze_completed_model_source(parameters):
+    if parameters.get("source_result_directory") not in (None, ""):
+        return _freeze_published_result_model_source(parameters)
     from .walk_forward_model_execution import _read_artifact_metadata
     _require(all(isinstance(parameters.get(key),str) and parameters[key] for key in SOURCE_FIELDS), "来源声明字段不完整")
     root=Path(parameters["source_run_root"]).resolve(strict=True)

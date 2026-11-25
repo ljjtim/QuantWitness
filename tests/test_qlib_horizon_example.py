@@ -17,6 +17,9 @@ from research_pipeline.platform import typed_canonical_hash
 from research_pipeline.research.modeling import assemble_daily_model_samples
 from research_pipeline.research.modeling.inputs import ModelMainlineError
 
+
+pytestmark = pytest.mark.ml
+
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio"
 WINDOWS = {
     "train_sessions": 20, "validation_sessions": 10, "test_sessions": 8,

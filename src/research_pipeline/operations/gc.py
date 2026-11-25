@@ -6,10 +6,10 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import shutil
 import uuid
 
 from research_pipeline.platform.canonical import typed_canonical_hash
+from research_pipeline.platform.immutable_files import remove_tree
 from research_pipeline.runtime.artifact_lifecycle import protection_reasons
 
 
@@ -232,7 +232,7 @@ def purge_artifact_quarantine(
             candidates.append(path)
     if apply:
         for path in candidates:
-            shutil.rmtree(path)
+            remove_tree(path)
     return tuple(path.relative_to(base).as_posix() for path in candidates)
 
 

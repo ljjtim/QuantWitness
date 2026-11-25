@@ -20,9 +20,17 @@
 5. 用 `predict_bundle` 执行显式预测。
 
 字节校验只检查内容。显式预测才加载模型和处理器。
-模型索引表未进入 `ResultSpec` 时，模型仍在原运行工件中。
+模型索引表未进入 `ResultSpec` 时，模型仍在原运行工件中。如果运行目录包含 `research.semantics.json` 与 `research.identity.json`，封存 `research.qlib-model-inventory.v1` 时还会同时在 Result 顶层写入 `model-provenance.json`（纳入 `ResultBundle.control_files`），并将对应 `split`/`fit` 工件根下的 `artifact-metadata.json` 一并写入 `support/<artifact_key>/artifact-metadata.json`。
 
 训练结束后，光保存一个指标不够。还需要模型文件、数据处理器、特征顺序和训练配置。它们一起决定恢复后是否还能产生相同预测。下面说明模型随结果包交付和检查的方式。
+
+## 从已发布 Result 正式导入模型
+
+后续研究如需通过 `research.model.import` 复用已训练模型，可直接使用自包含的 `source_result_directory`（可选 `source_result_store`，默认为 Result 目录上三级 ResultStore 根）：
+
+- `source_result_directory` 与旧版 `source_run_root`、`source_fit_artifact`、`source_split_artifact`、`source_fit_node_id`、`source_split_node_id` 五项运行目录字段严格互斥。
+- 准备与运行阶段先按 Result 校验 `model-provenance.json`、正式表以及 `support/` 支持文件（含 `artifact-metadata.json`），核验通过后直接从已发布 Result 还原 `splits` 与 `models` 工件，即使原 `run_root` 已归档删除也可完整复现并预测。
+- 本合同生效前发布的旧版历史 Result 未封存 `model-provenance.json` 或 `artifact-metadata.json`；`research.model.import` 会明确拒绝并提示：若只需对历史 Result 做离线预测，请继续使用 `ResultStore.open_snapshot` 与 `predict_bundle`，如需正式图导入则须按当前版本重新运行并发布 Result。
 
 ## 处理规则
 

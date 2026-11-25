@@ -34,7 +34,7 @@ from research_pipeline.platform.operator_contracts import validate_parameters
 
 from .contracts import ArtifactRef, ResourceBudget
 from .errors import RuntimeIntegrityError, RuntimeWorkerError
-from .identity import environment_fingerprint
+from .identity import environment_fingerprint, project_worker_adapter_hash
 from research_pipeline.data_plane.snapshots import _sha256
 
 
@@ -142,7 +142,7 @@ class ProjectRuntimeIdentity:
             "operator_spec_hash": manifest.operator_spec.spec_hash,
             "source_tree_hash": manifest.source_tree_hash,
             "dependency_lock_hash": manifest.dependency_lock_hash,
-            "adapter_hash": project_worker_adapter_hash(),
+            "adapter_hash": project_worker_adapter_hash(manifest),
             "requires_python": manifest.requires_python,
             "runtime_environment_hash": environment_fingerprint(),
             "abi_version": manifest.abi_version,
@@ -310,44 +310,6 @@ def project_runtime_identity(
     if expected is None or any(expected.get(key) != value for key, value in expected_fields.items()):
         raise RuntimeIntegrityError("项目 Runtime 身份与组合准入不一致")
     return identity
-
-
-def project_worker_adapter_hash() -> str:
-    """绑定实际 Worker adapter 与 Runtime bridge 源码，变化后旧状态不可复用。"""
-    runtime_path = Path(__file__).resolve(strict=True)
-    worker_path = runtime_path.with_name("project_operator_worker.py")
-    return typed_canonical_hash({
-        "contract_version": "project-operator-worker-adapter-code-v1",
-        "runtime_bridge_sha256": hashlib.sha256(runtime_path.read_bytes()).hexdigest(),
-        "worker_adapter_sha256": hashlib.sha256(worker_path.read_bytes()).hexdigest(),
-        "helpers": {
-            name: hashlib.sha256(runtime_path.with_name(name).read_bytes()).hexdigest()
-            for name in ("project_table_input.py", "project_output.py", "walk_forward_model_execution.py", "project_causal.py",
-                         "project_causal_worker.py", "project_causal_execution.py", "artifact_lifecycle.py",
-                         "project_causal_minute.py", "causal_facts_codec.py", "causal_worker_session.py",
-                         "worker_process_session.py", "lean_strategy_execution.py", "lean_strategy_inputs.py", "lean_engine_worker.py",
-                         "lean_market_source.py", "lean_day_stream.py",
-                         "strategy_signal_inputs.py", "portfolio_target_inputs.py")
-        },
-        "strategy_contracts": {
-            name: hashlib.sha256(runtime_path.parent.parent.joinpath(name).read_bytes()).hexdigest()
-            for name in ("domain/strategy_protocol.py", "domain/strategy_declaration.py", "results/contracts.py", "platform/lean_contract.py",
-                         "platform/lean_runtime.py", "platform/daily_projection.py", "extensions/project_bundle.py", "data_plane/daily_stream.py", "data_plane/dataset_files.py",
-                         "data_plane/dataset_artifacts.py", "data_plane/direct_sources.py", "data_plane/archive_read.py")
-        },
-        "resource_contracts": {
-            name: hashlib.sha256(
-                runtime_path.parent.parent.joinpath("platform", name).read_bytes()
-            ).hexdigest()
-            for name in ("resource_budget.py", "process_resources.py")
-        },
-        "causal_contract": hashlib.sha256(
-            runtime_path.parent.parent.joinpath("platform", "project_causal_contract.py").read_bytes()
-        ).hexdigest(),
-        "causal_time_contract": hashlib.sha256(
-            runtime_path.parent.parent.joinpath("platform", "causal_time.py").read_bytes()
-        ).hexdigest(),
-    })
 
 
 def execute_project_worker_attempt(
@@ -522,7 +484,7 @@ def _run_project_worker(
     staged_bundle = (worker_session.root if worker_session is not None else attempt_root) / identity.bundle_hash
     if worker_session is None or not staged_bundle.exists():
         shutil.copytree(bundle_path, staged_bundle)
-        if verify_project_operator_bundle(staged_bundle).bundle_hash != identity.bundle_hash:
+        if verify_project_operator_bundle(staged_bundle, cache=False).bundle_hash != identity.bundle_hash:
             raise RuntimeIntegrityError("项目 bundle 暂存后身份不一致")
     input_contracts = []
     input_root = attempt_root / "inputs"

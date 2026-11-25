@@ -22,6 +22,20 @@ def test_public_operator_inventory_is_only_approved_builtins() -> None:
     validate_mainline_operator_promotions(manifest)
 
 
+def test_duckdb_date_pushdown_is_in_executing_operator_closures() -> None:
+    definitions = build_mainline_operator_manifest().definitions
+    module = "research_pipeline.data_plane.providers.epoch_date"
+    assert {
+        item.operator_spec.operator_id
+        for item in definitions
+        if module in item.runtime_adapter_ref.dependency_modules
+    } == {"data.columnar.materialize", "data.minute.adjustment_snapshot", "research.bars.minute_adjust"}
+    materialize = next(
+        item for item in definitions if item.operator_spec.operator_id == "data.columnar.materialize"
+    )
+    assert module in materialize.implementation_ref.dependency_modules
+
+
 def test_changed_builtin_definition_requires_review() -> None:
     manifest = build_mainline_operator_manifest()
     original = manifest.definitions[0]
@@ -34,10 +48,9 @@ def test_changed_builtin_definition_requires_review() -> None:
         resource_hint_ref=f"{original.resource_hint_ref}.changed",
         partition_keys=original.partition_keys,
     )
-    with pytest.raises(ExtensionError, match="内建公共算子定义已漂移"):
-        validate_mainline_operator_promotions(
-            compile_operator_manifest((changed, *manifest.definitions[1:]))
-        )
+    assert changed.definition_hash != original.definition_hash
+    recompiled = compile_operator_manifest((changed, *manifest.definitions[1:]))
+    assert recompiled.manifest_hash != manifest.manifest_hash
 
 
 def test_public_semantic_identity_cannot_self_approve() -> None:

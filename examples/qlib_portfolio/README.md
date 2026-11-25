@@ -21,7 +21,9 @@
 
 `development`用于研究迭代：只训练模型并评价validation，保留时间切分和真实拟合范围。不生成test预测，不读取holdout索引或打开最终holdout。`model`执行相同模型代码，继续逐时点选择、开发test评价与一次性最终holdout。
 
-三种模式共享数据生成器、特征公式、模型声明和生产指标定义。`portfolio`在完整模型研究之外，把开发test预测按冻结的最高三只等权规则接入LEAN日频执行。组合结果使用`research.lean-simulation.v2`八表及metrics，LEAN指标引用统一为`project.lean.*@2.0.0`。
+三种模式共享数据生成器、特征公式、模型声明和生产指标定义。`portfolio`在完整模型研究之外，把开发test预测按冻结的最高三只等权规则接入LEAN日频执行。组合结果使用`research.lean-simulation.v4`八表及metrics，LEAN指标引用统一为`project.lean.*@2.0.0`。
+
+组合算法位于`lean_algorithm/algorithm.py`，直接继承`QCAlgorithm`。正式目标通过`ResearchData`交付`weight_ppb`与`batch_id`，每批覆盖全部声明证券，退出目标为零。算法收齐同批后调用原生`SetHoldings`，订单、成交、图表和ObjectStore进入正式Result。
 
 Feature和Label显式使用通用`stateless_session`。
 同一节点复用Worker进程，减少逐日启动开销。
@@ -196,7 +198,7 @@ Python 准备接口 `prepare(root, mode="development", feature_expressions={"his
 
 目标节点只读取test预测所需列和收盘价格，不读取actual、最终选择评分、holdout预测或下一会话开盘价。成交行情通过独立端口供仿真使用。最终holdout仍只用于独立模型诊断，不参与组合规则选择。
 
-组合Result包含目标、决策基准、LEAN订单、意图、每日账户、策略轨迹和正式金融指标。目标节点依据当时可见的预测排名生成固定权重、基准和执行会话。日频LEAN引擎生成成交、费用、结算与绩效。交易分类为合成权益ETF，佣金300 ppm，最低佣金0.05元，初始现金10万元，无公司行动。
+组合Result包含目标、决策基准、LEAN八张v4执行表和正式金融指标。执行表保存真实订单、每日账户、原生请求轨迹、成交、持仓、账户事件和生命周期；原生算法的intents表为空。目标节点依据当时可见的预测排名生成固定权重、基准和执行会话。日频LEAN引擎生成成交、费用、结算与绩效。交易分类为合成权益ETF，佣金300 ppm，最低佣金0.05元，初始现金10万元，无公司行动。
 
 指标定义在生成包的`spec/research.yaml`中以`metric_definitions`保存。MSE定义绑定`extension/operator.py`的生产汇总算法，组合指标由核心按日频LEAN的实际估值口径注入。模型误差的样本范围、单位和样本数直接写入正式指标表。
 
@@ -285,6 +287,8 @@ next-session-open目标和执行保持不变。模型价格变化误差与交易
 不对应真实交易所历史。
 
 自有数据的`input-config.json`在portfolio模式须增加`lean_execution`，包含`lean_home`、`scope_root`、`minute_scope`、本页的四个request_id、`applicable_start`、`applicable_end`、`availability_policy_ref`、`slippage_bps`、`slippage_ticks`及`participation_ppm`。四个执行请求须已存在于同一批准Catalog与输入归档，scope须覆盖完整历史规则和日历。框架不会为真实来源补造规则或无行动结论。
+
+自有数据的公司行动可通过 `lean_execution.trading_calendar_request_id` 绑定同一归档中的 `cn_market.trading_sessions` 请求。日历须从最早相关公告覆盖至执行窗口结束。这样公司行动跨周末、节假日或标的缺少日线时，仍按市场实际交易日确定可见时点。
 
 行情映射除原字段外须提供high/low/volume。LEAN安装通过`--lean-home`显式提供并冻结，恢复不更换安装。
 

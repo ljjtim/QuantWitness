@@ -11,7 +11,7 @@ from research_pipeline.research.modeling.qlib import fit_bundle, predict_bundle
 from test_qlib_gru_integration import inputs
 from test_qlib_lstm_contract import lstm_candidate
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="需要 ml-sequence 可选依赖")
+pytestmark = [pytest.mark.ml, pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="需要 ml-sequence 可选依赖")]
 
 
 def test_lstm_round_trip_does_not_read_prediction_labels(tmp_path, monkeypatch):

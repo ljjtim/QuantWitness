@@ -211,16 +211,20 @@ try {
             throw "中性草稿 lint 必须以 exit=1 和 research_package_invalid JSON 拒绝空 sources"
         }
 
-        $recipeListResult = Invoke-AcceptanceCommand "recipe.list" $venvPython @(
-            "-m", "research_pipeline", "recipe", "list", "--format", "json"
+        $operatorListResult = Invoke-AcceptanceCommand "operator.list" $venvPython @(
+            "-m", "research_pipeline", "operator", "list", "--format", "json"
         )
-        $recipeList = $recipeListResult.Stdout | ConvertFrom-Json
-        if ($recipeList.data.items.Count -ne 0) {
-            throw "公共 recipe 当前应为空"
+        $operatorList = $operatorListResult.Stdout | ConvertFrom-Json
+        if ($operatorList.data.items.Count -eq 0) {
+            throw "必须列出已安装的公共算子"
         }
-        [void](Invoke-AcceptanceCommand "recipe.unknown-id" $venvPython @(
-            "-m", "research_pipeline", "recipe", "describe", "unknown.recipe", "--format", "json"
-        ) $false)
+        $unknownOperator = Invoke-AcceptanceCommand "operator.unknown-id" $venvPython @(
+            "-m", "research_pipeline", "operator", "describe", "unknown.operator", "--format", "json"
+        ) $false
+        $unknownOperatorPayload = $unknownOperator.Stdout | ConvertFrom-Json
+        if ($unknownOperatorPayload.status -cne "fail" -or $unknownOperatorPayload.error_code -cne "discovery_not_found") {
+            throw "未知算子必须返回 discovery_not_found JSON 诊断"
+        }
     }
     finally {
         Pop-Location
@@ -231,7 +235,7 @@ try {
     )
     $environment = $environmentResult.Stdout | ConvertFrom-Json
     $payload = [ordered]@{
-        contract_version = "research-clean-wheel-acceptance-v1"
+        contract_version = "research-clean-wheel-acceptance-v2"
         status = "pass"
         wheel_name = [IO.Path]::GetFileName($wheelPath)
         wheel_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $wheelPath).Hash.ToLowerInvariant()
@@ -241,7 +245,7 @@ try {
         inventory = $inventory
         capabilities_sha256 = Get-TextSha256 $installedCapabilities
         package_data_probe_sha256 = Get-TextSha256 $resourceResult.Stdout
-        recipe_list_sha256 = Get-TextSha256 $recipeListResult.Stdout
+        operator_list_sha256 = Get-TextSha256 $operatorListResult.Stdout
         validated_capability_ids = @("capability.discovery", "research_package.plan")
         commands = $commands
         source_tree_on_pythonpath_during_installed_checks = $false

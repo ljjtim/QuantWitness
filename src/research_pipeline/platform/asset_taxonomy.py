@@ -44,7 +44,7 @@ ASSET_CAPABILITY_MATRIX: Mapping[str, AssetCapability] = MappingProxyType({
         ("daily", "minute"),
         ("open", "high", "low", "close", "volume", "money"),
         "cn_stock",
-        ("cash_daily", "minute_event", "bar_tca"),
+        ("lean_daily", "lean_minute"),
     ),
     "cn_etf": AssetCapability(
         "cn_etf",
@@ -52,7 +52,7 @@ ASSET_CAPABILITY_MATRIX: Mapping[str, AssetCapability] = MappingProxyType({
         ("daily", "minute"),
         ("open", "high", "low", "close", "volume", "money"),
         "cn_stock",
-        ("cash_daily", "minute_event", "bar_tca"),
+        ("lean_daily", "lean_minute"),
     ),
     "cn_index": AssetCapability(
         "cn_index",
@@ -60,7 +60,7 @@ ASSET_CAPABILITY_MATRIX: Mapping[str, AssetCapability] = MappingProxyType({
         ("daily", "minute"),
         ("open", "high", "low", "close", "volume", "money"),
         "cn_stock",
-        ("minute_event",),
+        (),
     ),
     "cn_future": AssetCapability(
         "cn_future",
@@ -77,14 +77,13 @@ ASSET_CAPABILITY_MATRIX: Mapping[str, AssetCapability] = MappingProxyType({
             "settlement",
         ),
         "cn_future",
-        ("futures_daily", "minute_event", "bar_tca"),
+        ("lean_daily", "lean_minute"),
     ),
 })
 MINUTE_TARGET_ASSET_CLASSES = tuple(
     asset_class
     for asset_class in CANONICAL_ASSET_CLASSES
-    if "minute_event" in ASSET_CAPABILITY_MATRIX[asset_class].simulation_entries
-    and "bar_tca" in ASSET_CAPABILITY_MATRIX[asset_class].simulation_entries
+    if "lean_minute" in ASSET_CAPABILITY_MATRIX[asset_class].simulation_entries
 )
 
 

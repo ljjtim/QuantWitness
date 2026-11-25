@@ -172,13 +172,13 @@ class CausalPlan:
     work_items: tuple[CausalWorkItem, ...]
     state_scope: str
 
-    def to_dict(self) -> dict:
-        return {
-            "kind": self.kind, "output_port": self.output_port,
+    def header(self) -> dict:
+        return {"kind": self.kind, "output_port": self.output_port,
             "key_columns": list(self.key_columns), "state_scope": self.state_scope,
-            "sources": [source.to_dict() for source in self.sources],
-            "work_items": [item.to_dict() for item in self.work_items],
-        }
+            "sources": [source.to_dict() for source in self.sources]}
+
+    def to_dict(self) -> dict:
+        return {**self.header(), "work_items": [item.to_dict() for item in self.work_items]}
 
     def iter_work_items(self, max_keys: int = 8192) -> Iterator[CausalWorkItem]:
         """同窗键可合批；批大小不参与冻结的计划身份。"""
@@ -209,11 +209,20 @@ class CausalPlan:
             yield replace(current, key_rows=tuple(pending))
 
 
-def parse_causal_plan(raw: object) -> CausalPlan:
+def parse_causal_plan(raw: object, *, allow_pending_schedule=False) -> CausalPlan:
     """解析固定 JSON 计划；不接受表达式、回调或扩展自报的时间事实。"""
-    data = _fields(raw, {
-        "kind", "output_port", "key_columns", "sources", "work_items", "state_scope",
-    }, "causal_plan")
+    fields = {"kind", "output_port", "key_columns", "sources", "state_scope"}
+    scheduled = isinstance(raw, Mapping) and "daily_schedule" in raw
+    pending = scheduled and "entity_pools" not in raw and allow_pending_schedule
+    if scheduled:
+        fields.add("daily_schedule")
+        if not pending:
+            fields.add("entity_pools")
+            if "source_files" in raw:
+                fields.add("source_files")
+    if not pending:
+        fields.add("work_items")
+    data = _fields(raw, fields, "causal_plan")
     if data["kind"] not in ("feature", "label"):
         raise CausalTimeContractError("causal kind 必须为 feature 或 label")
     if data["state_scope"] not in ("independent", "carry"):
@@ -246,11 +255,17 @@ def parse_causal_plan(raw: object) -> CausalPlan:
     ports = {source.port for source in sources}
     if len(ports) != len(sources):
         raise CausalTimeContractError("causal source port 不能重复")
+    if scheduled:
+        from .daily_schedule import validate_schedule
+        validate_schedule(data)
+        if pending:
+            return CausalPlan(data["kind"], output_port, keys, tuple(sources), (), data["state_scope"])
     if not isinstance(data["work_items"], (list, tuple)) or not data["work_items"]:
         raise CausalTimeContractError("causal work_items 必须非空")
     work_items = []
     seen_keys: set[tuple[object, ...]] = set()
     products: list[CausalKeyProduct] = []
+    scheduled_days = set()
     for value in data["work_items"]:
         key_fields = {"key_axes", "key_order"} if isinstance(value, Mapping) and "key_axes" in value else {"key_rows"}
         item = _fields(value, {
@@ -270,13 +285,26 @@ def parse_causal_plan(raw: object) -> CausalPlan:
         if data["kind"] == "label" and (start < decision or end <= decision):
             raise CausalTimeContractError("Label 窗口必须位于决策之后")
         if "key_axes" in item:
-            rows = CausalKeyProduct(item["key_axes"], item["key_order"])
+            axes = item["key_axes"]
+            if scheduled:
+                ref = axes[0]
+                if not isinstance(ref, Mapping) or set(ref) != {"pool"} or type(ref["pool"]) is not int or not 0 <= ref["pool"] < len(data["entity_pools"]):
+                    raise CausalTimeContractError("日频排程的证券清单引用无效")
+                day = decision.tz_convert("Asia/Shanghai").date().isoformat()
+                if len(axes) < 2 or tuple(axes[1]) != (day,) or day in scheduled_days:
+                    raise CausalTimeContractError("日频排程决策日与键轴不一致或重复")
+                scheduled_days.add(day)
+                axes = [data["entity_pools"][ref["pool"]], *axes[1:]]
+            rows = CausalKeyProduct(axes, item["key_order"])
             if len(rows.axes) != len(keys):
                 raise CausalTimeContractError("causal 行键宽度不匹配")
             if any(rows.overlaps(previous) for previous in products) or any(key in rows for key in seen_keys):
                 raise CausalTimeContractError("causal 输出行键必须全局唯一")
-            products.append(rows)
+            if not scheduled:
+                products.append(rows)
         else:
+            if scheduled:
+                raise CausalTimeContractError("日频排程须使用有序键轴")
             if not isinstance(item["key_rows"], (list, tuple)) or not item["key_rows"]:
                 raise CausalTimeContractError("causal key_rows 必须非空")
             plain_rows = []
@@ -303,7 +331,7 @@ def _parse_daily_time(raw: object) -> Mapping:
     from datetime import date
 
     data = _fields(raw, {"rule", "timezone", "calendar_id", "calendar_source", "sessions"}, "daily_time")
-    if data["rule"] not in {"next_session_open", "session_open", "business_effective_date"} or data["timezone"] != "Asia/Shanghai":
+    if data["rule"] not in {"next_session_open", "session_open", "business_effective_date", "next_session_open_following_publication_date"} or data["timezone"] != "Asia/Shanghai":
         raise CausalTimeContractError("日期因果来源只支持中国股票已准入的开盘或业务生效规则")
     _names([data["calendar_id"]], "calendar_id")
     _names([data["calendar_source"]], "calendar_source")
@@ -312,6 +340,6 @@ def _parse_daily_time(raw: object) -> Mapping:
         dates = tuple(date.fromisoformat(value) for value in sessions)
     except ValueError as exc:
         raise CausalTimeContractError("日频交易日历必须是 ISO 日期") from exc
-    if sessions != tuple(value.isoformat() for value in dates) or dates != tuple(sorted(set(dates))) or (data["rule"] == "next_session_open" and len(dates) < 2):
+    if sessions != tuple(value.isoformat() for value in dates) or dates != tuple(sorted(set(dates))) or (data["rule"] in {"next_session_open", "next_session_open_following_publication_date"} and len(dates) < 2):
         raise CausalTimeContractError("日频交易日历必须规范、严格递增；next_session_open 须包含后续交易日")
     return {**data, "sessions": sessions}

@@ -39,13 +39,20 @@ def build_mainline_operator_manifest() -> CompiledOperatorManifest:
 def production_implementation_code_hash(implementation_id: str) -> str:
     manifest = build_mainline_operator_manifest()
     try:
-        return manifest.require_implementation(
+        reference = manifest.require_implementation(
             implementation_id
-        ).implementation_ref.code_hash
+        ).implementation_ref
     except ExtensionError as exc:
         raise RuntimeRegistryError(
             f"未知正式 implementation: {implementation_id}"
         ) from exc
+    return _implementation_code_hash(
+        implementation_id=reference.implementation_id,
+        code_fingerprint=reference.code_fingerprint,
+        module_name=reference.module_name,
+        symbol_name=reference.symbol_name,
+        dependency_modules=reference.dependency_modules,
+    )
 
 
 def production_runtime_adapter_code_hash(adapter_id: str) -> str:

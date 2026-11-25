@@ -154,11 +154,39 @@ public sealed partial class ChinaAStockModels
         var cap = FloorGrid(Remaining(order), grid);
         return Affordable(rule, Cost(order.Id), price, Math.Min(RemainingBudgetCny(order.Id), cash), cap, grid);
     }
+
+    internal decimal AlignTargetQuantity(GetMaximumOrderQuantityForTargetBuyingPowerParameters parameters, decimal quantity)
+    {
+        if (quantity == 0) return 0;
+        var security = parameters.Security;
+        var utc = Now(security);
+        var rule = Rule(security.Symbol, utc);
+        rule.RequireVisibleReference(utc);
+        if (quantity < 0)
+        {
+            var sellable = SellableQuantity(security, utc);
+            return -FloorGrid(Math.Min(-quantity, sellable), rule.Grid(false, true), sellable);
+        }
+        var grid = rule.Grid(true, true);
+        var cap = FloorGrid(quantity, grid);
+        var price = _executionConfigured ? ExecutionPrice(security.Price, true, rule) : security.Price;
+        var cash = Math.Max(0, parameters.Portfolio.CashBook["CNY"].Amount - _pending.Values.Sum(item => item.Cash));
+        return price <= 0 ? 0 : Affordable(rule, new OrderCost(), price, cash, cap, grid);
+    }
 }
 
 /// <summary>只将显式金额买单的可负担余量交给原生一倍购买力检查。</summary>
 public sealed class ChinaBudgetBuyingPowerModel(ChinaAStockModels models) : SecurityMarginModel(1m)
 {
+    public override GetMaximumOrderQuantityResult GetMaximumOrderQuantityForTargetBuyingPower(
+        GetMaximumOrderQuantityForTargetBuyingPowerParameters parameters)
+    {
+        if (parameters.TargetBuyingPower < 0)
+            return new GetMaximumOrderQuantityResult(0, "中国现货不支持空头目标仓位");
+        var result = base.GetMaximumOrderQuantityForTargetBuyingPower(parameters);
+        return result.IsError ? result : new GetMaximumOrderQuantityResult(
+            models.AlignTargetQuantity(parameters, result.Quantity), string.Empty, false);
+    }
     public override HasSufficientBuyingPowerForOrderResult HasSufficientBuyingPowerForOrder(HasSufficientBuyingPowerForOrderParameters parameters)
     {
         if (parameters.Order.Direction != OrderDirection.Buy || (parameters.Order.Properties as ChinaOrderProperties)?.BudgetCny == null)

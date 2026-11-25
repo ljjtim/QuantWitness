@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from research_pipeline.catalog import AdjustmentFactorSnapshot
 from research_pipeline.domain import CorporateAction, InstrumentKey
 from research_pipeline.platform import typed_canonical_hash
-from research_pipeline.simulation.corporate_actions import corporate_action_snapshot_hash
+from research_pipeline.domain.corporate_action_source import corporate_action_snapshot_hash
 
 
 def strategy_snapshot_context(payload, *, source_bars_hash, frequency="1m"):

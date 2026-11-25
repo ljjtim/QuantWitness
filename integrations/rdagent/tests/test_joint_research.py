@@ -32,14 +32,19 @@ def test_shared_call_budget_and_resume(tmp_path):
     assert len(list((tmp_path / "calls").glob("*.json"))) == 2
 
 
-def test_reserved_call_is_not_repeated(tmp_path):
+@pytest.mark.parametrize("prefix", ["factor-", "model-"])
+def test_branch_reserved_call_is_not_repeated_or_replaced(tmp_path, prefix):
     owner = SimpleNamespace(root=tmp_path, payload={"budget": {"model_calls": 1, "output_tokens": 512, "max_output_tokens_per_call": 512},
         "proposer": {"mode": "fixed_responses"}}, materials={"responses": ["unused"]})
-    path = tmp_path / "calls" / "direction-00.json"
+    branch = SimpleNamespace(call_owner=owner, call_prefix=prefix)
+    path = tmp_path / "calls" / (prefix + "direction-00.json")
     path.parent.mkdir()
     path.write_text(json.dumps({"status": "reserved", "request": {"prompt": "next", "instructions": "direction", "max_output_tokens": 512}}))
+    before = path.read_bytes()
     with pytest.raises(RuntimeError, match="outcome_unknown"):
-        ResearchCalls(owner, "direction")("next", instructions="direction")
+        ResearchCalls(branch, "direction")("next", instructions="direction")
+    assert path.read_bytes() == before
+    assert list(path.parent.iterdir()) == [path]
 
 
 @pytest.mark.parametrize("change", [{"status": "failed"}, {"holdout": 1}, {"metrics": {"value": float("inf"), "rows": 1}}, {"metrics": {"value": 0.2, "rows": 0}}, {"metrics": {"value": 0.2, "rows": 1, "test": 0.1}}])

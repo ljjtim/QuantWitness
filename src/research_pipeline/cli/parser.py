@@ -10,9 +10,9 @@ from research_pipeline import __version__
 DESCRIPTION = "QuantWitness 量化研究主链；数据源只读，研究产物写入显式目录。"
 FINAL_COMMANDS = (
     "catalog", "package", "run", "resume", "retry-node", "inspect",
-    "rerun-from", "report", "compare", "analysis", "export-result", "doctor", "gc",
+    "rerun-from", "report", "compare", "export-result", "doctor", "gc",
     "capabilities",
-    "operator", "artifact", "recipe",
+    "operator", "artifact",
     "workspace",
 )
 
@@ -44,7 +44,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run(commands)
     _add_runtime(commands)
     _add_result_delivery(commands)
-    _add_analysis(commands)
     _add_operations(commands)
     _add_capabilities(commands)
     _add_machine_discovery(commands)
@@ -52,7 +51,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_output_arguments(command: argparse.ArgumentParser) -> None:
+def _add_output_arguments(command: argparse.ArgumentParser, *, audit: bool = False) -> None:
+    if audit:
+        command.add_argument("--strict-audit", action="store_true",
+                             help="完整核验冻结安装和写入的检查点，并同步每条运行日志")
     output = command.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="完整机器结果")
     output.add_argument("--summary", action="store_true", help="精简机器摘要、错误与下一步命令")
@@ -136,38 +138,6 @@ def _add_package(commands: argparse._SubParsersAction) -> None:
     _add_output_arguments(lint)
     admit = subcommands.add_parser("admit", help="复验正式材料并发布不可变运行计划")
     _add_admission_arguments(admit)
-    for name in ("report", "export-result"):
-        help_text = (
-            "按 ResearchPackage 导出 Result；不重新执行研究"
-            if name == "export-result"
-            else "按 ResearchPackage 生成研究结果报告"
-        )
-        command = subcommands.add_parser(name, help=help_text)
-        command.add_argument("--package", required=True)
-        command.add_argument("--source-archive-root", help="含 archived_snapshot 时必须提供")
-        command.add_argument("--result", required=True)
-        command.add_argument("--result-store")
-        command.add_argument("--extension-bundle", action="append", default=[], help="显式项目算子 bundle；可重复")
-        if name == "export-result":
-            command.add_argument("--output", required=True)
-        else:
-            command.add_argument("--output")
-            command.add_argument(
-                "--format", choices=("markdown", "json", "html"), default="markdown"
-            )
-            command.add_argument("--request", help="Qlib HTML 报告 JSON/YAML 请求；HTML 必填")
-        _add_output_arguments(command)
-    compare = subcommands.add_parser("compare", help="按同一合同比较研究结果")
-    compare.add_argument("--package", required=True)
-    compare.add_argument("--right-package")
-    compare.add_argument("--source-archive-root", help="左侧 package 含 archived_snapshot 时必须提供")
-    compare.add_argument("--right-source-archive-root", help="右侧 package 的来源归档根；省略时复用左侧")
-    compare.add_argument("--left-result", required=True)
-    compare.add_argument("--right-result", required=True)
-    compare.add_argument("--left-result-store")
-    compare.add_argument("--right-result-store")
-    compare.add_argument("--extension-bundle", action="append", default=[], help="显式项目算子 bundle；可重复")
-    _add_output_arguments(compare)
 
 
 def _add_admission_arguments(
@@ -191,7 +161,7 @@ def _add_admission_arguments(
     command.add_argument("--source-archive-root", help="含 archived_snapshot 时必须提供")
     command.add_argument("--extension-bundle", action="append", default=[], help="显式项目算子 bundle；可重复")
     command.add_argument("--output", help="正式 admit 必需：必须不存在的计划目录")
-    _add_output_arguments(command)
+    _add_output_arguments(command, audit=True)
 
 
 def _add_run(commands: argparse._SubParsersAction) -> None:
@@ -227,7 +197,7 @@ def _add_run(commands: argparse._SubParsersAction) -> None:
     )
     run.add_argument("--root-seed", type=int, default=0)
     run.add_argument("--clock", required=True, help="显式带时区的固定 ISO 时钟")
-    _add_output_arguments(run)
+    _add_output_arguments(run, audit=True)
 
 
 def _add_runtime(commands: argparse._SubParsersAction) -> None:
@@ -236,7 +206,7 @@ def _add_runtime(commands: argparse._SubParsersAction) -> None:
         command.add_argument("--run-root", required=True)
         if name == "retry-node":
             command.add_argument("--node", required=True)
-        _add_output_arguments(command)
+        _add_output_arguments(command, audit=True)
     inspect = commands.add_parser("inspect", help="检查统一运行时状态")
     inspect.add_argument("--run-root", required=True)
     _add_output_arguments(inspect)
@@ -247,7 +217,7 @@ def _add_runtime(commands: argparse._SubParsersAction) -> None:
     rerun.add_argument("--run-root", required=True, help="父 run root")
     rerun.add_argument("--output-run-root", required=True)
     rerun.add_argument("--node", required=True)
-    _add_output_arguments(rerun)
+    _add_output_arguments(rerun, audit=True)
 
 
 def _add_run_reuse_arguments(command: argparse.ArgumentParser) -> None:
@@ -306,7 +276,7 @@ def _add_runtime_resource_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument(
         "--resource-process-slots",
         type=int,
-        help="显式跨进程治理的总进程槽位",
+        help="本次运行的总进程槽位；本机默认串行 6 槽，共享资源池须显式声明",
     )
     command.add_argument(
         "--resource-timeout-seconds",
@@ -326,6 +296,8 @@ def _add_result_delivery(commands: argparse._SubParsersAction) -> None:
         command = commands.add_parser(name, help="直接消费 Result 生成报告或导出结果")
         command.add_argument("--result", required=True)
         command.add_argument("--result-store")
+        command.add_argument("--package", help="按声明核对 Result 的研究包、指标与结论范围")
+        command.add_argument("--source-archive-root", help="研究包引用的来源归档根")
         if name == "export-result":
             command.add_argument("--output", required=True)
         else:
@@ -338,61 +310,18 @@ def _add_result_delivery(commands: argparse._SubParsersAction) -> None:
     compare.add_argument("--right-result", required=True)
     compare.add_argument("--left-result-store")
     compare.add_argument("--right-result-store")
-    _add_output_arguments(compare)
-
-
-def _add_analysis(commands: argparse._SubParsersAction) -> None:
-    analysis = commands.add_parser(
-        "analysis",
-        help="只读分析 Result 的显式时间序列",
-    )
-    subcommands = analysis.add_subparsers(dest="analysis_command", required=True)
-    run = subcommands.add_parser("run", help="生成独立 AnalysisResult")
-    run.add_argument("--result", required=True)
-    run.add_argument("--result-store")
-    run.add_argument("--request", required=True, help="显式 AnalysisRequest YAML/JSON")
-    run.add_argument("--output", required=True, help="必须不存在的 AnalysisResult JSON")
-    run.add_argument(
-        "--analysis-memory-bytes",
-        type=int,
-        default=8 * 1024 * 1024,
-        help="日期和值两个投影列的批次预算；默认 8 MiB",
-    )
-    _add_output_arguments(run)
-
-    compare = subcommands.add_parser(
-        "compare",
-        help="比较两份或多份同口径 AnalysisResult",
-    )
-    compare.add_argument("--analysis-result", action="append", required=True)
-    compare.add_argument(
-        "--measure",
-        choices=(
-            "overall.mean",
-            "overall.absolute_change",
-            "overall.compounded_return",
-            "overall.geometric_annualized_return",
-            "overall.max_drawdown",
-        ),
-        required=True,
-    )
-    compare.add_argument(
-        "--direction",
-        choices=("higher_is_better", "lower_is_better"),
-        required=True,
-    )
-    compare.add_argument(
-        "--output",
-        required=True,
-        help="必须不存在的 AnalysisComparison JSON",
-    )
+    compare.add_argument("--package", help="左侧研究包，两侧相同时共用")
+    compare.add_argument("--right-package", help="右侧研究包，须与左侧的指标和结论合同一致")
+    compare.add_argument("--source-archive-root", help="左侧来源归档根")
+    compare.add_argument("--right-source-archive-root", help="右侧来源归档根")
     _add_output_arguments(compare)
 
 
 def _add_operations(commands: argparse._SubParsersAction) -> None:
     doctor = commands.add_parser("doctor", help="只读检查当前 Runtime run 和扩展注册")
     doctor.add_argument("--run-root", action="append", default=[])
-    _add_output_arguments(doctor)
+    doctor.add_argument("--lean-home", action="append", default=[], help="按冻结凭证完整核验本地 LEAN 安装")
+    _add_output_arguments(doctor, audit=True)
     gc = commands.add_parser("gc", help="研究工件垃圾回收；默认 dry-run")
     gc.add_argument("--root", required=True)
     gc.add_argument("--ttl-seconds", type=int, required=True)
@@ -449,24 +378,6 @@ def _add_machine_discovery(commands: argparse._SubParsersAction) -> None:
     artifact_describe.add_argument("artifact_type")
     artifact_describe.add_argument("--format", choices=("json", "text"), default="text")
 
-    recipe = commands.add_parser("recipe", help="从正式 Recipe registry 发现研究骨架")
-    recipe_commands = recipe.add_subparsers(dest="recipe_command", required=True)
-    recipe_list = recipe_commands.add_parser("list")
-    recipe_list.add_argument("--format", choices=("json", "text"), default="text")
-    recipe_describe = recipe_commands.add_parser("describe")
-    recipe_describe.add_argument("recipe_id")
-    recipe_describe.add_argument("--format", choices=("json", "text"), default="text")
-    recipe_scaffold = recipe_commands.add_parser("scaffold")
-    recipe_scaffold.add_argument("recipe_id")
-    recipe_scaffold.add_argument("--output", help="必须不存在的新 ResearchPackage 目录")
-    recipe_scaffold.add_argument(
-        "--catalog-lock",
-        required=True,
-        help="显式持久 Catalog Lock，用于冻结 recipe 的数据集版本",
-    )
-    recipe_scaffold.add_argument("--answers", help="JSON 对象文件；与 --set 合并，--set 优先")
-    recipe_scaffold.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="结构化回答；VALUE 可为 JSON")
-    recipe_scaffold.add_argument("--format", choices=("json", "text"), default="text")
 
 
 def _add_workspace(commands: argparse._SubParsersAction) -> None:
@@ -512,20 +423,20 @@ def _add_workspace(commands: argparse._SubParsersAction) -> None:
     _add_runtime_resource_arguments(run)
     run.add_argument("--source-db", action="append", default=[])
     run.add_argument("--minute-data-root")
-    _add_output_arguments(run)
+    _add_output_arguments(run, audit=True)
     resume = subcommands.add_parser("resume", help="复用 execution 中已验证的 invocation/checkpoint")
     resume.add_argument("--workspace", required=True)
     resume.add_argument("--execution", required=True)
-    _add_output_arguments(resume)
+    _add_output_arguments(resume, audit=True)
     retry = subcommands.add_parser("retry-node", help="委托正式 Runtime 重试 execution 节点")
     retry.add_argument("--workspace", required=True)
     retry.add_argument("--execution", required=True)
     retry.add_argument("--node", required=True)
-    _add_output_arguments(retry)
+    _add_output_arguments(retry, audit=True)
     execute = subcommands.add_parser("execute", help="依次检查、准入、运行并报告工作区研究")
     execute.add_argument("--workspace", required=True)
     execute.add_argument("--execution-id", help="接续明确的既有 execution，不分配新运行")
-    execute.add_argument("--catalog-lock", required=True)
+    execute.add_argument("--catalog-lock")
     execute.add_argument("--data-db", help="显式只读 DuckDB")
     execute.add_argument("--input-snapshot-manifest", help="显式封存输入清单；与数据库来源互斥")
     execute.add_argument("--persist-inputs", action="store_true", help="显式保存查询输入；默认直接读取既有来源")
@@ -542,7 +453,7 @@ def _add_workspace(commands: argparse._SubParsersAction) -> None:
     )
     _add_runtime_resource_arguments(execute)
     _add_run_reuse_arguments(execute)
-    _add_output_arguments(execute)
+    _add_output_arguments(execute, audit=True)
     dashboard = subcommands.add_parser(
         "dashboard",
         help="导出 Result 的 Dashboard 清单",

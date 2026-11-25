@@ -76,10 +76,17 @@ def test_model_execution_recovers_completed_child_without_restarting(tmp_path, m
     def execute(argv, **kwargs):
         from types import SimpleNamespace
         calls.append(argv)
-        write_json(Path(payload['session_root']) / 'model-execution-metrics.json', {'value': 0.1})
+        request = Path(argv[argv.index('--request') + 1])
+        output = Path(argv[argv.index('--output') + 1])
+        assert request == Path(payload['session_root']) / 'model-execution-request.json'
+        assert json.loads(request.read_text(encoding='utf-8')) == payload
+        assert output == Path(payload['session_root']) / 'model-execution-metrics.json'
+        assert kwargs['stderr'] == model_execution.subprocess.STDOUT
+        write_json(output, {'value': 0.1})
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(model_execution.subprocess, 'run', execute)
     first = model_execution.evaluate_model_package(payload)
+    assert first == {'value': 0.1}
     assert first == model_execution.evaluate_model_package(payload) and len(calls) == 1
     assert 'quantwitness_rdagent.model_execution' in calls[0]
     with pytest.raises(ValueError, match='冻结'):

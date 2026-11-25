@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import yaml
 from research_pipeline.domain import InstrumentKey
-from research_pipeline.domain.strategy_protocol import StrategyDeclaration, StrategyInputBinding, StrategyLimits
+from research_pipeline.domain.lean_algorithm import LeanAlgorithm, LeanStrategyDeclaration, LeanDataBinding, LeanAlgorithmLimits
 from research_pipeline.extensions import OperatorSpec, PortSpec, ParameterSpec, ParameterType, compile_project_operator_bundle, project_source_hash
 from research_pipeline.runtime.operator_registry import build_mainline_operator_registry
 from research_pipeline.platform.lean_contract import LEAN_ARTIFACT_TYPE, LEAN_SCHEMA_IDS, LEAN_PATHS, LEAN_METRICS_SCHEMA_ID, LEAN_METRICS_PATH
@@ -35,10 +35,14 @@ def build(output,frequency):
     reference=write_synthetic_scope(package,days=list(synthetic.DAYS),entities=[synthetic.CODE],clock=synthetic.CLOCK)
     catalog,requests,archive=prepare_inputs(root,frequency)
     instrument=InstrumentKey(synthetic.CODE,"cn_etf","XSHG","CNY","etf").to_dict()
-    declaration=StrategyDeclaration(strategy_id="public.lean.quickstart",bundle_id="pending",state_schema_id="public.lean.quickstart.state.v1",
-        subscriptions=("bar",),schedules=(),asset_class="cn_etf",frequency=frequency,
-        input_bindings=(StrategyInputBinding(binding_id="prices",columns=("close",),lookback_bars=1),),
-        limits=StrategyLimits(max_state_bytes=4096,max_context_bytes=8*1024**2,max_response_bytes=65536,max_intents_per_event=1,callback_wall_seconds=30))
+    algorithm = LeanAlgorithm(language="Python", entry_file="strategy.py", type_name="QuickstartAlgorithm")
+    bar_fields = tuple('fld_etf_'+column for column in ('date','code','open','high','low','close','volume')) if frequency == "1d" else tuple("fld_demo_minute_" + column for column in ("dt", "code", "open", "high", "low", "close", "volume"))
+    declaration = LeanStrategyDeclaration(strategy_id="public.lean.quickstart", bundle_id="pending", algorithm=algorithm,
+        asset_class="cn_etf", frequency=frequency,
+        input_bindings=(LeanDataBinding(binding_id="prices", input_port="bars", request_id="portfolio_bars" if frequency == "1d" else "minute_bars",
+            kind="bars", resolution=frequency, columns=bar_fields,
+            daily_time=dict(rule="next_session_open", timezone="Asia/Shanghai", sessions=[*synthetic.DAYS, "2024-01-12"]) if frequency == "1d" else None),),
+        limits=LeanAlgorithmLimits(initialize_seconds=30, time_step_seconds=30))
     parameters=dict(execution_mode="strategy",frequency=frequency,price_scale=3,
         execution_model="lean_next_session_open_v1" if frequency=="1d" else "lean_next_completed_close_v1",
         claim_ceiling="bar_level_research_only",strategy_declaration=declaration.to_dict(),instruments=[instrument],
@@ -53,9 +57,9 @@ def build(output,frequency):
         output_ports=(PortSpec("simulation",LEAN_ARTIFACT_TYPE),),
         parameters=tuple(ParameterSpec(key,ParameterType.STRING if isinstance(value,str) else ParameterType.INTEGER if type(value)is int else ParameterType.JSON) for key,value in parameters.items()),
         strategy_roles=(),resource_profile=dict(memory_bytes=12*1024**3,cpu_slots=4,process_slots=6,temp_bytes=32*1024**3,wall_seconds=120),
-        determinism_mode="deterministic",seed_policy="none",code_hash=project_source_hash(source),pit_capabilities=("pit.as_of.v1",))
+        determinism_mode="deterministic",seed_policy="none",code_hash=project_source_hash(source, native_algorithm=True),pit_capabilities=("pit.as_of.v1",))
     bundle=compile_project_operator_bundle(source_root=source,output_root=root/"bundles",project_id="public-lean-quickstart",
-        operator_spec=spec,entry_module="strategy",entry_function="run",dependency_lock={},
+        operator_spec=spec,lean_algorithm=algorithm,dependency_lock={},
         registered_operator_specs=build_mainline_operator_registry().operator_specs,project_artifact_types=(LEAN_ARTIFACT_TYPE,))
     parameters["strategy_declaration"]["bundle_id"]=bundle.name
     daily_ids=[q["request_id"] for q in requests if q["request_id"]!="minute_bars"]

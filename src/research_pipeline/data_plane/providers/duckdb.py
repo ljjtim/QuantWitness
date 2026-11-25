@@ -17,6 +17,7 @@ from ..execution_budget import (
 )
 from ..execution_estimate import ExecutionEstimate
 from ..stream import ColumnarStream
+from .epoch_date import DuckDBEpochDateSource
 from .sql import compile_duckdb_query, compile_json_array_projection_source
 
 
@@ -104,16 +105,17 @@ class DuckDBColumnarProvider:
                 connection.execute(f"SET temp_directory = '{escaped}'")
                 connection.execute("SET max_temp_directory_size = ?",
                                    ["-1" if allocation.temp_bytes is None else f"{allocation.temp_bytes}B"])
-            source_expression = (
-                None
-                if execution_estimate.json_array_projection is None
-                else compile_json_array_projection_source(
+            if execution_estimate.json_array_projection is None:
+                source_expression, source_parameters = DuckDBEpochDateSource(connection).expression(plan)
+            else:
+                source_expression = compile_json_array_projection_source(
                     execution_estimate.json_array_projection
                 )
-            )
+                source_parameters = ()
             sql, params = compile_duckdb_query(
                 plan,
                 source_expression=source_expression,
+                source_parameters=source_parameters,
                 preserve_temporal_facts=preserve_temporal_facts,
             )
             reader = connection.execute(sql, params).to_arrow_reader(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime
@@ -61,7 +63,7 @@ class MinuteOperatorArtifact:
         )
         object.__setattr__(self, "manifest", MappingProxyType(dict(self.manifest)))
 
-    @property
+    @cached_property
     def content_hash(self) -> str:
         return typed_canonical_hash(_canonical_rows(self.rows))
 

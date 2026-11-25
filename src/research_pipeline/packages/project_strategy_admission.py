@@ -1,7 +1,11 @@
 """项目策略绑定已准入bundle、行情输入及正式结果。"""
 from research_pipeline.platform.asset_taxonomy import MINUTE_TARGET_ASSET_CLASSES
 from research_pipeline.domain.trading import InstrumentKey
-from research_pipeline.domain.strategy_declaration import parse_strategy_declaration
+from research_pipeline.domain.strategy_declaration import (
+    parse_stock_corporate_actions,
+    parse_strategy_declaration,
+    project_strategy_worker_parameters,
+)
 from .models import ResearchPackageError
 
 
@@ -163,146 +167,179 @@ def futures_query_calendars(package, queries):
     return result
 
 
+def _native_binding_requests(binding, node, nodes, queries):
+    """只沿真实输入边找到冻结请求，不执行算法或Universe。"""
+    source = next((value for value in node.inputs if value.input_port == binding.input_port), None)
+    if source is None:
+        raise ResearchPackageError(f"原生数据绑定缺少输入端口：{binding.input_port}")
+    stack, seen, requests = [source.source_node_id], set(), set()
+    while stack:
+        key = stack.pop()
+        if key in seen:
+            continue
+        seen.add(key)
+        producer = nodes[key]
+        if producer.operator_id in {"data.catalog.admission", "data.minute.scan"}:
+            requests.update(producer.parameters["request_ids"])
+        if producer.operator_id == "research.bars.minute_resample" and producer.parameters.get("interval_minutes") != 1:
+            raise ResearchPackageError("原生执行分钟行情须为一分钟")
+        stack.extend(value.source_node_id for value in producer.inputs)
+    if binding.kind != "targets" and (binding.request_id not in requests or binding.request_id not in queries):
+        raise ResearchPackageError(f"原生绑定请求不属于实际输入：{binding.binding_id}")
+    return requests
+
+
+def validate_stock_strategy_actions(node, nodes, queries, bars_query, codes):
+    """原始股票交易须从同一正式列式输入消费行动和完整日历。"""
+    from datetime import date, timedelta
+    from zoneinfo import ZoneInfo
+    from research_pipeline.data_plane.query_ir import DateRangeV1, InstantRangeV2, QueryPurpose
+
+    try:
+        settings = parse_stock_corporate_actions(node.parameters["stock_corporate_actions"])
+    except ValueError as exc:
+        raise ResearchPackageError(str(exc)) from exc
+    action_id, calendar_id = settings["action_request_id"], settings["calendar_request_id"]
+    binding = next((item for item in node.inputs if item.input_port == "corporate_actions"), None)
+    source = nodes[binding.source_node_id] if binding is not None else None
+    parents = () if source is None else tuple(item for item in source.inputs if item.input_port == "admission")
+    if (source is None or source.operator_id != "data.columnar.materialize" or len(parents) != 1
+            or nodes[parents[0].source_node_id].operator_id != "data.catalog.admission"
+            or not {action_id, calendar_id} <= set(nodes[parents[0].source_node_id].parameters["request_ids"])):
+        raise ResearchPackageError("公司行动和交易日历须来自同一正式Catalog列式输入")
+    action, calendar = queries.get(action_id), queries.get(calendar_id)
+    for query, dataset in ((action, "cn_corporate_action.events"), (calendar, "cn_market.trading_sessions")):
+        if (query is None or query.dataset_id != dataset or query.purpose in {QueryPurpose.AUDIT, QueryPurpose.LABEL}
+                or not isinstance(query.time_range, DateRangeV1) or query.filters or query.limit is not None):
+            raise ResearchPackageError(f"公司行动执行须完整读取正式有界来源：{dataset}")
+    if (bars_query.dataset_id != "cn_equity.minute_bar" or not isinstance(bars_query.time_range, InstantRangeV2)
+            or bars_query.adjustment != "raw"):
+        raise ResearchPackageError("公司行动直读须使用已准入的原始一分钟行情")
+    zone = ZoneInfo("Asia/Shanghai")
+    start = bars_query.time_range.start_at.astimezone(zone).date()
+    end = (bars_query.visible_end_at - timedelta(microseconds=1)).astimezone(zone).date()
+    if (set(action.universe.instruments) != codes or action.time_range.start > start or action.time_range.end < end
+            or "fld_cn_trade_day" not in calendar.field_ids
+            or calendar.time_range.start > action.time_range.start or calendar.time_range.end < end
+            or any(query.as_of is not None and date.fromisoformat(query.as_of) < end for query in (action, calendar))):
+        raise ResearchPackageError("公司行动和日历须覆盖冻结交易证券及行情窗口")
+
+
 def validate_project_strategy_recipe(recipe, admission, queries, *, query_plans=None, catalog=None):
     from .models import _thaw_mapping
+    from research_pipeline.data_plane.query_ir import QueryPurpose
+    from research_pipeline.platform.lean_runtime import validate_lean_runtime
+    from research_pipeline.platform.lean_contract import LEAN_ARTIFACT_TYPE
+    import sys
     nodes = {item.node_id: item for item in recipe.nodes}
     for node in recipe.nodes:
         if "strategy_declaration" not in node.parameters:
             continue
         p = node.parameters
-        backend = p.get("execution_backend")
-        if backend != "lean":
+        if p.get("execution_backend") != "lean":
             raise ResearchPackageError("项目策略执行后端必须显式声明lean")
         token = admission.project_token(node.operator_id, node.operator_version) if hasattr(admission, "project_token") else None
         if token is None or "causal_plan" in p:
-            raise ResearchPackageError("策略必须绑定已准入项目bundle且不能同时声明causal_plan")
+            raise ResearchPackageError("原生策略须绑定算法bundle，不能在准入执行因果选股")
         declaration = parse_strategy_declaration(_thaw_mapping(p["strategy_declaration"], "strategy_declaration"))
-        if declaration.bundle_id != token.manifest.bundle_hash:
-            raise ResearchPackageError("策略声明未绑定实际项目bundle")
+        if declaration.bundle_id != token.manifest.bundle_hash or declaration.algorithm != token.manifest.lean_algorithm:
+            raise ResearchPackageError("原生算法声明未绑定实际bundle与入口")
         spec = token.manifest.operator_spec
-        import sys
-        from research_pipeline.platform.lean_runtime import validate_lean_runtime
+        if "strategy_worker_projection" in p:
+            project_strategy_worker_parameters(p, spec)
         validate_lean_runtime(p.get("lean_runtime", {}), verify_files=False)
-        bars_bindings = tuple(item for item in declaration.input_bindings if item.source == "bars")
-        signal_inputs = tuple(item for item in declaration.input_bindings if item.source == "signals")
-        if (len(bars_bindings) != 1 or bars_bindings[0].lookback_bars < 1
-                or any(item.lookback_bars != 1 for item in signal_inputs)
-                or len(signal_inputs) > 1 or declaration.schedules):
-            raise ResearchPackageError("LEAN策略要求一个行情历史窗口、至多一个单期signals输入且无定时事件")
-        declared_ports = {item.port: item.artifact_type for item in spec.input_ports}
-        frequency = strategy_bars_frequency(p, declared_ports)
+        ports = {item.port: item.artifact_type for item in spec.input_ports}
+        frequency = strategy_bars_frequency(p, ports)
         if declaration.frequency != frequency:
-            raise ResearchPackageError("策略声明frequency必须与节点行情频率一致")
+            raise ResearchPackageError("原生策略执行频率与bars端口不一致")
         minimum_slots = 3 + int(sys.platform == "win32" and sys.prefix != sys.base_prefix)
         if spec.resource_profile["process_slots"] < minimum_slots:
-            raise ResearchPackageError(f"LEAN策略须预留{minimum_slots}个进程槽，含Supervisor、宿主、引擎及实际Python启动进程")
+            raise ResearchPackageError(f"LEAN策略须预留{minimum_slots}个进程槽")
+        if {item.port: item.artifact_type for item in spec.output_ports} != {"simulation": LEAN_ARTIFACT_TYPE}:
+            raise ResearchPackageError("原生策略须交付正式simulation输出")
+        if set(ports) != {value.input_port for value in node.inputs}:
+            raise ResearchPackageError("原生算法声明端口与实际输入不一致")
         future = declaration.asset_class == "cn_future"
-        if not future and not any(item.input_port == "snapshot" for item in node.inputs):
-            raise ResearchPackageError("LEAN策略须直接绑定正式snapshot输入")
-        expected_ports = {"bars": declared_ports["bars"]}
-        if not future:
-            expected_ports["snapshot"] = "data.adjustment-factor-snapshot.v1"
-        if future and frequency == "1m" and p.get("settlement_request_id") is not None:
-            expected_ports["futures"] = "data.columnar-bundle.v1"
-        signal_bindings = tuple(binding for binding in declaration.input_bindings if binding.source == "signals")
-        portfolio_targets = declared_ports.get('targets') == 'research.portfolio-targets.v1'
-        if portfolio_targets:
-            if future:
-                raise ResearchPackageError("期货策略只接受显式手数意图，不使用组合目标")
-            if frequency != '1d' or len(signal_bindings) != 1 or signal_bindings[0].columns != ('weight_ppb',):
-                raise ResearchPackageError('组合目标仅支持日频及唯一weight_ppb信号binding')
-            expected_ports['targets'] = 'research.portfolio-targets.v1'
-        elif signal_bindings:
-            expected_ports["signals"] = "research.feature-set.v1"
-        declared_ports = {item.port: item.artifact_type for item in spec.input_ports}
-        if declared_ports not in (expected_ports, {**expected_ports, "signals": "research.feature-set.v1"}):
-            raise ResearchPackageError("策略输入必须绑定bars、snapshot或targets，以及可选正式signals Feature工件")
-        if "signals" in p:
-            raise ResearchPackageError("策略signals只能通过正式工件端口交付")
-        if spec.resource_profile["process_slots"] < 2:
-            raise ResearchPackageError("策略必须预留Supervisor和Worker进程槽")
-        if any(binding.source == "bars" and not set(binding.columns) <= {"open", "high", "low", "close", "volume"} for binding in declaration.input_bindings):
-            raise ResearchPackageError("策略行情投影列不受支持")
-        if "minute_scope" not in p:
-            raise ResearchPackageError("项目策略必须显式冻结市场规则")
-        from research_pipeline.platform.lean_contract import LEAN_ARTIFACT_TYPE
-        output_type = LEAN_ARTIFACT_TYPE
-        if ({item.port: item.artifact_type for item in spec.output_ports} != {"simulation": output_type}
-                or set(item.input_port for item in node.inputs) != set(expected_ports)):
-            raise ResearchPackageError("策略须按binding声明行情、金融输入、可选signals及simulation输出")
-        if signal_bindings and not portfolio_targets:
-            from research_pipeline.platform.project_causal_contract import parse_causal_plan
-            from research_pipeline.data_plane.query_ir import QueryPurpose
-            source_binding = next(item for item in node.inputs if item.input_port == "signals")
-            source = nodes[source_binding.source_node_id]
-            producer = admission.project_token(source.operator_id, source.operator_version)
-            if producer is None or "causal_plan" not in source.parameters:
-                raise ResearchPackageError("策略signals必须直接来自已准入项目causal Feature")
-            plan = parse_causal_plan(source.parameters["causal_plan"])
-            if plan.kind != "feature" or plan.key_columns != ("event_id",) or plan.output_port != source_binding.source_output_port:
-                raise ResearchPackageError("策略signals须绑定event_id稳定键的正式causal Feature输出")
-            if any(queries[item.request_id].purpose in {QueryPurpose.AUDIT, QueryPurpose.LABEL} for item in plan.sources):
-                raise ResearchPackageError("策略signals不能来自AUDIT或Label来源")
-            outputs = {item.port: item.artifact_type for item in producer.manifest.operator_spec.output_ports}
-            if outputs.get(source_binding.source_output_port) != "research.feature-set.v1":
-                raise ResearchPackageError("策略signals输出类型不是正式Feature")
-        if p.get("execution_mode") != "strategy" or p.get("order_commands", ""):
-            raise ResearchPackageError("项目策略须显式声明strategy模式且不能预填order_commands")
+        direct_actions = "stock_corporate_actions" in p
+        if direct_actions:
+            if (declaration.asset_class != "cn_stock" or frequency != "1m" or "snapshot" in ports
+                    or ports.get("corporate_actions") != "data.columnar-bundle.v1"):
+                raise ResearchPackageError("公司行动直读仅用于原始股票分钟，须绑定正式列式端口")
+        elif not future and ports.get("snapshot") != "data.adjustment-factor-snapshot.v1":
+            raise ResearchPackageError("现货策略须绑定正式公司行动snapshot")
+        bound_ports = set()
+        for binding in declaration.input_bindings:
+            bound_ports.add(binding.input_port)
+            if ports.get(binding.input_port) not in {"data.minute-bars.v1", "data.columnar-bundle.v1", "research.portfolio-targets.v1"}:
+                raise ResearchPackageError("原生数据须来自已准入行情、列式数据或正式组合目标")
+            _native_binding_requests(binding, node, nodes, queries)
+            if ports[binding.input_port] == "data.minute-bars.v1" and (
+                    binding.input_port != "bars" or binding.kind != "bars" or binding.resolution != "1m"):
+                raise ResearchPackageError("原始分钟端口须绑定一分钟行情；日线、公告和证券池须使用已准入列式输入")
+            if binding.kind == "targets":
+                if ports[binding.input_port] != "research.portfolio-targets.v1" or future:
+                    raise ResearchPackageError("组合目标绑定须为现货正式组合目标")
+                continue
+            if binding.kind == "pit" and (ports[binding.input_port] != "data.columnar-bundle.v1"
+                                          or declaration.algorithm.language != "Python"):
+                raise ResearchPackageError("算法内 PIT 直读须绑定 Python 算法的列式研究输入")
+            query = queries[binding.request_id]
+            if query.purpose in {QueryPurpose.AUDIT, QueryPurpose.LABEL}:
+                raise ResearchPackageError("原生策略不能消费观察或未来标签来源")
+            if not set(binding.columns) <= set(query.field_ids):
+                raise ResearchPackageError("原生绑定列超出冻结查询列")
+            if query_plans is not None and ports[binding.input_port] == "data.columnar-bundle.v1":
+                plan = query_plans.get(binding.request_id)
+                if plan is None or plan.query != query:
+                    raise ResearchPackageError("原生数据缺少一致的正式准入计划")
+                if binding.kind == "pit":
+                    from research_pipeline.data_plane.admitted_plan_codec import validate_pit_binding
+                    validate_pit_binding(plan, binding)
+                if binding.daily_time is not None:
+                    from .project_causal_admission import _validate_daily_source
+                    _validate_daily_source({"daily_time": binding.daily_time,
+                        "observation_column": plan.event_time_field,
+                        "available_column": plan.event_time_field}, plan, catalog=catalog)
+                elif (str(dict(plan.field_types).get(plan.event_time_field, "")).lower().startswith("date")
+                        and plan.session_close_binding is None):
+                    raise ResearchPackageError("日期粒度来源须显式绑定Catalog可见规则和冻结交易日历")
+        if "corporate_actions" in bound_ports:
+            raise ResearchPackageError("公司行动正式输入由账户按权益时点消费")
+        unbound = set(ports) - bound_ports - {"snapshot", "futures"} - ({"corporate_actions"} if direct_actions else set())
+        if unbound:
+            raise ResearchPackageError(f"原生数据端口未声明用途：{sorted(unbound)}")
+        if "minute_scope" not in p or p.get("execution_mode") != "strategy" or p.get("order_commands", ""):
+            raise ResearchPackageError("原生策略须冻结市场规则，且不能预填订单")
         model = "lean_next_session_open_v1" if frequency == "1d" else "lean_next_completed_close_v1"
         if p.get("execution_model") != model or p.get("claim_ceiling") != "bar_level_research_only":
-            raise ResearchPackageError("策略执行模型与后端或研究声明范围不一致")
-        for key in ("slippage_bps", "slippage_ticks"):
-            if type(p.get(key)) is not int or p[key] < 0:
-                raise ResearchPackageError("策略必须显式声明非负整数滑点")
-        instruments = tuple(InstrumentKey.from_dict(_thaw_mapping(item, "instrument")) for item in p.get("instruments", ()))
-        codes = {item.instrument_id for item in instruments}
-        asset_class = declaration.asset_class
-        if (asset_class not in MINUTE_TARGET_ASSET_CLASSES or not instruments or len(codes) != len(instruments)
-                or any(item.asset_class != asset_class or item.currency != "CNY" for item in instruments)):
-            raise ResearchPackageError("策略证券须为不重复人民币股票、ETF或真实期货合约，且与策略声明一致")
+            raise ResearchPackageError("执行模型与实际频率或研究范围不一致")
+        if any(type(p.get(key)) is not int or p[key] < 0 for key in ("slippage_bps", "slippage_ticks")):
+            raise ResearchPackageError("原生策略须显式声明非负滑点")
+        instruments = tuple(InstrumentKey.from_dict(_thaw_mapping(value, "instrument")) for value in p.get("instruments", ()))
+        codes = {value.instrument_id for value in instruments}
+        if not instruments or len(codes) != len(instruments) or any(value.asset_class != declaration.asset_class or value.currency != "CNY" for value in instruments):
+            raise ResearchPackageError("冻结交易域须为同资产类别的不重复人民币证券")
+        primary = [value for value in declaration.input_bindings if value.input_port == "bars" and value.kind == "bars" and value.resolution == frequency]
+        if len(primary) != 1 or not codes <= set(queries[primary[0].request_id].universe.instruments):
+            raise ResearchPackageError("执行行情须有唯一绑定并覆盖完整交易域")
+        if direct_actions:
+            validate_stock_strategy_actions(node, nodes, queries, queries[primary[0].request_id], codes)
         if future:
-            if any(item.contract_kind not in {"future", "future_contract"}
-                   or any(token in item.instrument_id.upper() for token in ("8888", "9999", "CONTINUOUS"))
-                   for item in instruments):
+            if any(value.contract_kind not in {"future", "future_contract"} or any(marker in value.instrument_id.upper() for marker in ("8888", "9999", "CONTINUOUS")) for value in instruments):
                 raise ResearchPackageError("期货策略只能交易真实合约")
             validate_futures_strategy_inputs(node, nodes, queries, codes)
-        expected_scale = 2 if asset_class == "cn_stock" else 3
-        price_scale = p.get("price_scale", expected_scale)
-        if not future and (type(price_scale) is not int or price_scale != expected_scale):
-            raise ResearchPackageError("策略price_scale须按资产类型声明：股票2、ETF3")
+        else:
+            required_scale = 3 if declaration.asset_class == "cn_etf" else 2
+            price_scale = p.get("price_scale", required_scale)
+            if type(price_scale) is not int or price_scale != required_scale:
+                raise ResearchPackageError("股票报价精度 price_scale 须为整数2，ETF须为整数3")
         if frequency == "1d":
             query = daily_strategy_query(node, nodes, queries)
+            if query != queries[primary[0].request_id]:
+                raise ResearchPackageError("执行日线与原生绑定不是同一请求")
             if query_plans is not None:
-                plan = query_plans.get(p["bars_request_id"])
-                if plan is None or plan.query != query:
-                    raise ResearchPackageError("日线bars请求缺少一致的已准入计划")
-                validate_daily_strategy_plan(plan)
-                opening = query_plans.get(p["open_request_id"])
-                if opening is None:
-                    raise ResearchPackageError("日线开盘请求缺少已准入计划")
-                validate_daily_open_plan(opening, plan, catalog=catalog)
-            if set(query.universe.instruments) != codes:
-                raise ResearchPackageError("策略证券必须与冻结日线请求一致")
-            continue
-        requests = set()
-        stack = [item.source_node_id for item in node.inputs if item.input_port == "bars"]
-        seen = set()
-        while stack:
-            key = stack.pop()
-            if key in seen:
-                continue
-            seen.add(key)
-            source = nodes[key]
-            if source.operator_id == "data.minute.scan":
-                requests.update(source.parameters["request_ids"])
-            if source.operator_id == "research.bars.minute_resample" and source.parameters.get("interval_minutes") != 1:
-                raise ResearchPackageError("策略行情必须为1分钟")
-            stack.extend(item.source_node_id for item in source.inputs if item.input_port in {"bars", "minute_1m"})
-        from research_pipeline.data_plane.query_ir import QueryPurpose
-        if any(queries[key].purpose is QueryPurpose.AUDIT for key in requests):
-            raise ResearchPackageError("观察用行情不能进入策略交易")
-        if not requests or any(set(queries[key].universe.instruments) != codes for key in requests):
-            raise ResearchPackageError("策略证券必须与冻结行情请求一致")
+                validate_daily_strategy_plan(query_plans[p["bars_request_id"]])
+                validate_daily_open_plan(query_plans[p["open_request_id"]], query_plans[p["bars_request_id"]], catalog=catalog)
 
 
 def validate_daily_strategy_plans(recipe, query_plans, *, catalog=None):
@@ -340,27 +377,7 @@ def validate_strategy_result_closure(recipe, result_spec):
         validate_lean_result_closure(node, result_spec)
 
 
-def validate_strategy_schedules(raw, calendar, query):
-    from datetime import datetime, time, timedelta
-    from research_pipeline.domain.minute_request_scope import minute_request_sessions
-    from research_pipeline.domain.session_calendar import SessionCalendarResolver
+def validate_strategy_schedules(raw):
+    """定时规则由原生算法在运行中注册；准入只验证策略声明。"""
     from .models import _thaw_mapping
-    declaration = parse_strategy_declaration(_thaw_mapping(raw, "strategy_declaration"))
-    common = {}
-    resolver = SessionCalendarResolver(calendar)
-    for policy, day, _, _ in minute_request_sessions(calendar, instruments=query.universe.instruments,
-            start_at=query.time_range.start_at, end_at=query.visible_end_at):
-        segments = tuple((item.starts_at, item.ends_at)
-                         for item in resolver._segments_for_date(policy, day) if item.bar_eligible)
-        if day in common and declaration.asset_class != "cn_future":
-            if common[day] != segments:
-                raise ResearchPackageError("同一策略账户要求共同交易时段")
-            # 逐证券核对时段；相同日期和时段的定时事件只需判断一次。
-            continue
-        common[day] = segments
-        start, end = segments[0][0], segments[-1][1]
-        for item in declaration.schedules:
-            at = (datetime.combine(day, time.fromisoformat(item.at), tzinfo=start.tzinfo) if item.basis == "local_time"
-                  else (start if item.basis == "session_open" else end) + timedelta(seconds=item.offset_seconds))
-            if at.second or at.microsecond or not any(left <= at <= right for left, right in segments):
-                raise ResearchPackageError("定时事件不在合法分钟触发点")
+    parse_strategy_declaration(_thaw_mapping(raw, "strategy_declaration"))

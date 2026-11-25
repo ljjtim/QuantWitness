@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -183,11 +185,11 @@ class MinuteScanPlan:
             raise QueryIRInvalidError("分钟扫描来源修订身份不一致")
         return plan
 
-    @property
+    @cached_property
     def source_revision_hash(self) -> str:
         return typed_canonical_hash([item.to_dict() for item in self.partitions])
 
-    @property
+    @cached_property
     def plan_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 

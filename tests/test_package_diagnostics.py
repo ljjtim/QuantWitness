@@ -164,7 +164,7 @@ def test_source_decoder_preserves_input_for_shared_validation(complete):
     value = yaml.safe_load((complete / "sources/sources.yaml").read_text(encoding="utf-8"))["sources"][0]
     value["provenance"] = store.SourceProvenance.citation_only().to_dict()
     original = deepcopy(value)
-    assert store._load_source(value) == store._load_source(value)
+    assert store._load_source(value).to_dict() == original
     assert value == original
 
 

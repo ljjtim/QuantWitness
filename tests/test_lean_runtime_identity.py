@@ -11,7 +11,10 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from research_pipeline.platform.lean_runtime import freeze_lean_runtime, validate_lean_runtime
+from research_pipeline.platform.lean_runtime import (
+    audit_lean_installation, freeze_lean_runtime, lean_runtime_semantic_identity, record_lean_installation,
+    validate_lean_runtime,
+)
 
 
 REVISION = "a" * 40
@@ -19,6 +22,19 @@ LAUNCHER = f"src/Lean-{REVISION}/Launcher/bin/Release"
 BASE = "python-managed/cpython-3.11-fixture"
 SHARED = "sdk/shared/Microsoft.NETCore.App/10.0.14"
 HOST = "sdk/host/fxr/10.0.14"
+
+
+def test_stricter_resume_keeps_frozen_cache_identity_and_restores_scope(monkeypatch):
+    from research_pipeline.platform.audit_mode import strict_audit_enabled, strict_audit_scope, strict_cache_identity
+
+    monkeypatch.delenv("QUANTWITNESS_STRICT_AUDIT", raising=False)
+    monkeypatch.delenv("QUANTWITNESS_FROZEN_CACHE_AUDIT", raising=False)
+    with strict_audit_scope(True):
+        assert strict_audit_enabled() and strict_cache_identity()
+        with strict_audit_scope(True, frozen_cache_audit=False):
+            assert strict_audit_enabled() and not strict_cache_identity()
+        assert strict_cache_identity()
+    assert not strict_audit_enabled() and not strict_cache_identity()
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +56,7 @@ def installation(tmp_path):
         *(f"{LAUNCHER}/{name}.dll" for name in (
             "QuantWitnessLeanHost", "ChinaRules", "CorporateActions", "ParquetInput",
             "ParquetSharp", "ParquetSharpNative", "Apache.Arrow", "Python.Runtime")),
-        "rp-integration/ResearchLeanAlgorithm.py", "rp-integration/config-template.json",
+        "rp-integration/config-template.json",
         "rp-integration/metadata/market-hours/market-hours-database.json",
         "rp-integration/metadata/symbol-properties/symbol-properties-database.csv",
         f"{BASE}/python.exe", f"{BASE}/python311.dll", f"{BASE}/vcruntime140.dll",
@@ -56,34 +72,137 @@ def installation(tmp_path):
     (root / "python-env/pyvenv.cfg").write_text(
         f"home = {root / BASE}\ninclude-system-site-packages = false\n", encoding="utf-8")
     (root / "upstream-revision.txt").write_text(REVISION, encoding="utf-8")
+    _record_installation(root)
     return root
 
 
-def test_freeze_returns_json_parameters_with_complete_runtime_files(installation):
+def test_freeze_references_installation_audit_without_embedding_file_list(installation):
     from research_pipeline.platform.operator_contracts import ParameterSpec, ParameterType, validate_parameters
 
     lock = freeze_lean_runtime(installation)
-    assert lock["files"] == {
-        name: hashlib.sha256((installation / name).read_bytes()).hexdigest()
-        for name in lock["files"]
-    }
+    manifest = (installation / "rp-integration/runtime-audit.json").read_bytes()
+    assert lock["audit_hash"] == hashlib.sha256(manifest).hexdigest()
+    files = json.loads(manifest)["runtime"]["files"]
+    assert files == {name: hashlib.sha256((installation / name).read_bytes()).hexdigest() for name in files}
+    assert {f"{LAUNCHER}/QuantWitnessLeanHost.dll", f"{SHARED}/coreclr.dll", f"{HOST}/hostfxr.dll",
+            f"{BASE}/DLLs/_socket.pyd", "python-env/Lib/site-packages/sample/data.csv"} <= files.keys()
+    assert "files" not in lock and len(json.dumps(lock).encode()) < 2048
     assert json.loads(json.dumps(lock)) == lock
     assert validate_lean_runtime(lock) == lock
     frozen = validate_parameters({"lean_runtime": lock}, (ParameterSpec("lean_runtime", ParameterType.JSON),), "parameters")
     assert validate_lean_runtime(frozen["lean_runtime"]) == lock
-    assert lock["files"][f"{LAUNCHER}/QuantWitnessLeanHost.dll"]
-    assert f"{SHARED}/coreclr.dll" in lock["files"]
-    assert f"{HOST}/hostfxr.dll" in lock["files"]
-    assert f"{BASE}/DLLs/_socket.pyd" in lock["files"]
-    assert "python-env/Lib/site-packages/sample/data.csv" in lock["files"]
-    assert "identity_hash" not in lock
+    assert lock["contract_version"] == "research-lean-runtime-v3"
+
+
+def _record_installation(installation):
+    (installation / LAUNCHER / "QuantConnect.Lean.Launcher.deps.json").write_text(
+        '{"libraries":{"Sample.Library/1.0.0":{}}}', encoding="utf-8")
+    (installation / "rp-integration/config-template.json").write_text(
+        '// Config\n{"url":"https://example.org"}', encoding="utf-8")
+    (installation / "rp-integration/metadata/market-hours/market-hours-database.json").write_text(
+        "{}", encoding="utf-8")
+    record_lean_installation(installation, engine_source_id="b" * 64)
+
+
+def test_runtime_rejects_modified_critical_bytes_and_strict_audits_other_files(installation):
+    lock = freeze_lean_runtime(installation)
+    assert audit_lean_installation(installation)["verified_files"] > 0
+    extra = installation / "python-env/Lib/site-packages/sample/data.csv"
+    extra.write_bytes(b"changed")
+    assert validate_lean_runtime(lock) == lock
+    with pytest.raises(ValueError, match="内容变化.*data.csv"):
+        validate_lean_runtime(lock, strict=True)
+    target = installation / LAUNCHER / "ChinaRules.dll"
+    original = target.stat()
+    target.write_bytes(b"X" * original.st_size)
+    os.utime(target, ns=(original.st_atime_ns, original.st_mtime_ns))
+    with pytest.raises(ValueError, match="内容变化.*ChinaRules"):
+        validate_lean_runtime(lock)
+
+
+def test_runtime_rejects_tampered_audit_reference(installation):
+    lock = freeze_lean_runtime(installation)
+    record = installation / "rp-integration/runtime-audit.json"
+    audit = json.loads(record.read_bytes())
+    audit["runtime"]["files"][f"{LAUNCHER}/ChinaRules.dll"] = "0" * 64
+    record.write_text(json.dumps(audit), encoding="utf-8")
+    with pytest.raises(ValueError, match="冻结计划不一致"):
+        validate_lean_runtime(lock)
+
+
+def test_installation_semantic_identity_separates_versions_and_audit_files(installation, monkeypatch):
+    _record_installation(installation)
+    original = freeze_lean_runtime(installation)
+    (installation / LAUNCHER / "ChinaRules.dll").write_bytes(b"another build")
+    record_lean_installation(installation, engine_source_id="c" * 64)
+    rebuilt = freeze_lean_runtime(installation)
+    assert original["audit_hash"] != rebuilt["audit_hash"]
+    assert lean_runtime_semantic_identity(original) == lean_runtime_semantic_identity(rebuilt)
+    with pytest.raises(ValueError, match="已安装版本与冻结计划不一致"):
+        validate_lean_runtime(original)
+    monkeypatch.setattr("research_pipeline.platform.lean_runtime.LEAN_ADAPTER_SEMANTIC_VERSION", "test-new-adapter")
+    record_lean_installation(installation, engine_source_id="d" * 64)
+    assert lean_runtime_semantic_identity(freeze_lean_runtime(installation)) != lean_runtime_semantic_identity(rebuilt)
+
+
+def test_published_installation_reuses_engine_lock_with_project_metadata(installation, monkeypatch):
+    from research_pipeline.platform import lean_runtime
+
+    _record_installation(installation)
+    installed = freeze_lean_runtime(installation)
+    relative = "rp-integration/project-metadata"
+    hours = installation / relative / "market-hours/market-hours-database.json"
+    symbols = installation / relative / "symbol-properties/symbol-properties-database.csv"
+    hours.parent.mkdir(parents=True)
+    symbols.parent.mkdir(parents=True)
+    hours.write_text('{"market":"project"}', encoding="utf-8")
+    symbols.write_text("project,market\n", encoding="utf-8")
+    files_digested = []
+    file_digests = lean_runtime._file_digests
+
+    def collect(root, names, resolved):
+        files_digested.append(names)
+        return file_digests(root, names, resolved)
+
+    monkeypatch.setattr(lean_runtime, "_file_digests", collect)
+    lock = freeze_lean_runtime(installation, layout={"metadata_relative": relative})
+    assert lock["metadata_relative"] == relative
+    assert lock["audit_hash"] != installed["audit_hash"]
+    assert lock["dotnet_relative"] == installed["dotnet_relative"]
+    assert lean_runtime_semantic_identity(lock) != lean_runtime_semantic_identity(installed)
+    semantic_reads = []
+    semantic_identity = lean_runtime._execution_inputs_identity
+    def count_semantic(root, runtime):
+        semantic_reads.append(runtime["metadata_relative"])
+        return semantic_identity(root, runtime)
+    monkeypatch.setattr(lean_runtime, "_execution_inputs_identity", count_semantic)
+    assert validate_lean_runtime(lock) == lock
+    assert semantic_reads == []
+    assert len(files_digested) == 4
+    for metadata, critical in zip(files_digested[::2], files_digested[1::2]):
+        assert metadata == [hours.relative_to(installation).as_posix(), symbols.relative_to(installation).as_posix()]
+        assert "sdk/dotnet.exe" in critical
+        assert not set(metadata).intersection(critical)
+    assert validate_lean_runtime(lock, strict=True) == lock
+    assert "sdk/dotnet.exe" in files_digested[-1]
+    assert semantic_reads == [relative]
+    forged = {**lock, "semantic_versions": {**lock["semantic_versions"], "execution_inputs": "f" * 64}}
+    with pytest.raises(ValueError):
+        validate_lean_runtime(forged)
+
+    hours.write_text('{"market":"changed"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="冻结计划不一致"):
+        validate_lean_runtime(lock)
+    with pytest.raises(ValueError, match="冻结计划不一致"):
+        validate_lean_runtime(lock, strict=True)
+
 
 
 @pytest.mark.parametrize("relative", [
     f"{LAUNCHER}/QuantConnect.Lean.Launcher.dll", f"{LAUNCHER}/QuantWitnessLeanHost.dll",
     f"{LAUNCHER}/ParquetSharpNative.dll", "sdk/dotnet.exe", f"{SHARED}/coreclr.dll",
     f"{HOST}/hostfxr.dll", f"{BASE}/python311.dll", f"{BASE}/Lib/os.py",
-    "python-env/Lib/site-packages/sample/__init__.py", "rp-integration/ResearchLeanAlgorithm.py",
+    "python-env/Lib/site-packages/sample/__init__.py",
     "rp-integration/config-template.json", "rp-integration/metadata/market-hours/market-hours-database.json",
     "rp-integration/metadata/symbol-properties/symbol-properties-database.csv",
 ])
@@ -94,7 +213,7 @@ def test_same_location_same_size_and_mtime_still_rejects_changed_bytes(installat
     target.write_bytes(b"X" * before.st_size)
     os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
     with pytest.raises(ValueError, match="内容变化"):
-        validate_lean_runtime(lock)
+        validate_lean_runtime(lock, strict=True)
 
 
 @pytest.mark.parametrize("relative", [
@@ -106,13 +225,43 @@ def test_missing_dependency_rejects_lock(installation, relative):
     lock = freeze_lean_runtime(installation)
     (installation / relative).unlink()
     with pytest.raises(ValueError, match="缺失|闭包变化"):
+        validate_lean_runtime(lock, strict=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="本地 LEAN 安装使用 Windows 目录通知")
+def test_run_reuses_only_unchanged_installation(installation, monkeypatch):
+    from research_pipeline.platform import lean_runtime
+
+    lock = freeze_lean_runtime(installation)
+    calls = []
+    original = lean_runtime._load_installation_audit
+
+    def load(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(lean_runtime, "_load_installation_audit", load)
+    with lean_runtime.lean_runtime_check_scope():
         validate_lean_runtime(lock)
+        alternate = {**deepcopy(lock), "installation_root": str(installation / "subdir" / "..")}
+        assert validate_lean_runtime(alternate) == lock
+        assert len(calls) == 1
+        target = installation / LAUNCHER / "ParquetInput.dll"
+        before = target.stat()
+        target.write_bytes(b"X" * before.st_size)
+        os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with pytest.raises(ValueError, match="内容变化"):
+            validate_lean_runtime(lock)
+    assert len(calls) == 2
+    with lean_runtime.lean_runtime_check_scope(), pytest.raises(ValueError, match="内容变化"):
+        validate_lean_runtime(lock)
+    assert len(calls) == 3
 
 
 def test_new_runtime_file_invalidates_old_closure(installation):
     lock = freeze_lean_runtime(installation)
     (installation / LAUNCHER / "ExtraPlugin.dll").write_text("新增插件", encoding="utf-8")
-    with pytest.raises(ValueError, match="闭包变化.*ExtraPlugin"):
+    with pytest.raises(ValueError, match="新增执行文件.*ExtraPlugin"):
         validate_lean_runtime(lock)
 
 
@@ -132,14 +281,13 @@ def test_unused_launcher_config_sdk_caches_and_logs_do_not_change_lock(installat
 
 
 def test_custom_layout_and_structural_validation(installation, monkeypatch):
-    source = installation / "rp-integration/ResearchLeanAlgorithm.py"
-    target = installation / "alternative/ResearchLeanAlgorithm.py"
+    source = installation / "rp-integration/config-template.json"
+    target = installation / "alternative/config-template.json"
     target.parent.mkdir()
     source.rename(target)
-    lock = freeze_lean_runtime(installation, layout={
-        "algorithm_relative": "alternative/ResearchLeanAlgorithm.py",
-        "python_base_relative": BASE, "python_library_relative": f"{BASE}/python311.dll",
-    })
+    record_lean_installation(installation, engine_source_id="b" * 64,
+                             layout={"config_template_relative": "alternative/config-template.json"})
+    lock = freeze_lean_runtime(installation)
     target.unlink()
     with monkeypatch.context() as isolated:
         def no_file_access(*args, **kwargs):
@@ -162,7 +310,11 @@ def test_existing_lean_preparation_defers_content_check_to_execution(installatio
     spec.loader.exec_module(prepare)
     lock = freeze_lean_runtime(installation)
     parameters = dict(execution_backend="lean", lean_runtime=lock, initial_cash_units=100000000,
-                      strategy_declaration={"bundle_id": "bundle", "asset_class": "cn_stock"})
+                      strategy_declaration={"strategy_id": "identity", "bundle_id": "bundle", "asset_class": "cn_stock",
+                          "algorithm": {"language": "Python", "entry_file": "strategy.py", "type_name": "IdentityAlgorithm"},
+                          "limits": {"initialize_seconds": 30, "time_step_seconds": 30},
+                          "input_bindings": [{"binding_id": "bars", "input_port": "bars", "request_id": "bars",
+                              "kind": "bars", "resolution": "1m", "columns": ["close"]}]})
     node = dict(operator_id="project.strategy", operator_version="1.0.0", parameters=parameters,
                 inputs=[{"input_port": port} for port in ("bars", "snapshot", "signals")])
     source = tmp_path / "package"
@@ -173,10 +325,11 @@ def test_existing_lean_preparation_defers_content_check_to_execution(installatio
                           encoding="utf-8")
     package = object()
     monkeypatch.setattr(packages, "load_research_package", lambda *args, **kwargs: package)
-    manifest = SimpleNamespace(bundle_hash="bundle", operator_spec=SimpleNamespace(resource_profile={"process_slots": 4},
+    from research_pipeline.domain.lean_algorithm import LeanAlgorithm
+    manifest = SimpleNamespace(bundle_hash="bundle", lean_algorithm=LeanAlgorithm(language="Python", entry_file="strategy.py", type_name="IdentityAlgorithm"), operator_spec=SimpleNamespace(resource_profile={"process_slots": 4},
         input_ports=(SimpleNamespace(port="bars", artifact_type="data.minute-bars.v1"),)))
     monkeypatch.setattr(prepare, "bundle_catalog", lambda root: {("project.strategy", "1.0.0"): (source, manifest)})
-    (installation / "rp-integration/ResearchLeanAlgorithm.py").write_text("更新后的算法", encoding="utf-8")
+    (installation / LAUNCHER / "QuantWitnessLeanHost.dll").write_text("更新后的插件", encoding="utf-8")
     summary, loaded = prepare.prepare_package(source, tmp_path / "conversion", installation)
     assert loaded is package
     assert summary["research_executed"] is False
@@ -189,15 +342,15 @@ def test_existing_lean_preparation_defers_content_check_to_execution(installatio
         execution.execute_lean_strategy_node(service, node_context=context, run_id="run", attempt_id="attempt", environment={})
 
 
-@pytest.mark.parametrize("mutation", ["outside", "absolute", "missing_lock_entry", "forbidden", "other_entry"])
+@pytest.mark.parametrize("mutation", ["outside", "invalid_hash", "missing_lock_entry", "forbidden", "other_entry"])
 def test_lock_rejects_incomplete_or_outside_installation_metadata(installation, mutation):
     lock = freeze_lean_runtime(installation)
     if mutation == "outside":
-        lock["algorithm_relative"] = "../ResearchLeanAlgorithm.py"
-    elif mutation == "absolute":
-        lock["files"][str(installation / "outside.dll")] = "0" * 64
+        lock["config_template_relative"] = "../config-template.json"
+    elif mutation == "invalid_hash":
+        lock["audit_hash"] = "0" * 32
     elif mutation == "missing_lock_entry":
-        lock["files"].pop(f"{LAUNCHER}/QuantWitnessLeanHost.dll")
+        lock.pop("audit_hash")
     elif mutation == "forbidden":
         lock["module"] = "arbitrary"
     else:
@@ -267,15 +420,17 @@ def test_formal_plan_load_revalidates_lean_files_and_existing_configuration_iden
     lock = freeze_lean_runtime(installation)
     target, plan = _publish_plan(tmp_path, lock)
     calls = []
-    def validate(payload, verify_files=True):
-        calls.append(verify_files)
-        return validate_lean_runtime(payload, verify_files=verify_files)
+    def validate(payload, *, strict):
+        calls.append(strict)
+        return validate_lean_runtime(payload, strict=strict)
     monkeypatch.setattr(research_plan_store, "validate_lean_runtime", validate)
     research_plan_store.load_operator_graph_research_plan(target=target)
-    assert calls == [True]
+    assert calls == [False]
+    research_plan_store.load_operator_graph_research_plan(target=target, strict=True)
+    assert calls == [False, True]
     node = next(item for item in plan.recipe.nodes if item.node_id == "lean_identity")
     changed = deepcopy(lock)
-    changed["files"][f"{LAUNCHER}/QuantWitnessLeanHost.dll"] = "f" * 64
+    changed["audit_hash"] = "f" * 64
     other = replace(node, parameters={**dict(node.parameters), "lean_runtime": changed})
     assert _node_configuration_hash(plan, node) != _node_configuration_hash(plan, other)
 

@@ -25,10 +25,21 @@ def payloads(root,manifest,name):
     require(len(selected)==1,"Result须恰好包含一张"+name+"表")
     result=[]
     for relative in sorted(selected[0]["files"]):
-        table=pq.ParquetFile(root/relative).read(columns=["payload_json"])
-        result.extend(json.loads(value) for value in table["payload_json"].to_pylist())
-    require(bool(result) or name in {"fills", "positions", "account_events", "lifecycle"},name+"表为空")
+        result.extend(pq.read_table(root/relative).to_pylist())
+    require(bool(result) or name in {"intents", "fills", "positions", "account_events", "lifecycle"},name+"表为空")
     return result
+
+
+def verify_history(root, manifest, expected):
+    support_files = {item["source_path"]: item["relative_path"] for item in manifest["support_files"]}
+    for observation in expected:
+        day = observation["at"][:10]
+        filename = f"lean/storage/quickstart/history-{day}.json"
+        require(filename in support_files, f"缺少 {day} 的 History 记录")
+        actual = json.loads((root / support_files[filename]).read_text(encoding="utf-8"))
+        require(actual["at"] == observation["at"], f"{day} 的 History 请求时点不匹配")
+        require(list(map(number, actual["close"])) == list(map(number, observation["close"])),
+                f"{day} 的 History 收盘价不匹配")
 
 
 def verify(root,frequency):
@@ -38,38 +49,31 @@ def verify(root,frequency):
     expected=yaml.safe_load((HERE/"expected.yaml").read_text(encoding="utf-8"))
     case=expected["frequencies"][frequency]
     tables={name:payloads(root,manifest,name) for name in LEAN_SCHEMA_IDS}
-    require(all(not tables[name] for name in ("fills", "positions", "account_events", "lifecycle")),
-            "现货示例的期货执行表必须为空")
+    require(not tables["intents"], "原生算法不能生成虚构策略意图")
     fills=[row for row in tables["orders"] if number(row["quantity"])!=0]
     require(len(fills)==2,"必须恰好买入、卖出各一次")
     for actual,wanted in zip(fills,case["fills"]):
         require(actual["instrument_id"]==expected["instrument_id"],"成交证券不匹配")
         for key in ("submitted_at","at"):
-            require(datetime.fromisoformat(actual[key])==datetime.fromisoformat(wanted[key]),"成交时点不匹配："+key)
+            require(actual[key]==datetime.fromisoformat(wanted[key]),"成交时点不匹配："+key)
         for key in ("quantity","price","fee","cash"):
             require(number(actual[key])==number(wanted[key]),"成交金额不匹配："+key)
     require(len({row["order_id"] for row in tables["orders"]})==2,"订单数必须为2")
     require(sum(number(row["fee"]) for row in fills)==number(case["fee_total"]),"总费用不匹配")
     daily=tables["daily"]
-    require([row["date"] for row in daily]==DAYS,"日终会话不完整")
+    require([row["date"].isoformat() for row in daily]==DAYS,"日终会话不完整")
     require([number(row["cash"]) for row in daily]==list(map(number,case["daily_cash"])),"日终现金不匹配")
     require(number(daily[-1]["equity"])==number(case["final_equity"]),"期末权益不匹配")
     require(not daily[-1]["positions"],"期末持仓必须为空")
     require(all(row["active_orders"]==0 for row in daily),"日终存在未完成订单")
-    intents=tables["intents"]
-    require(len(intents)==2,"意图数必须为2")
-    require([row["intent"]["side"] for row in intents]==["buy","sell"],"买卖意图顺序不匹配")
-    require(all(row["intent"]["quantity"]==100 for row in intents),"意图数量不匹配")
-    decisions=[row for row in tables["trace"] if row["response"]["intents"]]
-    require(len(decisions)==2,"轨迹须恰好包含两次下单决定")
-    for row,wanted in zip(decisions,case["fills"]):
-        event=row["event"]
-        require(event["kind"]=="bar","下单必须来自bar事件")
-        require(datetime.fromisoformat(event["decision_time"])==datetime.fromisoformat(wanted["submitted_at"]),"轨迹决定时点不匹配")
-        code=expected["instrument_id"]
-        require(datetime.fromisoformat(row["quotes"][code]["available_at"])<=datetime.fromisoformat(event["decision_time"]),"决定使用未来报价")
-    sell_positions=decisions[1]["event"]["account"]["positions"]
-    require(any(row["instrument"]["instrument_id"]==expected["instrument_id"] and row["sellable_quantity"]>=100 for row in sell_positions),"卖出时T+1可卖量不足")
+    requests = [row["payload"] for row in tables["trace"] if row["kind"] == "order_request"
+                and row["payload"]["request_type"] == "Submit"]
+    submitted = {row["order_id"]: row for row in requests}
+    require(len(submitted) == 2, "轨迹须保留两笔原生提交请求")
+    require(sorted(row["quantity"] for row in submitted.values()) == [-100, 100], "原生申报数量不匹配")
+    require(len(tables["fills"]) == 2, "实际成交表必须保存两笔成交")
+    require(bool(tables["account_events"]), "缺少真实账户事件")
+    verify_history(root, manifest, case["history"])
     return dict(result_id=manifest["result_id"],frequency=frequency,fill_count=2,fee_total=case["fee_total"],final_equity=case["final_equity"])
 
 if __name__=="__main__":

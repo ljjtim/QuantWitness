@@ -60,10 +60,12 @@ Get-Content -LiteralPath $flow.report_path
 
 ```powershell
 python -m research_pipeline workspace inspect --workspace $workspace --json
-python -m research_pipeline workspace execute --workspace $workspace --execution-id $executionId --catalog-lock $catalog --json
+python -m research_pipeline workspace execute --workspace $workspace --execution-id $executionId --json
 ```
 
-不指定 execution-id 的 execute 建立新执行。指定原编号时沿用原 plan、invocation、输入、预算和持久 holdout 锚点。不以新执行代替恢复。
+同一工作区内，每次分配和完成登记只更新对应的执行记录。用 `workspace inspect --workspace <工作区> --execution <执行编号> --json` 查看单次执行；完成登记后可读到完成状态和已记录的 Result 标识。使用 `--execution-id` 接续已有执行时，不再强制要求重复传入 `--catalog-lock`（仅新建执行必传）。
+
+不指定 execution-id 的 execute 建立新执行。指定原编号时沿用原 plan、invocation、输入、预算和持久 holdout 锚点。即使在 `report` 阶段失败，返回的失败诊断仍保留 `report --result ...` 的建议命令和 `next_action`；接续或首次生成报告时会自动清空 `package` 与 `source_archive_root`，避免因原归档包位置导致报告阶段报错。不以新执行代替恢复。
 
 | 原执行事实 | 接续动作 |
 | --- | --- |
@@ -99,7 +101,9 @@ python -m research_pipeline report --result $flow.result_directory --result-stor
 python -m research_pipeline workspace dashboard --workspace $workspace --json
 ```
 
-清单为 `research-dashboard-workspace-v4`，条目使用 entry_id、label、result 和 result_store，路径相对工作区生成根。只列与 execution 的 run/result 身份一致、可读取的正式 Result。没有可用结果时移除旧清单并返回诊断。
+清单为 `research-dashboard-workspace-v4`，条目使用 entry_id、label、result 和 result_store，路径相对工作区生成根。只列与 execution 的 run/result 身份一致、可读取的正式 Result。即使原 `run` 运行目录与 `result-finalize.json` 已被归档删除，`workspace dashboard` 仍会回退按 `result_store` 中的正式 Result 目录定位并校验导出。没有可用结果时移除旧清单并返回诊断。
+
+各阶段耗时与节点缓存命中情况可随运行记录到 Result 目录下的可选观测文件 `execution-cost.json`（校验时检查 JSON 结构，不参与 `result_id` 哈希，迁移导出随 Result 一并携带）。
 
 正式 Result、原计划和 holdout 账本按[工件生命周期](artifact-lifecycle.md)保留。输入引用的持久目录迁移时一并携带。
 

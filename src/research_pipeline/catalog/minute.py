@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+
+from functools import cached_property, partial
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -13,6 +15,9 @@ from research_pipeline.platform.asset_taxonomy import (
     normalize_asset_class,
 )
 from research_pipeline.platform.canonical import typed_canonical_hash
+from research_pipeline.platform.validation import (
+    parse_aware_seconds, require_exact_fields, require_text,
+)
 from .errors import CatalogParseError, CatalogReferenceError
 
 
@@ -87,18 +92,10 @@ def register_minute_policy_validators() -> None:
     )
 
 
-def _exact(value: Mapping[str, Any], expected: set[str], name: str) -> None:
-    if set(value) != expected:
-        raise CatalogParseError(
-            f"{name} schema 不匹配；缺失={sorted(expected-set(value))}，"
-            f"未知={sorted(set(value)-expected)}"
-        )
+_exact = partial(require_exact_fields, error=CatalogParseError)
 
 
-def _text(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise CatalogParseError(f"{name} 必须是非空字符串")
-    return value
+_text = partial(require_text, error=CatalogParseError)
 
 
 def _hash(value: object, name: str) -> str:
@@ -206,7 +203,7 @@ class MinuteDatasetSemantics:
             "semantics_version": self.semantics_version,
         }
 
-    @property
+    @cached_property
     def content_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -286,7 +283,7 @@ class MinuteSourceSemantics:
             "semantics_version": self.semantics_version,
         }
 
-    @property
+    @cached_property
     def content_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -429,6 +426,7 @@ class AdjustmentFactorSnapshot:
     included_action_hashes: tuple[str, ...]
     decision_anchors: tuple[AdjustmentDecisionAnchor, ...] = ()
     contract_version: str = ADJUSTMENT_FACTOR_SNAPSHOT_VERSION
+    factor_source: str = "corporate_actions"
 
     def __post_init__(self) -> None:
         _hash(self.factor_snapshot_hash, "factor_snapshot_hash")
@@ -445,6 +443,9 @@ class AdjustmentFactorSnapshot:
         _text(self.instrument_id, "instrument_id")
         if self.asset_class not in {"cn_stock", "cn_etf"}:
             raise CatalogParseError("复权快照只支持股票或 ETF")
+        if (self.factor_source not in {"corporate_actions", "stock_session_open"}
+                or self.factor_source == "stock_session_open" and self.asset_class != "cn_stock"):
+            raise CatalogParseError("复权快照因子来源不受支持")
         try:
             date.fromisoformat(self.initial_factor_date)
         except ValueError as exc:
@@ -500,7 +501,7 @@ class AdjustmentFactorSnapshot:
             raise CatalogReferenceError("pre 消费者没有唯一决定时点锚点")
         return matches[0]
 
-    @property
+    @cached_property
     def snapshot_identity_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -521,6 +522,7 @@ class AdjustmentFactorSnapshot:
             "included_action_hashes": list(self.included_action_hashes),
             "decision_anchors": [item.to_dict() for item in self.decision_anchors],
             "contract_version": self.contract_version,
+            **({"factor_source": self.factor_source} if self.factor_source != "corporate_actions" else {}),
         }
 
     @classmethod
@@ -532,7 +534,7 @@ class AdjustmentFactorSnapshot:
             "factor_segments", "included_action_hashes", "decision_anchors",
             "contract_version",
         }
-        _exact(value, expected, "AdjustmentFactorSnapshot")
+        _exact(value, expected | ({"factor_source"} if "factor_source" in value else set()), "AdjustmentFactorSnapshot")
         segment_values = value["factor_segments"]
         anchor_values = value["decision_anchors"]
         action_hashes = value["included_action_hashes"]
@@ -558,6 +560,7 @@ class AdjustmentFactorSnapshot:
             tuple(str(item) for item in action_hashes),
             tuple(AdjustmentDecisionAnchor.from_mapping(item) for item in anchor_values),
             _text(value["contract_version"], "contract_version"),
+            _text(value.get("factor_source", "corporate_actions"), "factor_source"),
         )
 
 
@@ -573,16 +576,7 @@ def _positive_decimal(value: object, name: str) -> Decimal:
 
 
 def _aware(value: object, name: str) -> datetime:
-    text = _text(value, name)
-    try:
-        result = datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise CatalogParseError(f"{name} 必须是带时区 ISO 时间") from exc
-    if result.tzinfo is None or result.utcoffset() is None:
-        raise CatalogParseError(f"{name} 必须带时区")
-    if text != result.isoformat(timespec="seconds"):
-        raise CatalogParseError(f"{name} 必须使用规范秒精度 ISO 时间")
-    return result
+    return parse_aware_seconds(_text(value, name), name, error=CatalogParseError)
 
 
 __all__ = [

@@ -63,14 +63,16 @@ class RuntimeEvent:
     def from_dict(cls, payload: dict[str, Any]) -> RuntimeEvent:
         fields = {"seq", "event_id", "run_id", "kind", "payload", "previous_hash", "event_hash", "occurred_at", "command_id", "node_id", "attempt_id", "contract_version"}
         _require_fields(payload, fields, "RuntimeEvent")
-        event = cls(
-            int(payload["seq"]), str(payload["event_id"]), str(payload["run_id"]),
-            str(payload["kind"]), dict(payload["payload"]), str(payload["previous_hash"]),
-            str(payload["event_hash"]), str(payload["occurred_at"]), str(payload["command_id"]),
-            None if payload["node_id"] is None else str(payload["node_id"]),
-            None if payload["attempt_id"] is None else str(payload["attempt_id"]),
-            str(payload["contract_version"]),
-        )
+        identifiers = ("node_id", "attempt_id")
+        text_fields = fields - {"seq", "payload", *identifiers}
+        if (
+            type(payload["seq"]) is not int
+            or not isinstance(payload["payload"], dict)
+            or any(not isinstance(payload[field], str) for field in text_fields)
+            or any(payload[field] is not None and not isinstance(payload[field], str) for field in identifiers)
+        ):
+            raise RuntimeIntegrityError("事件字段类型无效")
+        event = cls(**payload)
         event.verify()
         return event
 

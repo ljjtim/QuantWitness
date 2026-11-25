@@ -17,14 +17,19 @@ from research_pipeline.data_plane.dataset_artifacts import build_dataset_artifac
 from research_pipeline.data_plane.revision import SourceFileEvidence, SourceRevision
 from research_pipeline.platform import typed_canonical_hash
 
+if __package__:
+    from .source.operator import SYNTHETIC_SESSIONS
+else:
+    from source.operator import SYNTHETIC_SESSIONS
+
 
 def synthetic_table():
     rows = []
-    for index, day in enumerate((2, 3, 4, 5, 8, 9, 10, 11, 12)):
+    for index, session in enumerate(SYNTHETIC_SESSIONS):
         for security in range(20):
-            rows.append({'fld_metric_session': date(2024, 1, day),
+            rows.append({'fld_metric_session': session,
                          'fld_metric_code': f'SYN.{security:03d}',
-                         'fld_metric_turnover': 0.001 * (security + 1) + day * 0.00001,
+                         'fld_metric_turnover': 0.001 * (security + 1) + session.day * 0.00001,
                          'fld_metric_close': 100.0 * (1.0 + 0.001 * (20-security)) ** index})
     return pa.Table.from_pylist(rows, schema=pa.schema([
         ('fld_metric_session', pa.date32()), ('fld_metric_code', pa.string()),

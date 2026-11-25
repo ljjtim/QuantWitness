@@ -11,6 +11,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from test_lean_runtime_identity import installation as lean_installation
 
 
+pytestmark = pytest.mark.ml
+
+
 def test_risk_target_bundle_compiles_with_project_target_ports(tmp_path):
     from research_pipeline.extensions import load_project_operator_declaration, compile_project_operator_bundle, verify_project_operator_bundle
     from research_pipeline.runtime.operator_registry import build_mainline_operator_registry

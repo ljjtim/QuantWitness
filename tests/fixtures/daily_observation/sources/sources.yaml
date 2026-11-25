@@ -1,0 +1,19 @@
+sources:
+  - source_id: reference_paper
+    source_type: paper
+    title: Evidence of Predictable Behavior of Security Returns
+    url: https://doi.org/10.1111/j.1540-6261.1990.tb05110.x
+    accessed_at: '2026-07-11'
+    content_hash: 11026e47f9ebece33611b4dc6e147ba29e51a7deff13507bc82163af3b1a8842
+    license_id: citation-only
+    status: available
+    limitation: 模板只固化研究包结构，不代表已复刻论文结果
+    provenance:
+      mode: citation_only
+      content_digest: null
+      media_type: null
+      snapshot_artifact_id: null
+      snapshot_manifest_hash: null
+      importer_id: null
+      imported_at: null
+      contract_version: research-source-provenance-v1

@@ -42,12 +42,11 @@ def __getattr__(name: str) -> object:
             "ResultStore": ResultStore,
             "DatasetFilter": DatasetFilter,
         }
-    elif name in {"ResultMetric", "load_result_metrics", "metrics_from_snapshot"}:
-        from .metrics import ResultMetric, load_result_metrics, metrics_from_snapshot
+    elif name in {"ResultMetric", "metrics_from_snapshot"}:
+        from .metrics import ResultMetric, metrics_from_snapshot
 
         values = {
             "ResultMetric": ResultMetric,
-            "load_result_metrics": load_result_metrics,
             "metrics_from_snapshot": metrics_from_snapshot,
         }
     elif name in {"ResultContext", "ResultReport", "ResultComparison", "load_result_context",
@@ -75,5 +74,5 @@ __all__ = [
     "ResultTableManifest", "ResultTableSpec",
     "ResultContext", "ResultReport", "ResultComparison", "load_result_context",
     "build_result_report", "render_result_report", "compare_results", "export_result",
-    "compile_result_spec", "load_result_metrics", "metrics_from_snapshot", "ResultMetric",
+    "compile_result_spec", "metrics_from_snapshot", "ResultMetric",
 ]

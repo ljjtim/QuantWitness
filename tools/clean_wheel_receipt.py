@@ -12,7 +12,7 @@ from typing import Mapping
 from zipfile import ZipFile
 
 
-CLEAN_WHEEL_RECEIPT_VERSION = "research-clean-wheel-acceptance-v1"
+CLEAN_WHEEL_RECEIPT_VERSION = "research-clean-wheel-acceptance-v2"
 VALIDATED_CAPABILITY_IDS = ("capability.discovery", "research_package.plan")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 _BASE_COMMAND_IDS = {
@@ -28,8 +28,8 @@ _BASE_COMMAND_IDS = {
     "installed.dependencies",
     "package.init",
     "package.lint",
-    "recipe.list",
-    "recipe.unknown-id",
+    "operator.list",
+    "operator.unknown-id",
     "installed.environment",
 }
 _PAYLOAD_FIELDS = {
@@ -43,7 +43,7 @@ _PAYLOAD_FIELDS = {
     "inventory",
     "capabilities_sha256",
     "package_data_probe_sha256",
-    "recipe_list_sha256",
+    "operator_list_sha256",
     "validated_capability_ids",
     "commands",
     "source_tree_on_pythonpath_during_installed_checks",
@@ -176,7 +176,7 @@ def verify_clean_wheel_receipt(
     }
     if any(
         expectation != (
-            "failure" if command_id in {"package.lint", "recipe.unknown-id"} else "success"
+            "failure" if command_id in {"package.lint", "operator.unknown-id"} else "success"
         )
         for command_id, expectation in command_expectations.items()
     ):
@@ -218,7 +218,7 @@ def verify_clean_wheel_receipt(
         "inventory_sha256",
         "capabilities_sha256",
         "package_data_probe_sha256",
-        "recipe_list_sha256",
+        "operator_list_sha256",
     ):
         source = inventory if field == "inventory_sha256" else payload
         _require_digest(source.get(field), field)

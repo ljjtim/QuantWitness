@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from research_pipeline.platform.metric_contracts import builtin_metric_output_path
-from research_pipeline.domain.session_calendar import PROJECT_SESSION_BUNDLE_VERSION
 
 from typing import Mapping
 from research_pipeline.platform import typed_canonical_hash
@@ -12,7 +11,10 @@ from research_pipeline.data_plane.research_data_bundle import merge_research_dat
 from research_pipeline.platform.metric_contracts import build_mainline_metric_registry
 from ..operator_runtime import OperatorRuntimeContext, RuntimeCompletionMetadata, RuntimeNodeOutputs, RuntimeNodeValue
 from .common import _environment, _external_result, _input_external_payload, _parameters
-from .minute_io import _minute_scan_plan, _minute_scan_plan_from_environment, _session_bundle_from_payload
+from .minute_io import (
+    _minute_scan_plan, _minute_scan_plan_from_environment, _minute_scope_from_payload,
+    _session_bundle_from_payload,
+)
 
 
 def execute_data_minute_scan_v1(context: OperatorRuntimeContext) -> RuntimeNodeValue:
@@ -64,25 +66,23 @@ def execute_research_bars_minute_resample_v1(
         raise ValueError("分钟 resample 输入扫描计划或物理源发生漂移")
     parameters = _parameters(context)
     interval_minutes = int(parameters["interval_minutes"])
-    bundle = _session_bundle_from_payload(parameters, context)
-    if "minute_scope" in parameters:
-        from research_pipeline.domain.minute_request_scope import minute_request_sessions
-        for _ in minute_request_sessions(bundle, instruments=scan_plan.instruments,
-              start_at=scan_plan.start_at, end_at=scan_plan.visible_end,
-              policy_id=None if bundle.contract_version == PROJECT_SESSION_BUNDLE_VERSION else scan_plan.minute_session_policy_ref):
-            pass
+    scope = _minute_scope_from_payload(parameters, context)
+    calendar_hash = (scope.reference["calendar_hash"] if scope is not None
+                     else _session_bundle_from_payload(parameters, context).bundle_hash)
+    if scan_plan.minute_scope is not None and dict(scan_plan.minute_scope) != parameters.get("minute_scope"):
+        raise ValueError("分钟 resample 日历与扫描准入日历不一致")
     if interval_minutes != 1:
         raise ValueError("分钟行情仅支持一分钟")
     plan_hash = typed_canonical_hash({
         "scan_plan_hash": scan_plan.plan_hash,
         "interval_minutes": 1,
-        "session_policy_bundle_hash": bundle.bundle_hash,
+        "session_policy_bundle_hash": calendar_hash,
         "minute_capability_manifest_hash": scan_plan.minute_capability_manifest_hash,
     })
     artifact_semantics_hash = typed_canonical_hash({
         "interval_minutes": 1,
         "source_dataset": dataset.reference_id,
-        "session_policy_bundle_hash": bundle.bundle_hash,
+        "session_policy_bundle_hash": calendar_hash,
     })
     payload = {
         "contract_version": "runtime-minute-bars-artifact",
@@ -90,7 +90,7 @@ def execute_research_bars_minute_resample_v1(
         "interval_minutes": interval_minutes,
         "resample_plan_hash": plan_hash,
         "artifact_semantics_hash": artifact_semantics_hash,
-        "session_policy_bundle_hash": bundle.bundle_hash,
+        "session_policy_bundle_hash": calendar_hash,
         **({"minute_scope": parameters["minute_scope"]} if "minute_scope" in parameters else {}),
         "quality_policy_refs": list(scan_plan.minute_quality_policy_refs),
         "quality_status": "pending_stream_consumption",

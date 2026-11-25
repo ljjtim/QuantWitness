@@ -52,6 +52,9 @@ def build_data_event_daily_operator_definitions() -> tuple[OperatorDefinition, .
             implementation_scope="core",
             dependency_modules=(
                 "research_pipeline.data_plane.direct_sources",
+                "research_pipeline.data_plane.providers.duckdb",
+                "research_pipeline.data_plane.providers.epoch_date",
+                "research_pipeline.data_plane.providers.sql",
                 "research_pipeline.data_plane.snapshots",
                 "research_pipeline.data_plane.snapshot_layout",
             ),

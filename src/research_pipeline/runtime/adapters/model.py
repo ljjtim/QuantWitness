@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from research_pipeline.research.validation.holdout_series import series_from_parameters
-from ..walk_forward_model_execution import execute_model_fit_artifact, execute_model_fold_metrics_artifact, execute_model_locked_holdout_artifact, execute_model_predict_artifact, execute_model_selection_artifact, execute_model_split_artifact
+from ..model_fit_execution import execute_model_fit_artifact
+from ..walk_forward_model_execution import execute_model_fold_metrics_artifact, execute_model_locked_holdout_artifact, execute_model_predict_artifact, execute_model_selection_artifact, execute_model_split_artifact
 from ..operator_runtime import OperatorRuntimeContext, RuntimeNodeValue
 from .common import _environment, _factor_external_result, _input_external_root, _parameters
 

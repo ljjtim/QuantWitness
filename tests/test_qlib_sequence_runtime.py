@@ -16,6 +16,9 @@ import research_pipeline.runtime.walk_forward_model_execution as runtime
 from test_qlib_model_integration import synthetic_samples, candidate, _parameters, _read, research_series
 from test_qlib_gru_contract import gru_candidate
 
+
+pytestmark = pytest.mark.ml
+
 BUDGET = 256 * 1024**2
 
 

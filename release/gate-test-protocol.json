@@ -4,18 +4,18 @@
     "gate-d": {
       "selectors": [
         "tests/test_runtime_checkpoint.py",
-        "tests/test_financial_checkpoint_recovery.py::test_financial_checkpoint_resume_does_not_repeat_fill_fee_or_ledger_event",
-        "tests/test_financial_checkpoint_recovery.py::test_corrupt_financial_checkpoint_is_never_reused"
+        "tests/test_runtime_operator_dag.py::test_operator_dag_resume_reconciles_committed_running_attempt",
+        "tests/test_runtime_remediation_boundaries.py::test_uncommitted_target_can_recompute_but_committed_corruption_rejects"
       ],
       "required_files": []
     },
     "gate-f": {
       "selectors": [
         "tests/test_financial_values.py",
-        "tests/test_cn_stock_simulation.py",
-        "tests/test_cn_etf_simulation.py",
-        "tests/test_cn_futures_simulation.py",
-        "tests/test_simulation_semantics.py",
+        "tests/test_corporate_actions.py",
+        "tests/test_share_arrival_policy.py",
+        "tests/test_lean_metrics.py",
+        "tests/test_lean_futures_results.py",
         "tests/test_dsr_formula.py"
       ],
       "required_files": []

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Mapping, Protocol
 
 
@@ -44,8 +44,10 @@ def project_causal_request_ids(parameters: Mapping[str, object]) -> set[str]:
     """只解释已约定的因果声明，不递归猜测任意项目参数。"""
     if "causal_plan" not in parameters:
         return set()
-    plan = parse_causal_plan(parameters["causal_plan"])
-    return {source.request_id for source in plan.sources}
+    raw = parameters["causal_plan"]
+    plan = parse_causal_plan(raw, allow_pending_schedule=True)
+    from research_pipeline.platform.daily_schedule import schedule_requests
+    return {source.request_id for source in plan.sources} | schedule_requests(raw.get("daily_schedule", {}))
 
 
 def validate_project_causal_recipe(
@@ -60,10 +62,15 @@ def validate_project_causal_recipe(
     for node in recipe.nodes:
         if "causal_plan" not in node.parameters:
             continue
-        parsed = parse_causal_plan(node.parameters["causal_plan"])
+        raw = node.parameters["causal_plan"]
+        parsed = parse_causal_plan(raw, allow_pending_schedule=True)
+        from research_pipeline.platform.daily_schedule import schedule_requests
+        for request_id in schedule_requests(raw.get("daily_schedule", {})):
+            if request_id not in request_queries or request_queries[request_id].purpose is not QueryPurpose.FEATURE:
+                raise ResearchPackageError("日频排程的资格与来源键须绑定 FEATURE 请求")
         if causal_time_key_columns(parsed.key_columns, is_feature=parsed.kind == "feature") != parsed.key_columns:
             raise ResearchPackageError("项目 causal_plan 必须使用正式表完整行键")
-        plan = parsed.to_dict()
+        plan = parsed.header()
         specification = admission.require_operator(node.operator_id, node.operator_version)
         outputs = {port.port: port.artifact_type for port in specification.output_ports}
         if outputs.get(plan["output_port"]) != _CAUSAL_TYPES[plan["kind"]]:
@@ -118,7 +125,7 @@ def validate_project_causal_recipe(
             # 任意变换的列名不能冒充原始 request 的列语义。
             if nodes[inputs[port].source_node_id].operator_id not in _DATA_PRODUCERS:
                 raise ResearchPackageError("项目因果输入必须直接绑定可证明时间列的数据请求工件")
-            for item in plan["work_items"]:
+            for item in raw.get("work_items", ()):
                 decision = parse_aware_datetime(item["decision_time"], "decision_time")
                 start = parse_aware_datetime(item["window_start"], "window_start")
                 end = parse_aware_datetime(item["window_end"], "window_end")
@@ -177,10 +184,21 @@ def validate_project_causal_admitted_sources(
             if admitted is None:
                 raise ResearchPackageError("项目 causal_plan 缺少已准入请求")
             temporal = admitted.temporal_selection
-            if temporal.requires_consumer_binding or temporal.revision_selector is not None or temporal.effective_interval_selector is not None:
+            publication_date = source.get("daily_time", {}).get("rule") == "next_session_open_following_publication_date"
+            if (temporal.revision_selector is not None or temporal.effective_interval_selector is not None
+                    or (temporal.requires_consumer_binding and not (publication_date and causal.kind == "feature"))):
                 raise ResearchPackageError("项目因果输入尚不支持需逐决策快照选择的数据请求")
             if source.get("daily_time") is not None:
                 _validate_daily_source(source, admitted, catalog=catalog)
+                if publication_date and admitted.query.limit is not None:
+                    raise ResearchPackageError("公告因果输入必须保留窗口内完整事件，不能声明 QueryIR limit")
+                if publication_date and temporal.requires_consumer_binding:
+                    from zoneinfo import ZoneInfo
+
+                    cutoff = date.fromisoformat(admitted.query.as_of)
+                    timezone = ZoneInfo(source["daily_time"]["timezone"])
+                    if any(item.decision_time.astimezone(timezone).date() > cutoff for item in causal.work_items):
+                        raise ResearchPackageError("公告原始事件的决策日期不能晚于 QueryIR as_of")
                 continue
             if admitted.daily_availability_rule is not None or admitted.session_close_binding is not None:
                 raise ResearchPackageError("项目因果输入缺少日频或 session-close 核心可见时间列")
@@ -222,7 +240,7 @@ def _validate_daily_source(source: Mapping, admitted: AdmittedQueryPlan, *, cata
         _validate_catalog_date_rule(admitted, daily, catalog)
     calendar = TradingSessionCalendar.build(daily["sessions"])
     scope = admitted.query.time_range
-    needs_next = daily["rule"] == "next_session_open"
+    needs_next = daily["rule"] in {"next_session_open", "next_session_open_following_publication_date"}
     if (isinstance(scope, InstantRangeV2) or calendar.sessions[0] > scope.start
             or (calendar.sessions[-1] <= scope.end if needs_next else calendar.sessions[-1] < scope.end)):
         raise ResearchPackageError("日频冻结交易日历必须覆盖请求" + ("及结束后的下一交易日" if needs_next else "日期范围"))
@@ -251,6 +269,15 @@ def _validate_catalog_date_rule(admitted: AdmittedQueryPlan, daily: Mapping, cat
             or admitted.daily_availability_rule is not None
             or rules.get("claim_ceiling", "tradable_simulation") != admitted.input_claim_ceiling):
         raise ResearchPackageError("日期 causal 时间规则与 Catalog 准入事实不一致")
+    if daily["rule"] == "next_session_open_following_publication_date":
+        if (dataset["frequency"] != "event"
+                or rules.get("available_time_field") != admitted.event_time_field
+                or rules.get("publication_time_granularity") != "date"
+                or rules.get("same_publication_day_use") != "reject"
+                or visibility is None or visibility.available_time_field != admitted.event_time_field
+                or visibility.inclusive or visibility.additional_time_fields):
+            raise ResearchPackageError("公告日期必须绑定事件来源、日期粒度及公告当天不可见政策")
+        return
     # 上市日等实体属性不表示整条参考记录的观测日，不能据此提前交付记录。
     if dataset["frequency"] != "daily" or admitted.event_time_field not in dataset["primary_key"]:
         raise ResearchPackageError("业务日期必须是逐日记录的日期键；上市日期不能充当整条记录的观测日期")

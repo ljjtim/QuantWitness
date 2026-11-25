@@ -1,0 +1,281 @@
+contract_version: research-operator-graph-package-v2
+research_id: reference.minute.stock.session
+as_of: '2024-01-05T15:01:00+08:00'
+root_seed: 20260717
+fixed_clock: '2026-07-17T00:00:00+08:00'
+requests:
+- request_id: stock_daily_factor
+  dataset_id: cn_equity.daily_bar
+  dataset_version: 3
+  field_ids:
+  - fld_equity_daily_date
+  - fld_equity_daily_code
+  - fld_equity_daily_close
+  - fld_equity_daily_factor
+  purpose: feature
+  time_range:
+    start: '2023-12-29'
+    end: '2024-01-05'
+  universe:
+    instruments:
+    - 000001.XSHE
+    snapshot_id: null
+  filters: []
+  sort:
+  - field_id: fld_equity_daily_date
+    descending: false
+  - field_id: fld_equity_daily_code
+    descending: false
+  budget:
+    max_rows: 10
+    max_bytes: 1048576
+    batch_size: 10
+  adjustment: unadjusted
+  limit: 10
+- request_id: stock_corporate_actions
+  dataset_id: cn_corporate_action.events
+  dataset_version: 5
+  field_ids:
+  - fld_ca_id
+  - fld_ca_code
+  - fld_ca_implementation_pub_date
+  - fld_ca_cash_per_ten
+  - fld_ca_stock_per_ten
+  - fld_ca_transfer_per_ten
+  - fld_ca_record_date
+  - fld_ca_ex_date
+  - fld_ca_cash_arrival_date
+  - fld_ca_stock_arrival_date
+  - fld_ca_transfer_arrival_date
+  - fld_ca_listing_date
+  - fld_ca_plan_progress
+  - fld_ca_status
+  - fld_ca_add_time
+  - fld_ca_mod_time
+  - fld_ca_note
+  purpose: feature
+  time_range:
+    start: '2023-12-29'
+    end: '2024-01-05'
+  universe:
+    instruments:
+    - 000001.XSHE
+    snapshot_id: null
+  filters: []
+  sort:
+  - field_id: fld_ca_id
+    descending: false
+  budget:
+    max_rows: 20
+    max_bytes: 1048576
+    batch_size: 20
+  adjustment: none
+  limit: 20
+- request_id: stock_minute
+  dataset_id: cn_equity.minute_bar
+  dataset_version: 4
+  field_ids:
+  - fld_equity_minute_dt
+  - fld_equity_minute_code
+  - fld_equity_minute_open
+  - fld_equity_minute_close
+  - fld_equity_minute_high
+  - fld_equity_minute_low
+  - fld_equity_minute_volume
+  - fld_equity_minute_money
+  - fld_equity_minute_avg
+  purpose: feature
+  time_range:
+    contract_version: instant-range-v2
+    start_at: '2024-01-02T09:31:00+08:00'
+    end_at: '2024-01-05T15:01:00+08:00'
+    timezone: Asia/Shanghai
+  universe:
+    instruments:
+    - 000001.XSHE
+    snapshot_id: null
+  filters: []
+  sort:
+  - field_id: fld_equity_minute_dt
+    descending: false
+  - field_id: fld_equity_minute_code
+    descending: false
+  budget:
+    max_rows: 960
+    max_bytes: 16777216
+    batch_size: 960
+  adjustment: raw
+  limit: 960
+result:
+  contract_version: research-result-spec-v1
+  tables:
+  - table_id: adjustment_snapshot
+    role: diagnostic
+    source_node_id: adjustment_snapshot
+    source_port: snapshot
+    artifact_type: data.adjustment-factor-snapshot.v1
+    schema_id: data.adjustment-factor-snapshot.payload.v1
+    path_prefix: snapshot
+  - table_id: adjustment_feature_anchors
+    role: diagnostic
+    source_node_id: features
+    source_port: features
+    artifact_type: research.minute-features.v1
+    schema_id: research.minute-features.pre-anchor.v1
+    path_prefix: features
+  - table_id: adjustment_label_anchors
+    role: diagnostic
+    source_node_id: labels
+    source_port: labels
+    artifact_type: research.minute-labels.v1
+    schema_id: research.minute-labels.pre-anchor.v1
+    path_prefix: labels
+  - table_id: primary_statistics
+    role: primary
+    source_node_id: statistics
+    source_port: statistics
+    artifact_type: research.minute-statistics.v1
+    schema_id: research.minute-statistics.v1
+    path_prefix: statistics
+  - table_id: minute_statistic_observations
+    role: diagnostic
+    source_node_id: statistics
+    source_port: statistics
+    artifact_type: research.minute-statistics.v1
+    schema_id: research.minute-statistics.observations.v1
+    path_prefix: observations
+  - table_id: minute_statistic_split_assignments
+    role: diagnostic
+    source_node_id: statistics
+    source_port: statistics
+    artifact_type: research.minute-statistics.v1
+    schema_id: research.minute-statistics.split-assignments.v1
+    path_prefix: split-assignments
+graph:
+  contract_version: research-operator-graph-recipe-v1
+  graph_id: reference.minute.stock.session
+  nodes:
+  - node_id: data_plane
+    operator_id: data.columnar.materialize
+    operator_version: 1.0.0
+    inputs: []
+    parameters: {}
+    strategies: []
+  - node_id: scan
+    operator_id: data.minute.scan
+    operator_version: 1.0.0
+    inputs: []
+    parameters:
+      request_ids:
+      - stock_minute
+      scope_binding_hash: 5f8e1e55f75d53d73a62018612050f4c4434e03c1174c60dc3b1c9cd3c69e838
+      max_source_bytes: 17179869184
+      max_returned_rows: 960
+      max_batch_bytes: 16777216
+      availability_policy_ref: available.minute.completed_bar.v1
+    strategies: []
+  - node_id: bars_1m
+    operator_id: research.bars.minute_resample
+    operator_version: 1.0.0
+    inputs:
+    - input_port: minute_1m
+      source_node_id: scan
+      source_output_port: minute_1m
+    parameters:
+      interval_minutes: 1
+      session_policy_ref: session.cn_stock.minute.v1
+      quality_policy_refs:
+      - quality.minute.common_fields.v1
+      - quality.minute.stock.v1
+      adjustment_mode: none
+      asset_class: cn_stock
+      availability_policy_ref: available.minute.completed_bar.v1
+    strategies: []
+  - node_id: adjustment_snapshot
+    operator_id: data.minute.adjustment_snapshot
+    operator_version: 1.0.0
+    inputs:
+    - input_port: data
+      source_node_id: data_plane
+      source_output_port: data
+    parameters:
+      factor_request_id: stock_daily_factor
+      corporate_action_request_id: stock_corporate_actions
+      instrument_id: 000001.XSHE
+      asset_class: cn_stock
+      as_of: '2024-01-05T15:01:00+08:00'
+      applicable_start: '2024-01-02T09:31:00+08:00'
+      applicable_end: '2024-01-05T15:01:00+08:00'
+      availability_policy_ref: available.stock.corporate_action.v1
+    strategies: []
+  - node_id: bars_1m_post
+    operator_id: research.bars.minute_adjust
+    operator_version: 1.0.0
+    inputs:
+    - input_port: bars
+      source_node_id: bars_1m
+      source_output_port: bars
+    - input_port: snapshot
+      source_node_id: adjustment_snapshot
+      source_output_port: snapshot
+    parameters:
+      mode: post
+      relative_tolerance: 1.0e-12
+      availability_policy_ref: available.stock.corporate_action.v1
+    strategies: []
+  - node_id: features
+    operator_id: research.features.intraday
+    operator_version: 1.0.0
+    inputs:
+    - input_port: bars
+      source_node_id: bars_1m_post
+      source_output_port: bars
+    parameters:
+      feature_ids:
+      - lagged_return
+      lookback_bars: 2
+      warmup_bars: 2
+      gap_policy: reset
+      cross_session: false
+      adjustment_mode: pre
+      asset_class: cn_stock
+      interval_minutes: 1
+      availability_policy_ref: available.minute.completed_bar.v1
+    strategies: []
+  - node_id: labels
+    operator_id: research.labels.intraday
+    operator_version: 1.0.0
+    inputs:
+    - input_port: bars
+      source_node_id: bars_1m_post
+      source_output_port: bars
+    parameters:
+      entry_event: next_bar_open
+      exit_event: bar_close
+      horizon_bars: 5
+      overlap: true
+      adjustment_mode: pre
+      asset_class: cn_stock
+      interval_minutes: 1
+      availability_policy_ref: available.minute.completed_bar.v1
+    strategies: []
+  - node_id: statistics
+    operator_id: research.statistics.minute
+    operator_version: 1.0.0
+    inputs:
+    - input_port: labels
+      source_node_id: labels
+      source_output_port: labels
+    parameters:
+      trial_candidate_ids:
+      - return_1_gt_0
+      train_end_ns: 1704252600000000000
+      validation_end_ns: 1704339000000000000
+      test_end_ns: 1704438060000000000
+      hac_lag: 5
+      embargo_ns: 300000000000
+      multiple_testing_method: benjamini_yekutieli
+      alpha: 0.05
+      min_test_samples: 30
+      claim_ceiling: historical_intraday_research_observation
+    strategies: []

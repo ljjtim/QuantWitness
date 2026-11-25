@@ -60,6 +60,10 @@ def prepare(output):
     request, archive = prepare_inputs(output)
     for field in ('ir_version', 'as_of'):
         request.pop(field, None)
+    if request.get('filters') == []:
+        request.pop('filters')
+    if request.get('limit') is None:
+        request.pop('limit', None)
     source = HERE / 'source'
     operator = {
         'contract_version': 'project-operator-declaration-v2', 'project_id': 'turnover-factor-example',
@@ -81,7 +85,7 @@ def prepare(output):
     metric = definition()
     package = output / 'package'
     save_yaml(package/'package.yaml', {'package_slug': 'turnover_factor_example', 'display_name': '过去换手率五分组研究',
-        'package_version': '1.0.0', 'builder_id': 'operator_graph_plan_v1',
+        'package_version': '1.0.0',
         'metric_contract': {'contract_id': 'turnover_factor', 'version': '1.0.0', 'metrics': [METRIC_REF],
                             'semantics': {METRIC_REF: '五个观察日低换手组减高换手组的次日收益均值'}},
         'claim_contract': {'allowed_claim_levels': ['research_observation'], 'max_claim_level': 'research_observation'}})
@@ -94,17 +98,14 @@ def prepare(output):
              'schema_id': SCHEMA if name == 'metrics' else 'project.turnover_factor.observations.v1',
              'path_prefix': 'result/' + name} for name in ('metrics', 'observations')]},
         'graph': {'contract_version': 'research-operator-graph-recipe-v1', 'graph_id': 'turnover.factor.example', 'nodes': [
-            {'node_id': 'data_plane', 'operator_id': 'data.columnar.materialize', 'operator_version': '1.0.0', 'inputs': [], 'parameters': {}, 'strategies': []},
+            {'node_id': 'data_plane', 'operator_id': 'data.columnar.materialize', 'operator_version': '1.0.0'},
             {'node_id': 'metric', 'operator_id': 'project.turnover_factor.mean', 'operator_version': '1.0.0',
              'inputs': [{'input_port': 'data', 'source_node_id': 'data_plane', 'source_output_port': 'data'}],
              'parameters': {'data_request_id': 'observations'}, 'strategies': []}]}})
     save_yaml(package/'sources/sources.yaml', {'sources': [{'source_id': 'synthetic', 'source_type': 'dataset',
         'title': '20只证券的9日合成换手率与收盘价', 'url': 'https://github.com/ljjtim/QuantWitness',
         'accessed_at': '2024-01-15', 'content_hash': hashlib.sha256((HERE/'inputs.py').read_bytes()).hexdigest(),
-        'license_id': 'Apache-2.0', 'status': 'available', 'limitation': '合成数据，不代表真实市场',
-        'provenance': {'mode': 'citation_only', 'content_digest': None, 'media_type': None,
-            'snapshot_artifact_id': None, 'snapshot_manifest_hash': None, 'importer_id': None,
-            'imported_at': None, 'contract_version': 'research-source-provenance-v1'}}]})
+        'license_id': 'Apache-2.0', 'status': 'available', 'limitation': '合成数据，不代表真实市场'}]})
     save_yaml(package/'localization.yaml', {'decisions': [{'decision_id': 'synthetic_scope',
         'original_assumption': '观察日收益统计', 'local_market': 'cn_stock',
         'local_adaptation': '过去3日平均换手率分组，独立次日标签，不执行交易', 'evidence_source_ids': ['synthetic'],

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -118,7 +120,7 @@ class TradingSession:
             raise TimeContractError("bar_end 不属于唯一可聚合 session segment")
         return matches[0]
 
-    @property
+    @cached_property
     def session_hash(self) -> str:
         payload: dict[str, object] = {
             "session_id": self.session_id,

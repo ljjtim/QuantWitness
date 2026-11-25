@@ -1,7 +1,7 @@
 """从正式LEAN日终账户和逐笔订单事件生成项目范围的金融指标。"""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone, timedelta
+from datetime import date
 from decimal import Decimal
 import hashlib
 import json
@@ -13,6 +13,9 @@ import pyarrow as pa
 
 from research_pipeline.platform.metric_contracts import MetricDefinition, MetricMeasurementSemantics
 from research_pipeline.platform.lean_contract import LEAN_ARTIFACT_TYPE, LEAN_METRICS_SCHEMA_ID
+from research_pipeline.platform.lean_result_projection import (
+    LEAN_METRIC_VERSION, _number, lean_research_daily, lean_trade_totals,
+)
 
 
 ANNUAL_SESSIONS = 252
@@ -39,8 +42,10 @@ METRIC_COLUMNS = {
 FUTURES_METRIC_SPECS = {
     "margin_utilization_mean": ("ratio", "neutral", "mean_daily_margin_div_research_equity"),
 }
-from research_pipeline.platform.lean_result_projection import (
-    LEAN_METRIC_VERSION, _number, lean_research_daily, lean_trade_totals,
+_DAILY_METRIC_FIELDS = (
+    "date", "trading_date", "account_id", "asset_class", "equity_semantics",
+    "equity", "cash", "research_equity", "research_cash", "margin", "frozen_funds", "available_funds",
+    "valuation_at", "settled_through",
 )
 
 
@@ -104,8 +109,11 @@ def lean_metric_rows(daily, orders, *, initial_equity, expected_dates=None, fill
     initial = _number(initial_equity, "initial_equity")
     if initial <= 0:
         raise ValueError("LEAN指标要求正期初权益")
-    days = lean_research_daily(daily, account_events=account_events, final_account=final_account)
-    futures = bool(days and (days[0].get("asset_class") == "cn_future" or "margin" in days[0]))
+    # 逐日权益计算只保留账户汇总，持仓和估值明细由正式表保存。
+    daily_accounts = ({field: row[field] for field in _DAILY_METRIC_FIELDS if field in row}
+                      for row in daily)
+    days = lean_research_daily(daily_accounts, account_events=account_events, final_account=final_account)
+    futures = bool(days and (days[0].get("asset_class") == "cn_future" or days[0].get("margin") is not None))
     dates = [str(row["date"]) for row in days]
     if not dates or dates != sorted(set(dates)):
         raise ValueError("LEAN指标日终日期必须非空、唯一且升序")

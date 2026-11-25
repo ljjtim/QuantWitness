@@ -1,0 +1,8 @@
+decisions:
+  - decision_id: futures_historical_rules_boundary
+    original_assumption: 当前交易规则可以回填历史期货仿真
+    local_market: cn_future
+    local_adaptation: 仅在AG2406冻结窗口内观察已完成的一分钟行情、夜盘交易日归属和历史可见研究特征；本包不执行交易或结算仿真
+    evidence_source_ids: [minute_scope_v5]
+    status: adopted
+    claim_effect: none

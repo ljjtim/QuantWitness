@@ -85,6 +85,7 @@ spec/research.yaml
 - ResultSpec 与公共表
 - 指标和 claim 合同
 - 研究语义、holdout 和复现要求
+- 可选顶层 `research_cost_assumption`：记录明确的研究交易费用/滑点假设；对于声明了 LEAN 策略的研究包，若未显式填写顶层 `research_cost_assumption`，准备阶段会自动投影各 LEAN 策略节点声明的费用/规则假设摘要，并透传至计划、正式 `ResultBundle` 与 Markdown 报告中的“研究费用假设”章节。使用 `compare` 比较两份 Result 时，费用假设不一致会触发 `comparison.cost_assumption_mismatch` 并拒绝可比。另外运行期观测到的执行耗时保存在可选 `execution-cost.json` 中，不参与 `result_id` 哈希。
 
 指标按 ResultSpec 中的来源节点、端口和声明表结构绑定。同类观察节点可以分别输出正式指标表与诊断表。诊断表使用独立结构标识，不参与正式指标选择。多个节点同时声明同一指标结构时仍拒绝准入。
 
@@ -139,6 +140,35 @@ Catalog 规则为 `next_session_open` 时才准入。项目日频算法必须消
 当前公共 Recipe 为空，完整项目拓扑及其参数由项目侧 ResearchPackage 冻结。
 市场规则的生效时间、可见性和来源仍须在 Catalog 与准入计划中核验。佣金假设不等于
 交易所规则。项目使用完整声明，经 `package admit` 生成当前计划后运行。
+
+## 声明简写
+
+研究包可以省略唯一的 `builder_id`。请求省略 `filters` 表示无附加筛选，省略 `limit` 表示不截行。图节点可省略空的 `inputs`、`parameters`、`strategies`。读取时会补齐这些值，简写与对应完整写法得到相同的包身份和查询。多个请求可用 `universe_ref` 引用同一份 `spec.universes` 定义。请求用途、观察区间、复权方式和预算仍须声明。
+
+## 日频因果排程
+
+使用中国市场日线及 `next_session_open` 的项目 Feature 或 Label，可在 `causal_plan` 中用 `daily_schedule` 代替逐日 `work_items`。沿用来源 `daily_time.sessions` 的交易日历，观察日后的首个交易日 09:30 为决策时点。示例中的观察日收盘值在下一个交易日开盘可见。
+
+```yaml
+daily_schedule:
+  first_observation: '2024-01-02'
+  last_observation: '2024-01-05'
+  instruments: ['000001.XSHE']
+  start_offset: 0
+  start_time: '15:00:00'
+  end_offset: 0
+  end_time: '15:00:00'
+  constant_axes: {window_sessions: [1], feature_id: [close]}
+  key_order: [0, 1, 2, 3]
+```
+
+行键按 `entity_id`、`observation_session`、常量轴排列，日期键取决策日。窗口偏移按交易日计，0 为观察日。标签窗口从决策时点或之后开始，并在决策时点之后结束。日历须覆盖观察区间、窗口和所需后继交易日。
+
+动态股票池使用 `membership_request_id` 替换 `instruments`。请求应提供历次完整成分快照，展开时取观察日当天或之前最近一次快照。成分和可选的 `presence_request_id` 都须为已准入、未截行、次日开盘可见的日频 FEATURE 请求，公开投影含日期和证券列。`presence_request_id` 必须来自本特征节点的输入，仅按行是否存在裁剪物理上下文。
+
+排程的所有日线来源须声明 `timezone: Asia/Shanghai`。静态 `instruments` 清单的 `warmup_sessions` 可省略或设为 0。动态成分快照的特征排程可设置 `warmup_sessions: 19`，为后续入池证券保留之前最多 19 个交易日的历史数据。该上下文适合逐证券计算。截面排名、标准化和模型预测须另按观察日资格选股，避免提前使用后续入池信息。标签独立声明结束日，只对已有完整未来窗口的样本评分。
+
+准入阶段只读取展开所需的日期和证券键，在持久计划中冻结有序证券清单、逐日窗口和每个输入要读的月份。归档模式使用当前准入通过的快照，直接读取数据库时同时记录来源文件版本。恢复从计划读取既有排程，来源改变须重新准入。不规则窗口继续显式写 `work_items`。
 
 ## 项目算子
 

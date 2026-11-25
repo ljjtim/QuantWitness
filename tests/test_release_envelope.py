@@ -14,14 +14,16 @@ import pytest
 from research_pipeline.platform import (
     BuildManifest,
     DEPENDENCY_LOCK_VERSION,
+    canonical_json,
+    installed_distribution_digest,
+)
+from tools.release_envelope import (
     LOCAL_SUPPLY_CHAIN_STATUS,
     REQUIRED_GATE_IDS,
     ReleaseAcceptanceInput,
     ReleaseEnvelope,
     ReleaseEnvelopeError,
     ReleaseGateReceipt,
-    canonical_json,
-    installed_distribution_digest,
     verify_release_envelope,
 )
 
@@ -341,7 +343,7 @@ def test_build_release_envelope_tool_writes_closed_offline_bundle(tmp_path: Path
 
 def test_release_envelope_is_not_back_referenced_by_result_or_evidence() -> None:
     envelope_source = (
-        ROOT / "src/research_pipeline/platform/release_envelope.py"
+        ROOT / "tools/release_envelope.py"
     ).read_text(encoding="utf-8")
     assert "research_pipeline.results" not in envelope_source
     assert "research_pipeline.evidence" not in envelope_source

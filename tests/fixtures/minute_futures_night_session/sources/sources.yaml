@@ -1,0 +1,11 @@
+sources:
+  - source_id: minute_scope_v5
+    source_type: dataset
+    title: 分钟参考范围 revision 5
+    url: https://www.joinquant.com/help/api/help
+    accessed_at: '2026-08-27'
+    content_hash: bb99be24ea17e989caee40c57b0f0ddabd1cec19dfec0491fdb33ce8e09146e9
+    license_id: local-reference-metadata
+    status: available
+    limitation: 本包仅形成一分钟数据观察和研究特征，不提供期货成交、保证金或结算仿真。
+    provenance: {mode: citation_only, content_digest: null, media_type: null, snapshot_artifact_id: null, snapshot_manifest_hash: null, importer_id: null, imported_at: null, contract_version: research-source-provenance-v1}

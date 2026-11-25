@@ -60,6 +60,8 @@ Runtime 自动释放本次成功节点、成功月分区或成功因果键批已
 
 LEAN Result 保留 orders、intents、daily、trace、fills、positions、account_events、lifecycle 和 metrics，必要账户与策略支持文件随结果保存。行情、规则、公司行动和信号来源仍由持久工件及计划引用。不能因为执行结果表数量更少，就把这些来源当作已被Result完整复制而删除。归档同时保存计划、输入引用及其实际依赖。
 
+同卷的 Result 与正式外部工件可共享只读文件，分钟计划也可与包内已冻结的 Parquet 共享只读文件。发布时校验文件内容，沿用已封存的 schema 和行数。跨卷或已有可写别名的文件按字节复制。严格审计的 Result 路径校验并同步复制文件。共享文件的任一目录项删除后，其他路径仍可独立读取。
+
 先完成各输出及状态的正式提交和复验，再完成资源验收与节点 checkpoint 发布。等待 Worker 已退出，写入 attempt 与 node 的成功事件，最后确认旧载荷的全部文件均有正式替代位置。若有必要条件不满足，系统保留原件。
 
 源路径必须属于当前节点的请求恢复目录、当前 attempt 的 Worker outputs，或当前月分区实际复制并登记的 `inputs/runtime_state/content.bin`。正式替代路径必须位于该 external 对象内并属于它的文件清单。清理不重新计算内容摘要，继续使用既有 ExternalArtifact 验证。
@@ -79,6 +81,8 @@ python -m research_pipeline gc --root <运行目录> --ttl-seconds 86400 --json
 `--apply` 使用相同计划约束、根锁、路径边界和保护复查，把候选移入 `quarantine/`。计划生成后新增 pin/lease/active，或 Runtime owner 重新活动，均会阻断隔离。`--apply` 不删除隔离载荷，因此不代表空间已经释放。
 
 原有 `purge_artifact_quarantine` 库函数默认预览，只有显式 `apply=True` 才删除过期隔离目录。公共 CLI 没有新增 purge 入口。
+
+Windows 删除隔离目录中的只读共享文件时，只移除当前目录项。Result 对应文件的只读属性和内容随其他硬链接保留。
 
 ## 已知范围
 
@@ -106,3 +110,5 @@ owner 登记失败会留下诊断和保守保护，不改变业务提交的成�
 | Worker | 执行节点计算的独立进程 |
 | manifest（清单） | 记录文件、类型、范围和内容身份的文件 |
 | schema（结构） | 表的字段名称、类型和约束 |
+
+日频自动排程保存在持久计划的 `operator-graph-plan.json`。正式日频工件通过 `schedule_reference.node_id` 和 `configuration_hash` 指向冻结排程。归档时保留这一计划，可按节点核对任一决策日的证券、窗口与来源月份。

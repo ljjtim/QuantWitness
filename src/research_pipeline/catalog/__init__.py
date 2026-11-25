@@ -37,7 +37,6 @@ from .minute import (
     register_minute_policy_validators,
 )
 from .families import expand_field_family
-from .finance import require_financial_observation_visible
 from .docs import render_catalog_docs
 from .compiler import COMPILER_VERSION, LOCK_FORMAT_VERSION, CatalogPreflight, CompiledCatalog, compile_catalog
 from .schema import catalog_schema_bundle, catalog_source_schema
@@ -97,7 +96,6 @@ __all__ = [
     "load_default_declarative_catalog",
     "evaluate_current_drift",
     "require_approval",
-    "require_financial_observation_visible",
     "render_catalog_docs",
     "validate_contract_set",
     "validate_transform_manifest",

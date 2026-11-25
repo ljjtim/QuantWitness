@@ -2,6 +2,7 @@ using QuantConnect;
 using QuantConnect.Interfaces;
 using QuantConnect.Orders;
 using QuantConnect.Orders.Fees;
+using QuantConnect.Orders.Fills;
 using QuantConnect.Securities;
 using QuantConnect.Securities.Future;
 using QuantConnect.Securities.Positions;
@@ -57,16 +58,26 @@ public sealed partial class ChinaFutureModels
             if (security.Holdings is ChinaFutureHolding holding) holding.RefreshProjection();
     }
 
+    private readonly Dictionary<Security, (IFillModel Fill, IFeeModel Fee)> _initializedSecurities = new();
+    public Action<Security>? SecurityInitialized { get; set; }
+
+    public bool OwnsTradingModels(Security security) => _initializedSecurities.TryGetValue(security, out var models)
+        && ReferenceEquals(security.FillModel, models.Fill) && ReferenceEquals(security.FeeModel, models.Fee);
+
     public void InitializeSecurity(Security security)
     {
+        if (security.Type == SecurityType.Base) return;
         if (security.Type != SecurityType.Future || security.Symbol.IsCanonical())
             throw new InvalidOperationException("期货模型必须安装到真实 Future 合约");
+        if (_initializedSecurities.ContainsKey(security)) return;
         security.Holdings = new ChinaFutureHolding(security, _portfolio.CashBook);
         security.PortfolioModel = new PortfolioModel(this);
         security.SetBuyingPowerModel(new BuyingPower(this));
         security.SetFeeModel(new FeeModel(this));
         security.SetSettlementModel(new ExplicitSettlement());
         security.SetFillModel(new ChinaFutureFillModel(this));
+        SecurityInitialized?.Invoke(security);
+        _initializedSecurities.Add(security, (security.FillModel, security.FeeModel));
     }
 
     public void Register(Order order)

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from research_pipeline.extensions import CompiledExtensionManifest
-
 from .contracts import _require_id
 from .errors import RuntimeRegistryError
 
@@ -51,13 +49,6 @@ class ImplementationRegistry:
 
     def providers_for(self, capability: str) -> tuple[ImplementationDescriptor, ...]:
         return tuple(self._items[key] for key in sorted(self._items) if capability in self._items[key].capabilities)
-
-    @classmethod
-    def from_extension_manifest(cls, manifest: CompiledExtensionManifest) -> "ImplementationRegistry":
-        registry = cls()
-        for descriptor in manifest.descriptors:
-            registry.register(descriptor.extension_id, descriptor.code_hash, descriptor.capabilities)
-        return registry
 
 
 __all__ = ["ImplementationDescriptor", "ImplementationRegistry"]

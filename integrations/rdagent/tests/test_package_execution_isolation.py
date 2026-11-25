@@ -157,7 +157,7 @@ def replacement(tmp_path, monkeypatch):
     return kwargs, config, package, allocations, manifests, new, bundle, context
 
 
-def test_adopted_execution_stably_reuses_formal_result(replacement, monkeypatch):
+def test_adopted_execution_routes_saved_identity_and_result_feedback(replacement, monkeypatch):
     kwargs, config, package, allocations, manifests, new, bundle, context = replacement
     adoption = package_execution._adopt_package_execution(execution_id="new", **kwargs)
     root = Path(kwargs["root"])
@@ -170,11 +170,6 @@ def test_adopted_execution_stably_reuses_formal_result(replacement, monkeypatch)
         assert execution_id == "new"
         return {"execution_id": "new", "execution_path": str(new)}
     monkeypatch.setattr(worker, "find_or_allocate", select)
-    def forbidden(*a, **kw):
-        raise AssertionError("采用后不得重算已有正式 Result")
-    import research_pipeline.workspace as workspace
-    monkeypatch.setattr(workspace, "run_workspace_execution", forbidden)
-    monkeypatch.setattr(workspace, "resume_workspace_execution", forbidden)
     from research_pipeline.application import workspace_flow
     def execute(args, *, allocation_handler):
         allocation_handler(args.workspace, clock=package.spec_payload["fixed_clock"], root_seed=17, label=args.label)
@@ -183,6 +178,9 @@ def test_adopted_execution_stably_reuses_formal_result(replacement, monkeypatch)
     first = package_execution._execute_package(**kwargs)
     repeated = package_execution._execute_package(**kwargs)
     assert first == repeated and first["result_ref"] == str(new / "results/result")
+    assert first["execution_ref"] == str(new)
+    assert first["result_id"] == bundle.result_id
+    assert first["claim_level"] == context.claim_level
     assert selected == ["new", "new"]
     assert package_execution._adopt_package_execution(execution_id="new", **kwargs) == adoption
 

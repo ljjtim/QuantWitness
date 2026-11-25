@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+
 from dataclasses import dataclass
-from datetime import date, datetime
 import hashlib
 from importlib.resources import files
-from functools import lru_cache
+from functools import cached_property, lru_cache, partial
 import json
 from pathlib import Path
 import re
@@ -20,6 +20,9 @@ from .asset_taxonomy import (
 )
 from .canonical import typed_canonical_hash
 from .errors import MainlineError
+from .validation import (
+    parse_aware_seconds, parse_iso_date, require_exact_fields, require_integer, require_mapping, require_sha256, require_text,
+)
 
 
 MINUTE_CAPABILITY_MANIFEST_VERSION = "minute-capability-manifest-v1"
@@ -53,7 +56,6 @@ _DATASET_ASSET_PAIRS = {
 }
 _ROLES = {"tradable", "benchmark", "signal_only"}
 _STABLE_ID = re.compile(r"^[a-z0-9][a-z0-9_.:-]*$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ACTUAL_FUTURES_ID = re.compile(r"^[A-Z]{1,3}\d{3,4}\.[A-Z]{4}$")
 _FORBIDDEN_SELECTION_FIELDS = {
     "feature", "features", "label", "labels", "p_value", "pvalue", "return",
@@ -153,17 +155,17 @@ class MinuteInventoryObservation:
             )
             counts.append(
                 (
-                    _string(count_payload["trading_date"], "trading_date"),
+                    _require_text(count_payload["trading_date"], "trading_date"),
                     _integer(count_payload["count"], "count"),
                 )
             )
         return cls(
-            _string(payload["dataset_id"], "dataset_id"),
-            _string(payload["instrument_id"], "instrument_id"),
-            _string(payload["start_at"], "start_at"),
-            _string(payload["end_at"], "end_at"),
-            _string(payload["trading_date_start"], "trading_date_start"),
-            _string(payload["trading_date_end"], "trading_date_end"),
+            _require_text(payload["dataset_id"], "dataset_id"),
+            _require_text(payload["instrument_id"], "instrument_id"),
+            _require_text(payload["start_at"], "start_at"),
+            _require_text(payload["end_at"], "end_at"),
+            _require_text(payload["trading_date_start"], "trading_date_start"),
+            _require_text(payload["trading_date_end"], "trading_date_end"),
             _integer(payload["observed_row_count"], "observed_row_count"),
             tuple(counts),
             _strings(payload["observed_features"], "observed_features"),
@@ -226,7 +228,7 @@ class MinuteCapabilityInstrument:
             ):
                 raise MinuteCapabilityManifestError("期货能力范围必须使用实际到期合约")
 
-    @property
+    @cached_property
     def identity_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -256,18 +258,18 @@ class MinuteCapabilityInstrument:
             "MinuteCapabilityInstrument",
         )
         return cls(
-            _string(payload["instrument_id"], "instrument_id"),
+            _require_text(payload["instrument_id"], "instrument_id"),
             _normalize_asset_class(payload["asset_class"]),
-            _string(payload["asset_subtype"], "asset_subtype"),
-            _string(payload["dataset_id"], "dataset_id"),
-            _string(payload["role"], "role"),
-            _string(payload["adjustment_mode"], "adjustment_mode"),
+            _require_text(payload["asset_subtype"], "asset_subtype"),
+            _require_text(payload["dataset_id"], "dataset_id"),
+            _require_text(payload["role"], "role"),
+            _require_text(payload["adjustment_mode"], "adjustment_mode"),
             MinuteInventoryObservation.from_dict(
                 _mapping(payload["observation"], "observation")
             ),
-            _string(payload["source_adjustment_mode"], "source_adjustment_mode"),
-            _string(payload["source_usage"], "source_usage"),
-            _string(payload["source_semantics_version"], "source_semantics_version"),
+            _require_text(payload["source_adjustment_mode"], "source_adjustment_mode"),
+            _require_text(payload["source_usage"], "source_usage"),
+            _require_text(payload["source_semantics_version"], "source_semantics_version"),
         )
 
 
@@ -324,18 +326,18 @@ class MinuteAssetCoverage:
             "MinuteAssetCoverage",
         )
         return cls(
-            _string(payload["coverage_id"], "coverage_id"),
+            _require_text(payload["coverage_id"], "coverage_id"),
             MinuteCapabilityInstrument.from_dict(
                 _mapping(payload["instrument"], "instrument")
             ),
             _strings(payload["required_intervals"], "required_intervals"),
             _strings(payload["session_features"], "session_features"),
-            _string(payload["adjustment_requirement"], "adjustment_requirement"),
+            _require_text(payload["adjustment_requirement"], "adjustment_requirement"),
             _strings(payload["required_rule_ids"], "required_rule_ids"),
             _strings(payload["quality_expectations"], "quality_expectations"),
-            _string(payload["claim_ceiling"], "claim_ceiling"),
+            _require_text(payload["claim_ceiling"], "claim_ceiling"),
             _strings(payload["unsupported_boundaries"], "unsupported_boundaries"),
-            _string(payload["selection_reason"], "selection_reason"),
+            _require_text(payload["selection_reason"], "selection_reason"),
         )
 
 
@@ -436,18 +438,18 @@ class MinuteCapabilityManifest:
         if previous is not None and not isinstance(previous, str):
             raise MinuteCapabilityManifestError("previous_manifest_hash 类型无效")
         return cls(
-            _string(payload["manifest_id"], "manifest_id"),
+            _require_text(payload["manifest_id"], "manifest_id"),
             _integer(payload["revision"], "revision"),
             previous,
-            _string(payload["inventory_evidence_hash"], "inventory_evidence_hash"),
+            _require_text(payload["inventory_evidence_hash"], "inventory_evidence_hash"),
             _strings(payload["required_consumers"], "required_consumers"),
             _strings(payload["required_asset_classes"], "required_asset_classes"),
             tuple(
                 MinuteAssetCoverage.from_dict(_mapping(item, "coverage"))
                 for item in _list(payload["coverages"], "coverages")
             ),
-            _string(payload["manifest_hash"], "manifest_hash"),
-            _string(payload["contract_version"], "contract_version"),
+            _require_text(payload["manifest_hash"], "manifest_hash"),
+            _require_text(payload["contract_version"], "contract_version"),
         )
 
 
@@ -571,18 +573,12 @@ def _strict(value: object, expected: set[str], field: str) -> Mapping[str, objec
     unknown = set(payload) - expected
     if unknown & _FORBIDDEN_SELECTION_FIELDS:
         raise MinuteCapabilityManifestError("分钟能力选择禁止读取策略收益、标签或显著性输出")
-    if set(payload) != expected:
-        raise MinuteCapabilityManifestError(
-            f"{field} schema 不匹配；缺失={sorted(expected-set(payload))}，"
-            f"未知={sorted(unknown)}"
-        )
+    require_exact_fields(payload, expected, field, error=MinuteCapabilityManifestError)
     return payload
 
 
-def _mapping(value: object, field: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-        raise MinuteCapabilityManifestError(f"{field} 必须是字符串键映射")
-    return value
+_mapping = partial(require_mapping, error=MinuteCapabilityManifestError,
+                   string_keys=True, requirement="必须是字符串键映射")
 
 
 def _list(value: object, field: str) -> list[object]:
@@ -598,20 +594,10 @@ def _strings(value: object, field: str) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _integer(value: object, field: str) -> int:
-    if type(value) is not int:
-        raise MinuteCapabilityManifestError(f"{field} 必须是整数")
-    return value
+_integer = partial(require_integer, error=MinuteCapabilityManifestError)
 
 
-def _require_text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise MinuteCapabilityManifestError(f"{field} 必须是非空字符串")
-    return value
-
-
-def _string(value: object, field: str) -> str:
-    return _require_text(value, field)
+_require_text = partial(require_text, error=MinuteCapabilityManifestError)
 
 
 def _require_id(value: object, field: str) -> str:
@@ -620,10 +606,7 @@ def _require_id(value: object, field: str) -> str:
     return value
 
 
-def _require_hash(value: object, field: str) -> str:
-    if not isinstance(value, str) or not _SHA256.fullmatch(value):
-        raise MinuteCapabilityManifestError(f"{field} 必须是 sha256 小写摘要")
-    return value
+_require_hash = partial(require_sha256, error=MinuteCapabilityManifestError)
 
 
 def _require_sorted_ids(values: tuple[str, ...], field: str) -> None:
@@ -633,27 +616,10 @@ def _require_sorted_ids(values: tuple[str, ...], field: str) -> None:
         _require_id(value, field)
 
 
-def _aware_datetime(value: object, field: str) -> datetime:
-    if not isinstance(value, str):
-        raise MinuteCapabilityManifestError(f"{field} 必须是带时区 ISO 时间")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise MinuteCapabilityManifestError(f"{field} 必须是带时区 ISO 时间") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise MinuteCapabilityManifestError(f"{field} 必须带时区")
-    if value != parsed.isoformat(timespec="seconds"):
-        raise MinuteCapabilityManifestError(f"{field} 必须使用规范秒精度 ISO 时间")
-    return parsed
+_aware_datetime = partial(parse_aware_seconds, error=MinuteCapabilityManifestError)
 
 
-def _date(value: object, field: str) -> date:
-    if not isinstance(value, str):
-        raise MinuteCapabilityManifestError(f"{field} 必须是 ISO 日期")
-    try:
-        return date.fromisoformat(value)
-    except ValueError as exc:
-        raise MinuteCapabilityManifestError(f"{field} 必须是 ISO 日期") from exc
+_date = partial(parse_iso_date, error=MinuteCapabilityManifestError)
 
 
 __all__ = [

@@ -32,6 +32,21 @@ REGISTERED_OPERATOR_SPECS = build_mainline_operator_registry().operator_specs
 DEFAULT_PROJECT_ARTIFACT_TYPES = ("research.statistics.v1",)
 
 
+def test_native_bundle_imports_public_data_api(tmp_path):
+    path = tmp_path / "algo.py"
+    entries = ({"path": path.name},)
+    for statement in ("from research_pipeline.lean_data import read_fields",
+                      "import research_pipeline.lean_data as lean_data",
+                      "from research_pipeline import lean_data"):
+        path.write_text(statement, encoding="utf-8")
+        project_bundle._validate_imports(tmp_path, entries, {}, native_algorithm=True)
+        with pytest.raises(ExtensionError, match="未登记依赖"):
+            project_bundle._validate_imports(tmp_path, entries, {})
+    path.write_text("from research_pipeline import lean_data, runtime", encoding="utf-8")
+    with pytest.raises(ExtensionError, match="未登记依赖"):
+        project_bundle._validate_imports(tmp_path, entries, {}, native_algorithm=True)
+
+
 def _source(root: Path, text: str = "def run(context, inputs, output):\n    return {'status': 'ok'}\n") -> Path:
     source = root / "source"
     source.mkdir()
@@ -250,6 +265,8 @@ def test_bundle_rejects_project_specific_derived_label_contract(tmp_path: Path) 
 
 
 def test_bundle_rejects_source_and_manifest_tampering(tmp_path: Path) -> None:
+    from research_pipeline.platform.directory_watch import project_bundle_check_scope
+
     source = _source(tmp_path)
     bundle = compile_project_operator_bundle(
         source_root=source,
@@ -262,9 +279,18 @@ def test_bundle_rejects_source_and_manifest_tampering(tmp_path: Path) -> None:
         entry_function="run",
         dependency_lock={},
     )
-    (bundle / "sources" / "operator.py").write_text("def run(*args):\n    return 2\n", encoding="utf-8")
-    with pytest.raises(ExtensionError, match="源码漂移"):
-        verify_project_operator_bundle(bundle)
+    with project_bundle_check_scope():
+        verified = verify_project_operator_bundle(bundle)
+        if os.name == "nt":
+            assert verify_project_operator_bundle(bundle) is verified
+        bundled_source = bundle / "sources" / "operator.py"
+        original = bundled_source.stat()
+        before = bundled_source.read_text(encoding="utf-8")
+        bundled_source.write_text(before.replace("'ok'", "'no'"), encoding="utf-8")
+        os.utime(bundled_source, ns=(original.st_atime_ns, original.st_mtime_ns))
+        assert bundled_source.stat().st_size == original.st_size
+        with pytest.raises(ExtensionError, match="源码漂移"):
+            verify_project_operator_bundle(bundle)
 
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
     manifest["abi_version"] = "unknown-abi"

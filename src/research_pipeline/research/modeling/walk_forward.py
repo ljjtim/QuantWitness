@@ -12,6 +12,7 @@ import pandas as pd
 
 from research_pipeline.platform.canonical import typed_canonical_hash
 from .inputs import ModelMainlineError, assemble_daily_feature_context, _require_columns
+from .prediction_index import build_prediction_frame
 from research_pipeline.research.validation import (
     ValidationError,
 )
@@ -439,31 +440,15 @@ def _prediction_records(
     preprocessor_hash: str,
     model_hash: str,
 ) -> list[dict[str, object]]:
-    return [
-        {
-            "candidate_id": candidate_id,
-            "fold_id": fold_id,
-            "stage": stage,
-            "sample_id": str(row.sample_id),
-            "entity_id": str(row.entity_id),
-            "observation_session": pd.Timestamp(row.observation_session).date(),
-            "horizon_sessions": int(row.horizon_sessions),
-            "observation_time": pd.Timestamp(row.observation_time).isoformat(),
-            "feature_available_time": pd.Timestamp(row.feature_available_time).isoformat(),
-            "decision_time": pd.Timestamp(row.decision_time).isoformat(),
-            "label_available_time": None if pd.isna(row.label_available_time) else pd.Timestamp(row.label_available_time).isoformat(),
-            "raw_label": None if pd.isna(row.target) else float(row.target),
-            "label_start_time": None if pd.isna(row.label_start_time) else pd.Timestamp(row.label_start_time).isoformat(),
-            "label_end_time": None if pd.isna(row.label_end_time) else pd.Timestamp(row.label_end_time).isoformat(),
-            "prediction": float(prediction),
-            "actual": None if pd.isna(row.target) else float(row.target),
-            "processor_ref": preprocessor_hash,
-            "model_ref": model_hash,
-        }
-        for row, prediction in zip(
-            frame.itertuples(index=False), predictions, strict=True
-        )
-    ]
+    result = build_prediction_frame(frame, predictions, candidate_id, fold_id, stage,
+                                    model_hash, preprocessor_hash, include_observation_time=True)
+    nullable = ["label_available_time", "label_start_time", "label_end_time", "raw_label", "actual"]
+    result[nullable] = result[nullable].astype(object).where(result[nullable].notna(), None)
+    fields = ["candidate_id", "fold_id", "stage", "sample_id", "entity_id", "observation_session",
+              "horizon_sessions", "observation_time", "feature_available_time", "decision_time",
+              "label_available_time", "raw_label", "label_start_time", "label_end_time", "prediction",
+              "actual", "processor_ref", "model_ref"]
+    return result[fields].to_dict("records")
 
 
 def _normalize_model_samples(

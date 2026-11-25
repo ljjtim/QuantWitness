@@ -20,7 +20,7 @@ def frozen_minute_scope_input(environment, reference, dataset):
         raise RuntimeIntegrityError("期货分钟节点与扫描 minute_scope 不一致")
     scope = environment.minute_scope_inputs.get(reference["name"])
     if (scope is None or scope.reference != reference
-            or dataset.lineage.get("minute_session_bundle_hash") != scope.calendar.bundle_hash):
+            or dataset.lineage.get("minute_session_bundle_hash") != scope.reference["calendar_hash"]):
         raise RuntimeIntegrityError("期货分钟输入缺少一致的冻结 minute_scope 来源")
     return {"root": str(Path(scope.root).resolve(strict=True)), "reference": dict(reference)}
 

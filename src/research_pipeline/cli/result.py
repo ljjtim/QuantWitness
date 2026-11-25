@@ -9,7 +9,7 @@ from typing import Any
 
 from research_pipeline.platform import error_code_for_exception
 
-from .command_suggestion import command_suggestion
+from research_pipeline.application.command_suggestion import command_suggestion
 from .summary import build_summary, render_summary_text, summary_payload
 
 

@@ -36,8 +36,24 @@ def error_code_for_exception(error: BaseException) -> str:
     return "internal_error"
 
 
+class DomainContractError(MainlineError):
+    """基础金融身份或研究意图不满足合同。"""
+
+    error_code = "domain_contract_invalid"
+
+
+class StrategyProtocolError(DomainContractError):
+    """策略协议错误；机器码用于准入或Worker诊断。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.error_code = code
+
+
 __all__ = [
     "CanonicalEncodingError",
+    "DomainContractError",
     "MainlineError",
+    "StrategyProtocolError",
     "error_code_for_exception",
 ]

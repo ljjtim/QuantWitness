@@ -1,0 +1,40 @@
+contract_version: research-operator-graph-package-v2
+research_id: cn_stock_daily_observation_v1
+as_of: '2024-01-08'
+root_seed: 0
+fixed_clock: '2024-01-09T00:00:00+08:00'
+requests:
+  - request_id: daily_bar
+    dataset_id: cn_equity.daily_bar
+    dataset_version: 3
+    field_ids: [fld_equity_daily_date, fld_equity_daily_code, fld_equity_daily_open, fld_equity_daily_close, fld_equity_daily_volume]
+    purpose: feature
+    time_range: {start: '2024-01-02', end: '2024-01-05'}
+    universe: {instruments: [000001.XSHE], snapshot_id: null}
+    filters: []
+    sort:
+      - {field_id: fld_equity_daily_date, descending: false}
+      - {field_id: fld_equity_daily_code, descending: false}
+    budget: {max_rows: 10, max_bytes: 1048576, batch_size: 1024}
+    adjustment: unadjusted
+    limit: 10
+result:
+  contract_version: research-result-spec-v1
+  tables:
+    - table_id: observation_metrics
+      role: primary
+      source_node_id: data_plane
+      source_port: data
+      artifact_type: data.columnar-bundle.v1
+      schema_id: data.columnar-bundle.metrics.v1
+      path_prefix: observation
+graph:
+  contract_version: research-operator-graph-recipe-v1
+  graph_id: cn_stock_daily_observation_v1
+  nodes:
+    - node_id: data_plane
+      operator_id: data.columnar.materialize
+      operator_version: 1.0.0
+      inputs: []
+      parameters: {}
+      strategies: []

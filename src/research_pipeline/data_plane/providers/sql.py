@@ -63,18 +63,24 @@ def compile_duckdb_query(
     plan: AdmittedQueryPlan,
     *,
     source_expression: str | None = None,
+    source_parameters: tuple[Any, ...] = (),
     source_columns: dict[str, str] | None = None,
+    universe_relation: str | None = None,
     materialized_snapshot: bool = False,
     preserve_temporal_facts: bool = False,
+    order_output: bool = True,
+    apply_limit: bool = True,
+    direct_consumer_fields: tuple[str, ...] = (),
+    direct_scan_filters: tuple[tuple[str, tuple[Any, ...]], ...] = (),
+    direct_output_filters: tuple[tuple[str, tuple[Any, ...]], ...] = (),
 ) -> tuple[str, list[Any]]:
     if materialized_snapshot and preserve_temporal_facts:
         raise QueryIRInvalidError("materialized_snapshot 与 preserve_temporal_facts 不能同时启用")
     columns = plan.column_map if source_columns is None else source_columns
     field_types = dict(plan.field_types)
     output_fields = (
-        plan.temporal_selection.required_scan_fields
-        if preserve_temporal_facts
-        else plan.query.field_ids
+        plan.temporal_selection.required_scan_fields if preserve_temporal_facts
+        else direct_consumer_fields or plan.query.field_ids
     )
     public_projection = ", ".join(
         quote_identifier(field_id) for field_id in output_fields
@@ -86,14 +92,17 @@ def compile_duckdb_query(
     )
     source = source_expression or quote_identifier(plan.object_name)
     clauses: list[str] = []
-    params: list[Any] = []
+    params: list[Any] = list(source_parameters)
     if not materialized_snapshot:
-        clauses, params = _source_filter_clauses(plan, columns)
+        clauses, filter_params = _source_filter_clauses(
+            plan, columns, universe_relation=universe_relation, include_query_filters=not direct_consumer_fields,
+        )
+        params.extend(filter_params)
     ordering = ", ".join(
         f"{quote_identifier(item.field_id)} {'DESC' if item.descending else 'ASC'}"
         for item in plan.query.sort
     )
-    if preserve_temporal_facts:
+    if preserve_temporal_facts or direct_consumer_fields:
         source_order = tuple(
             dict.fromkeys(
                 (
@@ -102,16 +111,19 @@ def compile_duckdb_query(
                 )
             )
         )
-        ordering = ", ".join(
-            f"{quote_identifier(field_id)} ASC NULLS LAST" for field_id in source_order
-        )
+        if preserve_temporal_facts:
+            ordering = ", ".join(
+                f"{quote_identifier(field_id)} ASC NULLS LAST" for field_id in source_order
+            )
+    order_sql = f" ORDER BY {ordering}" if order_output else ""
     if materialized_snapshot:
         sql = (
             f"SELECT {public_projection} FROM {source} "
-            f"ORDER BY {ordering}"
+            f"{order_sql}"
         )
-        sql += " LIMIT ?"
-        params.append(_execution_limit(plan))
+        if apply_limit:
+            sql += " LIMIT ?"
+            params.append(_execution_limit(plan))
         return sql, params
 
     where = "" if not clauses else f" WHERE {' AND '.join(clauses)}"
@@ -123,7 +135,7 @@ def compile_duckdb_query(
         # 保留业务范围内的晚修订版本供缺史检测；实际值仍按消费时点选择。
         sql = (
             f"WITH {', '.join(ctes)} SELECT {public_projection} FROM {current} "
-            f"ORDER BY {ordering}"
+            f"{order_sql}"
         )
         return sql, params
     temporal = plan.temporal_selection
@@ -131,15 +143,38 @@ def compile_duckdb_query(
     cutoff_fields = dict(temporal.visibility_filter.time_fields) if temporal.visibility_filter else {}
     if temporal.revision_selector is not None:
         cutoff_fields.setdefault(temporal.revision_selector.order_fields[0], True)
+    as_of_clauses = []
     if plan.query.as_of is not None:
         for field, inclusive in cutoff_fields.items():
             clause, value = _upper_bound_clause(
                 plan, field, plan.query.as_of, inclusive=inclusive, end_of_date=True,
             )
-            temporal_clauses.append(clause)
+            as_of_clauses.append(clause)
             params.append(value)
+    if direct_consumer_fields:
+        for clause, values in direct_scan_filters:
+            as_of_clauses.append(clause)
+            params.extend(values)
+        where_as_of = " WHERE " + " AND ".join(as_of_clauses) if as_of_clauses else ""
+        ctes.append(f'"__facts" AS (SELECT * FROM {current}{where_as_of})')
+        keys = ", ".join(quote_identifier(field) for field in source_order)
+        checks = [
+            f"WHEN {quote_identifier(field)} IS NULL THEN error({_quote_literal(field + ' 非空约束失败')})"
+            for field, nullable in plan.field_nullables
+            if not nullable and field in temporal.required_scan_fields
+        ]
+        checks.extend((
+            f"WHEN COUNT(*) OVER () > {plan.query.budget.max_rows:d} THEN error('逐决策时态来源超过行数预算')",
+            f"WHEN COUNT(*) OVER (PARTITION BY {keys}) > 1 THEN error('逐决策时态来源 primary_key 重复')",
+        ))
+        # 物化同一消费的事实校验，避免业务值或更早时钟隐藏来源的重复记录。
+        ctes.append(f'"__valid_facts" AS MATERIALIZED (SELECT * FROM "__facts" QUALIFY '
+                    f"CASE {' '.join(checks)} ELSE TRUE END)")
+        current = '"__valid_facts"'
+    else:
+        temporal_clauses.extend(as_of_clauses)
     if temporal.session_close_selection is not None:
-        clause, values = _session_close_clause(plan)
+        clause, values = _session_close_clause(plan, require_coverage=bool(direct_consumer_fields))
         temporal_clauses.append(clause)
         params.extend(values)
     if temporal.visibility_filter is not None:
@@ -184,9 +219,12 @@ def compile_duckdb_query(
         end_operator = ">=" if end_exclusive else (
             ">=" if interval.right_closed else ">"
         )
+        starts = f"{start} {start_operator} {start_clock}"
+        if direct_consumer_fields:
+            starts = f"CASE WHEN {start} IS NULL THEN error('时态生效日期缺失') ELSE {starts} END"
         interval_clauses.extend(
             (
-                f"{start} {start_operator} {start_clock}",
+                starts,
                 f"({end} IS NULL OR {end} {end_operator} {end_clock})",
             )
         )
@@ -208,7 +246,8 @@ def compile_duckdb_query(
             for item in (*revision.entity_fields, *revision.order_fields)
         )
         ctes.append(
-            f'"__revision" AS (SELECT * FROM {current} QUALIFY '
+            f'"__revision" AS {"MATERIALIZED " if direct_consumer_fields else ""}'
+            f'(SELECT * FROM {current} QUALIFY '
             f"ROW_NUMBER() OVER (PARTITION BY {entity} ORDER BY {order}) = 1 "
             f"AND CASE WHEN COUNT(*) OVER (PARTITION BY {winner}) = 1 "
             "THEN TRUE ELSE error('时态最新修订存在冲突') END)"
@@ -222,22 +261,26 @@ def compile_duckdb_query(
         current = '"__effective"'
         entity = ", ".join(quote_identifier(item) for item in interval.entity_fields)
         ctes.append(
-            f'"__interval" AS (SELECT * FROM {current} QUALIFY '
+            f'"__interval" AS {"MATERIALIZED " if direct_consumer_fields else ""}'
+            f'(SELECT * FROM {current} QUALIFY '
             f"CASE WHEN COUNT(*) OVER (PARTITION BY {entity}) = 1 "
             "THEN TRUE ELSE error('时态有效区间重叠') END)"
         )
         current = '"__interval"'
     business_clauses, business_params = _predicate_clauses(
-        plan.query.filters,
+        () if direct_consumer_fields else plan.query.filters,
         {field: field for field in plan.temporal_selection.required_scan_fields},
     )
     params.extend(business_params)
+    for clause, values in direct_output_filters:
+        business_clauses.append(clause)
+        params.extend(values)
     business_where = "" if not business_clauses else f" WHERE {' AND '.join(business_clauses)}"
     sql = (
         f"WITH {', '.join(ctes)} SELECT {public_projection} FROM {current}"
-        f"{business_where} ORDER BY {ordering}"
+        f"{business_where}{order_sql}"
     )
-    if not materialized_snapshot:
+    if apply_limit:
         sql += " LIMIT ?"
         params.append(_execution_limit(plan))
     return sql, params
@@ -269,6 +312,9 @@ def compile_duckdb_scope_statistics(
 def _source_filter_clauses(
     plan: AdmittedQueryPlan,
     columns: Mapping[str, str],
+    *,
+    universe_relation: str | None = None,
+    include_query_filters: bool = True,
 ) -> tuple[list[str], list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -314,13 +360,19 @@ def _source_filter_clauses(
         if plan.instrument_field is None:
             raise QueryIRInvalidError("非证券关系不能编译证券universe过滤")
         instrument_column = quote_identifier(columns[plan.instrument_field])
-        placeholders = ",".join("?" for _ in plan.query.universe.instruments)
-        clauses.append(f"{instrument_column} IN ({placeholders})")
-        params.extend(plan.query.universe.instruments)
+        if universe_relation is None:
+            placeholders = ",".join("?" for _ in plan.query.universe.instruments)
+            clauses.append(f"{instrument_column} IN ({placeholders})")
+            params.extend(plan.query.universe.instruments)
+        else:
+            relation = quote_identifier(universe_relation)
+            clauses.append(
+                f'{instrument_column} IN (SELECT {relation}."instrument_id" FROM {relation})'
+            )
     # 只有对整个实体恒定的条件可先筛；业务值必须等可见版本确定后再判断。
     predicates = tuple(
         predicate for predicate in plan.query.filters
-        if predicate.field_id in plan.temporal_selection.stable_filter_fields
+        if include_query_filters and predicate.field_id in plan.temporal_selection.stable_filter_fields
     )
     filter_clauses, filter_params = _predicate_clauses(predicates, columns)
     return [*clauses, *filter_clauses], [*params, *filter_params]
@@ -405,7 +457,7 @@ def _selection_upper_clause(
     return f"{quote_identifier(field)} {operator} {operand}", values
 
 
-def _session_close_clause(plan: AdmittedQueryPlan) -> tuple[str, list[Any]]:
+def _session_close_clause(plan: AdmittedQueryPlan, *, require_coverage=False) -> tuple[str, list[Any]]:
     selection = plan.temporal_selection.session_close_selection
     if selection is None:  # pragma: no cover - 调用方已判断
         raise QueryIRInvalidError("session-close selection 缺失")
@@ -429,16 +481,26 @@ def _session_close_clause(plan: AdmittedQueryPlan) -> tuple[str, list[Any]]:
     if cutoff.tzinfo is None or cutoff.utcoffset() is None:
         raise QueryIRInvalidError("session-close selection clock 必须带时区")
     visible = tuple(item for item in selection.facts if item.completed_at <= cutoff)
-    if not visible:
-        return "FALSE", []
     instrument = quote_identifier(selection.instrument_field)
     session_date = quote_identifier(selection.session_date_field)
-    clauses = []
-    values: list[Any] = []
-    for fact in visible:
-        clauses.append(f"({instrument} = ? AND {session_date} = ?)")
-        values.extend((fact.instrument_id, fact.session_date))
-    return f"({' OR '.join(clauses)})", values
+
+    def includes(facts):
+        if not facts:
+            return "FALSE", []
+        clauses = []
+        values: list[Any] = []
+        for fact in facts:
+            clauses.append(f"({instrument} = ? AND {session_date} = ?)")
+            values.extend((fact.instrument_id, fact.session_date))
+        return f"({' OR '.join(clauses)})", values
+
+    visible_clause, values = includes(visible)
+    if require_coverage:
+        covered_clause, covered_values = includes(selection.facts)
+        return (f"CASE WHEN COALESCE({covered_clause}, FALSE) THEN {visible_clause} "
+                "ELSE error('session-close 计划缺少日期、日历或合约映射覆盖') END",
+                [*covered_values, *values])
+    return visible_clause, values
 
 
 def _upper_bound_clause(

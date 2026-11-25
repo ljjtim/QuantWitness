@@ -73,10 +73,9 @@ def result_observations(result, run_root):
     days=[]
     for relative in sorted(table['files']):
         with pq.ParquetFile(result/relative) as reader:
-            for batch in reader.iter_batches(columns=['payload_json'],batch_size=256):
-                for raw in batch.column(0).to_pylist():
-                    row=json.loads(raw)
-                    days.append(dict(date=row['date'],wall_seconds=row['day_wall_seconds'],rows=row['rows']))
+            for batch in reader.iter_batches(columns=['date','day_wall_seconds','rows'],batch_size=256):
+                for row in batch.to_pylist():
+                    days.append(dict(date=row['date'].isoformat(),wall_seconds=row['day_wall_seconds'],rows=row['rows']))
     days.sort(key=lambda row:row['date'])
     middle=len(days)//2
     observation['daily']=days

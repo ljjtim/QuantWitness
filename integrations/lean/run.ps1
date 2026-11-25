@@ -9,7 +9,8 @@ param(
  [string]$DownloadCache,
  [string]$NugetCache,
  [switch]$RefreshPackage,
- [switch]$PersistInputs
+ [switch]$PersistInputs,
+ [switch]$StrictAudit
 )
 $ErrorActionPreference='Stop'
 if((!!$DataDb) -eq (!!$InputSnapshotManifest)) {
@@ -34,5 +35,11 @@ if($DataDb) { $runArguments+=@('--data-db',$DataDb) }
 else { $runArguments+=@('--input-snapshot-manifest',$InputSnapshotManifest) }
 if($MinuteRoot) { $runArguments+=@('--minute-root',$MinuteRoot) }
 if($PersistInputs) { $runArguments+='--persist-inputs' }
-& $python -B -X utf8 (Join-Path $PSScriptRoot 'accept.py') @runArguments
-if($LASTEXITCODE -ne 0) { throw "正式验收失败，见 $Output/acceptance-timing.json" }
+$previousStrictAudit=$env:QUANTWITNESS_STRICT_AUDIT
+try {
+ if($StrictAudit) { $env:QUANTWITNESS_STRICT_AUDIT='1' }
+ & $python -B -X utf8 (Join-Path $PSScriptRoot 'accept.py') @runArguments
+ if($LASTEXITCODE -ne 0) { throw "正式验收失败，见 $Output/acceptance-timing.json" }
+} finally {
+ $env:QUANTWITNESS_STRICT_AUDIT=$previousStrictAudit
+}

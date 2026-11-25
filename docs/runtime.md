@@ -49,7 +49,7 @@ Runtime 只执行已经准入的 typed operator DAG。调用方不能传入 call
 
 - `bounded_parallel`：依赖满足的内建节点依照稳定顺序进入有界执行，空出的额度用于后续 ready 节点。
 - `partitioned_batch`：当前批次完成并提交后再派下一批，输出仍按节点身份交接。
-- 项目节点保持独占，复用现有项目 Worker 和分区恢复。专用 `execute_minute_partitions` 的分钟分区并行保持原合同。
+- 项目节点保持独占，复用现有项目 Worker 和分区恢复。
 - 选择、最终训练、holdout 以及其他非纯节点保持独占，不能借并行绕过系列锁和单次消费。
 
 内建节点使用独立 spawn 进程计算。Supervisor 是唯一事件写者和 checkpoint 发布者。工件完整验证及 external 提交通过绑定 run/attempt 的临时通道回到 Supervisor。同一运行继续复用首次验证结果，验证会话不跨进程序列化。
@@ -80,7 +80,7 @@ Windows 可能暂时拒绝同盘目录发布，或发生共享冲突。项目算
 
 ## checkpoint 发布与资源验收
 
-节点输出先写入 staging，并完成 manifest、内容大小、内容摘要和当前节点身份复验，再执行剩余时间检查。启用资源治理时，最终采样同时统计本次工作目录与 checkpoint 暂存目录，不计入其他 attempt。验收通过后才写入 `COMMITTED` 并原子发布正式目录。
+节点输出先计算内容摘要，再把输出和 manifest 写入 staging 并同步落盘。正常模式核对暂存输出大小及当前节点身份。严格审计模式在发布前回读 manifest 和输出，重新验证内容摘要。两种模式都在恢复、命中已有 checkpoint 或跨运行复用时完整验证磁盘内容。启用资源治理时，验收采样同时统计本次工作目录与 checkpoint 暂存目录，不计入其他 attempt。资源与剩余时间验收通过后才写入 `COMMITTED` 并原子发布正式目录。
 
 验收前中断或被拒绝时，暂存内容不能恢复为成功。发布后尚未记录成功事件的中断，仍可按正式身份复验后接续。
 
@@ -106,7 +106,7 @@ Windows 可能暂时拒绝同盘目录发布，或发生共享冲突。项目算
 
 实际内容变化才沿输入引用传播。registry 改变后仍须重新准入。节点兼容不等于旧计划可以直接恢复，也不会自动搜索磁盘上的 checkpoint。
 
-当前计划只使用 `node-local-v4` 节点局部身份。配置通过已验证的不可变节点内容摘要绑定完整声明。身份继续绑定实际引用的 request/query、typed 输入和实现。
+当前计划使用 `node-local-v5` 节点局部身份。缓存继续绑定节点实际使用的请求、输入工件和配置。框架版本、策略源码和审计模式如何影响复用见[实现身份](implementation-identity-scope.md)。
 
 固定时钟、seed 和环境兼容事实也参与绑定。任意层级的显式 request_id、request_ids 及其带前缀字段在参数冻结时收集，包含策略参数。构建配置身份不再重复展开和扫描大规则。
 
@@ -157,13 +157,13 @@ LEAN HTML 报告继续绑定并正式验证八张执行表及指标表。读取�
 
 后续追加只处理新事件，幂等命令直接返回原事件。相同 command_id 的不同 run、载荷或关联对象仍拒绝。
 
-每条新事件继续写入日志、flush 和 fsync，然后更新内存状态。正常结束写者会话时，将完整状态一次写入可丢弃的 `projection.json`。活动会话或中断后，该文件可以滞后或缺失。
+写者复用同一个追加句柄，每条新事件 flush 后更新内存状态。正常模式在 checkpoint 提交、运行进入终态及写者退出时 fsync。严格审计模式逐条 fsync，并同步 checkpoint 的内容、清单和提交标记。正常模式下 checkpoint 关闭文件后原子发布，断电可能丢失最近的日志尾部或尚未同步的 checkpoint 文件。恢复与检查重放正式日志并验证事件链，发现截断时停止。恢复使用 checkpoint 前重新验证内容和身份。留出区间的消费记录独立落盘，失败或中断不会重置已打开区间。
 
 日志始终是公开读取、恢复和 inspect 的依据。写入失败后丢弃内存状态，下一次操作从日志重建。截断日志明确拒绝。
 
 写者会话退出时释放锁和索引。新命令、新进程、恢复及只读 inspect 都重新验证日志，不继承旧会话的信任。
 
-公开事件和状态快照与内部缓存隔离。Runtime 用节点索引查询当前节点的尝试及提交事件，避免为一个节点反复扫描全部历史。普通追加不复制、排序或序列化全部历史 command_id。完整投影只在会话正常结束时生成，公开 replay 仍返回完整状态和命令集合。
+公开事件和状态快照与内部缓存隔离。Runtime 用节点索引查询当前节点的尝试及提交事件，避免为一个节点反复扫描全部历史。普通追加不复制、排序或序列化全部历史 command_id。公开 replay 返回隔离的完整状态和命令集合。
 
 ## 数据引用与节点交接
 
@@ -330,13 +330,13 @@ admit 把已验证 bundle 和实现摘要写入计划闭包。run、resume、ret
 
 provider 用本次有效预算设置 DuckDB memory/temp、Arrow batch 与 CPU。串行路径仅在显式 resource governor 存在时创建 ResourceUsageSampler。观测当前 Runtime 进程、attempt 开始后新建的后代进程以及 scratch 峰值并交给治理记录。并行路径始终采样各节点的专属进程树与暂存，超限即停止该节点。
 
-采样开始前已经存在的控制台宿主等 Runtime 后代不属于当前节点，不能污染节点 RSS 和进程数。默认串行 run 不启动无人消费的采样线程。代表查询探针只做测试回归，不写新的 proof，也不进入真实成功运行的资源校准总体。
+采样开始前已经存在的控制台宿主等 Runtime 后代不属于当前节点，不能污染节点 RSS 和进程数。默认串行 run 不启动无人消费的采样线程。代表查询探针用于测试回归。
 
 完整矩阵消费者先用 Parquet footer 下界做数据页前拒绝，再由运行时预算核对实际 Arrow/pandas 保留量。
 
 串行路径的 `process_slots` 覆盖 Supervisor、Worker 及其受支持的子进程树。并行路径将共享 Supervisor 与节点专属树分开计入总量。内建算子默认声明 1 个槽，spawn 计算至少预留当前解释器所需启动槽。
 
-项目算子必须在薄声明中显式填写。启用共享治理时，`--resource-process-slots` 必须至少容纳 DAG 中最大的单节点声明。并行模式还须加共享 Supervisor 及 POSIX tracker 的槽。
+项目算子必须在薄声明中显式填写。单机串行默认 6 个进程槽，支持通过 `--resource-process-slots` 设置总容量。运行容量必须容纳 DAG 中最大的单节点声明。并行模式显式设置总进程容量时，还须计入共享 Supervisor 及 POSIX tracker 的槽。
 
 CPU 和进程槽分别准入，不再用进程数推高 CPU 申请。
 
@@ -356,14 +356,14 @@ CPU 和进程槽分别准入，不再用进程数推高 CPU 申请。
 
 默认路径不创建跨命令状态或租约。只有调用方显式提供共享 resource state dir 时，多个独立 CLI 才申请跨进程 FIFO 额度。串行运行按节点声明申请，并行运行先申请整次 run 的总容量，再分配节点子租约。
 
-各维度之和未超过总容量时可以同时执行，超过任一维度时后到请求等待。等待超过显式 timeout 后拒绝，不改变金融语义。启用共享治理时，最终资源采样覆盖 checkpoint 提交标记、目录发布和内容复验。
+各维度之和未超过总容量时可以同时执行，超过任一维度时后到请求等待。等待超过显式 timeout 后拒绝，不改变金融语义。启用共享治理时，发布前的最终资源采样计入 checkpoint 暂存文件。
 
 系统再核对 Supervisor 与本 attempt 子进程的合计用量。用量包括 RSS、scratch、进程数和耗时。
 
 通过后才记录 checkpoint 成功事件。超出预算或租约时记录失败，
 撤销本 attempt 刚发布的 checkpoint，避免恢复复用未通过资源门禁的输出。资源测量不可用时记录 `measurement_unavailable` 并阻断提交。
 
-需要清理失控 Worker 时仍保留进程树终止，无法递归观察时报告 `direct_process_only` 残留风险。资源观测保留实际测量值，不会静默改写后续 reservation。共享状态使用 `research-resource-governor-v3`，资源观测保持 v4。
+需要清理失控 Worker 时仍保留进程树终止，无法递归观察时报告 `direct_process_only` 残留风险。节点实际测量保存在本次运行的 checkpoint 事件中。共享状态使用 `research-resource-governor-v4`，保存活动额度与结束租约历史。
 
 升级后必须使用新的仓库外 state dir，旧状态不自动迁移。项目声明必须包含`process_slots`，并经build、lint、admit进入新run。
 
@@ -393,7 +393,7 @@ Runtime succeeded 表示计算完成。ResultAssembler 按 ResultSpec 选择已�
 
 ### 因果事实列式传输
 
-Worker的核心时间事实使用`causal-facts-v1`描述：逐行标量写入attempt内Parquet，相同`source_partition_ids`列表只存一份，各行保存列表编号。JSON只承载路径、行数、键列、lineage和共享来源清单。Supervisor读取后恢复同一有序事实，再执行既有核心合并、来源和时间检查。特征值、时间字符串精度、标签成熟边界及最终证据含义保持。
+Worker的核心时间事实使用`causal-facts-v1`描述：逐行标量写入attempt内Parquet，相同`source_partition_ids`列表只存一份，各行保存列表编号。JSON只承载路径、行数、键列、lineage和共享来源清单。Supervisor按唯一行键用 Arrow 附加时间列，保留项目值的原始行序、精度和字段元数据。时间列以 UTC 纳秒保存，Feature 继续检查来源观测和可见时间，Label 继续检查未来观测及成熟顺序。
 
 非分钟Parquet按观测列的行组最小／最大月份跳过确定不相交的数据。缺少统计、存在空时间或非日期时间列时保留原读取。原始来源身份仍完整核验，实际交付仍受冻结月份、窗口和可见时间约束。
 
@@ -433,7 +433,7 @@ Worker的核心时间事实使用`causal-facts-v1`描述：逐行标量写入att
 
 目录载荷释放使用同一次遍历检查后代保护标记和源文件集合。逐文件复用源文件大小读数，正式替代工件复验、路径归属和大小核对继续执行。
 
-恢复使用正式 checkpoint 和 external，不为补清理重新执行节点。Result 保留正式输出和持久输入引用。成功因果键批按独立交接记录释放工作副本。失败批、未交接状态和历史未登记目录继续保留。目录类别、保护规则和只读 GC 预览见 [产物生命周期](artifact-lifecycle.md)。
+恢复使用正式 checkpoint 和 external，不为补清理重新执行节点。Result 保留正式输出和持久输入引用。同一进程发布 Result 直接接收运行写者的终态与内存事件投影，独立组装从正式事件日志重放并校验同一状态机。两条路径均核对 DAG 节点集合、运行身份和链尾摘要。成功因果键批按独立交接记录释放工作副本。失败批、未交接状态和历史未登记目录继续保留。目录类别、保护规则和只读 GC 预览见 [产物生命周期](artifact-lifecycle.md)。
 
 项目策略节点显式声明`execution_backend=lean`、冻结策略bundle和安装锁，经策略声明及范围准入进入LEAN。成功节点复验并复用正式工件。未完成LEAN节点整体重跑。恢复身份覆盖策略协议、bundle、引擎、插件、环境、输入和结果合同，详见[策略事件协议](strategy-protocol.md)。
 

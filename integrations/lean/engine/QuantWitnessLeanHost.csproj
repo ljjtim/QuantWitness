@@ -11,8 +11,13 @@
     <Compile Include="LeanStrategyHost.cs" />
     <Compile Include="LeanFutureHost.cs" />
     <Compile Include="LeanFutureLifecycle.cs" />
+    <Compile Include="NativeMarketLifecycle.cs" />
+    <Compile Include="NativeResultRecorder.cs" />
+    <Compile Include="NativeSpotResult.cs" />
     <ProjectReference Include="parquet-direct/ParquetInput.csproj" />
     <Reference Include="QuantConnect.Algorithm"><HintPath>$(LeanBin)/QuantConnect.Algorithm.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.AlgorithmFactory"><HintPath>$(LeanBin)/QuantConnect.AlgorithmFactory.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="QuantConnect.Lean.Engine"><HintPath>$(LeanBin)/QuantConnect.Lean.Engine.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="QuantConnect.Common"><HintPath>$(LeanBin)/QuantConnect.Common.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="QuantConnect.Configuration"><HintPath>$(LeanBin)/QuantConnect.Configuration.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="QuantConnect.Indicators"><HintPath>$(LeanBin)/QuantConnect.Indicators.dll</HintPath><Private>false</Private></Reference>

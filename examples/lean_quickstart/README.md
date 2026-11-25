@@ -32,7 +32,7 @@ python -m venv .venv
 
 `catalog_lock`为本例独立Catalog。`input_snapshot_manifest`用于正式归档准入。一分钟另提供`minute_root`。
 
-两个频率使用相同证券和2024-01-05、08、09、10、11日历，可共用一次安装。01-05仅作为前收与初始复权因子会话。执行覆盖01-08至01-11。
+两个频率使用相同证券和2024-01-05、08、09、10、11行情会话，可共用一次安装。01-05仅作为前收与初始复权因子会话。执行覆盖01-08至01-11。日线可见性日历还包含01-12，用于确定最后一根日线的下一会话开盘时点，不扩大交易窗口。
 
 一分钟每天生成240个完成bar，上午09:31至11:30，下午13:01至15:00。日线完整OHLCV按下一会话开盘可见，独立开盘来源按本会话09:30可见。公司行动来源为空，是合成市场的明确定义。
 
@@ -50,11 +50,11 @@ pwsh -NoProfile -File integrations/lean/run.ps1 -LeanHome "$env:LOCALAPPDATA/Qua
 
 `integrations/lean/prepare.py`在安装完成后冻结实际LEAN runtime、重建配套bundle并转换为正式LEAN声明。源包不直接执行。正式入口继续经过Catalog、归档、PIT、规则覆盖及策略准入。
 
-策略订阅bar，只在首次已可见报价时提交100份买单。下一会话取得100份可卖数量后提交卖单。所有订单为市价、DAY、零滑点。
+策略类`QuickstartAlgorithm`直接继承`QCAlgorithm`，使用原生证券订阅、SMA、SetWarmUp、History、MarketOrder、Plot和ObjectStore。首次已可见bar提交100份买单，下一会话提交卖单。T+1和费用由中国市场模型检查，订单为市价、DAY、零滑点。
 
 撮合遵守后续bar与T+1，策略只读取当前事件账户和已可见报价。初始现金10000元，合成费率为成交额的万分之三、每单最低0.05元，无印花税及过户费。策略算子声明12GiB、4CPU、6个进程槽、32GiB临时空间与120秒，入口沿用这些示例声明。
 
-策略上下文上限8MiB，包含冻结安装声明、当前事件和可见报价。声明上限不是实际占用。
+初始化与单时间步分别声明30秒上限。算法直接读取原生Slice、Portfolio和OrderTicket，不使用另一个策略上下文。图表、History观测记录和ObjectStore随正式Result封存。
 
 正式运行目录保存转换声明、plan、run、artifacts、results、Markdown和HTML报告，以及验收计时。报告读取正式Result，指标引用使用`project.lean.*@2.0.0`，HTML请求绑定八张执行表与metrics。需要迁移时同时保留源输入、Catalog、包、bundle、安装与计划引用。
 
@@ -68,7 +68,7 @@ pwsh -NoProfile -File integrations/lean/run.ps1 -LeanHome "$env:LOCALAPPDATA/Qua
 
 ## 手算核对
 
-`expected.yaml`独立保存固定成交、费用和每日现金预期。使用准备环境只读核对正式Result的八张v2执行表：orders、intents、daily、trace用于固定手算，fills、positions、account_events、lifecycle要求为空。脚本从各表Parquet读取`payload_json`，不重跑策略或撮合：
+`expected.yaml`独立保存固定成交、费用和每日现金预期。使用准备环境只读核对正式Result的八张v4执行表：orders、intents、daily、trace、fills、positions、account_events、lifecycle。orders和daily用于固定手算，trace须保留真实订单提交请求，fills须有两笔实际成交，account_events须保留真实账户事件；原生算法的intents为空。脚本直接读取各张 Parquet 的业务列：
 
 ```powershell
 .venv/Scripts/python.exe examples/lean_quickstart/verify.py --frequency 1d --result <日频正式Result目录>
@@ -77,8 +77,10 @@ pwsh -NoProfile -File integrations/lean/run.ps1 -LeanHome "$env:LOCALAPPDATA/Qua
 
 一分钟在01-08的09:31决定买入，09:32以10元成交。01-09的09:31决定卖出，09:32以10.5元成交。买卖佣金分别为0.30、0.32元，现金为10000－1000－0.30＋1050－0.32＝10049.38元。
 
-日频首个完整日线在01-09开盘可见，以10.5元买入100份。01-10开盘可卖，以11元卖出100份。佣金向上取整到分，分别为0.32、0.33元，期末现金为10000－1050－0.32＋1100－0.33＝10049.35元。
+日频01-05完整日线在01-08开盘可见，此时以独立开盘价10元买入100份。01-09开盘可卖，以10.5元卖出100份。佣金向上取整到分，分别为0.30、0.32元，期末现金为10000－1000－0.30＋1050－0.32＝10049.38元。
 
-日频按下一会话开盘执行，分钟按后续完成bar执行。核对还要求两笔意图、卖出当时可卖量足够、四个日终会话完整、期末空仓及无未完成订单。
+策略在两次下单前用原生 History 请求最近一根行情，并把请求时间和返回收盘价写入 ObjectStore。日线在01-08开盘的 History 为空，01-09开盘返回01-08收盘价10元。用于首日策略事件的01-05日线收盘价为9.9元，01-09当天开盘价为10.5元。分钟在01-08与01-09的09:31分别返回10元和10.5元。核对脚本读取正式Result中的 ObjectStore 记录。
+
+日频按下一会话开盘执行，分钟按后续完成bar执行。核对还要求两笔不同订单、两笔原生提交请求的数量分别为100和－100、四个日终会话完整、期末空仓及各日终无未完成订单。
 
 独立 `package lint` 用于主动诊断。普通正式流程从完整声明直接准入。

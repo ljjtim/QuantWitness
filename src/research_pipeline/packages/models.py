@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from functools import cached_property, partial
+
+
 from dataclasses import dataclass, field as dataclass_field
 from datetime import date, datetime
 import re
@@ -15,6 +18,7 @@ from research_pipeline.platform.asset_taxonomy import (
     AssetTaxonomyError,
     normalize_asset_class,
 )
+from research_pipeline.platform.validation import require_sha256, require_text
 
 
 RESEARCH_PACKAGE_VERSION = "research-package-v1"
@@ -31,16 +35,10 @@ class ResearchPackageError(MainlineError):
     error_code = "research_package_invalid"
 
 
-def _require_text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ResearchPackageError(f"{field} 必须是非空字符串")
-    return value
+_require_text = partial(require_text, error=ResearchPackageError)
 
 
-def _require_hash(value: object, field: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-        raise ResearchPackageError(f"{field} 必须是 sha256 小写摘要")
-    return value
+_require_hash = partial(require_sha256, error=ResearchPackageError)
 
 
 def _freeze(value: object) -> object:
@@ -52,8 +50,6 @@ def _freeze(value: object) -> object:
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(_freeze(item) for item in value)
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
     raise ResearchPackageError(f"spec_payload 不支持类型: {type(value).__name__}")
 
 
@@ -343,7 +339,7 @@ class ResearchPackage:
             "contract_version": self.contract_version,
         }
 
-    @property
+    @cached_property
     def source_provenance_hash(self) -> str:
         return typed_canonical_hash({"sources": [item.to_dict() for item in self.sources]})
 

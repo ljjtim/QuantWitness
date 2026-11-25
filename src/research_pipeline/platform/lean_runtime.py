@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
+
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, ExitStack
+from contextvars import ContextVar
+import csv
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 
+from .directory_watch import watch_directory as _watch_installation
+from .validation import file_sha256 as _sha256
 
-LEAN_RUNTIME_VERSION = "research-lean-runtime-v1"
+
+LEAN_RUNTIME_VERSION = "research-lean-runtime-v3"
+# 中国市场规则、策略宿主、输入或成交行为发生变化时更新此版本。
+LEAN_ADAPTER_SEMANTIC_VERSION = "research-lean-adapter-v2"
 _RELATIVE_FIELDS = (
-    "dotnet_relative", "launcher_relative", "algorithm_relative",
+    "dotnet_relative", "launcher_relative",
     "python_environment_relative", "python_library_relative",
     "dotnet_shared_relative", "dotnet_host_relative", "python_base_relative",
     "config_template_relative", "metadata_relative",
 )
-_FIELDS = {"contract_version", "installation_root", "files", "upstream_revision", *_RELATIVE_FIELDS}
+_FIELDS = {"contract_version", "installation_root", "audit_hash", "semantic_versions", "upstream_revision", *_RELATIVE_FIELDS}
 _PLUGINS = (
     "QuantWitnessLeanHost.dll", "ChinaRules.dll", "CorporateActions.dll",
     "ParquetInput.dll", "ParquetSharp.dll", "ParquetSharpNative.dll",
@@ -26,6 +36,26 @@ _PLUGINS = (
 _CACHE_DIRECTORIES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 _LAUNCHER_SUFFIXES = {".dll", ".json", ".py", ".pyd", ".exe"}
 _UNUSED_LAUNCHER_CONFIGS = {"config.json", "config.example.json"}
+_AUDIT_RELATIVE = "rp-integration/runtime-audit.json"
+_AUDIT_VERSION = "research-lean-installation-audit-v2"
+_DOTNET_KEY_FILES = {"coreclr.dll", "hostpolicy.dll", "hostfxr.dll", "System.Private.CoreLib.dll"}
+
+
+_run_checks = ContextVar("lean_run_checks", default=None)
+
+
+@contextmanager
+def lean_runtime_check_scope():
+    """在一次执行内监视安装目录；独立运行与恢复各自重新读取文件。"""
+    if _run_checks.get() is not None:
+        yield
+        return
+    with ExitStack() as resources:
+        token = _run_checks.set(({}, resources))
+        try:
+            yield
+        finally:
+            _run_checks.reset(token)
 
 
 def _relative(value: object, field: str) -> str:
@@ -54,7 +84,7 @@ def _required_files(values: Mapping[str, object]) -> set[str]:
     metadata = PurePosixPath(values["metadata_relative"])
     return {
         values["dotnet_relative"], values["launcher_relative"],
-        values["algorithm_relative"], values["python_library_relative"],
+        values["python_library_relative"],
         values["config_template_relative"],
         str(launcher.with_suffix(".deps.json")),
         str(launcher.with_suffix(".runtimeconfig.json")),
@@ -88,9 +118,7 @@ def _tree_files(root: Path, relative: str, *, launcher: bool = False, resolved=N
             source = directory / name
             if source.suffix.lower() in {".pyc", ".pyo", ".log"}:
                 continue
-            if launcher and (source.suffix.lower() not in _LAUNCHER_SUFFIXES
-                    or name.lower() in _UNUSED_LAUNCHER_CONFIGS
-                    or name.lower().endswith(("-order-events.json", "-logs.json", "-summary.json"))):
+            if launcher and not _launcher_file(source):
                 continue
             if not entry.is_file():
                 raise ValueError(f"LEAN 依赖文件缺失: {relative_name}")
@@ -99,6 +127,12 @@ def _tree_files(root: Path, relative: str, *, launcher: bool = False, resolved=N
             if resolved is not None:
                 resolved[relative_name] = target
             yield relative_name
+
+
+def _launcher_file(path):
+    name = path.name.lower()
+    return (path.suffix.lower() in _LAUNCHER_SUFFIXES and name not in _UNUSED_LAUNCHER_CONFIGS
+            and not name.endswith(("-order-events.json", "-logs.json", "-summary.json")))
 
 
 def _installation_files(root: Path, values: Mapping[str, object], *, resolved=None) -> set[str]:
@@ -137,28 +171,34 @@ def _installation_files(root: Path, values: Mapping[str, object], *, resolved=No
     return files
 
 
-def _sha256(source: Path) -> str:
-    digest = hashlib.sha256()
-    with source.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _file_digests(root: Path, names, resolved):
-    # 只并发读取独立文件，按原排序交付身份；每路至多保留一个读取块。
+    # 按小批调度，避免为安装中的每个小文件创建一个 Future。
+    def digest_group(group):
+        return [(name, _sha256(_contained(root, name, resolved))) for name in group]
+
     with ThreadPoolExecutor(max_workers=4) as readers:
-        paths = (_contained(root, name, resolved) for name in names)
-        yield from zip(names, readers.map(_sha256, paths))
+        groups = (names[start:start + 16] for start in range(0, len(names), 16))
+        for group in readers.map(digest_group, groups):
+            yield from group
 
 
 def freeze_lean_runtime(
     installation_root: str | Path, *, layout: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """冻结已安装的执行闭包；layout 只替换明确入口和目录的相对位置。"""
+    """引用安装审计记录，允许研究包绑定自己的市场元数据目录。"""
+    from research_pipeline.platform.audit_mode import strict_audit_enabled
+
     root = Path(installation_root).resolve(strict=True)
-    if not root.is_dir():
-        raise ValueError("LEAN installation_root 必须是已存在的安装目录")
+    overrides = dict(layout or {})
+    if set(overrides) - {"metadata_relative"}:
+        raise ValueError("LEAN 入口布局须在记录安装审计时声明")
+    audit, audit_hash = _load_installation_audit(root)
+    runtime = _runtime_from_audit(root, audit, audit_hash, overrides.get("metadata_relative"))
+    _verify_installation(root, runtime, audit["runtime"], strict=strict_audit_enabled())
+    return _runtime_reference(runtime)
+
+
+def _freeze_lean_runtime(root, *, layout=None):
     overrides = dict(layout or {})
     if set(overrides) - {*_RELATIVE_FIELDS, "upstream_revision"}:
         raise ValueError("LEAN layout 包含未支持字段")
@@ -171,7 +211,6 @@ def freeze_lean_runtime(
         "upstream_revision": revision,
         "dotnet_relative": "sdk/dotnet.exe",
         "launcher_relative": f"src/Lean-{revision}/Launcher/bin/Release/QuantConnect.Lean.Launcher.dll",
-        "algorithm_relative": "rp-integration/ResearchLeanAlgorithm.py",
         "python_environment_relative": "python-env",
         "dotnet_shared_relative": "sdk/shared",
         "dotnet_host_relative": "sdk/host",
@@ -201,16 +240,179 @@ def freeze_lean_runtime(
         if len(libraries) != 1:
             raise ValueError("LEAN Python base 必须有唯一版本化 Python DLL")
         values["python_library_relative"] = libraries[0].relative_to(root).as_posix()
-    values["files"] = {name: "0" * 64 for name in sorted(_required_files(values))}
-    normalized = validate_lean_runtime(values, verify_files=False)
     resolved = {}
-    names = sorted(_installation_files(root, normalized, resolved=resolved))
-    normalized["files"] = dict(_file_digests(root, names, resolved))
-    return normalized
+    names = sorted(_installation_files(root, values, resolved=resolved))
+    values["files"] = dict(_file_digests(root, names, resolved))
+    return values
 
 
-def validate_lean_runtime(payload: object, verify_files: bool = True) -> dict[str, object]:
-    """复验参数锁及实际文件；关闭文件复验仅用于离线结构检查。"""
+def _key_file_names(runtime):
+    launcher = runtime["launcher_relative"].rpartition("/")[0]
+    return _required_files(runtime) | {
+        name for name in runtime["files"]
+        if name == "upstream-revision.txt"
+        or name.rpartition("/")[0] == launcher
+        or name.rpartition("/")[2] in _DOTNET_KEY_FILES
+        or name.endswith(".dist-info/METADATA")
+    }
+
+
+def _load_installation_audit(root):
+    try:
+        content = (root / _AUDIT_RELATIVE).read_bytes()
+    except FileNotFoundError as exc:
+        raise ValueError("LEAN 安装审计凭证缺失，请通过安装或同步流程生成") from exc
+    audit = json.loads(content)
+    if (not isinstance(audit, dict) or audit.get("contract_version") != _AUDIT_VERSION
+            or not isinstance(audit.get("runtime"), dict)
+            or audit["runtime"].get("installation_root") != root.as_posix()):
+        raise ValueError("LEAN 安装审计凭证无效，请同步安装")
+    return audit, hashlib.sha256(content).hexdigest()
+
+
+def read_lean_config_template(template: Path) -> dict[str, object]:
+    text = template.read_text(encoding="utf-8-sig")
+    # 保留网址和转义字符串，只去掉 LEAN 配置注释。
+    text = re.sub(r'"(?:\\.|[^"\\])*"|//[^\r\n]*|/\*.*?\*/',
+                  lambda match: "" if match[0].startswith(("//", "/*")) else match[0], text, flags=re.S)
+    return json.loads(text)
+
+
+def _execution_inputs_identity(root, runtime):
+    from research_pipeline.platform import typed_canonical_hash
+
+    configuration = read_lean_config_template(root / runtime["config_template_relative"])
+    metadata = runtime["metadata_relative"]
+    with (root / metadata / "market-hours/market-hours-database.json").open(encoding="utf-8-sig") as stream:
+        hours = json.load(stream)
+    with (root / metadata / "symbol-properties/symbol-properties-database.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as stream:
+        symbols = list(csv.reader(stream))
+    return typed_canonical_hash({"config": configuration, "hours": hours, "symbols": symbols})
+
+
+def _runtime_with_metadata(root, installed, metadata_relative, *, execution_inputs=None):
+    relative = _relative(metadata_relative, "metadata_relative")
+    previous_prefix = installed["metadata_relative"] + "/"
+    files = {name: digest for name, digest in installed["files"].items() if not name.startswith(previous_prefix)}
+    resolved = {}
+    names = sorted(_tree_files(root, relative, resolved=resolved))
+    files.update(_file_digests(root, names, resolved))
+    runtime = {**installed, "metadata_relative": relative, "files": dict(sorted(files.items()))}
+    missing = _required_files(runtime) - files.keys()
+    if missing:
+        raise ValueError(f"LEAN 自定义元数据缺失必需文件: {', '.join(sorted(missing))}")
+    runtime["semantic_versions"] = {
+        **installed["semantic_versions"], "execution_inputs": execution_inputs or _execution_inputs_identity(root, runtime),
+    }
+    return runtime
+
+
+def _semantic_versions(root, runtime):
+    from research_pipeline.platform import typed_canonical_hash
+
+    launcher_deps = str(PurePosixPath(runtime["launcher_relative"]).with_suffix(".deps.json"))
+    with (root / launcher_deps).open(encoding="utf-8-sig") as stream:
+        dotnet_libraries = sorted(json.load(stream)["libraries"])
+    files = runtime["files"]
+    return {
+        "adapter_version": LEAN_ADAPTER_SEMANTIC_VERSION,
+        "dotnet_libraries": typed_canonical_hash(dotnet_libraries),
+        "dotnet_runtime": sorted(name.split("/")[-2] for name in files if name.endswith("/coreclr.dll")),
+        "python_runtime": PurePosixPath(runtime["python_base_relative"]).name,
+        "python_packages": typed_canonical_hash(
+            sorted(name.split("/")[-2] for name in files if name.endswith(".dist-info/METADATA"))
+        ),
+        "execution_inputs": _execution_inputs_identity(root, runtime),
+    }
+
+
+def lean_runtime_semantic_identity(runtime: Mapping[str, object]) -> dict[str, object]:
+    return {"contract_version": runtime["contract_version"],
+            "upstream_revision": runtime["upstream_revision"], "versions": runtime["semantic_versions"]}
+
+
+def _runtime_reference(runtime):
+    return {name: value for name, value in runtime.items() if name != "files"}
+
+
+def _runtime_from_audit(root, audit, audit_hash, metadata_relative=None, *, execution_inputs=None):
+    from research_pipeline.platform import typed_canonical_hash
+
+    installed = audit["runtime"]
+    runtime = {**installed, "audit_hash": audit_hash}
+    if metadata_relative is not None and metadata_relative != installed["metadata_relative"]:
+        runtime = _runtime_with_metadata(root, runtime, metadata_relative, execution_inputs=execution_inputs)
+        prefix = runtime["metadata_relative"] + "/"
+        runtime["audit_hash"] = typed_canonical_hash(
+            {"installation": audit_hash, "execution_inputs": runtime["semantic_versions"]["execution_inputs"], "metadata": {
+                name: digest for name, digest in runtime["files"].items() if name.startswith(prefix)
+            }}
+        )
+    return runtime
+
+
+def _verify_installation(root, runtime, installed, *, strict):
+    resolved = {}
+    files = runtime["files"]
+    if strict:
+        current = _installation_files(root, runtime, resolved=resolved)
+        missing, added = files.keys() - current, current - files.keys()
+        if missing or added:
+            raise ValueError(f"LEAN 执行文件闭包变化: 缺失={sorted(missing)}, 新增={sorted(added)}")
+        names = files
+    else:
+        names = _key_file_names(runtime)
+        if runtime["metadata_relative"] != installed["metadata_relative"]:
+            # 自定义元数据刚在读取审计凭证时逐文件计算了 SHA-256。
+            names = {name for name in names if not name.startswith(runtime["metadata_relative"] + "/")}
+        launcher = PurePosixPath(runtime["launcher_relative"]).parent
+        with os.scandir(_contained(root, launcher.as_posix(), resolved)) as entries:
+            added = sorted(entry.name for entry in entries if entry.is_file() and _launcher_file(Path(entry.name))
+                           and str(launcher / entry.name) not in files)
+        if added:
+            raise ValueError(f"LEAN Launcher 新增执行文件: {', '.join(added)}")
+    try:
+        for name, digest in _file_digests(root, sorted(names), resolved):
+            if digest != files[name]:
+                raise ValueError(f"LEAN 执行文件内容变化: {name}")
+    except FileNotFoundError as exc:
+        raise ValueError(f"LEAN 必需文件缺失: {exc.filename}") from exc
+
+
+def record_lean_installation(installation_root: str | Path, *, engine_source_id: str,
+                             layout: Mapping[str, str] | None = None) -> None:
+    """安装和同步完成后在安装目录发布完整文件清单。"""
+    root = Path(installation_root).resolve(strict=True)
+    runtime = _freeze_lean_runtime(root, layout=layout)
+    runtime["semantic_versions"] = _semantic_versions(root, runtime)
+    audit = {
+        "contract_version": _AUDIT_VERSION,
+        "engine_source_id": engine_source_id,
+        "runtime": runtime,
+    }
+    target = root / _AUDIT_RELATIVE
+    temporary = target.with_suffix(".tmp")
+    try:
+        temporary.write_text(json.dumps(audit, ensure_ascii=False, separators=(",", ":")) + "\n", encoding="utf-8")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def audit_lean_installation(installation_root: str | Path) -> dict[str, object]:
+    """用安装时的凭证逐个复验执行依赖，并返回只读审计摘要。"""
+    root = Path(installation_root).resolve(strict=True)
+    audit, audit_hash = _load_installation_audit(root)
+    runtime = _runtime_from_audit(root, audit, audit_hash)
+    _verify_installation(root, runtime, audit["runtime"], strict=True)
+    return {"installation_root": runtime["installation_root"], "upstream_revision": runtime["upstream_revision"],
+            "verified_files": len(runtime["files"])}
+
+
+def validate_lean_runtime(payload: object, verify_files: bool = True, *, strict: bool | None = None) -> dict[str, object]:
+    """复验参数锁；同一调用内监视安装目录，仅在内容未变化时复用。"""
     if not isinstance(payload, Mapping) or set(payload) != _FIELDS:
         raise ValueError("LEAN runtime lock schema 无效")
     if payload["contract_version"] != LEAN_RUNTIME_VERSION:
@@ -222,45 +424,61 @@ def validate_lean_runtime(payload: object, verify_files: bool = True) -> dict[st
     if not isinstance(installation, str) or not Path(installation).is_absolute():
         raise ValueError("LEAN installation_root 必须是绝对目录")
     root = Path(installation).resolve()
-    # 实际文件检查在本次调用内复用路径；结构检查不逐个访问依赖文件。
-    resolved = {}
-    values = {"contract_version": LEAN_RUNTIME_VERSION, "installation_root": root.as_posix(),
-              "upstream_revision": revision}
+    audit_hash = payload["audit_hash"]
+    if not isinstance(audit_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", audit_hash):
+        raise ValueError("LEAN 安装审计身份无效")
+    versions = payload["semantic_versions"]
+    scalars = {"adapter_version", "python_runtime", "execution_inputs", "dotnet_libraries", "python_packages"}
+    if (not isinstance(versions, Mapping) or set(versions) != scalars | {"dotnet_runtime"}
+            or any(not isinstance(versions[name], str) or not versions[name] for name in scalars)
+            or not isinstance(versions["dotnet_runtime"], (tuple, list))
+            or any(not isinstance(item, str) or not item for item in versions["dotnet_runtime"])):
+        raise ValueError("LEAN 执行版本声明无效")
+    values = {**payload, "installation_root": root.as_posix(),
+              "semantic_versions": {**versions, "dotnet_runtime": list(versions["dotnet_runtime"])}}
     for field in _RELATIVE_FIELDS:
         values[field] = _relative(payload[field], field)
-        if verify_files:
-            _contained(root, values[field], resolved)
-    expected_names = {"dotnet_relative": "dotnet.exe", "launcher_relative": "QuantConnect.Lean.Launcher.dll",
-                      "algorithm_relative": "ResearchLeanAlgorithm.py"}
+    expected_names = {"dotnet_relative": "dotnet.exe", "launcher_relative": "QuantConnect.Lean.Launcher.dll"}
     if any(PurePosixPath(values[field]).name != name for field, name in expected_names.items()):
         raise ValueError("LEAN runtime lock 入口名称不受支持")
     if not PurePosixPath(values["python_library_relative"]).is_relative_to(values["python_base_relative"]):
         raise ValueError("LEAN Python DLL 必须位于声明的 Python base 内")
-    files = payload["files"]
-    if not isinstance(files, Mapping) or not files:
-        raise ValueError("LEAN runtime lock files 必须是非空文件身份映射")
-    normalized_files = {}
-    for name, digest in files.items():
-        _relative(name, "files")
-        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise ValueError(f"LEAN 文件身份无效: {name}")
-        normalized_files[name] = digest
-    values["files"] = dict(sorted(normalized_files.items()))
-    missing = _required_files(values) - set(files)
-    if missing:
-        raise ValueError(f"LEAN runtime lock 未冻结必需文件: {', '.join(sorted(missing))}")
     if type(verify_files) is not bool:
         raise ValueError("LEAN verify_files 必须是布尔值")
-    if verify_files:
-        current = _installation_files(root, values, resolved=resolved)
-        missing = set(files) - current
-        added = current - set(files)
-        if missing or added:
-            raise ValueError(f"LEAN 执行文件闭包变化: 缺失={sorted(missing)}, 新增={sorted(added)}")
-        for name, digest in _file_digests(root, list(values["files"]), resolved):
-            if digest != values["files"][name]:
-                raise ValueError(f"LEAN 执行文件内容变化: {name}")
+    if not verify_files:
+        return values
+
+    if strict is None:
+        from research_pipeline.platform.audit_mode import strict_audit_enabled
+        strict = strict_audit_enabled()
+    scope = _run_checks.get()
+    unchanged = None
+    if scope is not None:
+        checked, resources = scope
+        previous = checked.get((root, strict))
+        if previous is not None:
+            frozen, prior_unchanged = previous
+            if frozen == values and prior_unchanged():
+                return values
+        # 在读取凭证前订阅；无法监视目录时逐次复验。
+        unchanged = _watch_installation(root, resources)
+    audit, base_hash = _load_installation_audit(root)
+    runtime = _runtime_from_audit(root, audit, base_hash, values["metadata_relative"],
+        execution_inputs=None if strict else versions["execution_inputs"])
+    if _runtime_reference(runtime) != values:
+        raise ValueError("LEAN 已安装版本与冻结计划不一致，请重新准入")
+    _verify_installation(root, runtime, audit["runtime"], strict=strict)
+    if unchanged is not None:
+        checked[(root, strict)] = (
+            {**values, "semantic_versions": {**values["semantic_versions"],
+                "dotnet_runtime": list(values["semantic_versions"]["dotnet_runtime"])}},
+            unchanged,
+        )
     return values
 
 
-__all__ = ["LEAN_RUNTIME_VERSION", "freeze_lean_runtime", "validate_lean_runtime"]
+__all__ = [
+    "LEAN_ADAPTER_SEMANTIC_VERSION", "LEAN_RUNTIME_VERSION",
+    "audit_lean_installation", "freeze_lean_runtime", "lean_runtime_semantic_identity",
+    "record_lean_installation", "validate_lean_runtime",
+]

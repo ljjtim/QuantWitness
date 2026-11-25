@@ -4,30 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import inspect
-from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping
 
-from .models import TransformContract
+from .models import TransformContract, _freeze as _freeze_metadata, _plain as _plain_metadata
 
 from research_pipeline.platform.canonical import typed_canonical_hash
 
 from .errors import CatalogReferenceError
-
-
-def _freeze_metadata(value: object) -> object:
-    if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze_metadata(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_metadata(item) for item in value)
-    return value
-
-
-def _plain_metadata(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _plain_metadata(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_plain_metadata(item) for item in value]
-    return value
 
 
 @dataclass(frozen=True)

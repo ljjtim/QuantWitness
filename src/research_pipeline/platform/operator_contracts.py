@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from functools import cached_property
+from functools import cached_property, partial
 import re
 from types import MappingProxyType
 
 from .canonical import typed_canonical_hash
 from .errors import MainlineError
+from .validation import require_exact_fields, require_sha256
 
 
 OPERATOR_CONTRACT_VERSION = "research-operator-contract-v1"
@@ -105,10 +107,7 @@ def _require_id(value: object, field: str) -> str:
     return value
 
 
-def _require_hash(value: object, field: str) -> str:
-    if not isinstance(value, str) or not _HASH_PATTERN.fullmatch(value):
-        raise OperatorContractError(f"{field} 必须是 sha256 小写摘要")
-    return value
+_require_hash = partial(require_sha256, error=OperatorContractError)
 
 
 def _require_string(value: object, field: str) -> str:
@@ -120,10 +119,7 @@ def _require_string(value: object, field: str) -> str:
 def _require_exact(payload: Mapping[str, object], expected: set[str], field: str) -> None:
     if any(not isinstance(key, str) for key in payload):
         raise OperatorContractError(f"{field} 的字段名必须是字符串")
-    if set(payload) != expected:
-        raise OperatorContractError(
-            f"{field} schema 不匹配；缺失={sorted(expected - set(payload))}，未知={sorted(set(payload) - expected)}"
-        )
+    require_exact_fields(payload, expected, field, error=OperatorContractError)
 
 
 def _freeze_json(
@@ -769,13 +765,16 @@ class OperatorGraphRecipe:
         if self.recipe_hash != self._validated_hash():
             raise OperatorContractError("operator graph recipe hash 不一致")
 
-    def _validated_hash(self) -> str:
+    def _validate_structure(self) -> None:
         _require_id(self.graph_id, "operator_graph.graph_id")
         node_ids = tuple(item.node_id for item in self.nodes)
         if not node_ids or node_ids != tuple(sorted(node_ids)) or len(node_ids) != len(set(node_ids)):
             raise OperatorContractError("operator_graph.nodes 必须非空并按 node_id 唯一排序")
         if self.contract_version != OPERATOR_GRAPH_RECIPE_VERSION:
             raise OperatorContractError("operator graph recipe version 不受支持")
+
+    def _validated_hash(self) -> str:
+        self._validate_structure()
         return typed_canonical_hash({
             "identity_projection": "immutable-node-content-v1",
             "graph_id": self.graph_id,
@@ -807,15 +806,26 @@ class OperatorGraphRecipe:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "OperatorGraphRecipe":
+        return cls._decode(payload, None)
+
+    @classmethod
+    def _decode(cls, payload, frozen_hash):
         _require_exact(payload, {"graph_id", "nodes", "contract_version"}, "operator_graph")
         if payload["contract_version"] != OPERATOR_GRAPH_RECIPE_VERSION:
             raise OperatorContractError("operator graph recipe version 不受支持")
         if not isinstance(payload["nodes"], (list, tuple)) or any(not isinstance(item, Mapping) for item in payload["nodes"]):
             raise OperatorContractError("operator_graph.nodes 必须是映射列表")
-        return cls.build(
-            graph_id=_require_string(payload["graph_id"], "operator_graph.graph_id"),
-            nodes=tuple(OperatorNodeRecipe.from_dict(item) for item in payload["nodes"]),
-        )
+        graph_id = _require_string(payload["graph_id"], "operator_graph.graph_id")
+        nodes = tuple(OperatorNodeRecipe.from_dict(item) for item in payload["nodes"])
+        if frozen_hash is None:
+            return cls.build(graph_id=graph_id, nodes=nodes)
+        result = object.__new__(cls)
+        object.__setattr__(result, "graph_id", graph_id)
+        object.__setattr__(result, "nodes", nodes)
+        object.__setattr__(result, "contract_version", OPERATOR_GRAPH_RECIPE_VERSION)
+        object.__setattr__(result, "recipe_hash", frozen_hash)
+        result._validate_structure()
+        return result
 
 
 @dataclass(frozen=True)

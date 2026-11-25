@@ -110,10 +110,6 @@ def normalize_minute_instant(value: object, field: str) -> datetime:
     return normalize_instant(value, field, timezone_name=MINUTE_TIMEZONE)
 
 
-def parse_minute_instant(value: object, field: str) -> datetime:
-    return parse_instant(value, field, timezone_name=MINUTE_TIMEZONE)
-
-
 def parse_instant(
     value: object,
     field: str,

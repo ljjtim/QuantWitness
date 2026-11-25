@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from bisect import bisect_right
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
-import json
 from zoneinfo import ZoneInfo
 
 from research_pipeline.domain.minute_rule_snapshots import MinuteRuleResolver
@@ -312,9 +311,10 @@ class FuturesInputs:
 
 
 class FuturesSettlementSource:
-    """结算只读既有正式列式输入或冻结规则，不连接数据库。"""
+    """按冻结合约会话从正式输入或历史规则读取结算。"""
 
     def __init__(self, context, parameters, bars, inputs):
+        self.descriptor = None
         self.inputs = inputs
         self.dataset = None
         self.plan = None
@@ -323,7 +323,6 @@ class FuturesSettlementSource:
         request_id = parameters.get("settlement_request_id")
         if request_id is None:
             return
-        from research_pipeline.data_plane import ArtifactResolver, DatasetArtifactRef
         from .adapters.common import _environment, _input_external_payload, _input_external_root
         from research_pipeline.data_plane.query_ir import DateRangeV1, QueryPurpose
 
@@ -338,6 +337,26 @@ class FuturesSettlementSource:
                 or set(plan.query.universe.instruments) != set(inputs.contracts)
                 or plan.session_close_binding is None):
             raise ValueError("期货结算须使用同真实合约范围的非AUDIT正式准入请求")
+        self.descriptor = dict(root=str((_input_external_root(context, port) / "data").resolve()),
+            plan=plan.to_dict(), reference=bundle["references"][request_id], source_ref=f"{request_id}:{plan.plan_hash}")
+        self._configure(plan, self.descriptor, context.effective_resource_budget.memory_bytes)
+
+    @classmethod
+    def from_frozen(cls, descriptor, inputs, memory):
+        from research_pipeline.data_plane.admitted_plan_codec import admitted_plan_from_dict
+
+        source = cls.__new__(cls)
+        source.inputs, source.dataset, source.plan = inputs, None, None
+        source._cache, source._read = {}, set()
+        if descriptor is not None:
+            source._configure(admitted_plan_from_dict(descriptor["plan"]), descriptor, memory)
+        return source
+
+    def _configure(self, plan, descriptor, memory):
+        from pathlib import Path
+        from research_pipeline.data_plane import ArtifactResolver
+        from .lean_native_data import _resolve_dataset
+
         self.columns = {}
         for logical, physical in plan.columns:
             if logical not in plan.query.field_ids:
@@ -349,11 +368,10 @@ class FuturesSettlementSource:
                 self.columns[role] = logical
         if set(self.columns) != {"date", "code", "settle_price"}:
             raise ValueError("期货结算请求缺少交易日、真实合约或结算价")
-        resolver = ArtifactResolver(_input_external_root(context, port) / "data",
-                                    max_batch_bytes=context.effective_resource_budget.memory_bytes // 8)
-        self.dataset = resolver.resolve(DatasetArtifactRef.from_dict(bundle["references"][request_id]))
+        resolver = ArtifactResolver(Path(descriptor["root"]), max_batch_bytes=memory // 8)
+        self.dataset = _resolve_dataset(resolver, descriptor["reference"], plan)
         self.plan = plan
-        self.source_ref = f"{request_id}:{plan.plan_hash}"
+        self.source_ref = descriptor["source_ref"]
 
     def _read_day(self, day):
         from research_pipeline.data_plane import DatasetFilter
@@ -362,21 +380,24 @@ class FuturesSettlementSource:
             return
         self._read.add(day)
         codes = tuple(code for code in self.inputs.contracts if (code, day) in self.inputs._settlements)
-        at = max(self.plan.session_close_binding.completion_time(code, day) for code in codes)
-        for batch in self.dataset.iter_batches_at(plan=self.plan, consumer_time=at,
-                columns=tuple(self.columns.values()),
-                filters=(DatasetFilter(self.columns["date"], "eq", day),
-                         DatasetFilter(self.columns["code"], "in", codes)), batch_size=4096):
-            for row in batch.to_pylist():
-                code = row[self.columns["code"]]
-                key = (code, day)
-                if key not in self.inputs._settlements:
-                    raise ValueError(f"期货结算包含未冻结合约交易日：{code} {day}")
-                if key in self._cache:
-                    raise ValueError(f"期货结算重复：{code} {day}")
-                available = self.plan.session_close_binding.completion_time(code, day)
-                self._cache[key] = self.inputs.settlement(code, day, row[self.columns["settle_price"]],
-                                                          available_at=available, source_ref=self.source_ref)
+        groups = {}
+        for code in codes:
+            at = self.plan.session_close_binding.completion_time(code, day)
+            groups.setdefault(at, []).append(code)
+        for at, members in groups.items():
+            batches = self.dataset.iter_batches_at(plan=self.plan, consumer_time=at,
+                columns=tuple(self.columns.values()), filters=(DatasetFilter(self.columns["date"], "eq", day),
+                    DatasetFilter(self.columns["code"], "in", tuple(members))), batch_size=4096)
+            for batch in batches:
+                for row in batch.to_pylist():
+                    code = row[self.columns["code"]]
+                    key = (code, day)
+                    if key not in self.inputs._settlements:
+                        raise ValueError(f"期货结算包含未冻结合约交易日：{code} {day}")
+                    if key in self._cache:
+                        raise ValueError(f"期货结算重复：{code} {day}")
+                    self._cache[key] = self.inputs.settlement(code, day, row[self.columns["settle_price"]],
+                                                              available_at=at, source_ref=self.source_ref)
 
     def for_header(self, day):
         result = []
@@ -389,31 +410,3 @@ class FuturesSettlementSource:
                     raise ValueError(f"期货必要结算缺失：{key[0]} {key[1]}")
                 result.append(self._cache.pop(key))
         return result
-
-
-def futures_signals(context, declaration, instruments, sessions, *, signal_reader=None):
-    """按实际会话包络读取有界信号，跨午夜仍保留核心可见时间。"""
-    from dataclasses import asdict
-    from .strategy_signal_inputs import open_strategy_signal_inputs, signal_payload
-
-    start = min(_instant(item["start_at"], "session start_at") for item in sessions)
-    end = max(_instant(item["end_at"], "session end_at") for item in sessions)
-    result = dict(available_at=start.isoformat(), selection=[])
-    current = start.date()
-    retained = 0
-    while current <= end.date():
-        with open_strategy_signal_inputs(context, declaration=declaration, instruments=instruments, day=current,
-                                         signal_reader=signal_reader) as provider:
-            if provider is not None:
-                while provider.next_row is not None:
-                    at = provider.next_row["decision_time"]
-                    references = provider.visible(at)
-                    if not start <= at <= end:
-                        continue
-                    rows = [signal_payload(asdict(item)) for item in references if item.available_at == at]
-                    retained += len(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-                    if retained > context.effective_resource_budget.memory_bytes // 8:
-                        raise MemoryError("期货逐日信号超过声明内存额度")
-                    result["selection"].extend(rows)
-        current += timedelta(days=1)
-    return result

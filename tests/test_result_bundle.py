@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import shutil
 import os
 from types import SimpleNamespace
 
@@ -279,7 +278,7 @@ def _finalize(
 
 
 def test_result_identity_is_stable_across_equivalent_event_chains(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first_run, first_result_root, _ = _runtime_fixture(tmp_path / "first")
     second_run, second_result_root, _ = _runtime_fixture(tmp_path / "second")
@@ -312,8 +311,16 @@ def test_result_identity_is_stable_across_equivalent_event_chains(
         run_root=first_run,
         **finalize_kwargs,
     )
+    second_projection = EventStore(second_run).replay()
+
+    def replay_again(_store):
+        pytest.fail("同次运行交接完整事件投影后无需重放日志")
+
+    monkeypatch.setattr(EventStore, "replay", replay_again)
     second_bundle, second_directory, _ = ResultAssembler(second_result_root).finalize(
         run_root=second_run,
+        runtime_record=second_record,
+        runtime_projection=second_projection,
         **finalize_kwargs,
     )
 
@@ -471,12 +478,18 @@ def test_result_bundle_prepared_failure_never_publishes(tmp_path: Path) -> None:
 
 
 def test_result_store_ignores_run_root_changes_after_finalize(tmp_path: Path) -> None:
+    from research_pipeline.platform.immutable_files import unlink_readonly_file
+
     run_root, result_root, object_root, bundle, _, _ = _finalize(tmp_path)
+    table_path = object_root / "statistics" / "metrics.parquet"
+    support_path = object_root / "result.json"
+    unlink_readonly_file(table_path)
+    unlink_readonly_file(support_path)
     pq.write_table(
         pa.table({"metric": ["alpha"], "value": [999.0]}),
-        object_root / "statistics" / "metrics.parquet",
+        table_path,
     )
-    (object_root / "result.json").write_text('{"tampered":true}', encoding="utf-8")
+    support_path.write_text('{"tampered":true}', encoding="utf-8")
     store = ResultStore(result_root, create=False)
     table = store.read_table_by_schema_id(
         bundle, schema_id="data.columnar-bundle.metrics.v1"
@@ -737,9 +750,16 @@ def test_result_survives_run_root_deletion_and_reads_each_parquet_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run_root, result_root, _, bundle, directory, _ = _finalize(tmp_path)
-    shutil.rmtree(run_root)
+    from research_pipeline.platform.immutable_files import remove_tree
+
+    monkeypatch.delenv("QUANTWITNESS_STRICT_AUDIT", raising=False)
+    run_root, result_root, object_root, bundle, directory, _ = _finalize(tmp_path)
     table_path = directory / next(iter(bundle.tables[0].files))
+    source_path = object_root / "statistics" / "metrics.parquet"
+    assert table_path.samefile(source_path)
+    assert table_path.stat().st_mode & 0o222 == 0
+    remove_tree(run_root)
+    assert table_path.stat().st_mode & 0o222 == 0
     original_open = Path.open
     table_opens = 0
 
@@ -959,11 +979,14 @@ def test_publish_rejects_invalid_metrics_before_controls_and_rename(tmp_path, mo
     """无效指标不能形成正式 Result；已复制产物不再整套扫描。"""
     original = ResultStore._materialize_files
     def materialize(self, staging, bundle, runtime_root):
+        from research_pipeline.platform.immutable_files import unlink_readonly_file
+
         original(self, staging, bundle, runtime_root)
         table = bundle.tables[0]
         path = staging / next(iter(table.files))
         rows = pq.read_table(path).to_pylist()
         rows[0].update(changes)
+        unlink_readonly_file(path)
         pq.write_table(pa.Table.from_pylist(rows), path)
     monkeypatch.setattr(ResultStore, "_materialize_files", materialize)
     def controls(*args):
@@ -988,10 +1011,13 @@ def test_metric_field_diagnostic_includes_timestamp_actual_type():
 def test_publish_rejects_missing_or_duplicate_declared_metrics(tmp_path, monkeypatch, row_count):
     original = ResultStore._materialize_files
     def materialize(self, staging, bundle, runtime_root):
+        from research_pipeline.platform.immutable_files import unlink_readonly_file
+
         original(self, staging, bundle, runtime_root)
         path = staging / next(iter(bundle.tables[0].files))
         table = pq.read_table(path)
         changed = table.slice(0, 0) if row_count == 0 else pa.concat_tables([table, table])
+        unlink_readonly_file(path)
         pq.write_table(changed, path)
     monkeypatch.setattr(ResultStore, "_materialize_files", materialize)
     with pytest.raises(ResultContractError, match="metric_ref 行数无效.*期望每项恰好有一行"):

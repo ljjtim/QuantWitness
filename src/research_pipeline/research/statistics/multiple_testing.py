@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar
@@ -42,7 +44,7 @@ class TestFamilyManifest:
         if self.frozen_at.tzinfo is None or self.frozen_at.utcoffset() is None:
             raise StatisticsError("frozen_at 必须包含时区")
 
-    @property
+    @cached_property
     def manifest_hash(self) -> str:
         return typed_canonical_hash({"family_id": self.family_id, "candidate_ids": list(self.candidate_ids), "metric": self.metric, "direction": self.direction, "alpha": self.alpha, "dependency_assumption": self.dependency_assumption, "frozen_at": self.frozen_at.isoformat(), "stage": self.stage})
 

@@ -2,12 +2,18 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 import html
 import json
 import math
 from typing import Mapping
 
 from research_pipeline.platform.lean_contract import LEAN_METRICS_SCHEMA_ID, LEAN_SCHEMA_IDS
+from research_pipeline.platform.lean_result_projection import (
+    LEAN_METRIC_VERSION, is_lean_futures_row, lean_research_daily, lean_trade_totals,
+)
+from research_pipeline.platform.lean_execution_schema import decode_lean_execution_row
+from research_pipeline.results import DatasetFilter
 
 
 LEAN_REPORT_VERSION = "lean-research-report-v2"
@@ -19,6 +25,24 @@ LABELS = {
     "fill_count": "成交事件数", "filled_order_count": "有成交订单数", "order_count": "订单数",
     "gross_traded_notional": "双边累计成交额", "capital_utilization_mean": "日均非现金权益占比",
     "margin_utilization_mean": "日均保证金使用率",
+}
+_METRIC_COLUMNS = ("metric_ref", "value", "unit", "sample_start", "sample_end", "sample_size", "status")
+_DAILY_COLUMNS = ("date", "trading_date", "account_id", "asset_class", "cash", "equity", "valuation_at",
+                  "margin", "frozen_funds", "available_funds", "settled_through", "equity_semantics")
+_SPOT_COLUMNS = {
+    "orders": ("order_id", "at", "order_type", "time_in_force", "status", "order_quantity", "quantity", "price", "fee"),
+    "positions": ("instrument_id", "at", "quantity", "sellable_quantity", "locked_bonus_quantity"),
+    "account_events": ("reason",),
+    "lifecycle": ("at", "kind", "action_id", "phase", "cash_delta", "share_delta"),
+}
+_FUTURES_COLUMNS = {
+    "orders": ("order_id",),
+    "fills": ("trading_date", "at", "order_id", "fill_id", "leg_id", "instrument_id", "direction", "bucket",
+              "position_effect", "quantity", "price", "multiplier", "fee", "realized_pnl", "rule_reference"),
+    "positions": ("account_id", "event_sequence", "instrument_id", "direction", "bucket", "quantity"),
+    "account_events": ("account_id", "event_sequence", "available_at", "valuation_at", "trading_date", "reason",
+                       "cash", "unrealized_pnl", "equity", "margin", "frozen_funds", "available_funds", "settled_through"),
+    "lifecycle": ("event_sequence", "at", "trading_date", "kind", "detail"),
 }
 
 
@@ -43,53 +67,53 @@ def read_lean_report_data(context, request):
     snapshot = context.snapshot
     if snapshot.bundle.result_id != request["result_id"]:
         raise ValueError("LEAN报告请求与所读 Result 不一致")
-    selected, artifact_keys = {}, set()
-    total_rows, total_bytes = 0, 0
+    artifact_keys = set()
     for name, schema in REPORT_SCHEMAS.items():
         manifests = [t for t in snapshot.bundle.tables if t.table_id == request["tables"][name]]
         if len(manifests) != 1 or manifests[0].schema_id != schema:
             raise ValueError(f"LEAN报告正式表schema不一致：{name}")
         artifact_keys.add(manifests[0].artifact_key)
-        if name in {"intents", "trace"}:
-            continue
+    if len(artifact_keys) != 1:
+        raise ValueError("LEAN报告执行表和指标必须来自同一正式simulation工件")
+
+    total_rows, total_bytes = 0, 0
+
+    def read_rows(name, columns, *, filters=()):
+        nonlocal total_rows, total_bytes
         rows = []
-        for batch in snapshot.iter_table_batches(schema, batch_size=4096):
+        for batch in snapshot.iter_table_batches(REPORT_SCHEMAS[name], columns=columns, batch_size=4096, filters=filters):
             total_rows += batch.num_rows
             total_bytes += batch.nbytes
             if total_rows > request["budget"]["max_rows"] or total_bytes > request["budget"]["memory_bytes"]:
                 raise ValueError("LEAN报告读取超出声明预算")
             records = batch.to_pylist()
             if name != "metrics":
-                records = [json.loads(row["payload_json"]) for row in records]
+                records = [decode_lean_execution_row(name, row) for row in records]
             rows.extend(records)
-        selected[name] = rows
-    if len(artifact_keys) != 1:
-        raise ValueError("LEAN报告执行表和指标必须来自同一正式simulation工件")
+        return rows
+
+    days = read_rows("daily", _DAILY_COLUMNS)
+    sessions = [row["date"] for row in days]
+    if not sessions or sessions != sorted(set(sessions)):
+        raise ValueError("LEAN报告日终序列必须非空、唯一且升序")
+    for session in sessions:
+        date.fromisoformat(session)
+    futures = is_lean_futures_row(days[0])
+    selected = {"daily": days, "metrics": read_rows("metrics", _METRIC_COLUMNS), "fills": []}
+    for name, columns in (_FUTURES_COLUMNS if futures else _SPOT_COLUMNS).items():
+        filters = (DatasetFilter("reason", "eq", "terminal"),) if name == "account_events" and not futures else ()
+        selected[name] = read_rows(name, columns, filters=filters)
     metric_rows = {row["metric_ref"]: row for row in selected["metrics"]}
     if len(metric_rows) != len(selected["metrics"]):
         raise ValueError("LEAN报告正式指标重复")
-    from research_pipeline.platform.lean_result_projection import LEAN_METRIC_VERSION, lean_research_daily
-    final_account = None
-    if selected["daily"] and (selected["daily"][0].get("asset_class") == "cn_future" or "margin" in selected["daily"][0]
-                              or any(row.get("reason") == "terminal" for row in selected["account_events"])):
-        content = snapshot.support_bytes.get("lean/account.json")
-        if content is None:
-            matches = [item for item in getattr(snapshot.bundle, "support_files", ())
-                       if item.source_path == "lean/account.json" and item.artifact_key in artifact_keys]
-            if len(matches) == 1:
-                path = snapshot.directory / matches[0].relative_path
-                if total_bytes + path.stat().st_size > request["budget"]["memory_bytes"]:
-                    raise ValueError("LEAN报告读取超出声明预算")
-                content = path.read_bytes()
-        if content is not None:
-            total_bytes += len(content)
-            if total_bytes > request["budget"]["memory_bytes"]:
-                raise ValueError("LEAN报告读取超出声明预算")
-            final_account = json.loads(content)
+    content = snapshot.support_content(next(iter(artifact_keys)), "lean/account.json",
+                                       max_bytes=request["budget"]["memory_bytes"] - total_bytes)
+    final_account = json.loads(content, parse_float=Decimal) if content is not None else None
+    if (futures and final_account is None
+            or not futures and selected["account_events"] and not (final_account or {}).get("terminal_observation_at")):
+        raise ValueError("LEAN报告缺少正式终态估值")
     selected["research_daily"] = lean_research_daily(
-        selected["daily"], account_events=selected["account_events"], final_account=final_account)
-    futures = bool(selected["research_daily"] and (selected["research_daily"][0].get("asset_class") == "cn_future"
-                    or "margin" in selected["research_daily"][0]))
+        days, account_events=selected["account_events"], final_account=final_account)
     names = set(LABELS) - (set() if futures else {"margin_utilization_mean"})
     expected = {"project.lean." + name + "@" + LEAN_METRIC_VERSION for name in names}
     verified = {m.metric_ref: m for m in context.metrics if m.table_id == request["tables"]["metrics"]}
@@ -100,12 +124,6 @@ def read_lean_report_data(context, request):
         if any(row[k] != getattr(metric, k) for k in (
             "value", "unit", "sample_start", "sample_end", "sample_size", "status")):
             raise ValueError("LEAN报告指标与正式证明读取结果不一致")
-    days = selected["daily"]
-    sessions = [row["date"] for row in days]
-    if not sessions or sessions != sorted(set(sessions)):
-        raise ValueError("LEAN报告日终序列必须非空、唯一且升序")
-    for session in sessions:
-        date.fromisoformat(session)
     if any(m.sample_start != sessions[0] or m.sample_end != sessions[-1] or m.sample_size != len(days)
            for m in verified.values()):
         raise ValueError("LEAN报告指标样本与正式日终序列不一致")
@@ -124,11 +142,10 @@ def render_lean_report(context, request, *, result_summary):
     import plotly.graph_objects as go
     from plotly.io import to_html
 
-    from research_pipeline.platform.lean_result_projection import LEAN_METRIC_VERSION, lean_trade_totals
     initial = metrics["project.lean.initial_equity@" + LEAN_METRIC_VERSION].value
     daily = rows["research_daily"]
     days = [row["date"] for row in daily]
-    futures = daily[0].get("asset_class") == "cn_future" or "margin" in daily[0]
+    futures = is_lean_futures_row(daily[0])
     equity = [float(row.get("research_equity", row["equity"])) for row in daily]
     latest_visible = any(row.get("equity_semantics") == "latest_visible_mark_not_session_close" for row in rows["daily"])
     valuation_text = ("日线权益使用最新已可见价格估值；当日开盘价可用时使用开盘价，否则沿用已可见历史价格。价格来源与时间保存在每日账户，图中净值不是当日收盘净值。"
@@ -163,11 +180,11 @@ def render_lean_report(context, request, *, result_summary):
     trades.update_layout(title="逐日成交与费用", yaxis_title="成交额（元）",
                          yaxis2={"title": "费用（元）", "overlaying": "y", "side": "right"})
     figures_list = [net, dd, trades]
-    details = ""
+    details = _spot_details(rows) if not futures else ""
     if terminal_spot:
         final = daily[-1]
-        details = "<h2>终点账户观察</h2><table>" + "".join(
-            "<tr><th>" + html.escape(label) + "</th><td>" + html.escape(str(final[field])) + "</td></tr>"
+        details += "<h2>终点账户观察</h2><table>" + "".join(
+            "<tr><th>" + html.escape(label) + "</th><td>" + html.escape(_display_value(final[field])) + "</td></tr>"
             for field, label in (("equity", "原日终权益"), ("cash", "原日终现金"),
                                  ("research_equity", "研究权益"), ("research_cash", "研究现金"),
                                  ("valuation_at", "原日终估值时间"), ("research_valuation_at", "研究权益实际估值时间"))) + "</table>"
@@ -209,11 +226,22 @@ def render_lean_report(context, request, *, result_summary):
             '</body></html>')
 
 
+def _display_value(value):
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+        return text.rstrip("0").rstrip(".") if "." in text else text
+    if isinstance(value, dict):
+        cells = (f"{key!r}: {item!r}" if isinstance(item, str) else f"{key!r}: {_display_value(item)}"
+                 for key, item in value.items())
+        return "{" + ", ".join(cells) + "}"
+    return str(value)
+
+
 def _futures_details(rows, daily):
     """正式事实保持字段原值，表格文字统一转义。"""
     def table(title, records, columns):
         header = "".join(f"<th>{html.escape(label)}</th>" for _, label in columns)
-        body = "".join("<tr>" + "".join(f"<td>{html.escape(str(row.get(key, '')))}</td>"
+        body = "".join("<tr>" + "".join(f"<td>{html.escape(_display_value(row.get(key, '')))}</td>"
                                              for key, _ in columns) + "</tr>" for row in records)
         return f"<h2>{title}</h2><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
     sections = [table("研究收益归属与实际估值时间", daily, (
@@ -235,4 +263,23 @@ def _futures_details(rows, daily):
         ("event_sequence", "事件序号"), ("available_at", "可见时间"), ("trading_date", "所属交易日"),
         ("reason", "原因"), ("cash", "现金C"), ("unrealized_pnl", "浮盈亏U"), ("equity", "权益E"),
         ("margin", "保证金M"), ("frozen_funds", "冻结F"), ("available_funds", "可用A"))))
+    return "".join(sections)
+
+
+def _spot_details(rows):
+    """展示现货原生订单与股份账户事实。"""
+    sections = []
+    for title, name, columns in (
+        ("原生订单事件", "orders", (("order_id", "订单"), ("at", "时间"),
+            ("order_type", "类型"), ("time_in_force", "有效期"), ("status", "状态"),
+            ("order_quantity", "申报数量"), ("quantity", "成交数量"), ("price", "成交价格"), ("fee", "费用"))),
+        ("股份与可卖量", "positions", (("instrument_id", "证券"), ("at", "时间"),
+            ("quantity", "持仓数量"), ("sellable_quantity", "可卖数量"), ("locked_bonus_quantity", "锁定送股"))),
+        ("公司行动与退市事件", "lifecycle", (("at", "时间"), ("kind", "类型"),
+            ("action_id", "权益事件"), ("phase", "阶段"), ("cash_delta", "现金变动"), ("share_delta", "股份变动"))),
+    ):
+        header = "".join(f"<th>{html.escape(label)}</th>" for _, label in columns)
+        body = "".join("<tr>" + "".join(f"<td>{html.escape(_display_value(row.get(key, '')))}</td>"
+                         for key, _ in columns) + "</tr>" for row in rows[name])
+        sections.append(f"<h2>{title}</h2><table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>")
     return "".join(sections)

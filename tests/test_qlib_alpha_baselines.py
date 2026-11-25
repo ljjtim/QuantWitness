@@ -12,6 +12,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+
+pytestmark = pytest.mark.ml
+
 _EXTENSION = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio/extension"
 sys.path.insert(0, str(_EXTENSION))
 try:

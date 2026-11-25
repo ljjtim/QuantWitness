@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 import math
@@ -104,11 +106,11 @@ class MinuteResamplePlan:
         if not identifiers or identifiers != tuple(sorted(set(identifiers))):
             raise QueryIRInvalidError("分钟重采样标的必须非空、唯一且排序")
 
-    @property
+    @cached_property
     def plan_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
-    @property
+    @cached_property
     def artifact_semantics_hash(self) -> str:
         return typed_canonical_hash({
             "artifact_version": MINUTE_BAR_ARTIFACT_VERSION,
@@ -204,9 +206,11 @@ def build_minute_resample_plan(
             policies_by_instrument.setdefault(policy.instrument, []).append(policy)
     for instrument in metadata:
         policies = policies_by_instrument.get(instrument, ())
+        # 项目日历按合约冻结政策及可见版本；扫描引用标识会话类型，逐合约身份由 bundle 保存。
         if (
             not policies
-            or any(item.policy_id != scan_plan.minute_session_policy_ref for item in policies)
+            or (session_bundle.contract_version != PROJECT_SESSION_BUNDLE_VERSION
+                and any(item.policy_id != scan_plan.minute_session_policy_ref for item in policies))
         ):
             raise QueryIRInvalidError("session policy id/revision 与扫描计划不一致")
     return MinuteResamplePlan(
@@ -272,7 +276,7 @@ class _Accumulator:
             self.open_interest = None if value is None else _finite(value, "open_interest")
         self.count += 1
 
-    def finish(self, spec: MinuteBucketSpec, interval_minutes: int) -> dict[str, object]:
+    def finish(self, spec: MinuteBucketSpec) -> dict[str, object]:
         missing = spec.visible_minutes - self.count
         if missing:
             status = "missing_minutes"
@@ -297,7 +301,7 @@ class _Accumulator:
             "session_id": spec.session_id,
             "session_hash": spec.session_hash,
             "segment_id": spec.segment_id,
-            "interval_minutes": interval_minutes,
+            "interval_minutes": 1,
             "open": self.open,
             "high": self.high,
             "low": self.low,
@@ -672,14 +676,14 @@ class MinuteResampleStream(Iterator[Any]):
                 if current_spec is not None and spec.key != current_spec.key:
                     if accumulator is None:
                         raise ProviderExecutionError("分钟重采样内部状态缺失")
-                    yield accumulator.finish(current_spec, self._plan.interval_minutes)
+                    yield accumulator.finish(current_spec)
                     accumulator = None
                 if accumulator is None:
                     current_spec = spec
                     accumulator = _Accumulator(has_open_interest=self._has_open_interest)
                 accumulator.add(row)
         if current_spec is not None and accumulator is not None:
-            yield accumulator.finish(current_spec, self._plan.interval_minutes)
+            yield accumulator.finish(current_spec)
 
     def _session_segment(self, code: str, dt: datetime) -> tuple[Any, Any]:
         instrument = self._instruments.get(code)
@@ -726,18 +730,9 @@ class MinuteResampleStream(Iterator[Any]):
         completed_offset = int((aware - segment.starts_at) / timedelta(minutes=1))
         if completed_offset < 1:
             raise ProviderExecutionError("分钟源 completed bar offset 无效")
-        bucket_index = (completed_offset - 1) // self._plan.interval_minutes
-        bucket_start = segment.starts_at + timedelta(
-            minutes=bucket_index * self._plan.interval_minutes
-        )
-        natural_end = bucket_start + timedelta(minutes=self._plan.interval_minutes)
-        bucket_end = min(natural_end, segment.ends_at)
-        expected = int((bucket_end - bucket_start) / timedelta(minutes=1))
-        visible = sum(
-            self._query_start <= bucket_start + timedelta(minutes=offset) < self._visible_end
-            for offset in range(1, expected + 1)
-        )
-        if visible <= 0:
+        bucket_end = segment.starts_at + timedelta(minutes=completed_offset)
+        bucket_start = bucket_end - timedelta(minutes=1)
+        if not self._query_start <= bucket_end < self._visible_end:
             raise ProviderExecutionError("分钟源行不在已准入查询边界内")
         return MinuteBucketSpec(
             code,
@@ -747,10 +742,10 @@ class MinuteResampleStream(Iterator[Any]):
             segment.segment_id,
             _naive_local(bucket_start),
             _naive_local(bucket_end),
-            expected,
-            visible,
-            bucket_end != natural_end,
-            visible != expected,
+            1,
+            1,
+            False,
+            False,
         )
 
 

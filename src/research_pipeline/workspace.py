@@ -21,6 +21,7 @@ import yaml
 
 from .data_plane.path_policy import PathRolePolicy
 from .packages import initialize_research_package
+from .platform.file_lock import ProcessFileLock
 
 
 WORKSPACE_CONTRACT_VERSION = "research-workspace-v1"
@@ -265,6 +266,11 @@ def validate_workspace(root: str | Path) -> dict[str, Any]:
     }
 
 
+def _index_lock(config: WorkspaceConfig) -> ProcessFileLock:
+    return ProcessFileLock(config.generated_root / "index.lock", timeout_seconds=10.0,
+                           timeout_error=WorkspaceError("工作区索引锁超时"))
+
+
 def allocate_execution(
     root: str | Path,
     *,
@@ -280,33 +286,34 @@ def allocate_execution(
         raise WorkspaceError("root_seed 必须是整数")
     execution_id = "exec-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid.uuid4().hex[:12]
     execution_root = config.generated_root / "executions" / execution_id
-    execution_root.mkdir(parents=True)
-    for name in ("plan", "run", "draft", "export-result"):
-        (execution_root / name).mkdir()
-    payload = {
-        "contract_version": "research-workspace-execution-v1",
-        "execution_id": execution_id,
-        "workspace_id": config.workspace_id,
-        "clock": clock,
-        "root_seed": root_seed,
-        "label": label,
-        "status": "allocated",
-        "database_opened": False,
-    }
-    _write_text_exclusive(execution_root / "execution.json", _json_text(payload))
-    index_path = config.generated_root / "index.json"
-    index = _read_index(index_path, config.workspace_id)
-    index["executions"].append({
-        "execution_id": execution_id,
-        "clock": clock,
-        "root_seed": root_seed,
-        "label": label,
-        "status": "allocated",
-        "execution_path": execution_root.relative_to(config.root).as_posix(),
-    })
-    index["executions"].sort(key=lambda item: item["execution_id"])
-    index["index_hash"] = _payload_hash(index, omit={"index_hash"})
-    _atomic_replace_text(index_path, _json_text(index))
+    with _index_lock(config):
+        execution_root.mkdir(parents=True)
+        for name in ("plan", "run", "draft", "export-result"):
+            (execution_root / name).mkdir()
+        payload = {
+            "contract_version": "research-workspace-execution-v1",
+            "execution_id": execution_id,
+            "workspace_id": config.workspace_id,
+            "clock": clock,
+            "root_seed": root_seed,
+            "label": label,
+            "status": "allocated",
+            "database_opened": False,
+        }
+        _write_text_exclusive(execution_root / "execution.json", _json_text(payload))
+        index_path = config.generated_root / "index.json"
+        index = _read_index(index_path, config.workspace_id)
+        index["executions"].append({
+            "execution_id": execution_id,
+            "clock": clock,
+            "root_seed": root_seed,
+            "label": label,
+            "status": "allocated",
+            "execution_path": execution_root.relative_to(config.root).as_posix(),
+        })
+        index["executions"].sort(key=lambda item: item["execution_id"])
+        index["index_hash"] = _payload_hash(index, omit={"index_hash"})
+        _atomic_replace_text(index_path, _json_text(index))
     return {**payload, "execution_path": str(execution_root), "index_path": str(index_path)}
 
 
@@ -317,7 +324,11 @@ def inspect_workspace(root: str | Path, execution_id: str | None = None) -> dict
     index = _read_index(config.generated_root / "index.json", config.workspace_id)
     if execution_id is not None:
         _, execution_root = _resolve_execution(config, index, execution_id)
-        return _read_execution_declaration(execution_root, config.workspace_id)
+        allocation = _read_execution_declaration(execution_root, config.workspace_id)
+        completion = execution_root / "completion.json"
+        if completion.is_file():
+            allocation.update(_read_completion(completion, execution_id))
+        return allocation
     return index
 
 
@@ -325,6 +336,11 @@ def rebuild_workspace_index(root: str | Path) -> dict[str, Any]:
     """从 execution 声明和完成投影确定性重建导航索引。"""
 
     config = load_workspace(root)
+    with _index_lock(config):
+        return _rebuild_workspace_index(config)
+
+
+def _rebuild_workspace_index(config: WorkspaceConfig) -> dict[str, Any]:
     executions_root = config.generated_root / "executions"
     items: list[dict[str, Any]] = []
     if executions_root.is_dir():
@@ -410,7 +426,7 @@ def run_workspace_execution(
     result = handler(Namespace(**payload))
     if not isinstance(result, dict):
         raise WorkspaceError("run 服务必须返回对象")
-    _record_completion(config, index, item, execution_root, result)
+    _record_completion(config, execution_id, result)
     return {**result, "execution_id": execution_id, "execution_root": str(execution_root)}
 
 
@@ -425,7 +441,7 @@ def resume_workspace_execution(
 
     config = load_workspace(root)
     index = _read_index(config.generated_root / "index.json", config.workspace_id)
-    item, execution_root = _resolve_execution(config, index, execution_id)
+    _, execution_root = _resolve_execution(config, index, execution_id)
     run_root = execution_root / "run"
     invocation = run_root / "operator-dag-invocation.json"
     try:
@@ -443,7 +459,7 @@ def resume_workspace_execution(
     result = handler(run_root=run_root, retry_node_id=retry_node_id)
     if not isinstance(result, dict):
         raise WorkspaceError("恢复服务必须返回对象")
-    _record_completion(config, index, item, execution_root, result)
+    _record_completion(config, execution_id, result)
     return {**result, "execution_id": execution_id, "execution_root": str(execution_root)}
 
 
@@ -459,11 +475,11 @@ def record_workspace_result_completion(
 
     config = load_workspace(root)
     index = _read_index(config.generated_root / "index.json", config.workspace_id)
-    item, execution_root = _resolve_execution(config, index, execution_id)
+    _, execution_root = _resolve_execution(config, index, execution_id)
     bundle = ResultStore(execution_root / "results", create=False).inspect_directory(result_directory)
     if bundle.result_id != result_id:
         raise WorkspaceError("接续 Result 身份与原执行不一致")
-    _record_completion(config, index, item, execution_root, {
+    _record_completion(config, execution_id, {
         "status": "result_finalized",
         "run_id": bundle.run_id,
         "runtime_run_id": bundle.run_id,
@@ -495,9 +511,28 @@ def export_dashboard_manifest(root: str | Path) -> dict[str, Any]:
         if len(recorded_run_ids) != 1:
             continue
         try:
-            finalized = read_finalize_status(execution_root / "run")
-            directory = finalized.get("result_directory")
-            if not finalized.get("result_published") or not directory:
+            directory = None
+            finalize_file = execution_root / "run" / "result-finalize.json"
+            if finalize_file.is_file():
+                finalized = read_finalize_status(execution_root / "run")
+                candidate = finalized.get("result_directory")
+                if not finalized.get("result_published") or not candidate or not Path(candidate).is_dir():
+                    continue
+                directory = Path(candidate)
+            else:
+                run_id = next(iter(recorded_run_ids))
+                result_id = str(item["result_id"])
+                if result_store.is_dir():
+                    matches = [
+                        project_dir / run_id / result_id
+                        for project_dir in sorted(result_store.iterdir())
+                        if project_dir.is_dir()
+                        and not project_dir.name.startswith(".")
+                        and (project_dir / run_id / result_id).is_dir()
+                    ]
+                    if len(matches) == 1:
+                        directory = matches[0]
+            if directory is None:
                 continue
             context = load_result_context(directory, result_store=result_store)
         except ResultContractError:
@@ -580,31 +615,32 @@ def _read_execution_declaration(execution_root: Path, workspace_id: str) -> dict
 
 def _record_completion(
     config: WorkspaceConfig,
-    index: dict[str, Any],
-    item: dict[str, Any],
-    execution_root: Path,
+    execution_id: str,
     result: dict[str, Any],
 ) -> None:
-    completion_path = execution_root / "completion.json"
-    completion = {"execution_id": item["execution_id"]}
-    if completion_path.is_file():
-        existing = _read_completion(completion_path, item["execution_id"])
-        completion.update(existing)
-    for key in COMPLETION_IDENTITY_KEYS:
-        values = [facts[key] for facts in (completion, item, result) if key in facts]
-        if values and any(value != values[0] for value in values[1:]):
-            raise WorkspaceError(f"completion 不可变身份发生漂移: {key}")
-        if key in result:
-            completion[key] = result[key]
-    item.update({key: completion[key] for key in COMPLETION_IDENTITY_KEYS if key in completion})
-    completion["status"] = str(
-        result.get("status", result.get("evidence_state", "completed"))
-    )
-    item["status"] = completion["status"]
-    item["execution_path"] = execution_root.relative_to(config.root).as_posix()
-    _atomic_replace_text(completion_path, _json_text(completion))
-    index["index_hash"] = _payload_hash(index, omit={"index_hash"})
-    _atomic_replace_text(config.generated_root / "index.json", _json_text(index))
+    with _index_lock(config):
+        index = _read_index(config.generated_root / "index.json", config.workspace_id)
+        item, execution_root = _resolve_execution(config, index, execution_id)
+        completion_path = execution_root / "completion.json"
+        completion = {"execution_id": item["execution_id"]}
+        if completion_path.is_file():
+            existing = _read_completion(completion_path, item["execution_id"])
+            completion.update(existing)
+        for key in COMPLETION_IDENTITY_KEYS:
+            values = [facts[key] for facts in (completion, item, result) if key in facts]
+            if values and any(value != values[0] for value in values[1:]):
+                raise WorkspaceError(f"completion 不可变身份发生漂移: {key}")
+            if key in result:
+                completion[key] = result[key]
+        item.update({key: completion[key] for key in COMPLETION_IDENTITY_KEYS if key in completion})
+        completion["status"] = str(
+            result.get("status", result.get("evidence_state", "completed"))
+        )
+        item["status"] = completion["status"]
+        item["execution_path"] = execution_root.relative_to(config.root).as_posix()
+        _atomic_replace_text(completion_path, _json_text(completion))
+        index["index_hash"] = _payload_hash(index, omit={"index_hash"})
+        _atomic_replace_text(config.generated_root / "index.json", _json_text(index))
 
 
 def _read_completion(path: Path, execution_id: str) -> dict[str, Any]:

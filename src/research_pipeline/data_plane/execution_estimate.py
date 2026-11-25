@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -187,7 +189,7 @@ class ExecutionEstimate:
             ):
                 raise ProviderExecutionError(f"ExecutionEstimate {field} 无效")
 
-    @property
+    @cached_property
     def estimate_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 

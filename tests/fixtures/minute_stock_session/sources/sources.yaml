@@ -1,0 +1,11 @@
+sources:
+  - source_id: minute_scope_v5
+    source_type: dataset
+    title: 分钟参考范围 revision 5
+    url: https://www.joinquant.com/help/api/help
+    accessed_at: '2026-08-27'
+    content_hash: bb99be24ea17e989caee40c57b0f0ddabd1cec19dfec0491fdb33ce8e09146e9
+    license_id: local-reference-metadata
+    status: available
+    limitation: 本地股票分钟物理源为直接采集 raw；结论只代表当前保存快照上的历史研究观察，且没有历史股票池和完整市场规则时不得用于可交易结论。
+    provenance: {mode: citation_only, content_digest: null, media_type: null, snapshot_artifact_id: null, snapshot_manifest_hash: null, importer_id: null, imported_at: null, contract_version: research-source-provenance-v1}

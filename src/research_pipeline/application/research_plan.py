@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from research_pipeline.platform.directory_watch import project_bundle_check_scope
+
 import argparse
 from contextlib import ExitStack
 from pathlib import Path
@@ -87,6 +89,7 @@ def admit_package(
     return prepare_package(args, documents=documents)[0]
 
 
+@project_bundle_check_scope()
 def prepare_package(args, *, documents=None, package=None):
     """编译并发布计划，同次执行直接使用返回的准入对象。"""
     if package is None:
@@ -184,6 +187,7 @@ def _execute_operator_graph(
         dag=SimpleNamespace(nodes=tuple(data_nodes)),
     )
     input_snapshot_manifest = None
+    schedule_datasets = None
     archive_path = getattr(args, "input_snapshot_manifest", None)
     if archive_path:
         from research_pipeline.data_plane.archived_inputs import (
@@ -192,6 +196,11 @@ def _execute_operator_graph(
         from research_pipeline.packages.project_strategy_admission import futures_query_calendars
 
         input_snapshot_manifest = load_archived_input_manifest(archive_path)
+        from research_pipeline.platform.daily_schedule import schedule_requests
+        schedule_datasets = {
+            key: None for node in recipe.nodes
+            for key in schedule_requests(node.parameters.get("causal_plan", {}).get("daily_schedule", {}))
+        }
         source_roles = {f"archive_{key}_input": item["root"]
                         for key, item in input_snapshot_manifest["requests"].items()}
         PathRolePolicy().validate(
@@ -203,15 +212,17 @@ def _execute_operator_graph(
             manifest=input_snapshot_manifest, execution_budgets=execution_budgets,
             session_calendars=futures_query_calendars(package,
                 dict(zip(query_result.request_ids, query_result.queries, strict=True))),
+            **({"schedule_datasets": schedule_datasets} if schedule_datasets else {}),
         )
         source_status = {"input_source": "archived_snapshot", "database_opened": False}
     else:
+        scope_statistics = {}
         admitted, execution_estimates, platform_admission, database_unchanged = _auto_admit_queries(
             package, catalog=catalog, data_db=getattr(args, "data_db", None),
             source_db=getattr(args, "source_db", ()), execution_budgets=execution_budgets,
-            query_result=query_result,
+            query_result=query_result, scope_statistics=scope_statistics,
         )
-        source_status = {"database_unchanged": database_unchanged}
+        source_status = {"database_unchanged": database_unchanged, "scope_statistics": scope_statistics}
     minute_scan_plans = _admit_minute_scan_plans(
         recipe, admitted, minute_data_root=getattr(args, "minute_data_root", None),
         input_snapshot_manifest=input_snapshot_manifest,
@@ -222,7 +233,16 @@ def _execute_operator_graph(
             "minute_data_root": str(Path(args.minute_data_root).resolve()),
             "minute_scan_plans": {key: value.to_dict() for key, value in sorted(minute_scan_plans.items())},
         })}
-    package_plan = bind_operator_graph_platform(prepared_graph, platform_admission)
+    from .daily_schedule import bind_daily_schedules
+    scheduled = bind_daily_schedules(recipe, admitted, execution_budgets, execution_estimates,
+                                     archive=schedule_datasets, args=args)
+    package_plan = bind_operator_graph_platform(prepared_graph, platform_admission, scheduled_nodes=scheduled)
+    if scheduled:
+        from research_pipeline.packages.project_causal_admission import validate_project_causal_recipe
+        from datetime import datetime
+        recipe = package_plan.recipe
+        validate_project_causal_recipe(recipe, request_queries=dict(zip(query_result.request_ids, query_result.queries)),
+                                      admission=registry, fixed_clock=datetime.fromisoformat(package_plan.fixed_clock))
     if not isinstance(package_plan, OperatorGraphPlan):
         raise ValueError("operator graph builder 返回了错误计划类型")
     dag = compile_operator_graph_dag(package_plan, registry)
@@ -381,6 +401,7 @@ def _auto_admit_queries(
     source_db,
     execution_budgets: dict[str, DataPlaneExecutionBudget],
     query_result=None,
+    scope_statistics=None,
 ):
     sources = _source_database_map(data_db=data_db, source_db=source_db)
     query_result = query_result if query_result is not None else compile_package_queries(package)
@@ -513,6 +534,9 @@ def _auto_admit_queries(
             )
             admitted[request_id] = plan
             execution_estimates[request_id] = estimate
+    if scope_statistics is not None:
+        scope_statistics.update(queries=sum(i.statistics_queries for i in inspectors.values()),
+                                seconds=sum(i.statistics_seconds for i in inspectors.values()))
     after = {str(path): _database_fingerprint(path) for path in database_paths}
     if before != after:
         raise ValueError("只读 Catalog/PIT 准入前后数据库 size/mtime 发生变化")

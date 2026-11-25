@@ -91,7 +91,8 @@ public sealed partial class LeanStrategyHost
                 var code = pair.Key; var symbol = _symbols[code];
                 if (_exitingFutureCodes.Add(code)) WriteFutureLifecycle("expiry_exit_started", new { instrument_id = code });
                 CancelFutureOpens(code);
-                var holding = (ChinaFutureHolding)_algorithm.Securities[symbol].Holdings;
+                if (!_algorithm.Securities.TryGetValue(symbol, out var security)) continue;
+                var holding = (ChinaFutureHolding)security.Holdings;
                 if (now > FutureTime(_futureContracts.GetProperty(code), "exit_deadline") && holding.Invested)
                     throw new InvalidOperationException($"退出截止仍有持仓：{code}");
                 if (FutureModels.RiskActive || !IsFutureTradingTime(code, now)) continue;
@@ -125,12 +126,15 @@ public sealed partial class LeanStrategyHost
                 var oldPending = active.Where(x => _codes[x.Symbol] == plan.Old).Sum(x => x.AbsoluteQuantity - _filled.GetValueOrDefault(x.Id));
                 var newPending = active.Where(x => _codes[x.Symbol] == plan.New).Sum(x => x.AbsoluteQuantity - _filled.GetValueOrDefault(x.Id));
                 var oldSymbol = _symbols[plan.Old];
-                var oldHolding = (ChinaFutureHolding)_algorithm.Securities[oldSymbol].Holdings;
+                if (!_algorithm.Securities.TryGetValue(oldSymbol, out var oldSecurity)) continue;
+                var oldHolding = (ChinaFutureHolding)oldSecurity.Holdings;
                 var closeQuantity = Math.Min(Math.Max(0, plan.Quantity - plan.Closed - oldPending), oldHolding.Positions()
                     .Where(x => x.Direction == plan.Direction).Sum(x => x.Quantity - FutureModels.ReservedClose(oldSymbol, x.Direction, x.Bucket)));
                 if (closeQuantity > 0 && IsFutureTradingTime(plan.Old, now) && FutureLifecycleAttempt(plan.Id + ":old"))
                     SubmitFutureOrder(plan.Old, closeQuantity * (plan.Direction == "long" ? -1 : 1), "close", "roll-old", roll: plan.Id);
                 var openQuantity = Math.Min(plan.Quantity - plan.Opened, Math.Max(0, plan.Closed - plan.Opened - newPending));
+                if (openQuantity > 0 && !_algorithm.Securities.ContainsKey(_symbols[plan.New]))
+                    throw new InvalidOperationException($"换月新腿必须由算法订阅：{plan.New}");
                 if (openQuantity > 0 && IsFutureTradingTime(plan.New, now) && FutureLifecycleAttempt(plan.Id + ":new"))
                     SubmitFutureOrder(plan.New, openQuantity * (plan.Direction == "long" ? 1 : -1), "open", "roll-new", roll: plan.Id);
             }

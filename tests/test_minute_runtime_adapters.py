@@ -19,7 +19,13 @@ from research_pipeline.application.research_plan_store import _formal_input_line
 from research_pipeline.application.research_plan import _admit_minute_scan_plans
 from research_pipeline.data_plane import (
     DatasetPartitionRef,
+    DateRangeV1,
     PartitionedDatasetRef,
+    QueryBudget,
+    QueryIR,
+    QueryPurpose,
+    SortKey,
+    UniverseSelection,
     admit_query,
 )
 from research_pipeline.packages import (
@@ -27,7 +33,7 @@ from research_pipeline.packages import (
     compile_research_package,
     load_research_package,
 )
-from research_pipeline.results import ResultAssembler, ResultStore, load_result_metrics
+from research_pipeline.results import ResultAssembler, ResultStore, load_result_context
 from research_pipeline.runtime import (
     AuditEnvironmentManifest,
     ExecutionMode,
@@ -52,8 +58,7 @@ from research_pipeline.runtime.operator_registry import (
 )
 from minute_observation_fixture import prepare_observation_package
 
-ROOT = Path(__file__).resolve().parents[1]
-REFERENCES = ROOT / "research_packages/references"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def test_action_effective_time_uses_datetime_half_open_range() -> None:
@@ -115,10 +120,6 @@ def test_etf_action_source_code_resolves_to_canonical_instrument_in_action_windo
 
 
 def _stock_action_history_fixture(*, revised_at: datetime):
-    required = (
-        "fld_ca_id", "fld_ca_code", "fld_ca_implementation_pub_date",
-        "fld_ca_add_time", "fld_ca_mod_time", "fld_ca_ex_date", "fld_ca_note",
-    )
     row = {
         "fld_ca_id": 1,
         "fld_ca_code": "000001.XSHE",
@@ -137,33 +138,176 @@ def _stock_action_history_fixture(*, revised_at: datetime):
         "fld_ca_mod_time": revised_at,
         "fld_ca_note": None,
     }
-    plan = SimpleNamespace(
-        query=SimpleNamespace(field_ids=tuple(row)),
-        temporal_selection=SimpleNamespace(
-            requires_consumer_binding=True,
-            visibility_filter=SimpleNamespace(
-                available_time_field="fld_ca_implementation_pub_date",
-                inclusive=False,
-                additional_time_fields=(),
-            ),
-            revision_selector=SimpleNamespace(order_fields=("fld_ca_implementation_pub_date",)),
-        ),
+    plan, dataset = _action_fixture(
+        "cn_corporate_action.events", "fld_ca_id", row, [row], ("000001.XSHE",),
     )
-
-    class FakeDataset:
-        def iter_temporal_fact_batches(self, **_kwargs):
-            yield pa.RecordBatch.from_pylist([{field: row[field] for field in required}])
-
-        def iter_batches_at(self, **_kwargs):
-            yield pa.RecordBatch.from_pylist([dict(row)])
-
-    return plan, FakeDataset(), row
+    return plan, dataset, row
 
 
-def _action_context(monkeypatch):
-    from research_pipeline.runtime.adapters import minute_adjustment
+def _action_catalog() -> CompiledCatalog:
+    payload = json.loads((FIXTURES / "minute_catalog.json").read_text(encoding="utf-8"))
+    etf_fields = (
+        ("fld_etf_ca_id", "int64", "identifier", "dimensionless", False, "id"),
+        ("fld_etf_ca_code", "string", "identifier", "dimensionless", False, "code"),
+        ("fld_etf_ca_pub_date", "date32", "date", "day", False, "pub_date"),
+        ("fld_etf_ca_event_id", "int64", "identifier", "dimensionless", True, "event_id"),
+        ("fld_etf_ca_event", "string", "category", "dimensionless", True, "event"),
+        ("fld_etf_ca_process_id", "int64", "identifier", "dimensionless", True, "process_id"),
+        ("fld_etf_ca_process", "string", "category", "dimensionless", True, "process"),
+        ("fld_etf_ca_cash_per_share", "decimal128", "cash_amount", "CNY/share", True, "proportion"),
+        ("fld_etf_ca_split_ratio", "decimal128", "ratio", "share/share", True, "split_ratio"),
+        ("fld_etf_ca_record_date", "date32", "date", "day", False, "record_date"),
+        ("fld_etf_ca_ex_date", "date32", "date", "day", False, "ex_date"),
+        ("fld_etf_ca_pay_date", "date32", "date", "day", True, "fund_paid_date"),
+        ("fld_etf_ca_status", "int8", "category", "dimensionless", True, "status"),
+        ("fld_etf_ca_add_time", "timestamp", "datetime", "microsecond", False, "addTime"),
+        ("fld_etf_ca_mod_time", "timestamp", "datetime", "microsecond", False, "modTime"),
+    )
+    payload["policies"].extend([
+        {
+            "contract_version": "catalog-contract-v1",
+            "policy_id": "available.etf.corporate_action.v1",
+            "policy_type": "availability",
+            "policy_version": 3,
+            "rules": {
+                "available_after": "next_session_open_after_publication_date",
+                "available_time_field": "fld_etf_ca_pub_date",
+                "date_granularity": "day",
+                "same_day_use": "reject",
+                "source_added_time_field": "fld_etf_ca_add_time",
+                "timezone": "Asia/Shanghai",
+            },
+            "status": "approved",
+        },
+        {
+            "contract_version": "catalog-contract-v1",
+            "policy_id": "revision.etf.corporate_action.v1",
+            "policy_type": "revision",
+            "policy_version": 1,
+            "rules": {
+                "future_revision": "reject",
+                "revision_field": "fld_etf_ca_mod_time",
+                "selection": "latest_revision_available_at_or_before_as_of",
+            },
+            "status": "approved",
+        },
+    ])
+    payload["fields"].extend([
+        {
+            "adjustment_allowed": [],
+            "aliases": [],
+            "availability_policy": "available.etf.corporate_action.v1",
+            "contract_version": "catalog-contract-v2",
+            "data_type": data_type,
+            "evidence_refs": ["fixture://minute-observation-contracts"],
+            "field_id": field_id,
+            "field_version": 1,
+            "finance_semantics": {},
+            "frequency_scope": ["event"],
+            "instrument_scope": ["etf"],
+            "logical_name": (
+                "corporate_action.etf.instrument_id"
+                if column == "code"
+                else f"corporate_action.etf.{column}"
+            ),
+            "nullable": nullable,
+            "observation_keys": {
+                "available_time_field": "fld_etf_ca_pub_date",
+                "revision_field": "fld_etf_ca_mod_time",
+            },
+            "observation_model": "point_in_time",
+            "semantic_type": semantic_type,
+            "status": "approved",
+            "unit": unit,
+        }
+        for field_id, data_type, semantic_type, unit, nullable, column in etf_fields
+    ])
+    field_ids = [field_id for field_id, *_ in etf_fields]
+    payload["datasets"].append({
+        "available_time_policy": "available.etf.corporate_action.v1",
+        "contract_version": "catalog-contract-v2",
+        "dataset_id": "cn_etf.corporate_action",
+        "dataset_version": 2,
+        "drift_policy_id": "drift.strict.v1",
+        "event_time_field": "fld_etf_ca_ex_date",
+        "fields": field_ids,
+        "frequency": "event",
+        "instrument_type": "etf",
+        "market": "cn_etf",
+        "primary_key": ["fld_etf_ca_id"],
+        "result_cardinality": "zero_or_more",
+        "revision_policy_id": "revision.etf.corporate_action.v1",
+        "sort_order": ["fld_etf_ca_id"],
+        "status": "approved",
+    })
+    payload["bindings"].append({
+        "binding_id": "cn_etf.corporate_action.local.v1",
+        "binding_version": 3,
+        "column_bindings": {
+            field_id: {"column": column, "kind": "direct"}
+            for field_id, *_, column in etf_fields
+        },
+        "contract_version": "catalog-contract-v2",
+        "dataset_id": "cn_etf.corporate_action",
+        "dataset_revision_constraint": "any",
+        "dataset_version": 2,
+        "drift_policy_id": "drift.strict.v1",
+        "environment": "prod",
+        "expected_schema_revision": "1086fccfef8fdcf9f471d13cf5647f601884941a8d6220d9f0aae91ad5cb6db1",
+        "object_name": "finance_fund_dividend",
+        "source_profile": "source",
+        "status": "approved",
+    })
+    payload["catalog_hash"] = typed_canonical_hash(
+        {key: value for key, value in payload.items() if key != "catalog_hash"}
+    )
+    return CompiledCatalog.from_payload(payload)
 
-    monkeypatch.setattr(minute_adjustment, "read_temporal_batch", lambda dataset, **_kwargs: dataset)
+
+def _action_fixture(dataset_id, id_field, prototype, rows, instruments):
+    catalog = _action_catalog()
+    binding = next(
+        item for item in catalog.bindings.values() if item["dataset_id"] == dataset_id
+    )
+    policy = PolicyContract(**dict(catalog.policies[binding["drift_policy_id"]]))
+    attestation = DriftAttestation(
+        catalog.catalog_hash,
+        binding["binding_id"],
+        binding["source_profile"],
+        binding["environment"],
+        binding["expected_schema_revision"],
+        binding["expected_schema_revision"],
+        policy.content_hash,
+        True,
+    )
+    query = QueryIR(
+        dataset_id,
+        int(catalog.datasets[dataset_id]["dataset_version"]),
+        tuple(prototype),
+        QueryPurpose.FEATURE,
+        DateRangeV1(date(2023, 12, 29), date(2024, 1, 5)),
+        UniverseSelection(tuple(instruments)),
+        (),
+        (SortKey(id_field),),
+        QueryBudget(100000, 64 * 1024 * 1024, 8192),
+        adjustment="unadjusted",
+    )
+    plan = admit_query(query, catalog=catalog, binding=binding, attestation=attestation)
+
+    class Dataset:
+        schema = pa.RecordBatch.from_pylist([prototype]).schema
+        max_batch_rows = 8192
+        max_batch_bytes = 1024**2
+        manifest = {"temporal_source": True, "admitted_plan_hash": plan.plan_hash}
+
+        def _iter_ordered_file_batches(self, **kwargs):
+            if rows:
+                yield pa.RecordBatch.from_pylist(rows, schema=self.schema).select(kwargs["columns"])
+
+    return plan, Dataset()
+
+
+def _action_context():
     return SimpleNamespace(effective_resource_budget=SimpleNamespace(memory_bytes=1024 * 1024))
 
 
@@ -176,12 +320,15 @@ def test_stock_action_uses_announcement_despite_later_maintenance(monkeypatch) -
     monkeypatch.setattr(operator_adapters, "_columnar_request_dataset",
                         lambda *_args: (dataset, SimpleNamespace(), plan))
     times = []
-    def batches_at(*_args, consumer_time, **_kwargs):
+    scan = operator_adapters._TemporalBatch.iter_batches_at
+
+    def batches_at(self, *, consumer_time, **kwargs):
         times.append(consumer_time)
-        yield pa.RecordBatch.from_pylist([dict(row)])
-    monkeypatch.setattr(dataset, "iter_batches_at", batches_at)
+        yield from scan(self, consumer_time=consumer_time, **kwargs)
+
+    monkeypatch.setattr(operator_adapters._TemporalBatch, "iter_batches_at", batches_at)
     rows, _reference = _temporal_corporate_action_rows(
-        _action_context(monkeypatch), "stock_corporate_actions", instrument_id="000001.XSHE",
+        _action_context(), "stock_corporate_actions", instrument_id="000001.XSHE",
         asset_class="cn_stock",
         trading_sessions=tuple(date(2024, 1, day) for day in (2, 3, 4, 5)),
         applicable_start=datetime.fromisoformat("2024-01-02T09:31:00+08:00"),
@@ -211,40 +358,19 @@ def test_etf_action_missing_window_revision_fails_closed(monkeypatch) -> None:
         "fld_etf_ca_add_time": datetime(2024, 1, 2, 8),
         "fld_etf_ca_mod_time": datetime(2024, 1, 4, 10),
     }
-    required = (
-        "fld_etf_ca_id", "fld_etf_ca_code", "fld_etf_ca_pub_date",
-        "fld_etf_ca_add_time", "fld_etf_ca_mod_time", "fld_etf_ca_ex_date",
+    plan, dataset = _action_fixture(
+        "cn_etf.corporate_action", "fld_etf_ca_id", row, [row], ("510300.XSHG",),
     )
-    plan = SimpleNamespace(
-        query=SimpleNamespace(field_ids=tuple(row)),
-        temporal_selection=SimpleNamespace(
-            requires_consumer_binding=True,
-            visibility_filter=SimpleNamespace(
-                available_time_field="fld_etf_ca_pub_date",
-                inclusive=False,
-                additional_time_fields=("fld_etf_ca_add_time",),
-            ),
-            revision_selector=SimpleNamespace(
-                order_fields=("fld_etf_ca_mod_time",)
-            ),
-        ),
-    )
-
-    class FakeDataset:
-        def iter_temporal_fact_batches(self, **_kwargs):
-            yield pa.RecordBatch.from_pylist(
-                [{field: row[field] for field in required}]
-            )
 
     monkeypatch.setattr(
         operator_adapters,
         "_columnar_request_dataset",
-        lambda *_args: (FakeDataset(), SimpleNamespace(), plan),
+        lambda *_args: (dataset, SimpleNamespace(), plan),
     )
 
     with pytest.raises(ValueError, match="缺少研究窗口内可还原的修订前版本"):
         _temporal_corporate_action_rows(
-            _action_context(monkeypatch),
+            _action_context(),
             "etf_corporate_actions",
             instrument_id="510300.XSHG",
             asset_class="cn_etf",
@@ -263,22 +389,17 @@ def test_stock_action_current_event_preserves_exact_amount(monkeypatch, amount_t
         revised_at=datetime(2024, 1, 2, 8)
     )
     original["fld_ca_cash_per_ten"] = amount_type("1.0")
+    plan, dataset = _action_fixture(
+        "cn_corporate_action.events", "fld_ca_id", original, [original], ("000001.XSHE",),
+    )
     monkeypatch.setattr(
         operator_adapters,
         "_columnar_request_dataset",
         lambda *_args: (dataset, SimpleNamespace(), plan),
     )
 
-    def batches_at(*, consumer_time, filters=(), **_kwargs):
-        assert len(filters) == 1
-        assert filters[0].field == "fld_ca_code"
-        assert filters[0].operator == "eq"
-        assert filters[0].value == "000001.XSHE"
-        yield pa.RecordBatch.from_pylist([dict(original)])
-
-    monkeypatch.setattr(dataset, "iter_batches_at", batches_at)
     rows, _reference = _temporal_corporate_action_rows(
-        _action_context(monkeypatch),
+        _action_context(),
         "stock_corporate_actions",
         instrument_id="000001.XSHE",
         asset_class="cn_stock",
@@ -448,7 +569,7 @@ def _short_package(
     trial_candidate_ids: tuple[str, ...] | None = None,
     sample_count: int = 6,
 ) -> tuple[object, object]:
-    source = REFERENCES / name
+    source = FIXTURES / name
     target = tmp_path / name
     shutil.copytree(source, target)
     prepare_observation_package(target)
@@ -529,7 +650,9 @@ def _admit(plan: object, *, request_id: str | None = None) -> object:
         if request_id is None
         else plan.queries[plan.request_ids.index(request_id)]
     )
-    catalog = CompiledCatalog.load_default()
+    catalog = CompiledCatalog.from_payload(
+        json.loads((FIXTURES / "minute_catalog.json").read_text(encoding="utf-8"))
+    )
     binding = next(
         item
         for item in catalog.bindings.values()
@@ -779,7 +902,7 @@ def test_formal_minute_observation_chain_publishes_result_metric(tmp_path: Path)
     assert {
         table.table_id for table in result_bundle.tables if table.role == "diagnostic"
     } >= {"minute_features"}
-    _, metrics = load_result_metrics(result_store, result_bundle)
+    metrics = load_result_context(result_path, result_store=result_store.root).metrics
     assert [metric.metric_ref for metric in metrics] == [
         "minute.row_count@1.0.0"
     ]
@@ -944,7 +1067,7 @@ def test_raw_stock_source_passes_formal_admission(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "stock"
-    shutil.copytree(REFERENCES / "minute_stock_session", target)
+    shutil.copytree(FIXTURES / "minute_stock_session", target)
     prepare_observation_package(target)
     package = load_research_package(target)
     plan = compile_research_package(
@@ -958,7 +1081,7 @@ def test_pre_adjustment_package_must_archive_each_consumed_anchor_table(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "minute_stock_session"
-    shutil.copytree(REFERENCES / "minute_stock_session", target)
+    shutil.copytree(FIXTURES / "minute_stock_session", target)
     prepare_observation_package(target)
     spec_path = target / "spec/research.yaml"
     payload = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
@@ -984,7 +1107,7 @@ def test_adjusted_package_must_archive_the_consumed_snapshot(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "minute_stock_session"
-    shutil.copytree(REFERENCES / "minute_stock_session", target)
+    shutil.copytree(FIXTURES / "minute_stock_session", target)
     prepare_observation_package(target)
     spec_path = target / "spec/research.yaml"
     payload = yaml.safe_load(spec_path.read_text(encoding="utf-8"))

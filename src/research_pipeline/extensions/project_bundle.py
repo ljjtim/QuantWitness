@@ -30,6 +30,7 @@ from research_pipeline.platform.operator_contracts import (
 )
 
 from .errors import ExtensionError
+from research_pipeline.platform.lean_contract import LeanAlgorithm
 from .governance import (
     validate_project_dependency_lock,
     validate_project_operator_artifacts,
@@ -163,7 +164,7 @@ def _assert_regular_file(path: Path, *, root: Path) -> None:
         raise ExtensionError(f"项目源码逃逸受信根: {path}") from exc
 
 
-def _source_entries(source_root: str | Path) -> tuple[Path, tuple[dict[str, object], ...]]:
+def _source_entries(source_root: str | Path, *, native_algorithm=False) -> tuple[Path, tuple[dict[str, object], ...]]:
     root = Path(source_root).resolve(strict=True)
     if not root.is_dir():
         raise ExtensionError("项目源码根必须是已存在目录")
@@ -175,11 +176,14 @@ def _source_entries(source_root: str | Path) -> tuple[Path, tuple[dict[str, obje
         relative = path.relative_to(root).as_posix()
         if PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts:
             raise ExtensionError(f"项目源码相对路径无效: {relative}")
-        if path.suffix != ".py" or "__pycache__" in path.parts:
-            raise ExtensionError(f"项目 bundle 首版只允许 Python 源码: {relative}")
+        allowed = {".py", ".cs", ".csproj", ".dll", ".pdb", ".json"} if native_algorithm else {".py"}
+        if path.suffix not in allowed or "__pycache__" in path.parts:
+            message = "项目bundle包含未声明的源码或程序集类型" if native_algorithm else "项目bundle只允许 Python 源码"
+            raise ExtensionError(f"{message}: {relative}")
         data = path.read_bytes()
         try:
-            data.decode("utf-8")
+            if path.suffix not in {".dll", ".pdb"}:
+                data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ExtensionError(f"项目源码必须是 UTF-8: {relative}") from exc
         entries.append({"path": relative, "size": len(data), "sha256": _sha256(data)})
@@ -204,9 +208,9 @@ def _source_paths(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(paths, key=lambda path: path.as_posix()))
 
 
-def project_source_hash(source_root: str | Path) -> str:
+def project_source_hash(source_root: str | Path, *, native_algorithm=False) -> str:
     """计算规范化项目源码闭包身份。"""
-    _, entries = _source_entries(source_root)
+    _, entries = _source_entries(source_root, native_algorithm=native_algorithm)
     return typed_canonical_hash({"source_files": list(entries)})
 
 
@@ -486,6 +490,8 @@ class ProjectOperatorBundleManifest:
     reuse_scope: str
     requires_python: str
     bundle_hash: str
+    lean_algorithm: LeanAlgorithm | None = None
+    semantic_source_hash: str | None = None
     parameter_preflight_module: str | None = None
     parameter_preflight_function: str | None = None
     parameter_preflight_parameters: tuple[str, ...] | None = None
@@ -495,7 +501,10 @@ class ProjectOperatorBundleManifest:
     def __post_init__(self) -> None:
         _safe_id(self.project_id, "project_id")
         _safe_id(self.bundle_id, "bundle_id")
-        if not _MODULE_PATTERN.fullmatch(self.entry_module) or not _FUNCTION_PATTERN.fullmatch(self.entry_function):
+        if self.lean_algorithm is not None:
+            if not isinstance(self.lean_algorithm, LeanAlgorithm) or self.entry_module is not None or self.entry_function is not None:
+                raise ExtensionError("原生算法入口与项目函数入口互斥")
+        elif not _MODULE_PATTERN.fullmatch(self.entry_module) or not _FUNCTION_PATTERN.fullmatch(self.entry_function):
             raise ExtensionError("项目算子入口描述符无效")
         preflight_values = (
             self.parameter_preflight_module,
@@ -515,6 +524,11 @@ class ProjectOperatorBundleManifest:
             object.__setattr__(self, "parameter_preflight_parameters",
                                tuple(self.parameter_preflight_parameters))
         hashes = (self.source_tree_hash, self.dependency_lock_hash, self.bundle_hash)
+        python_strategy = self.lean_algorithm is not None and self.lean_algorithm.language == "Python"
+        if python_strategy != (self.semantic_source_hash is not None) or (
+            self.semantic_source_hash is not None and not _HASH_PATTERN.fullmatch(self.semantic_source_hash)
+        ):
+            raise ExtensionError("Python 策略 bundle 必须冻结源码语义身份")
         if any(not _HASH_PATTERN.fullmatch(value) for value in hashes):
             raise ExtensionError("项目 bundle 身份字段无效")
         if self.operator_spec.code_hash != self.source_tree_hash:
@@ -545,7 +559,7 @@ class ProjectOperatorBundleManifest:
             "project_id": self.project_id,
             "bundle_id": self.bundle_id,
             "operator_spec": self.operator_spec.to_dict(),
-            "entry": {"module": self.entry_module, "function": self.entry_function},
+            "entry": self.lean_algorithm.to_dict() if self.lean_algorithm else {"module": self.entry_module, "function": self.entry_function},
             "source_files": [dict(item) for item in self.source_files],
             "source_tree_hash": self.source_tree_hash,
             "dependency_lock": dict(self.dependency_lock),
@@ -557,6 +571,8 @@ class ProjectOperatorBundleManifest:
         }
         if self.reuse_scope == "cross_run":
             payload["reuse_scope"] = self.reuse_scope
+        if self.semantic_source_hash is not None:
+            payload["semantic_source_hash"] = self.semantic_source_hash
         if self.parameter_preflight_module is not None:
             payload["parameter_preflight"] = {
                 "module": self.parameter_preflight_module,
@@ -569,6 +585,21 @@ class ProjectOperatorBundleManifest:
     def to_dict(self) -> dict[str, object]:
         return {**self.payload(), "bundle_hash": self.bundle_hash}
 
+    def cache_bundle_hash(self) -> str:
+        if self.semantic_source_hash is None:
+            return self.bundle_hash
+        payload = self.payload()
+        payload.pop("source_files")
+        payload.pop("source_tree_hash")
+        payload["operator_spec"] = self.cache_operator_spec()
+        return typed_canonical_hash(payload)
+
+    def cache_operator_spec(self) -> dict[str, object]:
+        payload = self.operator_spec.payload()
+        if self.semantic_source_hash is not None:
+            payload["code_hash"] = self.semantic_source_hash
+        return payload
+
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "ProjectOperatorBundleManifest":
         expected = {
@@ -580,13 +611,16 @@ class ProjectOperatorBundleManifest:
             raise ExtensionError("项目 bundle 或 ABI 版本不受支持")
         if "reuse_scope" in payload:
             expected.add("reuse_scope")
+        if "semantic_source_hash" in payload:
+            expected.add("semantic_source_hash")
         if "parameter_preflight" in payload:
             expected.add("parameter_preflight")
         if set(payload) != expected:
             raise ExtensionError("项目 bundle manifest schema 无效")
         if not isinstance(payload["operator_spec"], Mapping) or not isinstance(payload["entry"], Mapping):
             raise ExtensionError("项目 bundle operator/entry 合同无效")
-        if set(payload["entry"]) != {"module", "function"}:
+        native = "language" in payload["entry"]
+        if set(payload["entry"]) != ({"language", "entry_file", "type_name"} if native else {"module", "function"}):
             raise ExtensionError("项目 bundle entry schema 无效")
         preflight = payload.get("parameter_preflight")
         if preflight is not None and (
@@ -602,8 +636,9 @@ class ProjectOperatorBundleManifest:
             project_id=str(payload["project_id"]),
             bundle_id=str(payload["bundle_id"]),
             operator_spec=OperatorSpec.from_dict(payload["operator_spec"]),
-            entry_module=str(payload["entry"]["module"]),
-            entry_function=str(payload["entry"]["function"]),
+            entry_module=None if native else str(payload["entry"]["module"]),
+            entry_function=None if native else str(payload["entry"]["function"]),
+            lean_algorithm=LeanAlgorithm(**dict(payload["entry"])) if native else None,
             source_files=tuple(dict(item) for item in payload["source_files"]),
             source_tree_hash=str(payload["source_tree_hash"]),
             dependency_lock={str(key): str(value) for key, value in payload["dependency_lock"].items()},
@@ -612,6 +647,9 @@ class ProjectOperatorBundleManifest:
             reuse_scope=str(payload.get("reuse_scope", "same_run")),
             requires_python=str(payload["requires_python"]),
             bundle_hash=str(payload["bundle_hash"]),
+            semantic_source_hash=(
+                str(payload["semantic_source_hash"]) if "semantic_source_hash" in payload else None
+            ),
             parameter_preflight_module=(
                 None if preflight is None else str(preflight["module"])
             ),
@@ -637,6 +675,7 @@ class ProjectOperatorDeclaration:
     entry_function: str
     dependency_lock: Mapping[str, str]
     permissions: ProjectOperatorPermissionProfile
+    lean_algorithm: LeanAlgorithm | None = None
     parameter_preflight_module: str | None = None
     parameter_preflight_function: str | None = None
     parameter_preflight_parameters: tuple[str, ...] | None = None
@@ -646,7 +685,10 @@ class ProjectOperatorDeclaration:
 
     def __post_init__(self) -> None:
         _safe_id(self.project_id, "project_id")
-        if not _MODULE_PATTERN.fullmatch(self.entry_module) or not _FUNCTION_PATTERN.fullmatch(
+        if self.lean_algorithm is not None:
+            if not isinstance(self.lean_algorithm, LeanAlgorithm) or self.entry_module is not None or self.entry_function is not None:
+                raise ExtensionError("原生算法入口与项目函数入口互斥")
+        elif not _MODULE_PATTERN.fullmatch(self.entry_module) or not _FUNCTION_PATTERN.fullmatch(
             self.entry_function
         ):
             raise ExtensionError("项目算子入口描述符无效")
@@ -695,7 +737,7 @@ class ProjectOperatorDeclaration:
             "contract_version": self.contract_version,
             "project_id": self.project_id,
             "operator": operator,
-            "entry": {
+            "entry": self.lean_algorithm.to_dict() if self.lean_algorithm else {
                 "module": self.entry_module,
                 "function": self.entry_function,
             },
@@ -787,7 +829,8 @@ class ProjectOperatorDeclaration:
                     ),
                 ),
             )
-        if set(entry) != {"module", "function"}:
+        native = "language" in entry
+        if set(entry) != ({"language", "entry_file", "type_name"} if native else {"module", "function"}):
             raise ExtensionError(
                 "项目算子薄声明 entry schema 无效",
                 failure_payload=_repair_payload(
@@ -847,7 +890,7 @@ class ProjectOperatorDeclaration:
                 resource_profile=dict(operator["resource_profile"]),
                 determinism_mode=str(operator["determinism_mode"]),
                 seed_policy=str(operator["seed_policy"]),
-                code_hash=project_source_hash(source_root),
+                code_hash=project_source_hash(source_root, native_algorithm=native),
                 pit_capabilities=tuple(str(item) for item in operator["pit_capabilities"]),
             )
         except (OperatorContractError, ValueError, TypeError) as exc:
@@ -855,8 +898,9 @@ class ProjectOperatorDeclaration:
         return cls(
             project_id=str(payload["project_id"]),
             operator_spec=specification,
-            entry_module=str(entry["module"]),
-            entry_function=str(entry["function"]),
+            entry_module=None if native else str(entry["module"]),
+            entry_function=None if native else str(entry["function"]),
+            lean_algorithm=LeanAlgorithm(**dict(entry)) if native else None,
             dependency_lock={str(key): str(value) for key, value in dependency_lock.items()},
             permissions=ProjectOperatorPermissionProfile.from_dict(permissions),
             parameter_preflight_module=(
@@ -902,27 +946,44 @@ def load_project_operator_declaration(
     return ProjectOperatorDeclaration.from_dict(payload, source_root=source_root)
 
 
-def _validate_imports(root: Path, entries: tuple[dict[str, object], ...], dependency_lock: Mapping[str, str]) -> None:
+def _validate_imports(root: Path, entries: tuple[dict[str, object], ...], dependency_lock: Mapping[str, str], *,
+                      native_algorithm=False, python_strategy=False) -> str | None:
     validate_project_dependency_lock(dependency_lock)
     internal = {str(item["path"]).split("/", 1)[0].removesuffix(".py") for item in entries}
     stdlib = set(getattr(sys, "stdlib_module_names", ()))
     declared = set(dependency_lock)
+    if native_algorithm:
+        declared.update({"AlgorithmImports", "QuantConnect", "QuantWitness", "System", "clr", "Python"})
+    semantic_sources = {}
     for item in entries:
         path = root / str(item["path"])
+        if path.suffix != ".py":
+            if python_strategy:
+                semantic_sources[str(item["path"])] = item["sha256"]
+            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if python_strategy:
+            semantic_sources[str(item["path"])] = ast.dump(tree, include_attributes=False)
         for node in ast.walk(tree):
-            module = None
             if isinstance(node, ast.Import):
-                names = [alias.name.split(".", 1)[0] for alias in node.names]
+                names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
                 if node.level:
                     continue
-                names = [node.module.split(".", 1)[0]] if node.module else []
+                if native_algorithm and node.module == "research_pipeline":
+                    names = [f"research_pipeline.{alias.name}" for alias in node.names]
+                else:
+                    names = [node.module] if node.module else []
             else:
                 continue
-            for module in names:
+            for name in names:
+                if native_algorithm and name == "research_pipeline.lean_data":
+                    continue
+                module = name.split(".", 1)[0]
                 if module not in internal and module not in stdlib and module not in declared:
                     raise ExtensionError(f"项目源码使用未登记依赖: {module}")
+    if python_strategy:
+        return typed_canonical_hash({"contract_version": "python-strategy-ast-v1", "sources": semantic_sources})
 
 
 def _validate_entry_abi(tree: ast.Module, entry_function: str) -> None:
@@ -1014,8 +1075,9 @@ def compile_project_operator_bundle(
     output_root: str | Path,
     project_id: str,
     operator_spec: OperatorSpec,
-    entry_module: str,
-    entry_function: str,
+    entry_module: str | None = None,
+    entry_function: str | None = None,
+    lean_algorithm: LeanAlgorithm | Mapping | None = None,
     dependency_lock: Mapping[str, str],
     registered_operator_specs: Iterable[OperatorSpec],
     project_artifact_types: Iterable[str] = (),
@@ -1027,11 +1089,16 @@ def compile_project_operator_bundle(
 ) -> Path:
     """从显式受信源码根生成内容寻址、不可变的项目算子 bundle。"""
     _safe_id(project_id, "project_id")
-    if not _MODULE_PATTERN.fullmatch(entry_module) or not _FUNCTION_PATTERN.fullmatch(entry_function):
+    if isinstance(lean_algorithm, Mapping):
+        lean_algorithm = LeanAlgorithm(**dict(lean_algorithm))
+    if lean_algorithm is not None:
+        if not isinstance(lean_algorithm, LeanAlgorithm) or entry_module is not None or entry_function is not None:
+            raise ExtensionError("原生算法入口与项目函数入口互斥")
+    elif not _MODULE_PATTERN.fullmatch(entry_module) or not _FUNCTION_PATTERN.fullmatch(entry_function):
         raise ExtensionError("项目算子入口描述符无效")
     _validate_preflight_parameters(parameter_preflight_parameters,
         parameter_preflight_module, operator_spec)
-    root, entries = _source_entries(source_root)
+    root, entries = _source_entries(source_root, native_algorithm=lean_algorithm is not None)
     source_hash = typed_canonical_hash({"source_files": list(entries)})
     if operator_spec.code_hash != source_hash:
         raise ExtensionError("operator code_hash 未绑定当前源码闭包")
@@ -1043,12 +1110,22 @@ def compile_project_operator_bundle(
     normalized_lock = dict(sorted((str(key), str(value)) for key, value in dependency_lock.items()))
     if any(not _ID_PATTERN.fullmatch(key) or not value or value.strip() != value for key, value in normalized_lock.items()):
         raise ExtensionError("项目依赖 lock 必须使用稳定导入名和精确版本")
-    _validate_imports(root, entries, normalized_lock)
-    entry_path = root / Path(*entry_module.split(".")).with_suffix(".py")
+    semantic_source_hash = _validate_imports(
+        root, entries, normalized_lock, native_algorithm=lean_algorithm is not None,
+        python_strategy=lean_algorithm is not None and lean_algorithm.language == "Python",
+    )
+    entry_path = root / lean_algorithm.entry_file if lean_algorithm else root / Path(*entry_module.split(".")).with_suffix(".py")
     if not entry_path.is_file() or entry_path.relative_to(root).as_posix() not in {str(item["path"]) for item in entries}:
         raise ExtensionError("项目算子入口模块不在源码闭包")
-    tree = ast.parse(entry_path.read_text(encoding="utf-8"), filename=str(entry_path))
-    _validate_entry_abi(tree, entry_function)
+    if lean_algorithm is None:
+        tree = ast.parse(entry_path.read_text(encoding="utf-8"), filename=str(entry_path))
+        _validate_entry_abi(tree, entry_function)
+    elif lean_algorithm.language == "Python":
+        tree = ast.parse(entry_path.read_text(encoding="utf-8"), filename=str(entry_path))
+        if not any(isinstance(node, ast.ClassDef) and node.name == lean_algorithm.type_name for node in tree.body):
+            raise ExtensionError("原生Python入口须在声明模块定义指定算法类")
+    elif not any(Path(str(item["path"])).suffix == ".cs" for item in entries):
+        raise ExtensionError("原生CSharp bundle须同时封存算法程序集和源码")
     if (parameter_preflight_module is None) != (parameter_preflight_function is None):
         raise ExtensionError("项目算子参数预检必须同时声明 module 和 function")
     if parameter_preflight_module is not None:
@@ -1083,7 +1160,7 @@ def compile_project_operator_bundle(
         "project_id": project_id,
         "bundle_id": bundle_id,
         "operator_spec": operator_spec.to_dict(),
-        "entry": {"module": entry_module, "function": entry_function},
+        "entry": lean_algorithm.to_dict() if lean_algorithm else {"module": entry_module, "function": entry_function},
         "source_files": list(entries),
         "source_tree_hash": source_hash,
         "dependency_lock": normalized_lock,
@@ -1095,6 +1172,8 @@ def compile_project_operator_bundle(
     }
     if reuse_scope == "cross_run":
         payload["reuse_scope"] = reuse_scope
+    if semantic_source_hash is not None:
+        payload["semantic_source_hash"] = semantic_source_hash
     if parameter_preflight_module is not None:
         payload["parameter_preflight"] = {
             "module": parameter_preflight_module,
@@ -1109,6 +1188,8 @@ def compile_project_operator_bundle(
         operator_spec=operator_spec,
         entry_module=entry_module,
         entry_function=entry_function,
+        lean_algorithm=lean_algorithm,
+        semantic_source_hash=semantic_source_hash,
         source_files=entries,
         source_tree_hash=source_hash,
         dependency_lock=normalized_lock,
@@ -1148,14 +1229,37 @@ def compile_project_operator_bundle(
         shutil.rmtree(staging, ignore_errors=True)
         raise
     try:
-        verify_project_operator_bundle(output)
+        verify_project_operator_bundle(output, cache=False)
     except Exception:
         shutil.rmtree(output, ignore_errors=True)
         raise
     return output
 
 
-def verify_project_operator_bundle(path: str | Path) -> object:
+def verify_project_operator_bundle(path: str | Path, *, cache: bool = True) -> object:
+    """核对完整 bundle。待移动或回收的目录调用时关闭缓存。"""
+    from contextlib import ExitStack
+    from research_pipeline.platform.audit_mode import strict_audit_enabled
+    from research_pipeline.platform.directory_watch import bundle_checks, watch_directory
+    scope = bundle_checks.get()
+    if not cache or scope is None or strict_audit_enabled():
+        return _verify_project_operator_bundle(path)
+    root = Path(path).resolve(strict=True)
+    cached, handles = scope
+    if root in cached:
+        unchanged, manifest = cached[root]
+        if unchanged():
+            return manifest
+    with ExitStack() as candidate:
+        unchanged = watch_directory(root, candidate)
+        manifest = _verify_project_operator_bundle(root)
+        if unchanged is not None and unchanged():
+            handles.enter_context(candidate.pop_all())
+            cached[root] = (unchanged, manifest)
+    return manifest
+
+
+def _verify_project_operator_bundle(path: str | Path) -> object:
     """离线复验 bundle 的文件闭包、合同和全部内容身份。"""
     from research_pipeline.platform.project_bundle_content import verify_project_bundle_content
     parsed = []
@@ -1169,7 +1273,13 @@ def verify_project_operator_bundle(path: str | Path) -> object:
         raise ExtensionError(str(exc)) from exc
     manifest = parsed[0]
     source_root = Path(path).resolve(strict=True) / "sources"
-    _validate_imports(source_root, tuple(dict(item) for item in manifest.source_files), manifest.dependency_lock)
+    semantic_source_hash = _validate_imports(
+        source_root, tuple(dict(item) for item in manifest.source_files), manifest.dependency_lock,
+        native_algorithm=manifest.lean_algorithm is not None,
+        python_strategy=manifest.semantic_source_hash is not None,
+    )
+    if semantic_source_hash != manifest.semantic_source_hash:
+        raise ExtensionError("Python 策略 bundle 源码语义身份不一致")
     return manifest
 
 

@@ -116,7 +116,7 @@ def operator_describe(operator_id: str) -> dict[str, object]:
         items=items,
         next_commands=(
             "python -m research_pipeline artifact describe <artifact-type> --format json",
-            "python -m research_pipeline recipe list --format json",
+            "python -m research_pipeline package init <new-package-dir>",
         ),
     )
 
@@ -230,76 +230,6 @@ def artifact_describe(artifact_type: str) -> dict[str, object]:
             "python -m research_pipeline catalog field search <query> --catalog-lock <持久Catalog-Lock目录> --format json",
         ),
     )
-
-
-def recipe_list() -> dict[str, object]:
-    from research_pipeline.packages.reference_transform_recipes import (
-        build_reference_transform_recipes,
-    )
-
-    recipes = build_reference_transform_recipes()
-    identity = typed_canonical_hash([_recipe_item(item) for item in recipes])
-    next_commands = (
-        ("python -m research_pipeline recipe describe <recipe-id> --format json",)
-        if recipes
-        else (
-            "python -m research_pipeline package init <new-package-dir> --json",
-            "python -m research_pipeline operator scaffold --project-id <project-id> "
-            "--operator-id <operator-id> --output <new-extension-dir> --format json",
-        )
-    )
-    return _payload(
-        "recipe.list",
-        source_identity=identity,
-        items=[
-            {
-                "recipe_id": item.reference_id,
-                "research_kind": item.research_kind,
-                "execution_ready": item.execution_ready,
-                "availability_state": _recipe_availability(item),
-                "sealed": False,
-                "graph_hash": _recipe_hash(item),
-            }
-            for item in recipes
-        ],
-        next_commands=next_commands,
-    )
-
-
-def recipe_describe(recipe_id: str) -> dict[str, object]:
-    recipe = _require_recipe(recipe_id)
-    item = _recipe_item(recipe)
-    item.update(
-        {
-            "availability_state": _recipe_availability(recipe),
-            "sealed": False,
-            "missing_requirements": [
-                item.key
-                for item in recipe.questions
-                if item.required and item.default is None
-            ],
-        }
-    )
-    return _payload(
-        "recipe.describe",
-        source_identity=_recipe_hash(recipe),
-        items=(item,),
-        next_commands=(
-            f"python -m research_pipeline recipe scaffold {recipe.reference_id} --answers <answers.json> --output <new-package-dir> --format json",
-        ),
-    )
-
-
-def recipe_scaffold(
-    recipe_id: str,
-    *,
-    output: str | Path | None = None,
-    catalog_lock: str | Path,
-    assignments: tuple[str, ...] = (),
-    answers_file: str | Path | None = None,
-) -> dict[str, object]:
-    """当前公共 Recipe 清单为空，沿用发现门禁直接拒绝。"""
-    _require_recipe(recipe_id)
 
 
 def catalog_search(
@@ -466,7 +396,7 @@ def _catalog_next_commands(
 ) -> tuple[str, ...]:
     lock_argument = f'--catalog-lock "{catalog_context["lock_reference"]}"'
     commands = [
-        "python -m research_pipeline recipe list --format json",
+        "python -m research_pipeline package init <new-package-dir>",
         "python -m research_pipeline package lint --package <package-dir> "
         f"{lock_argument} --json",
     ]
@@ -508,52 +438,6 @@ def _blocked_catalog_items(root: Path, kind: str) -> tuple[dict[str, object], ..
         for item in audit.get("blocked_entries", ())
         if item.get("target_kind") == target_kind
     )
-
-
-def _require_recipe(recipe_id: str):
-    from research_pipeline.packages.reference_transform_recipes import (
-        build_reference_transform_recipes,
-    )
-
-    matches = [
-        item
-        for item in build_reference_transform_recipes()
-        if item.reference_id == recipe_id
-    ]
-    if len(matches) != 1:
-        raise DiscoveryNotFoundError(
-            f"未找到 recipe: {recipe_id}",
-            missing_requirements=("registered_recipe_id",),
-            next_commands=(
-                "python -m research_pipeline recipe list --format json",
-                "python -m research_pipeline package init <new-package-dir> --json",
-            ),
-        )
-    return matches[0]
-
-
-def _recipe_item(recipe) -> dict[str, object]:
-    return {
-        "recipe_id": recipe.reference_id,
-        "research_kind": recipe.research_kind,
-        "execution_ready": recipe.execution_ready,
-        "contract_version": recipe.contract_version,
-        "frequency": recipe.frequency,
-        "supported_asset_profiles": list(recipe.supported_asset_profiles),
-        "questions": [item.to_dict() for item in recipe.questions],
-        "graph": dict(recipe.graph),
-        "graph_hash": _recipe_hash(recipe),
-    }
-
-
-def _recipe_hash(recipe) -> str:
-    from research_pipeline.packages.reference_transform_recipes import recipe_identity
-
-    return recipe_identity(recipe)
-
-
-def _recipe_availability(recipe) -> str:
-    return "local_only" if recipe.execution_ready else "planned"
 
 
 def _discovery_availability() -> tuple[str, bool]:
@@ -616,7 +500,4 @@ __all__ = [
     "catalog_search",
     "operator_describe",
     "operator_list",
-    "recipe_describe",
-    "recipe_list",
-    "recipe_scaffold",
 ]

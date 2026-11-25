@@ -1,8 +1,40 @@
 """本地 LEAN 项目结果的表、支持文件和正式输出绑定。"""
 
+from dataclasses import asdict, dataclass
+from pathlib import PurePosixPath
+import re
 from types import MappingProxyType
 
-from .errors import MainlineError
+from .errors import MainlineError, StrategyProtocolError
+
+
+_TYPE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+@dataclass(frozen=True, kw_only=True)
+class LeanAlgorithm:
+    language: str
+    entry_file: str
+    type_name: str
+
+    def __post_init__(self):
+        _require_algorithm(self.language in {"Python", "CSharp"}, "原生算法语言须为Python或CSharp")
+        _require_algorithm(isinstance(self.entry_file, str) and bool(self.entry_file), "算法入口文件不能为空")
+        path = PurePosixPath(self.entry_file)
+        _require_algorithm(not path.is_absolute() and ".." not in path.parts and ":" not in self.entry_file and "\\" not in self.entry_file
+                 and path.as_posix() == self.entry_file, "算法入口须为源码闭包内的相对路径")
+        _require_algorithm(path.suffix == (".py" if self.language == "Python" else ".dll"),
+                 "Python入口须为.py，CSharp入口须为已构建的.dll")
+        _require_algorithm(isinstance(self.type_name, str) and bool(_TYPE_NAME.fullmatch(self.type_name)),
+                 "原生算法须声明实际类型名")
+
+    def to_dict(self):
+        return asdict(self)
+
+
+def _require_algorithm(condition, message):
+    if not condition:
+        raise StrategyProtocolError("lean_native_declaration_invalid", message)
 
 
 class LeanResultContractError(MainlineError):
@@ -11,13 +43,13 @@ class LeanResultContractError(MainlineError):
     error_code = "result_contract_invalid"
 
 
-LEAN_ARTIFACT_TYPE = "research.lean-simulation.v2"
-LEAN_RESULT_VERSION = "research-lean-simulation-v2"
+LEAN_ARTIFACT_TYPE = "research.lean-simulation.v4"
+LEAN_RESULT_VERSION = "research-lean-simulation-v4"
 LEAN_SIGNAL_SOURCE_SCHEMA_ID = "research.lean-signal-source.v1"
 LEAN_METRICS_SCHEMA_ID = "research.lean.metrics.v2"
 LEAN_METRICS_PATH = "lean/metrics"
 LEAN_SCHEMA_IDS = MappingProxyType({
-    name: f"research.lean.{name}.v2"
+    name: f"research.lean.{name}.v4"
     for name in ("orders", "intents", "daily", "trace", "fills", "positions", "account_events", "lifecycle")
 })
 LEAN_PATHS = MappingProxyType({name: f"lean/{name}" for name in LEAN_SCHEMA_IDS})
@@ -30,7 +62,7 @@ LEAN_SUPPORT_PATHS = (
     "lean/engine-status.json",
     "lean/launcher-summary.json",
     "lean/account.json",
-    "lean/strategy-state.json",
+    "lean/algorithm-state.json",
     "lean/runtime-lock.json",
 )
 

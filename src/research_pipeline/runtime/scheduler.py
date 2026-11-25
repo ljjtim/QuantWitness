@@ -13,6 +13,7 @@ from .errors import RuntimeAdmissionError
 
 
 DEFAULT_RUNTIME_CPU_SLOTS = 4
+DEFAULT_RUNTIME_LOCAL_PROCESS_SLOTS = 6
 DEFAULT_RUNTIME_MEMORY_BYTES = 16 * 1024**3
 DEFAULT_RUNTIME_SCRATCH_BYTES = 64 * 1024**3
 
@@ -93,45 +94,6 @@ class ReadyCandidate:
     @property
     def key(self) -> str:
         return self.node_id if self.partition_key is None else f"{self.node_id}#{self.partition_key}"
-
-
-@dataclass(frozen=True, order=True)
-class ProjectReadyCandidate:
-    project_id: str
-    run_id: str
-    block_id: str
-    candidate: ReadyCandidate
-
-    @property
-    def key(self) -> str:
-        return f"{self.project_id}/{self.run_id}/{self.block_id}/{self.candidate.key}"
-
-
-class ProjectFairQueue:
-    """以 parameter block 为最小单元，在项目间做确定性轮转。"""
-
-    def __init__(self) -> None:
-        self._last_project: str | None = None
-
-    def order(self, candidates: tuple[ProjectReadyCandidate, ...]) -> tuple[ProjectReadyCandidate, ...]:
-        grouped: dict[str, list[ProjectReadyCandidate]] = {}
-        for item in candidates:
-            grouped.setdefault(item.project_id, []).append(item)
-        projects = sorted(grouped)
-        if self._last_project in projects:
-            pivot = (projects.index(self._last_project) + 1) % len(projects)
-            projects = projects[pivot:] + projects[:pivot]
-        for values in grouped.values():
-            values.sort(key=lambda item: (item.candidate.topological_level, item.run_id, item.block_id, item.candidate.node_id))
-        ordered: list[ProjectReadyCandidate] = []
-        while any(grouped.values()):
-            for project in projects:
-                if grouped[project]:
-                    ordered.append(grouped[project].pop(0))
-        if ordered:
-            # 调用方可以只取前 N 个填满固定 worker 池；下轮从首个已获机会项目之后开始。
-            self._last_project = ordered[0].project_id
-        return tuple(ordered)
 
 
 class ReservationLedger:
@@ -237,7 +199,7 @@ def stable_partition_merge(values: dict[str, object]) -> tuple[tuple[str, object
 
 __all__ = [
     "DEFAULT_RUNTIME_MEMORY_BYTES", "DEFAULT_RUNTIME_SCRATCH_BYTES", "ExecutionMode",
-    "MemoryGovernor", "ProjectFairQueue", "ProjectReadyCandidate", "ReadyCandidate",
+    "MemoryGovernor", "ReadyCandidate",
     "ReservationLedger", "ResourceCapacity", "ResourceToken", "available_cpu_slots",
     "stable_partition_keys", "stable_partition_merge",
 ]

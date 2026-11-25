@@ -221,13 +221,14 @@ def test_resource_rejection_leaves_no_recoverable_checkpoint(tmp_path):
     store.verify(_expectation())
 
 
-def test_staging_content_is_verified_before_resource_gate(tmp_path):
+def test_staging_content_is_verified_before_resource_gate(tmp_path, monkeypatch):
+    monkeypatch.setenv("QUANTWITNESS_STRICT_AUDIT", "1")
     store = CheckpointStore(tmp_path / "run")
     calls = []
 
     def corrupt(phase):
         if phase == "checkpoint_prepared":
-            (store.staging_root / "attempt-1" / "content.bin").write_bytes(b"changed")
+            (store.staging_root / "attempt-1" / "content.bin").write_bytes(b"modify")
 
     with pytest.raises(RuntimeIntegrityError, match="内容"):
         _commit(store, attempt_id="attempt-1", phase_hook=corrupt,
@@ -236,10 +237,33 @@ def test_staging_content_is_verified_before_resource_gate(tmp_path):
     assert not list(store.checkpoints_root.iterdir())
 
 
+def test_normal_publication_hashes_once_and_recovery_verifies_disk(tmp_path, monkeypatch):
+    from research_pipeline.runtime import checkpoint as checkpoint_module
+
+    monkeypatch.delenv("QUANTWITNESS_STRICT_AUDIT", raising=False)
+    hashes = []
+    original = checkpoint_module._sha256
+
+    def track_hash(content):
+        hashes.append(content)
+        return original(content)
+
+    monkeypatch.setattr(checkpoint_module, "_sha256", track_hash)
+    store = CheckpointStore(tmp_path / "run")
+    manifest = _commit(store, attempt_id="attempt-1")
+    assert hashes == [b"result"]
+
+    path = store.checkpoints_root / manifest.node_execution_id / manifest.content_path
+    path.write_bytes(b"modify")
+    with pytest.raises(RuntimeIntegrityError, match="内容 hash"):
+        store.verify(_expectation())
+    assert hashes == [b"result", b"modify"]
+
+
 def test_resource_gate_precedes_marker_and_atomic_publication(tmp_path):
     store = CheckpointStore(tmp_path / "run")
     phases = []
     _commit(store, attempt_id="attempt-1", phase_hook=phases.append,
             before_publish=lambda: phases.append("resources_accepted"))
-    assert phases == ["checkpoint_prepared", "resources_accepted", "marker_fsynced", "renamed"]
+    assert phases == ["checkpoint_prepared", "resources_accepted", "marker_written", "renamed"]
     store.verify(_expectation())

@@ -68,91 +68,20 @@ def _expand_session_task(task, session):
                                "inherited_lineage": task["inherited_lineage"]}}
 
 
-_WINDOWS_JOB_KILL_ON_CLOSE = 0x00002000
-_WINDOWS_JOB_EXTENDED_LIMIT_INFORMATION = 9
 _WINDOWS_JOB_HANDLE: int | None = None
 
 
-class _WindowsJobBasicLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("per_process_user_time_limit", ctypes.c_longlong),
-        ("per_job_user_time_limit", ctypes.c_longlong),
-        ("limit_flags", ctypes.c_uint32),
-        ("minimum_working_set_size", ctypes.c_size_t),
-        ("maximum_working_set_size", ctypes.c_size_t),
-        ("active_process_limit", ctypes.c_uint32),
-        ("affinity", ctypes.c_size_t),
-        ("priority_class", ctypes.c_uint32),
-        ("scheduling_class", ctypes.c_uint32),
-    ]
-
-
-class _WindowsIoCounters(ctypes.Structure):
-    _fields_ = [
-        ("read_operation_count", ctypes.c_uint64),
-        ("write_operation_count", ctypes.c_uint64),
-        ("other_operation_count", ctypes.c_uint64),
-        ("read_transfer_count", ctypes.c_uint64),
-        ("write_transfer_count", ctypes.c_uint64),
-        ("other_transfer_count", ctypes.c_uint64),
-    ]
-
-
-class _WindowsJobExtendedLimitInformation(ctypes.Structure):
-    _fields_ = [
-        ("basic_limit_information", _WindowsJobBasicLimitInformation),
-        ("io_info", _WindowsIoCounters),
-        ("process_memory_limit", ctypes.c_size_t),
-        ("job_memory_limit", ctypes.c_size_t),
-        ("peak_process_memory_used", ctypes.c_size_t),
-        ("peak_job_memory_used", ctypes.c_size_t),
-    ]
-
-
 def _bind_windows_descendants_to_worker_lifetime() -> bool:
-    """让极短命 Worker 的后台后代也随 Worker 退出，不依赖轮询恰好看见。"""
-
+    """操作系统在 Worker 退出时关闭句柄并终止仍存活的后代。"""
     global _WINDOWS_JOB_HANDLE
     if sys.platform != "win32":
         return False
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
-    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-    kernel32.SetInformationJobObject.argtypes = (
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.c_uint32,
-    )
-    kernel32.SetInformationJobObject.restype = ctypes.c_int
-    kernel32.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
-    kernel32.AssignProcessToJobObject.restype = ctypes.c_int
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-    kernel32.CloseHandle.restype = ctypes.c_int
+    from research_pipeline.platform.process_resources import _windows_kill_job, _WINDOWS_WORKER_JOB_ENV
 
-    from research_pipeline.platform.process_resources import _WINDOWS_WORKER_JOB_ENV
-    handle = kernel32.CreateJobObjectW(None, os.environ.pop(_WINDOWS_WORKER_JOB_ENV, None))
-    if not handle:
+    try:
+        _WINDOWS_JOB_HANDLE = _windows_kill_job(os.environ.pop(_WINDOWS_WORKER_JOB_ENV, None))
+    except OSError:
         return False
-    limits = _WindowsJobExtendedLimitInformation()
-    limits.basic_limit_information.limit_flags = _WINDOWS_JOB_KILL_ON_CLOSE
-    configured = kernel32.SetInformationJobObject(
-        handle,
-        _WINDOWS_JOB_EXTENDED_LIMIT_INFORMATION,
-        ctypes.byref(limits),
-        ctypes.sizeof(limits),
-    )
-    assigned = configured and kernel32.AssignProcessToJobObject(
-        handle,
-        kernel32.GetCurrentProcess(),
-    )
-    if not assigned:
-        kernel32.CloseHandle(handle)
-        return False
-    # 不在 Python 中主动关闭：Worker 正常或异常退出时，操作系统关闭最后一个
-    # Job handle，并终止仍存活的后代；监督器的 psutil 清理继续作为跨平台兜底。
-    _WINDOWS_JOB_HANDLE = int(handle)
     return True
 
 
@@ -509,7 +438,7 @@ def _validate_task(
     if any(identity[key] != value for key, value in checks.items()):
         raise ValueError("project_bundle_runtime_identity_mismatch")
     if first_task:
-        if identity["adapter_hash"] != project_worker_adapter_hash():
+        if identity["adapter_hash"] != project_worker_adapter_hash(manifest):
             raise ValueError("project_worker_adapter_drift")
         if identity["runtime_environment_hash"] != environment_fingerprint():
             raise ValueError("project_worker_environment_drift")

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+
 from bisect import bisect_left, bisect_right
-from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import date, datetime, time, timedelta
-from functools import cached_property
+from functools import cached_property, partial
 import hashlib
 from importlib.resources import files
 import json
@@ -22,10 +22,13 @@ from research_pipeline.platform.asset_taxonomy import (
     require_instrument_type,
 )
 from research_pipeline.platform.canonical import (
-    canonical_json, typed_canonical_bytes, typed_canonical_hash,
+    typed_canonical_bytes, typed_canonical_hash,
 )
 from research_pipeline.platform.minute_reference import (
     require_published_minute_capability_binding,
+)
+from research_pipeline.platform.validation import (
+    require_exact_fields, require_integer, require_mapping, require_text,
 )
 
 from .sessions import SessionSegment, TradingSession
@@ -279,8 +282,9 @@ class SessionPolicyRevision:
     claim_ceiling: str = "research_observation"
     contract_version: str = SESSION_POLICY_VERSION
     available_at: datetime | None = None
+    _ordered_trading_dates: InitVar[bool] = False
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _ordered_trading_dates: bool) -> None:
         if self.contract_version not in {SESSION_POLICY_VERSION, PROJECT_SESSION_POLICY_VERSION}:
             raise SessionCalendarError("session policy version 不受支持")
         if self.contract_version == PROJECT_SESSION_POLICY_VERSION:
@@ -297,20 +301,26 @@ class SessionPolicyRevision:
             raise SessionCalendarError("session policy id/revision 无效")
         if self.effective_from > self.effective_to:
             raise SessionCalendarError("session policy 生效期倒置")
-        if (
-            not self.trading_dates
-            or self.trading_dates != tuple(sorted(set(self.trading_dates)))
-            or any(
-                item < self.effective_from or item > self.effective_to
-                for item in self.trading_dates
-            )
+        if not self.trading_dates and (
+            self.contract_version != PROJECT_SESSION_POLICY_VERSION
+            or self.instrument.asset_class not in {"cn_stock", "cn_etf"}
+        ):
+            raise SessionCalendarError("trading_dates 必须在生效期内严格递增且非空")
+        if self.trading_dates and (
+            (not _ordered_trading_dates and any(
+                first >= second for first, second in zip(self.trading_dates, self.trading_dates[1:])
+            ))
+            or self.trading_dates[0] < self.effective_from
+            or self.trading_dates[-1] > self.effective_to
         ):
             raise SessionCalendarError("trading_dates 必须在生效期内严格递增")
         if not self.segments or len({item.segment_id for item in self.segments}) != len(
             self.segments
         ):
             raise SessionCalendarError("session policy segments 不能为空或重复")
-        built = tuple(item.build(self.trading_dates[0]) for item in self.segments)
+        # 空交易日声明仍需校验时段模板，生效起点只用于模板校验。
+        validation_date = self.trading_dates[0] if self.trading_dates else self.effective_from
+        built = tuple(item.build(validation_date) for item in self.segments)
         if built != tuple(sorted(built, key=lambda item: (item.starts_at, item.segment_id))):
             raise SessionCalendarError("session policy segments 必须按时间排序")
         for index, item in enumerate(built):
@@ -347,6 +357,9 @@ class SessionPolicyRevision:
         return typed_canonical_hash(self.to_dict())
 
     def to_dict(self) -> dict[str, object]:
+        return self._identity_payload(trading_dates=[item.isoformat() for item in self.trading_dates])
+
+    def _identity_payload(self, *, trading_dates) -> dict[str, object]:
         return {
             **({"available_at": self.available_at.isoformat()} if self.available_at is not None else {}),
             "policy_id": self.policy_id,
@@ -354,7 +367,7 @@ class SessionPolicyRevision:
             "instrument": self.instrument.to_dict(),
             "effective_from": self.effective_from.isoformat(),
             "effective_to": self.effective_to.isoformat(),
-            "trading_dates": [item.isoformat() for item in self.trading_dates],
+            "trading_dates": trading_dates,
             "segments": [item.to_dict() for item in self.segments],
             "evidence_hashes": [
                 {"source_id": source_id, "content_hash": content_hash}
@@ -431,7 +444,9 @@ class SessionPolicyBundle:
     bundle_hash: str
     contract_version: str = SESSION_POLICY_BUNDLE_VERSION
 
-    def __post_init__(self) -> None:
+    _verified_columnar: InitVar[bool] = False
+
+    def __post_init__(self, _verified_columnar: bool) -> None:
         if self.contract_version not in {SESSION_POLICY_BUNDLE_VERSION, PROJECT_SESSION_BUNDLE_VERSION}:
             raise SessionCalendarError("session policy bundle version 不受支持")
         if not self.bundle_id.strip() or _SHA256.fullmatch(self.inventory_evidence_hash) is None:
@@ -475,7 +490,7 @@ class SessionPolicyBundle:
             if item.revision == 1:
                 continue
             previous = by_key.get((item.policy_id, item.revision - 1, item.instrument.instrument_id))
-            if previous is None or item.previous_policy_hash != previous.policy_hash:
+            if previous is None or (not _verified_columnar and item.previous_policy_hash != previous.policy_hash):
                 raise SessionCalendarError("session policy revision chain 不闭合")
         if self.contract_version == PROJECT_SESSION_BUNDLE_VERSION:
             metadata = {}
@@ -487,7 +502,7 @@ class SessionPolicyBundle:
                 if not any(key not in {"minute.capability.inventory.v1", "minute.capability.manifest.v1"}
                            for key, _ in item.evidence_hashes):
                     raise SessionCalendarError("项目日历缺少独立来源证据")
-            if self.bundle_hash != self._identity_hash():
+            if not _verified_columnar and self.bundle_hash != self._identity_hash():
                 raise SessionCalendarError("session policy bundle hash 不一致")
             return
         if any(item.contract_version != SESSION_POLICY_VERSION for item in ordered):
@@ -511,7 +526,7 @@ class SessionPolicyBundle:
                 != tuple(day for day, _ in observation.bars_per_trading_date)
             ):
                 raise SessionCalendarError("session policy 与平台分钟能力覆盖不一致")
-        if self.bundle_hash != self._identity_hash():
+        if not _verified_columnar and self.bundle_hash != self._identity_hash():
             raise SessionCalendarError("session policy bundle hash 不一致")
 
     def _identity_hash(self) -> str:
@@ -526,17 +541,25 @@ class SessionPolicyBundle:
         digest = hashlib.sha256()
         digest.update(before + b'"policies":{"type":"list","value":[')
         templates = {}
+        date_tokens = {}
         for position, policy in enumerate(self.policies):
             if position:
                 digest.update(b",")
-            payload = policy.to_dict()
-            instrument = payload.pop("instrument")
-            # JSON 正文保留类型、时区文本与列表顺序；仅在本次校验内复用。
-            key = canonical_json(payload)
+            # 日期以共享的原序列标识；正文仍使用规范编码，身份与 JSON 定义一致。
+            date_key = id(policy.trading_dates)
+            payload = policy._identity_payload(trading_dates=None)
+            instrument = payload["instrument"]
+            payload["instrument"] = None
+            key = (date_key, typed_canonical_bytes(payload))
             parts = templates.get(key)
             if parts is None:
-                payload["instrument"] = None
-                template = typed_canonical_bytes(payload)[len(_CANONICAL_VALUE_PREFIX):-1]
+                if date_key not in date_tokens:
+                    date_tokens[date_key] = typed_canonical_bytes(
+                        [day.isoformat() for day in policy.trading_dates]
+                    )[len(_CANONICAL_VALUE_PREFIX):-1]
+                template = key[1][len(_CANONICAL_VALUE_PREFIX):-1]
+                template = template.replace(b'"trading_dates":' + _NULL_IDENTITY_VALUE,
+                    b'"trading_dates":' + date_tokens[date_key], 1)
                 head, tail = template.split(b'"instrument":' + _NULL_IDENTITY_VALUE, 1)
                 parts = (head + b'"instrument":', tail)
                 templates[key] = parts
@@ -826,30 +849,17 @@ def load_session_policy_bundle(
     return bundle
 
 
-def _mapping(value: object, field: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-        raise SessionCalendarError(f"{field} 必须是字符串键 mapping")
-    return value
+_mapping = partial(require_mapping, error=SessionCalendarError,
+                   string_keys=True, requirement="必须是字符串键 mapping")
 
 
-def _exact(value: Mapping[str, object], expected: set[str], field: str) -> None:
-    if set(value) != expected:
-        raise SessionCalendarError(
-            f"{field} schema 不匹配；缺失={sorted(expected-set(value))}，"
-            f"未知={sorted(set(value)-expected)}"
-        )
+_exact = partial(require_exact_fields, error=SessionCalendarError)
 
 
-def _text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise SessionCalendarError(f"{field} 必须是非空字符串")
-    return value
+_text = partial(require_text, error=SessionCalendarError)
 
 
-def _integer(value: object, field: str) -> int:
-    if type(value) is not int:
-        raise SessionCalendarError(f"{field} 必须是整数")
-    return value
+_integer = partial(require_integer, error=SessionCalendarError)
 
 
 def _boolean(value: object, field: str) -> bool:
@@ -921,7 +931,9 @@ def _session_instant(value: datetime, field: str) -> datetime:
 
 
 def _dates(value: object, field: str) -> tuple[date, ...]:
-    return tuple(_date(item, field) for item in _list(value, field))
+    if not isinstance(value, (list, tuple)):
+        raise SessionCalendarError(f"{field} 必须是列表")
+    return tuple(_date(item, field) for item in value)
 
 
 def _time(value: object, field: str) -> time:

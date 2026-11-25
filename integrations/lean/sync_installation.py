@@ -7,14 +7,27 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from xml.etree import ElementTree
 
 
 PACKAGE_INPUTS = (
-    "pyproject.toml", "MANIFEST.in", "README.md", "ARCHITECTURE.md",
-    "CONTRIBUTING.md", "EXTENSIONS.md", "SECURITY.md", "LICENSE", "NOTICE",
-    "THIRD_PARTY_NOTICES.md", "licenses", "docs", "src",
+    "pyproject.toml",
+    "src",
     "integrations/lean/refresh-package.ps1",
 )
+ENGINE_ROOT = Path("integrations/lean/engine")
+ENGINE_BUILD_INPUTS = (
+    ENGINE_ROOT / "build.ps1",
+    ENGINE_ROOT / "Directory.Build.props",
+    ENGINE_ROOT / "build_pythonnet.py",
+    ENGINE_ROOT / "install_metadata.py",
+    ENGINE_ROOT.parent / "patch_native_lifecycle.py",
+)
+ENGINE_PROJECTS = (
+    ENGINE_ROOT / "QuantWitnessLeanHost.csproj",
+    ENGINE_ROOT / "parquet-direct/ParquetInput.csproj",
+)
+AUDIT_RECORD = "rp-integration/runtime-audit.json"
 
 
 def source_digest(project, names):
@@ -73,20 +86,52 @@ def is_research_execution(arguments):
     )
 
 
+def engine_inputs(project):
+    """沿生产工程的显式编译项和项目引用识别构建输入。"""
+    inputs = set(ENGINE_BUILD_INPUTS)
+    pending = list(ENGINE_PROJECTS)
+    while pending:
+        relative = pending.pop()
+        if relative in inputs:
+            continue
+        inputs.add(relative)
+        path = project / relative
+        if not path.is_file():
+            continue
+        definition = ElementTree.parse(path)
+        for item_kind in ("Compile", "ProjectReference", "EmbeddedResource", "Content", "None"):
+            for item in definition.iterfind(f"./ItemGroup/{item_kind}[@Include]"):
+                target = (path.parent / item.attrib["Include"]).resolve().relative_to(project.resolve())
+                if item_kind == "ProjectReference":
+                    pending.append(target)
+                else:
+                    inputs.add(target)
+    return sorted(inputs)
+
+
 def source_state(project):
     return {
         "package": source_digest(project, PACKAGE_INPUTS),
-        "engine": source_digest(project, ("integrations/lean/engine",)),
+        "engine": source_digest(project, engine_inputs(project)),
     }
 
 
+def publish_installation_audit(lean_home, state):
+    from research_pipeline.platform.lean_runtime import record_lean_installation
+
+    record_lean_installation(lean_home, engine_source_id=state["engine"])
+
+
 def record_installed(project, lean_home):
+    state = source_state(Path(project))
+    publish_installation_audit(lean_home, state)
     (Path(lean_home) / "source-sync.json").write_text(
-        json.dumps(source_state(Path(project)), indent=2) + "\n", encoding="utf-8")
+        json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
 def synchronize(project, lean_home, *, force_package=False, nuget_cache=None):
     project, lean_home = Path(project).resolve(), Path(lean_home).resolve()
+    nuget_cache = Path(nuget_cache).resolve() if nuget_cache is not None else None
     state_path = lean_home / "source-sync.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     current = source_state(project)
@@ -97,6 +142,7 @@ def synchronize(project, lean_home, *, force_package=False, nuget_cache=None):
     require_idle(lean_home)
     # 失败不能留下可用于跳过安装的旧记录。
     state_path.unlink(missing_ok=True)
+    (lean_home / AUDIT_RECORD).unlink(missing_ok=True)
     integration = project / "integrations/lean"
     for name in changed:
         script = integration / ("refresh-package.ps1" if name == "package" else "engine/build.ps1")
@@ -106,6 +152,7 @@ def synchronize(project, lean_home, *, force_package=False, nuget_cache=None):
             if nuget_cache:
                 command.extend(["-NugetCache", str(nuget_cache)])
         subprocess.run(command, check=True, cwd=project)
+    publish_installation_audit(lean_home, current)
     state_path.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
     return {"status": "synchronized", "updated": changed, "lean_home": str(lean_home)}
 

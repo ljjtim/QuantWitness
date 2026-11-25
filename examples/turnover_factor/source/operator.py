@@ -1,9 +1,11 @@
 """过去窗口分组与独立未来标签的教学算子。"""
 from collections import defaultdict
+from datetime import date
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+SYNTHETIC_SESSIONS = tuple(date(2024, 1, day) for day in (2, 3, 4, 5, 8, 9, 10, 11, 12))
 ARTIFACT = 'project.turnover_factor.sample.v1'
 SCHEMA = 'project.turnover_factor.metrics.v1'
 METRIC_REF = 'project.turnover_factor.low_minus_high_return@1.0.0'
@@ -14,9 +16,8 @@ METRIC_SCHEMA = pa.schema([
 ])
 
 
-def build_groups(rows, window=3):
+def build_groups(rows, window=3, *, sessions=SYNTHETIC_SESSIONS):
     """每个观察日只用观察日前的窗口，代码排序用于固定同值次序。"""
-    sessions = sorted({row['fld_metric_session'] for row in rows})
     indexed = {(row['fld_metric_session'], row['fld_metric_code']): row for row in rows}
     securities = sorted({row['fld_metric_code'] for row in rows})
     output = []
@@ -38,23 +39,22 @@ def build_groups(rows, window=3):
     return output
 
 
-def build_labels(rows):
+def build_labels(rows, *, sessions=SYNTHETIC_SESSIONS):
     """次日收盘收益只供事后评价，不参与窗口、资格和分组。"""
-    by_code = defaultdict(list)
-    for row in rows:
-        by_code[row['fld_metric_code']].append(row)
+    next_session = dict(zip(sessions, sessions[1:]))
+    closes = {(row['fld_metric_session'], row['fld_metric_code']): row['fld_metric_close']
+              for row in rows}
     labels = {}
-    for code, records in by_code.items():
-        records.sort(key=lambda row: row['fld_metric_session'])
-        for current, following in zip(records, records[1:]):
-            labels[(current['fld_metric_session'].isoformat(), code)] = (
-                following['fld_metric_close'] / current['fld_metric_close'] - 1.0)
+    for (day, code), close in closes.items():
+        following_close = closes.get((next_session.get(day), code))
+        if close is not None and following_close is not None:
+            labels[(day.isoformat(), code)] = following_close / close - 1.0
     return labels
 
 
-def evaluate(rows):
-    groups = build_groups(rows)
-    labels = build_labels(rows)
+def evaluate(rows, *, sessions=SYNTHETIC_SESSIONS):
+    groups = build_groups(rows, sessions=sessions)
+    labels = build_labels(rows, sessions=sessions)
     observations = [{**row, 'forward_return': labels.get((row['session'], row['code']))}
                     for row in groups]
     daily = defaultdict(lambda: defaultdict(list))

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from functools import cached_property
+
+from contextlib import nullcontext
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from research_pipeline.platform.canonical import typed_canonical_hash
 
@@ -52,7 +54,7 @@ class SourceRevision:
     evidence_strength: str
     probe_version: str = SOURCE_REVISION_VERSION
 
-    @property
+    @cached_property
     def revision_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -80,12 +82,15 @@ def probe_duckdb_source(
     object_name: str,
     source_id: str,
     watermark: str | None = None,
+    connection=None,
 ) -> SourceRevision:
     import duckdb
 
     database, relative = _safe_path(path, allowed_root)
     stat = database.stat()
-    with duckdb.connect(str(database), read_only=True) as connection:
+    context = (duckdb.connect(str(database), read_only=True)
+               if connection is None else nullcontext(connection))
+    with context as connection:
         rows = connection.execute(
             """SELECT column_name, data_type, is_nullable, column_index
                FROM duckdb_columns()
@@ -107,48 +112,6 @@ def probe_duckdb_source(
     )
 
 
-def probe_parquet_source(
-    path: str | Path,
-    *,
-    allowed_root: str | Path,
-    source_id: str,
-    watermark: str | None = None,
-) -> SourceRevision:
-    import pyarrow.parquet as pq
-
-    source, _ = _safe_path(path, allowed_root)
-    files = tuple(sorted(source.rglob("*.parquet"))) if source.is_dir() else (source,)
-    if not files:
-        raise SourceChangedError("Parquet 来源为空")
-    manifest_hashes: dict[str, str] = {}
-    manifest_path = source / "manifest.json" if source.is_dir() else None
-    if manifest_path and manifest_path.is_file() and (source / "COMMITTED").is_file():
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest_hashes = {
-            str(item["relative_path"]): str(item["sha256"])
-            for item in raw.get("files", [])
-            if "relative_path" in item and "sha256" in item
-        }
-    evidence: list[SourceFileEvidence] = []
-    schemas: list[str] = []
-    root = Path(allowed_root).resolve()
-    for file_path in files:
-        resolved, relative = _safe_path(file_path, root)
-        stat = resolved.stat()
-        schemas.append(str(pq.ParquetFile(resolved).schema_arrow))
-        content_hash = manifest_hashes.get(resolved.relative_to(source).as_posix()) if source.is_dir() else None
-        evidence.append(SourceFileEvidence(relative, stat.st_size, stat.st_mtime_ns, content_hash))
-    strength = "manifest_content_hash" if manifest_hashes and all(item.content_hash for item in evidence) else "metadata"
-    return SourceRevision(
-        source_id,
-        "parquet",
-        tuple(evidence),
-        typed_canonical_hash(schemas),
-        watermark,
-        strength,
-    )
-
-
 def require_source_unchanged(before: SourceRevision, after: SourceRevision) -> None:
     if before.revision_hash != after.revision_hash:
         raise SourceChangedError(
@@ -161,6 +124,5 @@ __all__ = [
     "SourceFileEvidence",
     "SourceRevision",
     "probe_duckdb_source",
-    "probe_parquet_source",
     "require_source_unchanged",
 ]

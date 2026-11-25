@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import replace
 
 import pytest
 
-from research_pipeline.platform import typed_canonical_hash
 from research_pipeline.research.statistics import (
     MINUTE_STATISTICS_CLAIM_CEILING,
     MinuteLabelReturn,
@@ -14,7 +12,6 @@ from research_pipeline.research.statistics import (
     build_minute_statistics_artifact,
     derive_minute_overlap_floors,
     derive_minute_trial_universe_hash,
-    recompute_minute_statistics_artifact,
 )
 
 
@@ -121,29 +118,3 @@ def test_overlap_metadata_determines_hac_and_embargo_floor() -> None:
     assert below["reported"]["status"] == "fail"
     with pytest.raises(StatisticsError, match="min_test_samples"):
         replace(_profile(), min_test_samples=29)
-
-
-def test_future_split_and_omitted_trials_fail_closed() -> None:
-    artifact = build_minute_statistics_artifact(
-        observations=_observations(),
-        profile=_profile(),
-    )
-    observations, assignments = _fact_rows()
-    assignments[0]["split"] = "test"
-    with pytest.raises(StatisticsError, match="独立重算"):
-        recompute_minute_statistics_artifact(
-            artifact,
-            observations=observations,
-            split_assignments=assignments,
-        )
-
-    omitted = deepcopy(artifact)
-    omitted["reported"]["trial_results"].pop()
-    body = {key: value for key, value in omitted.items() if key != "artifact_hash"}
-    omitted["artifact_hash"] = typed_canonical_hash(body)
-    with pytest.raises(StatisticsError, match="独立重算"):
-        recompute_minute_statistics_artifact(
-            omitted,
-            observations=observations,
-            split_assignments=_fact_rows()[1],
-        )

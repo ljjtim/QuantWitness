@@ -12,6 +12,9 @@ import pytest
 
 from research_pipeline.research.modeling.qlib import QlibModelError, fit_bundle, normalize_candidates, predict_bundle
 
+
+pytestmark = pytest.mark.ml
+
 SOURCE = Path(__file__).resolve().parents[1] / "examples/qlib_portfolio/extension/expressions.py"
 _spec = importlib.util.spec_from_file_location("public_qlib_expressions", SOURCE)
 _expressions = importlib.util.module_from_spec(_spec)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal, ROUND_HALF_UP
 import math
 from typing import Iterable, Iterator, Mapping, Sequence
@@ -20,6 +20,7 @@ from .errors import ProviderExecutionError, QualityGateError
 from .minute_quality import audit_adjustment_gate
 
 
+ADJUSTMENT_SNAPSHOT_ARTIFACT = "data.adjustment-factor-snapshot.v1"
 MINUTE_ADJUSTMENT_MANIFEST_VERSION = "minute-adjustment-manifest-v1"
 _ZONE = ZoneInfo("Asia/Shanghai")
 _PRICE_FIELDS = ("open", "high", "low", "close", "avg")
@@ -75,8 +76,9 @@ def build_adjustment_factor_snapshot(
     corporate_actions: Sequence[CorporateAction],
     effective_times: Mapping[date, datetime],
     previous_closes: Mapping[date, Decimal],
+    stock_openings: Mapping[date, tuple[Decimal, Decimal | None]] | None = None,
 ) -> AdjustmentFactorSnapshot:
-    """从前一已完成日因子和当时可见公司行动构造单标的快照。"""
+    """从股票开盘观测或前一已完成日和公司行动构造单标的快照。"""
 
     _require_aware(as_of, "as_of")
     _require_aware(applicable_start, "applicable_start")
@@ -87,10 +89,13 @@ def build_adjustment_factor_snapshot(
         raise QualityGateError("初始 factor 必须是正有限数")
     if asset_class not in {"cn_stock", "cn_etf"}:
         raise QualityGateError("复权快照只支持股票和 ETF")
+    if stock_openings is not None and (asset_class != "cn_stock" or not stock_openings):
+        raise QualityGateError("股票开盘因子仅支持有开盘观测的 cn_stock")
 
     actions_by_date: dict[date, tuple[CorporateAction, ...]] = {}
     for effective_date in sorted({item.effective_date for item in corporate_actions}):
-        effective_at = effective_times.get(effective_date)
+        effective_at = (datetime.combine(effective_date, time(9, 30), _ZONE)
+                        if stock_openings is not None else effective_times.get(effective_date))
         if effective_at is None:
             raise QualityGateError("公司行动缺少生效时点")
         _require_aware(effective_at, "effective_at")
@@ -128,23 +133,47 @@ def build_adjustment_factor_snapshot(
             None if current_reference is None else _decimal_text(current_reference),
         ))
 
-    for effective_date, actions in sorted(actions_by_date.items()):
-        effective_at = effective_times[effective_date]
+    transitions = sorted(actions_by_date.keys() | (stock_openings or {}).keys())
+    for effective_date in transitions:
+        actions = actions_by_date.get(effective_date, ())
+        if stock_openings is not None:
+            effective_at = datetime.combine(effective_date, time(9, 30), _ZONE)
+            if effective_at >= applicable_end or effective_at > as_of:
+                continue
+            observation = stock_openings.get(effective_date)
+            if observation is None:
+                raise QualityGateError(f"公司行动缺少股票开盘观测: {effective_date}")
+            next_factor, reference = observation
+            if not next_factor.is_finite() or next_factor <= 0:
+                raise QualityGateError(f"股票开盘 factor 必须是正有限数: {effective_date}")
+            if reference is not None and (not reference.is_finite() or reference <= 0):
+                raise QualityGateError(f"股票开盘前收必须是正有限数: {effective_date}")
+            if effective_at > applicable_start and next_factor == current_factor and not actions:
+                continue
+            # 首日盘中起跑可直接消费当天已可见的开盘观测。
+            effective_at = max(effective_at, applicable_start)
+            if next_factor == current_factor and not actions:
+                reference = None
+            unrounded = reference
+        else:
+            effective_at = effective_times[effective_date]
+            previous_close = previous_closes.get(effective_date)
+            if previous_close is None or not previous_close.is_finite() or previous_close <= 0:
+                raise QualityGateError("公司行动缺少正有限前收盘价")
+            next_factor, unrounded, reference = _apply_actions_to_factor(
+                current_factor=current_factor,
+                previous_close=previous_close,
+                actions=actions,
+                asset_class=asset_class,
+            )
         append_until(effective_at)
-        previous_close = previous_closes.get(effective_date)
-        if previous_close is None or not previous_close.is_finite() or previous_close <= 0:
-            raise QualityGateError("公司行动缺少正有限前收盘价")
-        next_factor, unrounded, reference = _apply_actions_to_factor(
-            current_factor=current_factor,
-            previous_close=previous_close,
-            actions=actions,
-            asset_class=asset_class,
-        )
         included.extend(actions)
         current_start = effective_at
         current_factor = next_factor
         current_action_hashes = tuple(sorted(item.action_hash for item in actions))
-        current_available = max(item.announcement_available_time for item in actions)
+        current_available = (datetime.combine(effective_date, time(9, 30), _ZONE)
+                             if stock_openings is not None else
+                             max(item.announcement_available_time for item in actions))
         current_unrounded = unrounded
         current_reference = reference
     append_until(applicable_end)
@@ -161,6 +190,7 @@ def build_adjustment_factor_snapshot(
         "segments": [item.to_dict() for item in segments],
         "included_action_hashes": list(included_hashes),
         "source_revision_hash": source_revision_hash,
+        **({"factor_source": "stock_session_open"} if stock_openings is not None else {}),
     }
     factor_snapshot_hash = typed_canonical_hash(provisional)
     event_available = max(
@@ -181,6 +211,7 @@ def build_adjustment_factor_snapshot(
         _decimal_text(initial_factor),
         tuple(segments),
         included_hashes,
+        factor_source="stock_session_open" if stock_openings is not None else "corporate_actions",
     )
 
 
@@ -257,31 +288,6 @@ def rebase_pre_window(
         transformed["adjustment_anchor_factor"] = float(anchor_factor)
         output.append(transformed)
     return tuple(output)
-
-
-def resolve_pre_anchor_factor(
-    *,
-    snapshot: AdjustmentFactorSnapshot,
-    candidate_actions: Sequence[CorporateAction],
-    effective_times: Mapping[date, datetime],
-    previous_closes: Mapping[date, Decimal],
-    selection_at: datetime,
-) -> Decimal:
-    """按单个 Feature decision 或 Label available time 复算 pre 锚点。"""
-
-    _require_aware(selection_at, "selection_at")
-    if selection_at > datetime.fromisoformat(snapshot.as_of):
-        raise QualityGateError("pre 锚点选择时点晚于快照研究时钟")
-    return _factor_at_transitions(
-        _decision_factor_transitions(
-            snapshot=snapshot,
-            candidate_actions=candidate_actions,
-            effective_times=effective_times,
-            previous_closes=previous_closes,
-            selection_at=selection_at,
-        ),
-        selection_at,
-    )
 
 
 class MinuteAdjustmentStream(Iterator[object]):
@@ -459,6 +465,13 @@ def _decision_factor_transitions(
     previous_closes: Mapping[date, Decimal],
     selection_at: datetime,
 ) -> tuple[tuple[datetime, Decimal], ...]:
+    if snapshot.factor_source == "stock_session_open":
+        snapshot.segment_at(selection_at)
+        return tuple(
+            (datetime.fromisoformat(segment.starts_at), Decimal(segment.factor))
+            for segment in snapshot.factor_segments
+            if datetime.fromisoformat(segment.available_at) <= selection_at
+        )
     transitions: list[tuple[datetime, Decimal]] = [
         (datetime.fromisoformat(snapshot.applicable_start), Decimal(snapshot.initial_factor))
     ]
@@ -564,6 +577,5 @@ __all__ = [
     "execute_minute_adjustment",
     "require_minute_price_mode",
     "rebase_pre_window",
-    "resolve_pre_anchor_factor",
     "round_ex_reference_price",
 ]

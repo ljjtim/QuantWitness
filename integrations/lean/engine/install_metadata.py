@@ -6,8 +6,9 @@ import shutil
 
 
 def install(source, target):
-    for name in ('market-hours', 'symbol-properties'):
-        shutil.copytree(source / name, target / name, dirs_exist_ok=True)
+    if source.resolve() != target.resolve():
+        for name in ('market-hours', 'symbol-properties'):
+            shutil.copytree(source / name, target / name, dirs_exist_ok=True)
     properties = target / 'symbol-properties/symbol-properties-database.csv'
     with properties.open(encoding='utf-8-sig', newline='') as stream:
         rows = list(csv.reader(stream))

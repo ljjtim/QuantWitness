@@ -3,22 +3,23 @@ from __future__ import annotations
 from datetime import date
 
 import duckdb
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from research_pipeline.catalog import (
     CompiledCatalog,
+    DatasetContract,
     DriftAttestation,
+    FieldContract,
+    PhysicalBindingContract,
     PolicyContract,
 )
-from research_pipeline.catalog.discovery import ObjectExecutionEvidence
+from research_pipeline.catalog.compiler import COMPILER_VERSION, LOCK_FORMAT_VERSION
+from research_pipeline.catalog.discovery import ObjectExecutionEvidence, PhysicalColumn, PhysicalInventory
 from research_pipeline.data_plane import (
     DataPlaneExecutionBudget,
     DuckDBColumnarProvider,
     FilterOperator,
     FilterPredicate,
-    ParquetColumnarProvider,
     ProviderExecutionError,
     QueryBudget,
     QueryIR,
@@ -34,8 +35,60 @@ from research_pipeline.data_plane.providers.sql import _duckdb_type
 from research_pipeline.platform import typed_canonical_hash
 
 
+def _provider_catalog() -> CompiledCatalog:
+    """三列合成行情沿用供应器测试的字段、物理映射和日线可见规则。"""
+    policies = (
+        PolicyContract("available.daily.v1", 1, "availability", {"available_after": "next_session_open"}),
+        PolicyContract("drift.strict.v1", 1, "schema_drift", {"schema_changed": "reject"}),
+        PolicyContract("revision.none.v1", 1, "revision", {"mode": "none"}),
+    )
+    columns = (
+        ("date", "date32", "DATE", "date", "day", False),
+        ("code", "string", "VARCHAR", "identifier", "dimensionless", False),
+        ("close", "float64", "DOUBLE", "price", "CNY", True),
+    )
+    fields = tuple(
+        FieldContract(
+            f"fld_equity_daily_{name}", f"synthetic.daily.{name}", 1,
+            logical_type, semantic, unit, nullable, "available.daily.v1",
+            ("daily",), ("stock",), adjustment_allowed=("unadjusted",),
+        )
+        for name, logical_type, _, semantic, unit, nullable in columns
+    )
+    field_ids = tuple(field.field_id for field in fields)
+    dataset = DatasetContract(
+        "cn_equity.daily_bar", 3, "cn_stock", "stock", "daily",
+        field_ids[:2], field_ids, field_ids[0], "available.daily.v1",
+        "drift.strict.v1", field_ids[:2],
+    )
+    inventory = PhysicalInventory(
+        "duckdb", "source", "prod", "daily_price_unadjusted",
+        tuple(PhysicalColumn(name, sql_type, True, index)
+              for index, (name, _, sql_type, _, _, _) in enumerate(columns)),
+    )
+    binding = PhysicalBindingContract(
+        "cn_equity.daily_bar.local.v1", 3, dataset.dataset_id, 3,
+        "source", "prod", inventory.object_name, inventory.schema_revision,
+        "drift.strict.v1",
+        {field.field_id: {"kind": "direct", "column": column[0]}
+         for field, column in zip(fields, columns, strict=True)},
+    )
+    payload = {
+        "lock_format_version": LOCK_FORMAT_VERSION,
+        "compiler_version": COMPILER_VERSION,
+        "compile_id": typed_canonical_hash({"fixture": "provider.daily.v1"})[:24],
+        "fields": [field.to_dict() for field in fields],
+        "datasets": [dataset.to_dict()],
+        "policies": [policy.to_dict() for policy in policies],
+        "bindings": [binding.to_dict()],
+        "transforms": [],
+    }
+    payload["catalog_hash"] = typed_canonical_hash(payload)
+    return CompiledCatalog.from_payload(payload)
+
+
 def _plan(*, max_rows=100, max_bytes=1_000_000, batch_size=2, end=date(2025, 1, 10), instruments=("000001.XSHE", "600000.XSHG")):
-    catalog = CompiledCatalog.load_default()
+    catalog = _provider_catalog()
     binding = catalog.bindings["cn_equity.daily_bar.local.v1"]
     policy = PolicyContract(**dict(catalog.policies[binding["drift_policy_id"]]))
     attestation = DriftAttestation(
@@ -125,7 +178,7 @@ def _data_plane_execution_budget(operator_plan, registry):
     return DataPlaneExecutionBudget.from_resource_budget(matches[0].resource_budget)
 
 
-def test_duckdb_and_parquet_share_arrow_contract(tmp_path):
+def test_duckdb_provider_arrow_contract(tmp_path):
     plan = _plan()
     db = tmp_path / "source.duckdb"
     with duckdb.connect(str(db)) as connection:
@@ -134,27 +187,18 @@ def test_duckdb_and_parquet_share_arrow_contract(tmp_path):
             "INSERT INTO daily_price_unadjusted VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
             [date(2025, 1, 3), "000001.XSHE", 11.0, date(2025, 1, 2), "600000.XSHG", 12.0, date(2025, 1, 2), "000001.XSHE", 10.0],
         )
-    parquet = tmp_path / "source.parquet"
-    pq.write_table(pa.table(_rows()), parquet)
-
-    outputs = []
-    for provider in (
-        DuckDBColumnarProvider(db),
-        ParquetColumnarProvider(parquet, allowed_root=tmp_path),
-    ):
-        budget = _execution_budget()
-        with provider.open_stream(
-            plan,
-            execution_budget=budget,
-            execution_estimate=_execution_estimate(plan, budget),
-            scratch_root=tmp_path / "scratch",
-        ) as stream:
-            table = stream.read_table()
-            outputs.append(table.to_pylist())
-            assert stream.closed
-            assert table.column_names == list(plan.query.field_ids)
-    assert outputs[0] == outputs[1]
-    assert outputs[0][0]["fld_equity_daily_code"] == "000001.XSHE"
+    budget = _execution_budget()
+    with DuckDBColumnarProvider(db).open_stream(
+        plan,
+        execution_budget=budget,
+        execution_estimate=_execution_estimate(plan, budget),
+        scratch_root=tmp_path / "scratch",
+    ) as stream:
+        table = stream.read_table()
+        output = table.to_pylist()
+        assert stream.closed
+        assert table.column_names == list(plan.query.field_ids)
+    assert [row["fld_equity_daily_code"] for row in output] == ["000001.XSHE", "600000.XSHG", "000001.XSHE"]
 
 
 def test_stream_budget_closes_resources(tmp_path):
@@ -173,18 +217,6 @@ def test_stream_budget_closes_resources(tmp_path):
         next(stream)
     assert stream.closed
 
-
-def test_parquet_rejects_path_escape_and_uncommitted_directory(tmp_path):
-    outside = tmp_path.parent / "outside.parquet"
-    pq.write_table(pa.table(_rows()), outside)
-    with pytest.raises(ProviderExecutionError, match="允许根目录"):
-        ParquetColumnarProvider(outside, allowed_root=tmp_path)
-    uncommitted = tmp_path / "snapshot"
-    uncommitted.mkdir()
-    pq.write_table(pa.table(_rows()), uncommitted / "part-00000.parquet")
-    with pytest.raises(ProviderExecutionError, match="尚未提交"):
-        ParquetColumnarProvider(uncommitted, allowed_root=tmp_path)
-    outside.unlink()
 
 
 @pytest.mark.parametrize(

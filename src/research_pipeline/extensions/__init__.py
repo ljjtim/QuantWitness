@@ -1,9 +1,6 @@
 """受控扩展清单公共 API。"""
 
-from .contracts import EXTENSION_CONTRACT_VERSION, DeterminismPolicy, ExtensionDescriptor, ExtensionKind, ResourceProfile
 from .errors import ExtensionError
-from .manifest import EXTENSION_MANIFEST_VERSION, CompiledExtensionManifest, compile_extension_manifest
-from .registry import ControlledExtensionRegistry, RegisteredExtension
 from .operators import (
     CompiledOperatorManifest,
     OperatorDefinition,
@@ -12,7 +9,6 @@ from .operators import (
     TrustedOperatorRegistry,
     compile_operator_manifest,
 )
-from .projections import ExtensionProjection, project_extensions
 from .project_bundle import (
     PROJECT_OPERATOR_ABI_VERSION,
     PROJECT_OPERATOR_BUNDLE_VERSION,
@@ -57,19 +53,19 @@ from research_pipeline.platform.operator_contracts import (
 
 __all__ = [
     "build_project_model_adapter",
-    "EXTENSION_CONTRACT_VERSION", "EXTENSION_MANIFEST_VERSION", "OPERATOR_CONTRACT_VERSION",
+    "OPERATOR_CONTRACT_VERSION",
     "OPERATOR_GRAPH_ADMISSION_VERSION", "OPERATOR_GRAPH_RECIPE_VERSION", "STRATEGY_CONTRACT_VERSION",
     "PROJECT_OPERATOR_ABI_VERSION", "PROJECT_OPERATOR_BUNDLE_VERSION",
     "PROJECT_OPERATOR_DECLARATION_VERSION",
-    "AdmittedOperatorGraph", "AdmittedProjectOperatorRegistry", "CompiledExtensionManifest", "CompiledOperatorManifest", "ControlledExtensionRegistry",
-    "DeterminismPolicy", "ExtensionDescriptor", "ExtensionError", "ExtensionKind",
-    "ExtensionProjection", "InputBinding", "OperatorContractError", "OperatorDefinition", "OperatorGraphRecipe",
+    "AdmittedOperatorGraph", "AdmittedProjectOperatorRegistry", "CompiledOperatorManifest",
+    "ExtensionError",
+    "InputBinding", "OperatorContractError", "OperatorDefinition", "OperatorGraphRecipe",
     "OperatorImplementationRef",
     "OperatorNodeRecipe", "OperatorSpec", "ParameterSpec", "ParameterType", "PortSpec",
     "ProjectArtifactCommit", "ProjectArtifactInput", "ProjectDirectoryCommit", "ProjectOperatorBundleManifest",
     "ProjectOperatorContext", "ProjectOperatorDeclaration", "ProjectOperatorImplementationToken", "ProjectOperatorPermissionProfile",
-    "RegisteredExtension", "RegisteredOperatorBinding", "ResourceProfile", "StrategyRole",
+    "RegisteredOperatorBinding", "StrategyRole",
     "StrategySelection", "StrategySpec", "TrustedOperatorRegistry",
-    "build_admitted_operator_registry", "compile_extension_manifest", "compile_operator_manifest", "compile_project_operator_bundle", "project_extensions",
+    "build_admitted_operator_registry", "compile_operator_manifest", "compile_project_operator_bundle",
     "load_project_operator_declaration", "project_source_hash", "verify_project_operator_bundle",
 ]

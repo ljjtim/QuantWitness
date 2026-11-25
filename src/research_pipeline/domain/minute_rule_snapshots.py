@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
+
 from research_pipeline.platform.asset_taxonomy import MINUTE_TARGET_ASSET_CLASSES
 from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from functools import cached_property, lru_cache
+from functools import cached_property, lru_cache, partial
 import hashlib
 from importlib.resources import files
 import json
+from operator import itemgetter
 from pathlib import Path
 import re
 
 from research_pipeline.platform import typed_canonical_hash
-from research_pipeline.platform.canonical import typed_canonical_bytes
+from research_pipeline.platform.canonical import canonical_json, typed_canonical_bytes
+from research_pipeline.platform.errors import CanonicalEncodingError, DomainContractError
 from research_pipeline.platform.minute_reference import (
     require_published_minute_capability_binding,
 )
-from .models import DomainContractError
+from research_pipeline.platform.validation import (
+    parse_aware_seconds, require_aware, require_integer, require_mapping, require_text,
+)
 from .session_calendar import (
     published_session_bundle_hash,
     SessionCalendarError,
@@ -71,7 +76,11 @@ def _snapshot_identity_parts(
     encoded = typed_canonical_bytes(payload)
     before, rest = encoded.split(b'"instrument_id":' + _NULL_IDENTITY_VALUE, 1)
     middle, after = rest.split(b'"parameters":' + _NULL_IDENTITY_VALUE, 1)
-    return before + b'"instrument_id":', middle + b'"parameters":', after
+    return (
+        before[len(_CANONICAL_VALUE_PREFIX):] + b'"instrument_id":',
+        middle + b'"parameters":',
+        after[:-1],
+    )
 
 
 @lru_cache(maxsize=8192)
@@ -87,8 +96,14 @@ def _scalar_parameters_bytes(
 @lru_cache(maxsize=8192)
 def _scalar_parameter_bytes(key, kind, value):
     # 不同逐日参数模板中的相同字段共用原codec字节，避免整份模板重复编码。
-    encoded = _identity_value_bytes({key: float.fromhex(value) if kind is float else value})
-    return encoded[len(b'{"type":"object","value":{'):-2]
+    return _parameter_key_bytes(key) + _identity_value_bytes(float.fromhex(value) if kind is float else value)
+
+
+@lru_cache(maxsize=256)
+def _parameter_key_bytes(key: str) -> bytes:
+    if not isinstance(key, str):
+        raise CanonicalEncodingError("canonical payload 的 mapping key 必须是字符串")
+    return canonical_json(key).encode("utf-8") + b":"
 
 
 @lru_cache(maxsize=256)
@@ -180,9 +195,11 @@ class MinuteRuleSnapshot:
     def __post_init__(self) -> None:
         if self.contract_version != MINUTE_RULE_VERSION or self.revision < 1:
             raise MinuteRuleSnapshotError("规则合同版本或 revision 无效")
-        if any(not isinstance(item, str) or not item.strip() for item in (
-            self.rule_id, self.instrument_id, self.asset_class
-        )):
+        if not (
+            isinstance(self.rule_id, str) and self.rule_id.strip()
+            and isinstance(self.instrument_id, str) and self.instrument_id.strip()
+            and isinstance(self.asset_class, str) and self.asset_class.strip()
+        ):
             raise MinuteRuleSnapshotError("规则身份字段不完整")
         if self.status not in {"supported", "unsupported"}:
             raise MinuteRuleSnapshotError("规则状态不受支持")
@@ -190,7 +207,7 @@ class MinuteRuleSnapshot:
             raise MinuteRuleSnapshotError("规则有效期倒置")
         if self.source_ids != tuple(sorted(set(self.source_ids))):
             raise MinuteRuleSnapshotError("source_ids 必须排序且唯一")
-        if self.parameters != tuple(sorted(self.parameters, key=lambda item: item[0])):
+        if self.parameters != tuple(sorted(self.parameters, key=itemgetter(0))):
             raise MinuteRuleSnapshotError("规则参数必须按名称排序")
         if len({key for key, _ in self.parameters}) != len(self.parameters):
             raise MinuteRuleSnapshotError("规则参数不能重复")
@@ -205,7 +222,7 @@ class MinuteRuleSnapshot:
         ):
             raise MinuteRuleSnapshotError("不支持规则只能携带来源和稳定拒绝原因")
 
-    @property
+    @cached_property
     def snapshot_hash(self) -> str:
         # 标量参数不可变；含列表或mapping的规则继续按当前内容计算。
         if self._scalar_parameters:
@@ -221,6 +238,11 @@ class MinuteRuleSnapshot:
         return hashlib.sha256(self._scalar_identity_bytes()).hexdigest()
 
     def _scalar_identity_bytes(self) -> bytes:
+        return b"".join((
+            _CANONICAL_VALUE_PREFIX, self._scalar_identity_value(), b"}",
+        ))
+
+    def _scalar_identity_value(self) -> bytes:
         before, middle, after = _snapshot_identity_parts((
             self.rule_id, self.revision, self.asset_class, self.status,
             self.effective_from.isoformat(), self.effective_to.isoformat(),
@@ -232,8 +254,8 @@ class MinuteRuleSnapshot:
             for key, value in self.parameters
         )
         return b"".join((
-            before, _instrument_identity_bytes(self.instrument_id), middle,
-            _scalar_parameters_bytes(parameters), after,
+            before, _instrument_identity_bytes(self.instrument_id),
+            middle, _scalar_parameters_bytes(parameters), after,
         ))
 
     def to_dict(self) -> dict[str, object]:
@@ -283,7 +305,7 @@ class MinuteRuleBinding:
     source_hashes: tuple[tuple[str, str], ...]
     decision_at: datetime
 
-    @property
+    @cached_property
     def identity_hash(self) -> str:
         before, after = _binding_identity_parts(self.source_hashes)
         return hashlib.sha256(b"".join((
@@ -378,6 +400,9 @@ class MinuteRuleSnapshotBundle:
                     raise MinuteRuleSnapshotError("项目期货规则须使用真实合约")
                 required = set(next(item.required_rule_ids for item in manifest.coverages
                                     if item.instrument.asset_class == instrument.asset_class))
+                if instrument.asset_class == "cn_stock":
+                    # 项目原价执行可直接绑定公司行动；复权消费者在请求覆盖时仍需因子规则。
+                    required.discard("rule.cn_stock.adjustment_factor_snapshot.v1")
                 rules = revisions_by_instrument.get(instrument.instrument_id, {})
                 missing = required - rules.keys()
                 if missing:
@@ -435,8 +460,7 @@ class MinuteRuleSnapshotBundle:
         for position, rule in enumerate(self.rules):
             if position:
                 digest.update(b",")
-            encoded_rule = rule._scalar_identity_bytes()
-            digest.update(encoded_rule[len(_CANONICAL_VALUE_PREFIX):-1])
+            digest.update(rule._scalar_identity_value())
         digest.update(b"]}" + after)
         return digest.hexdigest()
 
@@ -574,6 +598,11 @@ class MinuteRuleResolver:
             if rule.available_at is not None and start < rule.available_at <= end}))
 
     def resolve(self, *, rule_id: str, instrument_id: str, effective_on: date, as_of: datetime) -> MinuteRuleBinding:
+        rule = self.resolve_rule(rule_id=rule_id, instrument_id=instrument_id,
+                                 effective_on=effective_on, as_of=as_of)
+        return MinuteRuleBinding(rule, self._source_bindings[rule.source_ids], as_of)
+
+    def resolve_rule(self, *, rule_id: str, instrument_id: str, effective_on: date, as_of: datetime) -> MinuteRuleSnapshot:
         current = _aware(as_of, "as_of")
         if type(effective_on) is not date:
             raise MinuteRuleSnapshotError("effective_on 必须是明确交易日，不能传 datetime")
@@ -582,7 +611,7 @@ class MinuteRuleResolver:
         if cached is not None:
             cached_date, first_at, next_at, selected = cached
             if effective_on == cached_date and first_at <= current and (next_at is None or current < next_at):
-                return MinuteRuleBinding(selected, self._source_bindings[selected.source_ids], current)
+                return selected
         has_candidates = False
         rule = None
         next_at = None
@@ -610,7 +639,7 @@ class MinuteRuleResolver:
             raise MinuteRuleSnapshotError(f"rule_snapshot_unsupported:{rule.unsupported_reason}")
         # 只在同一业务日期及已检查的可见区间内复用；时间回退或新版本可见时重新选版。
         self._visible_rules[key] = (effective_on, current, next_at, rule)
-        return MinuteRuleBinding(rule, self._source_bindings[rule.source_ids], current)
+        return rule
 
     def resolve_actual_contract(self, *, requested_id: str, effective_on: date, as_of: datetime) -> str:
         binding = self.resolve(
@@ -649,10 +678,8 @@ def load_minute_rule_snapshot_bundle(
     return bundle
 
 
-def _mapping(value: object, field: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
-        raise MinuteRuleSnapshotError(f"{field} 必须是字符串键 mapping")
-    return value
+_mapping = partial(require_mapping, error=MinuteRuleSnapshotError,
+                   string_keys=True, requirement="必须是字符串键 mapping")
 
 
 def _exact(value: Mapping[str, object], expected: set[str], field: str) -> None:
@@ -660,20 +687,14 @@ def _exact(value: Mapping[str, object], expected: set[str], field: str) -> None:
         raise MinuteRuleSnapshotError(f"{field} schema 不匹配")
 
 
-def _text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise MinuteRuleSnapshotError(f"{field} 必须是非空字符串")
-    return value
+_text = partial(require_text, error=MinuteRuleSnapshotError)
 
 
 def _optional_text(value: object, field: str) -> str | None:
     return None if value is None else _text(value, field)
 
 
-def _integer(value: object, field: str) -> int:
-    if type(value) is not int:
-        raise MinuteRuleSnapshotError(f"{field} 必须是整数")
-    return value
+_integer = partial(require_integer, error=MinuteRuleSnapshotError)
 
 
 def _list(value: object, field: str, *, allow_empty: bool = False) -> list[object] | tuple[object, ...]:
@@ -694,21 +715,11 @@ def _date(value: object, field: str) -> date:
 
 
 def _datetime(value: object, field: str) -> datetime:
-    raw = _text(value, field)
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError as exc:
-        raise MinuteRuleSnapshotError(f"{field} 必须是带时区 ISO 时间") from exc
-    parsed = _aware(parsed, field)
-    if raw != parsed.isoformat(timespec="seconds"):
-        raise MinuteRuleSnapshotError(f"{field} 必须使用规范秒精度 ISO 时间")
-    return parsed
+    return parse_aware_seconds(_text(value, field), field, error=MinuteRuleSnapshotError,
+                               timezone_requirement="必须是带时区时点")
 
 
-def _aware(value: datetime, field: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-        raise MinuteRuleSnapshotError(f"{field} 必须是带时区时点")
-    return value
+_aware = partial(require_aware, error=MinuteRuleSnapshotError, requirement="必须是带时区时点")
 
 
 def _hash(value: object, field: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,8 +12,7 @@ import pytest
 
 from research_pipeline.platform.causal_time import (
     CausalTimeContractError,
-    attach_core_feature_time_facts,
-    build_core_feature_time_facts,
+    attach_core_time_facts_arrow,
     validate_label_time_facts,
 )
 from research_pipeline.runtime import ExternalArtifactStore, RuntimeIntegrityError
@@ -23,120 +23,46 @@ def _at(day: int, hour: int = 15) -> datetime:
     return datetime(2024, 1, day, hour, tzinfo=timezone.utc)
 
 
-def _feature_source() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "date": ["2024-01-02", "2024-01-03"],
-            "code": ["000001.XSHE", "000001.XSHE"],
-            "decision_time": [_at(2, 16), _at(3, 16)],
-            "observation_at": [_at(2), _at(3)],
-            "available_at": [_at(2, 15), _at(3, 15)],
-            "source_partition_id": ["2024-01-02", "2024-01-03"],
-        }
-    )
-
-
-def test_feature_rejects_observation_after_actual_decision() -> None:
-    source = _feature_source()
-    source.loc[0, "observation_at"] = _at(2, 17)
-
-    with pytest.raises(CausalTimeContractError, match="观测时间晚于决策时间"):
-        build_core_feature_time_facts(
-            source,
-            key_columns=("date", "code"),
-            decision_time_column="decision_time",
-            observation_time_column="observation_at",
-            available_time_column="available_at",
-            source_partition_column="source_partition_id",
+@pytest.mark.parametrize("change", [None, "duplicate", "missing", "type", "future", "partitions"])
+def test_arrow_causal_join_preserves_exact_values_and_rejects_invalid_facts(change):
+    declared = [_at(2, 16), _at(3, 16)]
+    values = pa.table({
+        "code": ["B", "A"],
+        "value": pa.array(
+            [Decimal("9007199254740993.11"), Decimal("9007199254740993.12")],
+            type=pa.decimal128(20, 2),
+        ),
+    })
+    facts = {
+        "code": ["A", "B"],
+        "decision_time": declared,
+        "max_source_observation_time": declared,
+        "max_source_available_time": declared,
+        "source_partition_ids": [["first", "second"], ["third"]],
+    }
+    if change == "duplicate":
+        values = values.set_column(0, "code", pa.array(["A", "A"]))
+        facts["code"] = ["A", "A"]
+    elif change == "missing":
+        facts["code"] = ["A", "C"]
+    elif change == "type":
+        values = values.set_column(0, "code", pa.array([1, 2]))
+        facts["code"] = ["01", "02"]
+    elif change == "future":
+        facts["max_source_available_time"] = [_at(2, 17), _at(3, 16)]
+    elif change == "partitions":
+        facts["source_partition_ids"] = [["second", "second"], ["third"]]
+    if change:
+        with pytest.raises(CausalTimeContractError):
+            attach_core_time_facts_arrow(values, pa.table(facts), key_columns=("code",), is_feature=True)
+    else:
+        combined = attach_core_time_facts_arrow(
+            values, pa.table(facts), key_columns=("code",), is_feature=True,
         )
+        assert combined.select(["code", "value"]).equals(values)
+        assert combined["max_source_available_time"].to_pylist() == declared[::-1]
+        assert combined["source_partition_ids"].to_pylist() == [["third"], ["first", "second"]]
 
-
-def test_feature_rejects_source_available_after_actual_decision() -> None:
-    source = _feature_source()
-    source.loc[0, "available_at"] = _at(2, 17)
-
-    with pytest.raises(CausalTimeContractError, match="可见时间晚于决策时间"):
-        build_core_feature_time_facts(
-            source,
-            key_columns=("date", "code"),
-            decision_time_column="decision_time",
-            observation_time_column="observation_at",
-            available_time_column="available_at",
-            source_partition_column="source_partition_id",
-        )
-
-
-def test_feature_rejects_naive_actual_source_time() -> None:
-    source = _feature_source()
-    source["observation_at"] = source["observation_at"].astype(object)
-    source.loc[0, "observation_at"] = datetime(2024, 1, 2, 15)
-
-    with pytest.raises(CausalTimeContractError, match="必须是带时区时间"):
-        build_core_feature_time_facts(
-            source,
-            key_columns=("date", "code"),
-            decision_time_column="decision_time",
-            observation_time_column="observation_at",
-            available_time_column="available_at",
-            source_partition_column="source_partition_id",
-        )
-
-
-@pytest.mark.parametrize(
-    "protected_column",
-    ("max_source_observation_time", "max_source_available_time"),
-)
-def test_project_values_cannot_override_core_feature_time_facts(
-    protected_column: str,
-) -> None:
-    facts = build_core_feature_time_facts(
-        _feature_source(),
-        key_columns=("date", "code"),
-        decision_time_column="decision_time",
-        observation_time_column="observation_at",
-        available_time_column="available_at",
-        source_partition_column="source_partition_id",
-    )
-    project_values = pd.DataFrame(
-        {
-            "date": ["2024-01-02", "2024-01-03"],
-            "code": ["000001.XSHE", "000001.XSHE"],
-            "feature_value": [1.0, 2.0],
-            protected_column: [_at(1), _at(1)],
-        }
-    )
-
-    with pytest.raises(CausalTimeContractError, match="扩展不得填写核心时间事实"):
-        attach_core_feature_time_facts(
-            project_values,
-            facts,
-            key_columns=("date", "code"),
-        )
-
-
-def test_project_feature_values_must_match_core_fact_keys_exactly() -> None:
-    facts = build_core_feature_time_facts(
-        _feature_source(),
-        key_columns=("date", "code"),
-        decision_time_column="decision_time",
-        observation_time_column="observation_at",
-        available_time_column="available_at",
-        source_partition_column="source_partition_id",
-    )
-    project_values = pd.DataFrame(
-        {
-            "date": ["2024-01-02", "2024-01-04"],
-            "code": ["000001.XSHE", "000001.XSHE"],
-            "feature_value": [1.0, 2.0],
-        }
-    )
-
-    with pytest.raises(CausalTimeContractError, match="行键不闭合"):
-        attach_core_feature_time_facts(
-            project_values,
-            facts,
-            key_columns=("date", "code"),
-        )
 
 
 def test_label_requires_strict_actual_future_observations() -> None:
@@ -281,13 +207,15 @@ def test_project_formal_feature_commit_attaches_core_time_context(
         ),
         target,
     )
-    facts = build_core_feature_time_facts(
-        _feature_source(),
-        key_columns=("date", "code"),
-        decision_time_column="decision_time",
-        observation_time_column="observation_at",
-        available_time_column="available_at",
-        source_partition_column="source_partition_id",
+    facts = pd.DataFrame(
+        {
+            "date": ["2024-01-02", "2024-01-03"],
+            "code": ["000001.XSHE", "000001.XSHE"],
+            "decision_time": [_at(2, 16), _at(3, 16)],
+            "max_source_observation_time": [_at(2), _at(3)],
+            "max_source_available_time": [_at(2, 15), _at(3, 15)],
+            "source_partition_ids": [["2024-01-02"], ["2024-01-03"]],
+        }
     )
 
     commit = store.commit(
@@ -295,7 +223,7 @@ def test_project_formal_feature_commit_attaches_core_time_context(
         artifact_name="features",
         artifact_type="research.feature-set.v1",
         producer_scope="project",
-        core_time_facts=facts,
+        core_time_facts=pa.Table.from_pandas(facts, preserve_index=False),
         causal_time_key_columns=("date", "code"),
     )
 

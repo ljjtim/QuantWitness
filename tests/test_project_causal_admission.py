@@ -195,3 +195,30 @@ def test_causal_plan_changes_recipe_identity_and_keeps_date_timezone():
     changed = deepcopy(declaration)
     changed["state_scope"] = "carry"
     assert _recipe(declaration).recipe_hash != _recipe(changed).recipe_hash
+
+
+def test_causal_source_verification_tracks_parquet_snapshot_tuple_and_detects_change(tmp_path):
+    from research_pipeline.platform.causal_time import CausalTimeContractError
+    from research_pipeline.runtime.project_causal_worker import CausalArchiveReaders
+
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    data_file = snapshot / "part-00000.parquet"
+    data_file.write_bytes(b"parquet-v1")
+    (snapshot / "manifest.json").write_text("{}", encoding="utf-8")
+    (snapshot / "COMMITTED").write_text("", encoding="utf-8")
+    readers = CausalArchiveReaders()
+    expected = ({"files": [{"relative_path": "part-00000.parquet"}]}, ("stamp-v1",))
+
+    assert readers.verification.resolve(
+        "parquet_snapshot", str(snapshot), lambda: expected, descriptor={"path": snapshot}
+    ) == expected
+    assert readers.verification.resolve(
+        "parquet_snapshot", str(snapshot), lambda: expected, descriptor={"path": snapshot}
+    ) == expected
+
+    data_file.write_bytes(b"parquet-v2-modified")
+    with pytest.raises(CausalTimeContractError, match="因果会话归档来源发生变化"):
+        readers.verification.resolve(
+            "parquet_snapshot", str(snapshot), lambda: expected, descriptor={"path": snapshot}
+        )

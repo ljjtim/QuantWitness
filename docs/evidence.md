@@ -5,7 +5,7 @@
 ## 开始前
 
 - 输入：已经原子发布的正式 Result。
-- 输出：报告、比较、分析结果或导出的 Result 副本。
+- 输出：报告、比较或导出的 Result 副本。
 - 命令中的尖括号内容是待替换参数。
 
 ## 使用顺序
@@ -16,7 +16,7 @@
 4. 结合指标定义、样本和限制解释结论。
 5. 保存 Result 和实际输入依赖。
 
-Result 保存一次研究的正式计算输出、运行摘要、配置、代码和输入版本引用。报告、比较、分析、导出和 AI 开发反馈直接消费它。
+Result 保存一次研究的正式计算输出、运行摘要、配置、代码和输入版本引用。报告、比较、导出和 AI 开发反馈直接消费它。
 
 ## Result 保存什么
 
@@ -116,17 +116,6 @@ python -m research_pipeline export-result --result <Result目录> --output <新�
 每个已声明指标在其正式生产表中恰好一行。`ResultSpec`与可达性证明共同绑定生产节点、端口、工件及schema。
 
 发布入口在原子发布前检查正式指标行。直接读取、报告及比较沿用同一行合同。失败时异常指明指标引用、字段、实际值或类型和期望，不能把报告无法消费的表当成已完成指标。具体运行命令及Python、CLI消费者验收见示例README。
-
-## 时间序列分析
-
-analysis 生成独立 AnalysisResult，不修改 Result 或提高结论级别。请求显式指定 Result ID、日期列、数值列、日期窗口、频率、单位、费用和缺失值政策。
-
-```powershell
-python -m research_pipeline analysis run --result <Result目录> --request <AnalysisRequest.yaml> --output <新AnalysisResult.json> --json
-python -m research_pipeline analysis compare --analysis-result <左AnalysisResult.json> --analysis-result <右AnalysisResult.json> --measure overall.compounded_return --direction higher_is_better --output <新AnalysisComparison.json> --json
-```
-
-只对明确声明的非重叠期间收益计算复利、几何年化与最大回撤。水平值只计算水平与绝对变化。比较要求分析规格、实际窗口和声明事实一致，不满足时返回稳定原因和空排名。
 
 ## 正确性由哪里保证
 

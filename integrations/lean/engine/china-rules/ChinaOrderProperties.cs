@@ -6,6 +6,7 @@ namespace QuantWitness.Lean.China;
 /// <summary>人民币每股保护价；不改变原生 Market／MOO 的订单类型和撮合价格。</summary>
 public sealed class ChinaOrderProperties : OrderProperties
 {
+    public override bool PreserveMarketOrder => true;
     public decimal? ProtectionPrice { get; set; }
     /// <summary>买单累计成交额及费用的人民币硬上限；随委托固定。</summary>
     public decimal? BudgetCny { get; set; }

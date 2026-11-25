@@ -2,7 +2,7 @@
 
 QuantWitness 是量化研究与回测框架。你提供数据、计算方法和评价范围。框架检查数据时点，执行计算，保存正式结果。
 
-当前源码版本为 **1.6.0**。发布状态见 [Releases](https://github.com/ljjtim/QuantWitness/releases)。
+当前源码版本为 **1.7.0**。发布状态见 [Releases](https://github.com/ljjtim/QuantWitness/releases)。
 
 第一次使用，从[换手率因子入门](docs/workspace-quickstart.md)开始。教程采用合成数据，不需要行情账号或个人数据库。
 
@@ -18,9 +18,25 @@ QuantWitness 是量化研究与回测框架。你提供数据、计算方法和�
 | 回测股票、ETF和期货策略 | 本地LEAN引擎 | [首次回测](examples/lean_quickstart/README.md) |
 | 让AI提出因子或模型候选 | 可选RD-Agent集成 | [安装与配置](integrations/rdagent/docs/installation.md) |
 | 查看、比较和导出结果 | Result结果接口 | [结果文档](docs/evidence.md) |
-| 中断后继续研究 | 事件与检查点 | [恢复文档](docs/runtime.md) |
+| 中断后继续研究 | 事件、检查点和工件保留 | [恢复文档](docs/runtime.md) · [工件生命周期](docs/artifact-lifecycle.md) |
 
 特定因子公式、资产池和参数属于研究项目。框架通过项目扩展读取这些声明。
+
+默认串行运行监测节点的内存、临时磁盘、进程数和耗时，进程总容量为 6 槽。多个独立运行可显式共用资源池。见[资源预算](docs/project_resource_budgets.md)。
+
+股票送转按登记、除权、实际到账和上市可卖分别处理。实际到账日缺失时，可显式采用应收股份模型：保留空源日期，除权后估值、真实上市日结转，策略账户可读取逐证券应收。数据要求及限制见[公司行动执行合同](docs/lean-execution.md)。
+
+## 原生LEAN策略
+
+项目算法直接继承Python或C#的QCAlgorithm，使用原生指标、History、SetWarmUp、Universe、Scheduled Events、订单票据、Chart和ObjectStore。统一数据服务执行冻结来源和PIT可见规则，中国市场模型直接检查原生订单、资金和权益；准入不运行选股或回测。
+
+现货分钟支持Market、Limit、MarketOnOpen，日线使用Market开盘模型；人民币期货支持Market/Limit、DAY/IOC与显式开平。Stop、TrailingStop和所有TIF不属于当前支持承诺。正式 simulation.v4 用业务列式 Parquet 保存八张执行表，金融指标、原生输出及实际依赖随 Result 封存。历史Result保持只读，旧项目函数回调不保留兼容入口。
+
+原生接入的输入、交易和结果合同见[算法声明](docs/strategy-protocol.md)、[执行合同](docs/lean-execution.md)与[原生结果](docs/lean-native-results.md)。
+
+冻结计划按名称复用股票池和交易时段。LEAN 安装的完整文件清单保存在安装目录，计划和 Result 保存审计引用。报告按所需表和列读取 Result，指标表在一次报告中只读取一次。见[准入与执行](docs/admission-execution.md)。
+
+股票分钟研究可通过 `stock_open_state_request_id` 绑定当日开盘的供应商原始复权因子。成交仍用原始行情，权益由公司行动决定。参数、可见时点及适用范围见[执行合同](docs/lean-execution.md#结果与金融计算)。
 
 ## 获取与安装
 
@@ -91,7 +107,9 @@ python examples/turnover_factor/run.py --output ../quantwitness-work/turnover-fi
 
 - 框架只读访问研究数据库。
 - 历史计算只使用当时已知的信息，称为PIT规则。
+- 现货历史价格规则支持前收对称比例，以及明确参考价类型的独立上下比例；发行价仅用于股票IPO阶段。准入与LEAN执行按同一价格边界检查，见[市场规则](docs/minute_market_rules.md#现货价格参考与独立上下比例)。
 - 特征、标签、成分股和财报按可见时间对齐。
+- 只有日期的公告由因果接口按冻结日历交付：公告后的首个交易日09:30可见，支持周末和长假公告，见[项目扩展日期规则](project_extensions/README.md)。
 - 最终留出集独立于开发循环，消费记录长期保存。
 - 查询输入默认保存来源引用。`--persist-inputs` 另存输入副本。
 - 恢复前核对输入、实现、配置和检查点。
@@ -110,6 +128,8 @@ python examples/turnover_factor/run.py --output ../quantwitness-work/turnover-fi
 
 合成示例用于学习和检验计算流程。合成收益不代表投资表现。`local_only` 表示已记录的本地适用范围。
 
+从源码仓库运行发行和架构门禁，操作见[发布文档](docs/release.md)。
+
 <details>
 <summary>机器清单中的能力状态</summary>
 
@@ -120,14 +140,13 @@ python examples/turnover_factor/run.py --output ../quantwitness-work/turnover-fi
 | `catalog.lock` | `local_only` | `catalog` | `local_acceptance` / `local_only` | Catalog 编译、锁定和漂移检查由显式来源文件驱动；公开仓库不附带个人 Catalog 或独立发布验收记录。 |
 | `research_package.plan` | `local_only` | `package lint`<br>`package admit` | `local_acceptance` / `local_only` | ResearchPackage 只能声明受控合同，不接受自由 SQL、动态模块或项目 runner。lint 一次返回声明、算子、指标、结果和准入缺口；admit 从显式只读数据源生成漂移/PIT 闭包并在发布/加载时校验准入事实。 |
 | `runtime.recovery` | `local_only` | `resume`<br>`retry-node`<br>`inspect`<br>`rerun-from`<br>`run --reuse-run-root`<br>`run --require-reused-node`<br>`run --reuse-failed-run-root`<br>`workspace run --reuse-run-root`<br>`workspace run --require-reused-node`<br>`workspace run --reuse-failed-run-root` | `local_acceptance` / `local_only` | resume、retry-node、inspect 和 rerun-from 消费当前 invocation、计划内算子闭包和已验证 checkpoint；run 与 workspace run 共用复用参数和正式运行校验；--reuse-run-root 只按显式顺序接受现行节点局部身份下已成功发布 Result 的完成态 run，并机会式复用 pure/cacheable 节点。配合 --require-reused-node 时，指定节点及其必要上游允许不是 pure/cacheable，但必须在 Worker 启动前全部通过节点局部身份、输入、checkpoint、typed 输出和 ExternalArtifact 内容复验，且不得回退执行。run --reuse-failed-run-root 只接受一个显式失败终态 run，要求新旧 DAG、节点身份环境、clock 和 seed 完全一致，只把状态为成功且完整复验通过的 checkpoint 复制进目标 run，再从首个未成功节点继续。两种跨运行来源不能混用，不扫描磁盘或依赖裸 ResultStore。同一次 execute 复用 Supervisor 已冻结的工件验证结果，新的 resume 进程、rerun child 或新 run 必须重新完整验证。多请求 data 节点另以 run 内 partial index 逐项复验已提交 DatasetArtifactRef，只重做失效 request；partial 不进入正式输出。恢复与跨运行复用均使用当前合同和已冻结的输入、实现及配置身份。该边界仍为 local_only。 |
-| `result.consume` | `local_only` | `report`<br>`export-result`<br>`compare`<br>`analysis run`<br>`analysis compare` | `local_acceptance` / `local_only` | report、compare、analysis、export-result 和 Dashboard 直接消费正式 Result，不依赖 run-root。报告只投影需要的表与列。analysis 的请求显式声明窗口、值语义、单位、费用和处理政策；只有规格与实际窗口相同的结果才能排名。package compare 另检查研究包的指标与结论合同。Result 中的结论级别是研究声明及输入范围，不是独立认证。 |
+| `result.consume` | `local_only` | `report`<br>`export-result`<br>`compare` | `local_acceptance` / `local_only` | report、compare、export-result 和 Dashboard 直接消费正式 Result，不依赖 run-root。报告只投影需要的表与列。compare --package 另检查研究包的指标与结论合同。Result 中的结论级别是研究声明及输入范围，不是独立认证。 |
 | `operator_graph.generic_run` | `local_only` | `run`<br>`resume`<br>`retry-node`<br>`inspect` | `local_acceptance` / `local_only` | 正式 run 由统一 Runtime 调度，节点返回按端口索引的类型化工件，checkpoint 绑定全部端口；成功后原子发布 Result，报告与开发反馈直接读取结果。恢复继续核对输入、配置、实现和检查点，失败不能作为成功研究反馈。当前范围保持 local_only。 |
 | `research.walk_forward_model` | `local_only` | `package admit`<br>`run` | `local_acceptance` / `local_only` | Qlib 六节点负责日频回归模型：Linear、LightGBM、XGBoost；Processor 与 Model 按候选/fold 一起训练保存。保留 purge/embargo、开发区 validation 选择及隔离 holdout；模型文件随 Result 封存。模型工件与处理器一同冻结，恢复要求输入、模型与处理器身份一致。本地技术验收不代表真实策略、可交易性或样本外盈利。 |
 | `minute_line.complete` | `local_only` | `run` | `local_acceptance` / `local_only` | 股票与ETF的一分钟策略使用LEAN原生订单与账户，按已准入来源、完成bar和历史可见规则执行。读取层按月整理、按天消费并预读下一交易日；预读不改变策略可见时点。日线使用独立开盘来源。当前策略频率为1m或1d，能力保持local_only。 |
 | `minute_line.real_data_smoke` | `local_only` | `run` | `local_acceptance` / `local_only` | 公开包提供四资产分钟输入和只读 Result 合同，不附带供应商原始数据或个人运行记录。真实数据观察由使用者在自己的来源、窗口和规则下执行；当前能力为 local_only，不代表供应商历史版本精确重放或分钟交易仿真。 |
-| `simulation.bar_tca` | `local_only` | `capabilities --format json` | `local_acceptance` / `local_only` | Bar TCA 提供库级成交成本归因，消费调用方提供的正式订单、成交、可见价格基准和政策，不重新撮合。当前没有主 DAG 算子或 Result 报告入口；缺少正式成交或必要可见事实时拒绝计算。 |
-| `capability.discovery` | `local_only` | `capabilities --format json`<br>`operator list/describe/scaffold/validate/build`<br>`artifact describe`<br>`recipe list/describe/scaffold`<br>`catalog dataset/field search`<br>`package lint`<br>`package expand-variants` | `local_acceptance` / `local_only` | capabilities 命令逐字段读取本清单；operator、artifact、catalog 和 package lint 的发现结果来自正式 registry、schema、Catalog Lock 或 package compiler。package expand-variants 只覆盖基包中已存在的 node 参数，原子生成普通完整包，不接受深层 YAML 合并、模板、Python 或 SQL。当前没有获准的公共 recipe，使用 package init 创建通用起点；项目完整拓扑由 ResearchPackage 声明。operator scaffold 生成可验证的最小项目算子；正式 Feature/Label 需必填 causal_plan，且来源必须可由已准入请求证明。validate/build 只复验显式源码闭包，不扫描目录或自动安装。 |
-| `resource.governance` | `local_only` | `run --resource-state-dir` | `local_acceptance` / `local_only` | 数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。合成探针不进入正式运行校准总体。 |
+| `capability.discovery` | `local_only` | `capabilities --format json`<br>`operator list/describe/scaffold/validate/build`<br>`artifact describe`<br>`catalog dataset/field search`<br>`package lint`<br>`package expand-variants` | `local_acceptance` / `local_only` | capabilities 命令逐字段读取本清单；operator、artifact、catalog 和 package lint 的发现结果来自正式 registry、schema、Catalog Lock 或 package compiler。package expand-variants 只覆盖基包中已存在的 node 参数，原子生成普通完整包，不接受深层 YAML 合并、模板、Python 或 SQL。使用 package init 创建研究包；项目完整拓扑由 ResearchPackage 声明。operator scaffold 生成可验证的最小项目算子；正式 Feature/Label 需必填 causal_plan，且来源必须可由已准入请求证明。validate/build 只复验显式源码闭包，不扫描目录或自动安装。 |
+| `resource.governance` | `local_only` | `run --resource-state-dir` | `local_acceptance` / `local_only` | 数据节点预算先编译为 DuckDB、batch/writer 与进程余量；当前 provider 支持包络下限为 256 MiB，低于下限在对象统计和扫描前拒绝。完整矩阵消费者用 footer 做数据页前的明显超界拒绝；内部 worker 默认 1 个，显式指定不能超过 CPU 或 max_workers 容量，并共用节点总预算。全新隔离进程中的真实 DuckDB/Parquet/Arrow 探针回归整个进程树 RSS、读取量与 temp 峰值，不把局部公式称为任意 allocator 的硬上界。多个 CLI/worker 的 FIFO 租约与父子令牌仍共用总容量；资源不足不改变样本、频率、参数或 seed。运行资源用量按节点记录。 |
 
 <!-- CAPABILITIES_TABLE:END -->
 

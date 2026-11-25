@@ -30,9 +30,48 @@
 
 Python新建`MinuteRuleSnapshotBundle`时可省略`bundle_hash`，构造器在完整内容校验后一次生成身份。读取JSON或列式工件必须提供原身份并核对。修改已有对象时保留的原身份也必须匹配当前内容。
 
+大范围股票或 ETF 的规则可通过 `write_columnar_minute_scope_input` 发布。按证券和交易日排序的 Arrow 批次记录生命周期、参考价与涨跌停、停牌三组逐日规则，低频区间规则和共享参数另存。三组可以各自声明来源、可见时点和修订。同一证券同一交易日有多条修订时依次保留，按实际消费时点选择可见版本。
+
+发布时一次验证声明的证券、时段、修订流和价格边界。普通单版本逐日数据按列检查，有盘中修订或重叠区间时按证券复用时点解析。新输入的 `rules_hash` 由规则元数据、日历身份及实际 Parquet 文件摘要共同确定。计划冻结原文件，准入可以复用同口径下的已验证覆盖。变更文件或覆盖声明后需要重新准入。历史 Result 保持只读。
+
+
 列式加载在本次调用内共享重复的规则身份文本、来源元组和不可变标量参数键值对。避免年度规则把相同内容展开为数百万份对象。共享保留布尔、整数、浮点及正负零的区别。嵌套列表和对象独立加载，完整规则身份与PIT检查继续执行。
 
 `MinuteRuleResolver`按证券、规则和有效日期取候选，排除尚不可见的修订，在同一有效区间选择已可见的最高revision。可见区间冲突、缺失、不支持或没有当时可见版本均拒绝，不使用默认值。
+
+## 现货价格参考与独立上下比例
+
+现货`price_limit_mode`为`bounded`、`unbounded`或`suspended`。有界模式支持两种互斥声明：
+
+- 前收对称简写：`reference_previous_close_units`与`price_limit_ratio_ppm`。上下比例相同，比例为正整数且小于1000000。
+- 显式声明：`reference_price_kind`、`reference_price_units`、`price_limit_up_ratio_ppm`与`price_limit_down_ratio_ppm`四项必须完整。参考类型为`previous_close`或`issue_price`；上涨比例为正整数，下跌比例为正整数且小于1000000。1000000 ppm等于100%。
+
+两种声明不能混用，包括值为空的字段。`issue_price`仅用于具有明确`stock_board`和`listing_phase=ipo`的股票，不能用于ETF或普通交易阶段。实际板块、阶段及停牌事实按同一时点的独立规则选择，不由价格声明覆盖。
+
+两种有界声明均提供`high_limit_units`、`low_limit_units`、`price_scale`、带时区的`reference_price_available_at`和`price_limit_rounding=half_up_to_quote_unit`。上下限分别以参考价乘以`1+上涨比例`、`1-下跌比例`，四舍五入到整数报价单位；实际使用时参考价必须已可见。有界及停牌价格规则逐交易日覆盖。
+
+例如发行价32.21元、上涨44%、下跌36%的价格规则参数为：
+
+```json
+{
+  "price_limit_mode": "bounded",
+  "price_scale": 2,
+  "reference_price_kind": "issue_price",
+  "reference_price_units": 3221,
+  "price_limit_up_ratio_ppm": 440000,
+  "price_limit_down_ratio_ppm": 360000,
+  "high_limit_units": 4638,
+  "low_limit_units": 2061,
+  "reference_price_available_at": "2021-10-22T09:00:00+08:00",
+  "price_limit_rounding": "half_up_to_quote_unit"
+}
+```
+
+上例用于说明数值和字段，实际可见时间与来源由项目提供；生命周期规则还须声明股票板块和IPO阶段。框架不内置44%/36%这一组比例。Python准入与执行共用价格验证，LEAN按相同公式消费冻结参数。公司行动只消费前收参考价，发行价不能作为除权参考价。
+
+`unbounded`不携带固定上下限、对称比例或显式四字段。`suspended`保留真实停牌事实和前收参考，不能携带显式四字段。无界、停牌和有界阶段不能通过虚构极大限价互相替代。
+
+价格规则与共享验证实现进入现有来源和执行身份。规则、实现或安装改变后重新准入，不跨身份复用计划和checkpoint；历史Result保持只读。完整物理市场覆盖要求不变，上市年龄仍由策略判断。
 
 ## 当前参考范围支持矩阵
 
@@ -64,7 +103,7 @@ ETF 只闭合 2024-01-02—05 的冻结参考窗口：成交仍使用 raw bar，
 
 ## 夜盘交易日与持仓量对账
 
-`SessionAssignmentPolicy` 保存规则可见时间、有效区间和 `Asia/Shanghai` 时区。
+仓库期货实数验收工具按可见时间、有效区间和 `Asia/Shanghai` 时区核对交易日归属。
 普通时点使用 `[start,end)`，完成分钟使用 `(start,end]`。
 交易日归属继续消费 `SessionPolicyRevision` 和 `TradingSession`。
 夜盘按冻结会话归属交易日，不能直接使用自然日。
@@ -96,3 +135,6 @@ ETF 只闭合 2024-01-02—05 的冻结参考窗口：成交仍使用 raw bar，
 | minute_scope（分钟范围引用） | 指向同一冻结日历和历史规则的小引用 |
 | Supervisor | 监督运行和提交结果的主进程 |
 | Worker | 执行节点计算的独立进程 |
+
+
+逐日参考规则使用 Arrow 批次校验。来源在产生行情时可以追加公司的规则和参数。写入器按证券检查已交付的版本、来源及交易日覆盖，压缩写盘时对实际字节计算摘要。延迟到输入结束才补齐的规则按最终版本集核对。成功发布后，列式载荷以只读文件交接。

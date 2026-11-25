@@ -64,12 +64,18 @@ class _ProjectionAccumulator:
 
     def validate(self, event: RuntimeEvent, *, validate_chain: bool = True) -> str:
         event.verify()
+        return self.validate_transition(event, validate_chain=validate_chain)
+
+    def validate_transition(self, event: RuntimeEvent, *, validate_chain: bool = True) -> str:
         if validate_chain:
             if event.seq != self.last_seq + 1 or event.previous_hash != self.chain_head:
                 raise RuntimeIntegrityError("事件序号或前序 hash 不连续")
+        if not isinstance(event.run_id, str) or not event.run_id:
+            raise RuntimeIntegrityError("事件 run_id 无效")
         if self.run_id is not None and event.run_id != self.run_id:
             raise RuntimeStateError("同一事件库不能混入其他 run")
-        target = str(event.payload.get("status", ""))
+        raw_status = event.payload.get("status")
+        target = raw_status if isinstance(raw_status, str) else ""
         if event.kind == "run_status_changed":
             _transition(self.run_status, target, RUN_TRANSITIONS, "run")
         elif event.kind == "node_status_changed":

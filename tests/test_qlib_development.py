@@ -8,6 +8,9 @@ from research_pipeline.runtime import walk_forward_model_execution as execution
 from test_walk_forward_model_mainline import _write_input_artifact
 
 
+pytestmark = pytest.mark.ml
+
+
 def _inputs(tmp_path):
     days = pd.bdate_range("2024-01-02", periods=72, tz="UTC")
     features, labels = [], []

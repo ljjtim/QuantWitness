@@ -16,7 +16,6 @@ from research_pipeline.platform.asset_taxonomy import (
 from ..operator_definition_factory import (
     _GIB,
     _MIB,
-    _bar_tca_parameters,
     _choice_parameter,
     _definition,
     _parameter,
@@ -25,6 +24,21 @@ from ..operator_definition_factory import (
 
 def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
     return (
+        _definition(
+            "data.minute.adjustment_snapshot_import",
+            "data.minute.adjustment_snapshot_import.v1",
+            inputs=(),
+            outputs=(("snapshot", "data.adjustment-factor-snapshot.v1"),),
+            parameters=(_parameter("published_snapshot", ParameterType.JSON),
+                        _parameter("request_ids", ParameterType.STRING_LIST)),
+            resource_profile={"memory_bytes": _GIB, "cpu_slots": 1,
+                              "temp_bytes": _GIB, "wall_seconds": 300},
+            code_fingerprint="published-minute-adjustment-snapshot-v1",
+            capability="data.adjustment-factor-snapshot.v1",
+            module_name="research_pipeline.runtime.adjustment_snapshot_import",
+            symbol_name="execute_data_minute_adjustment_snapshot_import_v1",
+            implementation_scope="core",
+        ),
         _definition(
             "data.minute.scan",
             "data.minute.scan.v1",
@@ -91,7 +105,9 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
             outputs=(("snapshot", "data.adjustment-factor-snapshot.v1"),),
             parameters=(
                 _parameter("factor_request_id", ParameterType.STRING),
+                ParameterSpec("stock_open_state_request_id", ParameterType.STRING, required=False),
                 _parameter("corporate_action_request_id", ParameterType.STRING),
+                ParameterSpec("trading_calendar_request_id", ParameterType.STRING, required=False),
                 ParameterSpec("instrument_id", ParameterType.STRING, required=False),
                 ParameterSpec("instrument_ids", ParameterType.JSON, required=False),
                 ParameterSpec("initial_listing_evidence_by_instrument", ParameterType.JSON, required=False),
@@ -104,7 +120,8 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
                 _parameter("availability_policy_ref", ParameterType.STRING),
                 ParameterSpec("initial_listing_evidence", ParameterType.JSON, required=False),
                 ParameterSpec("financial_missing_date_policy", ParameterType.STRING,
-                              required=False, allowed_values=("error", "omit_event")),
+                              required=False, allowed_values=("error", "omit_event", "sellable_date_receivable")),
+                ParameterSpec("financial_entitlement_exclusions", ParameterType.JSON, required=False),
             ),
             resource_profile={
                 "memory_bytes": 2 * _GIB,
@@ -112,7 +129,7 @@ def build_minute_operator_definitions() -> tuple[OperatorDefinition, ...]:
                 "temp_bytes": 512 * _MIB,
                 "wall_seconds": 600,
             },
-            code_fingerprint="minute-adjustment-snapshot-pit-v2",
+            code_fingerprint="minute-adjustment-snapshot-pit-v4",
             capability="data.adjustment-factor-snapshot.v1",
             module_name="research_pipeline.data_plane.minute_adjustment",
             symbol_name="build_adjustment_factor_snapshot",

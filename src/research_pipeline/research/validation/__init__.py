@@ -1,6 +1,5 @@
 """无泄漏切分、拟合审计、留出集和搜索治理。"""
 
-from .nested import NestedValidationManifest, build_nested_validation
 from .fit_audit import FitArtifactBinding, FitScopeCertificate, bind_fit_artifact, issue_fit_scope
 from .holdout import (
     HoldoutAccessEvent,
@@ -16,7 +15,6 @@ from .trial_ledger import TrialEvent, TrialLedger
 from .splits import SplitFold, SplitManifest, ValidationError, build_purged_kfold, build_walk_forward, build_explicit_walk_forward
 
 __all__ = [
-    "NestedValidationManifest",
     "FitArtifactBinding",
     "FitScopeCertificate",
     "HoldoutAccessEvent",
@@ -32,7 +30,6 @@ __all__ = [
     "SplitFold",
     "SplitManifest",
     "ValidationError",
-    "build_nested_validation",
     "bind_fit_artifact",
     "build_seed_manifest",
     "build_search_manifest",

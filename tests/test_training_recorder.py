@@ -14,6 +14,9 @@ from qlib.workflow.recorder import MLflowRecorder
 from research_pipeline.research.modeling.qlib import _training_recorder
 
 
+pytestmark = pytest.mark.ml
+
+
 @pytest.fixture(autouse=True)
 def no_database(monkeypatch):
     import duckdb

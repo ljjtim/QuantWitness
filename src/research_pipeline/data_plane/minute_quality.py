@@ -1,106 +1,23 @@
-"""分钟数据的只读结构、session、数值与 PIT 复权质量审计。"""
+"""分钟数据的 PIT 复权质量审计。"""
 
 from __future__ import annotations
 
+from functools import cached_property
+
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 import math
-from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from research_pipeline.catalog import AdjustmentFactorSnapshot
-from research_pipeline.domain import (
-    CN_MARKET_TIMEZONE,
-    CorporateAction,
-    SessionCalendarResolver,
-    SessionInstrumentMetadata,
-    SessionPolicyBundle,
-)
+from research_pipeline.domain import CN_MARKET_TIMEZONE, CorporateAction
 from research_pipeline.platform import typed_canonical_hash
 
 from .errors import QualityGateError
-from .minute_scan import MinuteScanPlan
 
 
-MINUTE_QUALITY_PROFILE_VERSION = "minute-quality-profile-v1"
-MINUTE_QUALITY_REPORT_VERSION = "minute-quality-report-v1"
 MINUTE_ADJUSTMENT_AUDIT_VERSION = "minute-adjustment-audit-v1"
 _ZONE = ZoneInfo(CN_MARKET_TIMEZONE)
-_QUALITY_REFS = {
-    "cn_stock": (
-        "quality.minute.common_fields.v1",
-        "quality.minute.stock.v1",
-    ),
-    "cn_etf": (
-        "quality.minute.common_fields.v1",
-        "quality.minute.fund.v1",
-    ),
-    "cn_index": (
-        "quality.minute.common_fields.v1",
-        "quality.minute.index.v1",
-    ),
-    "cn_future": (
-        "quality.minute.common_fields.v1",
-        "quality.minute.futures.avg_coverage.v1",
-        "quality.minute.futures.open_interest.v1",
-    ),
-}
-
-
-@dataclass(frozen=True)
-class MinuteQualityProfile:
-    profile_id: str = "quality.minute.reference.v1"
-    revision: int = 1
-    enforcement: str = "report_only"
-    max_issue_samples: int = 20
-    max_expected_slots: int = 250_000
-    contract_version: str = MINUTE_QUALITY_PROFILE_VERSION
-
-    def __post_init__(self) -> None:
-        if (
-            self.contract_version != MINUTE_QUALITY_PROFILE_VERSION
-            or not self.profile_id.strip()
-            or self.revision < 1
-            or self.enforcement not in {"report_only", "hard_fail"}
-            or not 1 <= self.max_issue_samples <= 1000
-            or not 1 <= self.max_expected_slots <= 5_000_000
-        ):
-            raise QualityGateError("分钟质量 profile 无效")
-
-    @property
-    def profile_hash(self) -> str:
-        return typed_canonical_hash(self.to_dict())
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "profile_id": self.profile_id,
-            "revision": self.revision,
-            "enforcement": self.enforcement,
-            "max_issue_samples": self.max_issue_samples,
-            "max_expected_slots": self.max_expected_slots,
-            "quality_policy_refs_by_asset": {
-                key: list(value) for key, value in sorted(_QUALITY_REFS.items())
-            },
-            "contract_version": self.contract_version,
-        }
-
-
-@dataclass(frozen=True)
-class MinuteQualityIssue:
-    error_code: str
-    severity: str
-    instrument_id: str
-    bar_end: str | None
-    detail: str
-
-    def to_dict(self) -> dict[str, str | None]:
-        return {
-            "error_code": self.error_code,
-            "severity": self.severity,
-            "instrument_id": self.instrument_id,
-            "bar_end": self.bar_end,
-            "detail": self.detail,
-        }
 
 
 @dataclass(frozen=True)
@@ -125,7 +42,7 @@ class MinuteAdjustmentAudit:
     reason: str | None
     contract_version: str = MINUTE_ADJUSTMENT_AUDIT_VERSION
 
-    @property
+    @cached_property
     def audit_hash(self) -> str:
         return typed_canonical_hash(self.to_dict())
 
@@ -140,207 +57,6 @@ class MinuteAdjustmentAudit:
             "reason": self.reason,
             "contract_version": self.contract_version,
         }
-
-
-@dataclass(frozen=True)
-class MinuteQualityReport:
-    scan_plan_hash: str
-    source_revision_hash: str
-    session_bundle_hash: str
-    quality_profile_hash: str
-    quality_policy_refs: tuple[str, ...]
-    scan_start_at: str
-    scan_end_at: str
-    as_of: str
-    row_count: int
-    expected_bar_count: int
-    observed_bar_count: int
-    missing_bar_count: int
-    issue_counts: tuple[tuple[str, int], ...]
-    issue_samples: tuple[MinuteQualityIssue, ...]
-    status: str
-    claim_impact: str
-    adjustment_audit_hash: str | None
-    contract_version: str = MINUTE_QUALITY_REPORT_VERSION
-
-    @property
-    def report_hash(self) -> str:
-        return typed_canonical_hash(self.to_dict())
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "scan_plan_hash": self.scan_plan_hash,
-            "source_revision_hash": self.source_revision_hash,
-            "session_bundle_hash": self.session_bundle_hash,
-            "quality_profile_hash": self.quality_profile_hash,
-            "quality_policy_refs": list(self.quality_policy_refs),
-            "scan_start_at": self.scan_start_at,
-            "scan_end_at": self.scan_end_at,
-            "as_of": self.as_of,
-            "row_count": self.row_count,
-            "expected_bar_count": self.expected_bar_count,
-            "observed_bar_count": self.observed_bar_count,
-            "missing_bar_count": self.missing_bar_count,
-            "coverage_ratio": (
-                1.0
-                if self.expected_bar_count == 0
-                else self.observed_bar_count / self.expected_bar_count
-            ),
-            "issue_counts": dict(self.issue_counts),
-            "issue_samples": [item.to_dict() for item in self.issue_samples],
-            "status": self.status,
-            "claim_impact": self.claim_impact,
-            "adjustment_audit_hash": self.adjustment_audit_hash,
-            "contract_version": self.contract_version,
-        }
-
-
-class _Issues:
-    def __init__(self, limit: int) -> None:
-        self.limit = limit
-        self.counts: dict[str, int] = {}
-        self.severities: dict[str, str] = {}
-        self.samples: list[MinuteQualityIssue] = []
-
-    def add(
-        self,
-        code: str,
-        *,
-        instrument_id: str,
-        bar_end: datetime | None,
-        detail: str,
-        count: int = 1,
-        severity: str = "fail",
-    ) -> None:
-        self.counts[code] = self.counts.get(code, 0) + count
-        previous = self.severities.setdefault(code, severity)
-        if previous != severity:
-            raise QualityGateError("同一质量错误码不能同时使用不同 severity")
-        if len(self.samples) < self.limit:
-            self.samples.append(
-                MinuteQualityIssue(
-                    code,
-                    severity,
-                    instrument_id,
-                    None if bar_end is None else bar_end.isoformat(timespec="seconds"),
-                    detail,
-                )
-            )
-
-
-def audit_minute_quality(
-    source: Iterable[Any],
-    *,
-    scan_plan: MinuteScanPlan,
-    session_bundle: SessionPolicyBundle,
-    instruments: tuple[SessionInstrumentMetadata, ...],
-    profile: MinuteQualityProfile | None = None,
-    adjustment_audit: MinuteAdjustmentAudit | None = None,
-) -> MinuteQualityReport:
-    """只读扫描分钟批次；报告异常但不修复、不插值。"""
-
-    profile = profile or MinuteQualityProfile()
-    expected_refs = _QUALITY_REFS.get(scan_plan.minute_asset_class)
-    if expected_refs is None or scan_plan.minute_quality_policy_refs != expected_refs:
-        raise QualityGateError("分钟扫描计划的 quality policy refs 与资产不一致")
-    by_id = {item.instrument_id: item for item in instruments}
-    if set(by_id) != set(scan_plan.instruments):
-        raise QualityGateError("质量审计 instrument 集合与扫描计划不一致")
-    expected = _expected_slots(scan_plan, session_bundle, by_id, profile)
-    issues = _Issues(profile.max_issue_samples)
-    observed: set[tuple[str, datetime]] = set()
-    previous: tuple[str, datetime] | None = None
-    row_count = 0
-    expected_schema = tuple(scan_plan.source_columns)
-
-    for batch in source:
-        if tuple(batch.schema.names) != expected_schema:
-            raise QualityGateError("分钟质量审计输入 schema 漂移")
-        for row in batch.to_pylist():
-            row_count += 1
-            code = str(row.get("code", ""))
-            bar_end = row.get("dt")
-            if code not in by_id or not isinstance(bar_end, datetime) or bar_end.tzinfo is not None:
-                issues.add(
-                    "minute.structural.invalid_identity_or_time",
-                    instrument_id=code or "<missing>",
-                    bar_end=None,
-                    detail="code 未准入或 dt 不是 naive 上海 completed-bar 时点",
-                )
-                continue
-            key = (code, bar_end)
-            if previous is not None and key < previous:
-                issues.add(
-                    "minute.structural.sort_regression",
-                    instrument_id=code,
-                    bar_end=bar_end,
-                    detail="code,dt 未严格递增",
-                )
-            if key in observed:
-                issues.add(
-                    "minute.structural.duplicate_primary_key",
-                    instrument_id=code,
-                    bar_end=bar_end,
-                    detail="重复 code+dt",
-                )
-            previous = key
-            observed.add(key)
-            if key not in expected:
-                issues.add(
-                    "minute.session.outside_expected_slot",
-                    instrument_id=code,
-                    bar_end=bar_end,
-                    detail="bar 不在查询窗口内的批准 session 槽位",
-                )
-            _check_market_values(row, scan_plan.minute_asset_class, issues, code, bar_end)
-
-    missing = expected - observed
-    if missing:
-        first_code, first_bar = min(missing)
-        issues.add(
-            "minute.session.missing_expected_bar",
-            instrument_id=first_code,
-            bar_end=first_bar,
-            detail="批准 session 槽位缺少 bar；不自动插值",
-            count=len(missing),
-        )
-    counts = tuple(sorted(issues.counts.items()))
-    has_failures = any(issues.severities[code] == "fail" for code in issues.counts)
-    has_warnings = any(issues.severities[code] == "warn" for code in issues.counts)
-    if has_failures:
-        status = "fail"
-        impact = "blocks_execution_and_verification"
-    elif adjustment_audit is not None and adjustment_audit.status == "unsupported":
-        status = "unsupported"
-        impact = "capability_limited"
-    elif has_warnings:
-        status = "warn"
-        impact = "requires_review_no_claim_upgrade"
-    else:
-        status = "pass"
-        impact = "eligible_for_downstream_gate"
-    report = MinuteQualityReport(
-        scan_plan.plan_hash,
-        scan_plan.source_revision_hash,
-        session_bundle.bundle_hash,
-        profile.profile_hash,
-        scan_plan.minute_quality_policy_refs,
-        scan_plan.start_at.isoformat(timespec="seconds"),
-        scan_plan.end_at.isoformat(timespec="seconds"),
-        scan_plan.as_of.isoformat(timespec="seconds"),
-        row_count,
-        len(expected),
-        len(observed & expected),
-        len(missing),
-        counts,
-        tuple(issues.samples),
-        status,
-        impact,
-        None if adjustment_audit is None else adjustment_audit.audit_hash,
-    )
-    if profile.enforcement == "hard_fail" and report.status == "fail":
-        raise QualityGateError(f"分钟质量门禁失败: {report.report_hash}")
-    return report
 
 
 def audit_adjustment_gate(
@@ -427,158 +143,9 @@ def audit_adjustment_gate(
     )
 
 
-def require_minute_quality_pass(
-    report: MinuteQualityReport,
-    *,
-    scan_plan_hash: str,
-    session_bundle_hash: str,
-    quality_profile_hash: str,
-    adjustment_audit_hash: str | None,
-) -> str:
-    """供 plan/run/verify 共用的失败关闭消费门；返回已复验报告摘要。"""
-
-    expected = (
-        scan_plan_hash,
-        session_bundle_hash,
-        quality_profile_hash,
-        adjustment_audit_hash,
-    )
-    observed = (
-        report.scan_plan_hash,
-        report.session_bundle_hash,
-        report.quality_profile_hash,
-        report.adjustment_audit_hash,
-    )
-    if observed != expected:
-        raise QualityGateError("分钟质量报告输入身份不一致")
-    if report.status != "pass" or report.claim_impact != "eligible_for_downstream_gate":
-        raise QualityGateError("分钟质量报告未达到可执行 pass")
-    return report.report_hash
-
-
-def _expected_slots(
-    scan_plan: MinuteScanPlan,
-    bundle: SessionPolicyBundle,
-    instruments: Mapping[str, SessionInstrumentMetadata],
-    profile: MinuteQualityProfile,
-) -> set[tuple[str, datetime]]:
-    resolver = SessionCalendarResolver(bundle)
-    result: set[tuple[str, datetime]] = set()
-    for code, instrument in instruments.items():
-        if bundle.contract_version == "minute-project-session-bundle-v2":
-            from research_pipeline.domain.minute_request_scope import minute_request_sessions
-            sessions = (policy.build_session(day, scope_binding_hash=bundle.capability_binding_hash)
-                        for policy, day, _, _ in minute_request_sessions(bundle, instruments=(code,),
-                            start_at=scan_plan.start_at, end_at=scan_plan.end_at,
-                            policy_id=scan_plan.minute_session_policy_ref))
-        else:
-            policies = tuple(item for item in bundle.policies if item.instrument == instrument
-                             and item.policy_id == scan_plan.minute_session_policy_ref and item.revision == 1)
-            if len(policies) != 1:
-                raise QualityGateError("质量审计没有唯一 session policy")
-            sessions = (resolver.resolve_trading_date(instrument, day, policy_revision=1)
-                        for day in policies[0].trading_dates)
-        for session in sessions:
-            for segment in session.segments:
-                cursor = segment.starts_at + timedelta(minutes=1)
-                while cursor <= segment.ends_at:
-                    if (
-                        scan_plan.start_at <= cursor < scan_plan.end_at
-                        and cursor <= scan_plan.as_of
-                    ):
-                        result.add((code, cursor.replace(tzinfo=None)))
-                        if len(result) > profile.max_expected_slots:
-                            raise QualityGateError("分钟质量审计预期槽位超过 profile 上限")
-                    cursor += timedelta(minutes=1)
-    return result
-
-
-def _check_market_values(
-    row: Mapping[str, object],
-    asset_class: str,
-    issues: _Issues,
-    code: str,
-    bar_end: datetime,
-) -> None:
-    values: dict[str, float] = {}
-    for field in ("open", "high", "low", "close", "volume", "money"):
-        value = row.get(field)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
-            issues.add(
-                "minute.value.non_finite",
-                instrument_id=code,
-                bar_end=bar_end,
-                detail=f"{field} 不是有限数",
-            )
-            return
-        values[field] = float(value)
-    if not (
-        values["low"] <= values["open"] <= values["high"]
-        and values["low"] <= values["close"] <= values["high"]
-    ):
-        issues.add(
-            "minute.value.ohlc_invariant",
-            instrument_id=code,
-            bar_end=bar_end,
-            detail="low <= open/close <= high 不成立",
-        )
-    if values["volume"] < 0 or values["money"] < 0:
-        issues.add(
-            "minute.value.negative_flow",
-            instrument_id=code,
-            bar_end=bar_end,
-            detail="volume/money 不能为负",
-        )
-    avg = row.get("avg")
-    if avg is None and values["volume"] > 0:
-        issues.add(
-            (
-                "minute.value.avg_unavailable"
-                if asset_class == "cn_future"
-                else "minute.value.missing_avg_positive_volume"
-            ),
-            instrument_id=code,
-            bar_end=bar_end,
-            detail="正成交量 bar 缺少源 avg",
-            severity="warn" if asset_class == "cn_future" else "fail",
-        )
-    elif avg is not None and (
-        isinstance(avg, bool)
-        or not isinstance(avg, (int, float))
-        or not math.isfinite(float(avg))
-    ):
-        issues.add(
-            "minute.value.invalid_avg",
-            instrument_id=code,
-            bar_end=bar_end,
-            detail="avg 必须为空或有限数",
-        )
-    if asset_class == "cn_future":
-        open_interest = row.get("open_interest")
-        if (
-            isinstance(open_interest, bool)
-            or not isinstance(open_interest, (int, float))
-            or not math.isfinite(float(open_interest))
-            or float(open_interest) < 0
-        ):
-            issues.add(
-                "minute.value.invalid_open_interest",
-                instrument_id=code,
-                bar_end=bar_end,
-                detail="期货 open_interest 必须是非负有限数",
-            )
-
-
 __all__ = [
     "MINUTE_ADJUSTMENT_AUDIT_VERSION",
-    "MINUTE_QUALITY_PROFILE_VERSION",
-    "MINUTE_QUALITY_REPORT_VERSION",
     "AdjustmentRelationSample",
     "MinuteAdjustmentAudit",
-    "MinuteQualityIssue",
-    "MinuteQualityProfile",
-    "MinuteQualityReport",
     "audit_adjustment_gate",
-    "audit_minute_quality",
-    "require_minute_quality_pass",
 ]

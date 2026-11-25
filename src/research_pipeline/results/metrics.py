@@ -35,14 +35,6 @@ class MetricSnapshot(Protocol):
     ): ...
 
 
-class MetricStore(Protocol):
-    """指标读取所需的结果存储接口。"""
-
-    def result_directory(self, bundle: ResultBundle) -> Path: ...
-
-    def open_snapshot(self, result_directory: str | Path) -> MetricSnapshot: ...
-
-
 _REQUIRED_COLUMNS = frozenset({
     "metric_ref",
     "value",
@@ -78,23 +70,15 @@ class ResultMetric:
         }
 
 
-def load_result_metrics(
-    store: MetricStore,
-    bundle: ResultBundle,
-) -> tuple[MetricSnapshot, tuple[ResultMetric, ...]]:
-    """一次完整扫描同时验证 Result 并读取所有证明绑定的指标表。"""
-
-    snapshot = store.open_snapshot(store.result_directory(bundle))
-    if snapshot.bundle != bundle:
-        raise ResultContractError("指标读取的 ResultBundle 与验证快照不一致")
-    return snapshot, metrics_from_snapshot(snapshot)
-
-
 def metrics_from_snapshot(snapshot: MetricSnapshot) -> tuple[ResultMetric, ...]:
     """消费操作内已验证快照，不再次打开 Result 文件。"""
 
     bundle = snapshot.bundle
-    registry = compose_metric_registry(metric_definitions_from_snapshot(snapshot))
+    from research_pipeline.platform.lean_contract import LEAN_METRICS_SCHEMA_ID
+    lean_rows = None
+    if any(table.schema_id == LEAN_METRICS_SCHEMA_ID for table in bundle.tables):
+        lean_rows = [row for batch in snapshot.iter_table_batches(LEAN_METRICS_SCHEMA_ID) for row in batch.to_pylist()]
+    registry = compose_metric_registry(metric_definitions_from_snapshot(snapshot, lean_rows=lean_rows))
     rows_by_ref: dict[str, list[ResultMetric]] = {
         proof.metric_ref: [] for proof in bundle.metric_proofs
     }
@@ -107,26 +91,28 @@ def metrics_from_snapshot(snapshot: MetricSnapshot) -> tuple[ResultMetric, ...]:
             missing = sorted(_REQUIRED_COLUMNS - set(schema.names))
             raise ResultContractError(f"正式指标表缺少最小列: {missing}")
         proof_by_ref = {proof.metric_ref: proof for proof in proofs}
-        for batch in snapshot.iter_table_batches(schema_id, batch_size=8_192):
-            for row in batch.to_pylist():
-                metric_ref = row.get("metric_ref")
-                proof = proof_by_ref.get(metric_ref)
-                if proof is None:
-                    continue
-                definition = registry.require(proof.metric_ref)
-                if definition.definition_digest != proof.definition_digest:
-                    raise ResultContractError("Result 指标定义与正式生产声明不一致")
-                value, sample_size, text_fields = validate_metric_row(row, definition)
-                rows_by_ref[proof.metric_ref].append(ResultMetric(
-                    metric_ref=proof.metric_ref,
-                    value=float(value),
-                    unit=text_fields["unit"],
-                    sample_start=text_fields["sample_start"],
-                    sample_end=text_fields["sample_end"],
-                    sample_size=sample_size,
-                    status=text_fields["status"],
-                    table_id=proof.result_table_id,
-                ))
+        rows = lean_rows if schema_id == LEAN_METRICS_SCHEMA_ID else (
+            row for batch in snapshot.iter_table_batches(schema_id, batch_size=8_192) for row in batch.to_pylist()
+        )
+        for row in rows:
+            metric_ref = row.get("metric_ref")
+            proof = proof_by_ref.get(metric_ref)
+            if proof is None:
+                continue
+            definition = registry.require(proof.metric_ref)
+            if definition.definition_digest != proof.definition_digest:
+                raise ResultContractError("Result 指标定义与正式生产声明不一致")
+            value, sample_size, text_fields = validate_metric_row(row, definition)
+            rows_by_ref[proof.metric_ref].append(ResultMetric(
+                metric_ref=proof.metric_ref,
+                value=float(value),
+                unit=text_fields["unit"],
+                sample_start=text_fields["sample_start"],
+                sample_end=text_fields["sample_end"],
+                sample_size=sample_size,
+                status=text_fields["status"],
+                table_id=proof.result_table_id,
+            ))
     invalid = sorted(ref for ref, rows in rows_by_ref.items() if len(rows) != 1)
     if invalid:
         raise ResultContractError(f"正式指标 metric_ref 行数无效：实际 {dict((ref, len(rows_by_ref[ref])) for ref in invalid)!r}；期望每项恰好有一行")
@@ -168,26 +154,29 @@ def validate_metric_row(row, definition):
     return value, sample_size, text
 
 
-def metric_definitions_from_snapshot(snapshot):
+def metric_definitions_from_snapshot(snapshot, *, lean_rows=None):
     """从 Result 冻结的项目定义和 LEAN 表定义读取指标合同。"""
     definitions = list(snapshot.bundle.metric_definitions)
     from research_pipeline.platform.lean_contract import LEAN_METRICS_SCHEMA_ID
     if any(table.schema_id == LEAN_METRICS_SCHEMA_ID for table in snapshot.bundle.tables):
         seen = set()
-        for batch in snapshot.iter_table_batches(LEAN_METRICS_SCHEMA_ID, columns=("metric_ref", "definition_json"), batch_size=1024):
-            for row in batch.to_pylist():
-                definition = MetricDefinition.from_dict(json.loads(row["definition_json"]))
-                if (definition.metric_ref != row["metric_ref"] or definition.metric_ref in seen
-                        or not definition.metric_id.startswith("project.lean.")
-                        or definition.result_schema_id != LEAN_METRICS_SCHEMA_ID):
-                    raise ResultContractError("LEAN正式指标冻结定义不一致或重复")
-                seen.add(definition.metric_ref)
-                existing = next((item for item in definitions if item.metric_ref == definition.metric_ref), None)
-                if existing is None:
-                    definitions.append(definition)
-                elif existing != definition:
-                    raise ResultContractError("表内指标定义与 Result 声明不一致")
+        if lean_rows is None:
+            lean_rows = (row for batch in snapshot.iter_table_batches(
+                LEAN_METRICS_SCHEMA_ID, columns=("metric_ref", "definition_json"), batch_size=1024,
+            ) for row in batch.to_pylist())
+        for row in lean_rows:
+            definition = MetricDefinition.from_dict(json.loads(row["definition_json"]))
+            if (definition.metric_ref != row["metric_ref"] or definition.metric_ref in seen
+                    or not definition.metric_id.startswith("project.lean.")
+                    or definition.result_schema_id != LEAN_METRICS_SCHEMA_ID):
+                raise ResultContractError("LEAN正式指标冻结定义不一致或重复")
+            seen.add(definition.metric_ref)
+            existing = next((item for item in definitions if item.metric_ref == definition.metric_ref), None)
+            if existing is None:
+                definitions.append(definition)
+            elif existing != definition:
+                raise ResultContractError("表内指标定义与 Result 声明不一致")
     return tuple(definitions)
 
 
-__all__ = ["ResultMetric", "load_result_metrics", "metrics_from_snapshot", "metric_definitions_from_snapshot"]
+__all__ = ["ResultMetric", "metrics_from_snapshot", "metric_definitions_from_snapshot"]

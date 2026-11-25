@@ -16,7 +16,7 @@
 4. 执行并检查正式 Result。
 5. 失败时按节点恢复规则处理。
 
-股票和ETF一分钟策略通过ResearchPackage准入后，由本地LEAN执行。节点声明`execution_backend=lean`、`execution_model=lean_next_completed_close_v1`及冻结安装身份，正式输出为`research.lean-simulation.v2`。安装、输入与运行步骤见[LEAN执行](lean-execution.md)，回调及委托接口见[策略事件协议](strategy-protocol.md)。
+股票和ETF一分钟策略通过ResearchPackage准入后，由本地LEAN执行。节点声明`execution_backend=lean`、`execution_model=lean_next_completed_close_v1`及冻结安装身份，正式输出为`research.lean-simulation.v4`。安装、输入与运行步骤见[LEAN执行](lean-execution.md)，回调及委托接口见[策略事件协议](strategy-protocol.md)。
 
 ## 行情与规则
 

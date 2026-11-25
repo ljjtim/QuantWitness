@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+
 from datetime import datetime
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +14,7 @@ import uuid
 from typing import Any, Callable, Iterable
 
 from research_pipeline.platform.canonical import canonical_json, typed_canonical_hash
+from research_pipeline.platform.validation import file_sha256 as _sha256
 
 from .admission import AdmittedQueryPlan
 from .errors import SnapshotIntegrityError
@@ -282,14 +283,6 @@ class _SnapshotLayoutWriter:
         self.close_file()
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _manifest_identity_payload(manifest: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in manifest.items() if key != "physical_snapshot_id"}
 
@@ -442,7 +435,8 @@ def publish_parquet_snapshot(
         if session is None:
             verify_parquet_snapshot(target)
         else:
-            session.remember("parquet_snapshot", str(target), manifest)
+            session.remember("parquet_snapshot", str(target),
+                             (manifest, snapshot_file_stamps(target, manifest)))
         return target
     except BaseException:
         layout.close_spool()
@@ -454,19 +448,45 @@ def publish_parquet_snapshot(
         raise
 
 
-def verify_parquet_snapshot(path: str | Path) -> dict[str, Any]:
-    """完整验证快照；Runtime 同一 run 内复用首次冻结的 manifest。"""
+def snapshot_file_stamps(snapshot: Path, manifest) -> tuple:
+    """以已验证清单为基准检查文件集合及物理状态。"""
+    files = _PATH_POLICY.discover_files(
+        snapshot, suffix=".parquet", root_role="parquet_snapshot_root",
+        file_role="parquet_partition",
+    )
+    if set(files) != {item["relative_path"] for item in manifest["files"]}:
+        raise SnapshotIntegrityError("Parquet 文件集合与已验证清单不一致")
+    paths = [files[item["relative_path"]] for item in manifest["files"]]
+    paths.extend((snapshot / "manifest.json", snapshot / "COMMITTED"))
+    try:
+        return tuple(
+            (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
+            for path in paths for stat in (path.stat(),)
+        )
+    except OSError as exc:
+        raise SnapshotIntegrityError("Parquet 快照文件缺失或无法复验") from exc
 
+
+def _verified_parquet_snapshot_entry(snapshot):
+    snapshot = Path(snapshot)
+    manifest = _verify_parquet_snapshot_uncached(snapshot)
+    return manifest, snapshot_file_stamps(snapshot, manifest)
+
+
+def verify_parquet_snapshot(path: str | Path) -> dict[str, Any]:
+    """完整验证快照；同一运行复用摘要证据并复验实际文件状态。"""
     snapshot = Path(path).resolve()
     session = current_artifact_verification()
     if session is None:
         return _verify_parquet_snapshot_uncached(snapshot)
-    return session.resolve(
-        "parquet_snapshot",
-        str(snapshot),
-        lambda: _verify_parquet_snapshot_uncached(snapshot),
+    manifest, stamps = session.resolve(
+        "parquet_snapshot", str(snapshot),
+        lambda: _verified_parquet_snapshot_entry(snapshot),
         descriptor={"path": snapshot},
     )
+    if snapshot_file_stamps(snapshot, manifest) != stamps:
+        raise SnapshotIntegrityError("Parquet 快照在运行会话内发生变化")
+    return manifest
 
 
 def _verify_parquet_snapshot_uncached(path: str | Path) -> dict[str, Any]:

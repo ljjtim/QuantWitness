@@ -1,5 +1,6 @@
 """只读核对公开期货示例的正式Result与独立手算。"""
 import argparse
+from datetime import timedelta, timezone
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -20,10 +21,9 @@ def verify(root, frequency):
     for name, schema in LEAN_SCHEMA_IDS.items():
         selected = [row for row in manifest['tables'] if row['schema_id'] == schema]
         require(len(selected) == 1, 'Result须恰好包含一张'+name+'表')
-        tables[name] = [json.loads(value) for path in sorted(selected[0]['files'])
-                       for value in pq.ParquetFile(root/path).read(columns=['payload_json'])['payload_json'].to_pylist()]
+        tables[name] = [row for path in sorted(selected[0]['files']) for row in pq.read_table(root/path).to_pylist()]
     fills = tables['fills']
-    expected = {'1m': (6, 6, 100094, 8300, 0), '1d': (3, 3, 100077, 4300, 454)}[frequency]
+    expected = {'1m': (6, 6, 100094, 8300, 0), '1d': (6, 6, 100094, 8300, 0)}[frequency]
     require(len(fills) == expected[0], '实际成交腿数量与手算不符')
     require(sum(Decimal(str(row['fee'])) for row in fills) == expected[1], '总费用与手算不符')
     require(sum(Decimal(str(row['price']))*row['quantity']*row['multiplier'] for row in fills) == expected[3], '名义成交金额未按手数乘乘数计算')
@@ -34,14 +34,15 @@ def verify(root, frequency):
     require(final['equity'] == final['cash'] == expected[2], '期末结算权益与手算不符')
     require(final['margin'] == expected[4] and final['frozen_funds'] == 0, '期末保证金或预占不符')
     require(final['available_funds'] == expected[2]-expected[4], '期末可用资金不符')
-    require(final['trading_date'] == '2024-01-04', '结算观察尾段不能成为额外交易日')
-    require(final['valuation_at'].startswith('2024-01-05T09:30:'), '末日结算须保留实际可见时刻')
-    require([row['trading_date'] for row in tables['daily']] == ['2024-01-03', '2024-01-04'], '日终交易日不完整')
+    require(final['trading_date'].isoformat() == '2024-01-04', '结算观察尾段不能成为额外交易日')
+    local_valuation = final['valuation_at'].astimezone(timezone(timedelta(hours=8)))
+    require(local_valuation.strftime('%Y-%m-%dT%H:%M') == '2024-01-05T09:30', '末日结算须保留实际可见时刻')
+    require([row['trading_date'].isoformat() for row in tables['daily']] == ['2024-01-03', '2024-01-04'], '日终交易日不完整')
     require(all(row['active_orders'] == 0 for row in tables['daily']), '日终不能保留活动订单')
-    if frequency == '1m':
-        require(all(row['bucket'] == 'yesterday' for row in fills[3:]), '跨日平仓必须使用昨仓')
-    else:
-        require([row['price'] for row in fills] == [110, 110, 210], '日频成交须使用下一会话独立开盘')
+    require(all(row['bucket'] == 'yesterday' for row in fills[3:]), '跨日平仓必须使用昨仓')
+    require([row['trading_date'].isoformat() for row in fills] == ['2024-01-03']*3 + ['2024-01-04']*3, '首个合法会话开仓并在下一会话平昨')
+    if frequency == '1d':
+        require([row['price'] for row in fills] == [100, 100, 200, 110, 110, 210], '日频成交须使用各会话独立开盘')
     metric_table = next(row for row in manifest['tables'] if row['schema_id'] == LEAN_METRICS_SCHEMA_ID)
     metrics = [row for path in metric_table['files'] for row in pq.ParquetFile(root/path).read().to_pylist()]
     value = next(row['value'] for row in metrics if row['metric_ref'].startswith('project.lean.final_equity@'))

@@ -2,7 +2,7 @@
 from datetime import date, datetime, timedelta
 CODE = "599999.XSHG"
 DAYS = ("2024-01-05", "2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11")
-PRICES = (10., 10., 10.5, 11., 11.)
+PRICES = (9.9, 10., 10.5, 11., 11.)
 CLOCK = "2024-01-12T09:00:00+08:00"
 def rows(include_factor_fields=True):
     return [dict(fld_equity_daily_date=date.fromisoformat(day), fld_equity_daily_code=CODE,

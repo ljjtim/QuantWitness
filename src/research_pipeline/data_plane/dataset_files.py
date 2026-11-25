@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from functools import partial
+
+
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -11,25 +14,20 @@ from types import MappingProxyType
 from typing import Callable, Iterator, Mapping
 
 from research_pipeline.platform.canonical import typed_canonical_hash
+from research_pipeline.platform.validation import require_sha256
 
 from .errors import SnapshotIntegrityError
 from .admission import AdmittedQueryPlan
 from .path_policy import PathRolePolicy
 from .query_ir import FilterOperator
-from .snapshots import verify_parquet_snapshot
+from .snapshots import snapshot_file_stamps, verify_parquet_snapshot
 from .verification_lifecycle import current_artifact_verification
 
 
 DATASET_ARTIFACT_REF_VERSION = "dataset-artifact-ref-v1"
-_HASH_LENGTH = 64
 
 
-def _require_hash(value: object, field: str) -> str:
-    if not isinstance(value, str) or len(value) != _HASH_LENGTH or any(
-        char not in "0123456789abcdef" for char in value
-    ):
-        raise SnapshotIntegrityError(f"{field} 必须是 sha256 小写摘要")
-    return value
+_require_hash = partial(require_sha256, error=SnapshotIntegrityError)
 
 
 def _require_relative_path(value: object) -> str:
@@ -189,6 +187,15 @@ def _filter_expression(
                 value = pa.array([Decimal(str(entry)) for entry in value], type=field_type)
             elif item.operator not in {"is_null", "is_valid"}:
                 value = pa.scalar(Decimal(str(value)), type=field_type)
+        if field_type is not None and pa.types.is_integer(field_type):
+            # QueryIR 可用字符串表示整数，Arrow 和 DuckDB 采用相同的整数比较。
+            if item.operator == "in":
+                value = tuple(
+                    pa.scalar(entry).cast(field_type).as_py() if isinstance(entry, str) else entry
+                    for entry in value
+                )
+            elif isinstance(value, str):
+                value = pa.scalar(value).cast(field_type)
         current = {
             "eq": lambda: field == value,
             "ne": lambda: field != value,
@@ -312,6 +319,18 @@ class VerifiedDataset:
                 )
         return total
 
+    def _validate_temporal_request(self, plan, columns, batch_size):
+        if self.manifest.get("temporal_source") is not True:
+            raise SnapshotIntegrityError("普通数据工件不接受逐决策时态选择")
+        if self.manifest.get("admitted_plan_hash") != plan.plan_hash:
+            raise SnapshotIntegrityError("逐决策时态来源与 admitted plan 不一致")
+        if not columns or len(columns) != len(set(columns)):
+            raise SnapshotIntegrityError("扫描列必须非空且唯一")
+        if not set(columns) <= set(plan.query.field_ids):
+            raise SnapshotIntegrityError("逐决策扫描只能返回 QueryIR 公开列")
+        if type(batch_size) is not int or batch_size <= 0 or batch_size > self.max_batch_rows:
+            raise SnapshotIntegrityError("扫描 batch_size 超过批准上限")
+
     def iter_batches_at(
         self,
         *,
@@ -326,16 +345,7 @@ class VerifiedDataset:
         import pyarrow as pa
         import pyarrow.dataset as ds
 
-        if self.manifest.get("temporal_source") is not True:
-            raise SnapshotIntegrityError("普通数据工件不接受逐决策时态选择")
-        if self.manifest.get("admitted_plan_hash") != plan.plan_hash:
-            raise SnapshotIntegrityError("逐决策时态来源与 admitted plan 不一致")
-        if not columns or len(columns) != len(set(columns)):
-            raise SnapshotIntegrityError("扫描列必须非空且唯一")
-        if not set(columns) <= set(plan.query.field_ids):
-            raise SnapshotIntegrityError("逐决策扫描只能返回 QueryIR 公开列")
-        if type(batch_size) is not int or batch_size <= 0 or batch_size > self.max_batch_rows:
-            raise SnapshotIntegrityError("扫描 batch_size 超过批准上限")
+        VerifiedDataset._validate_temporal_request(self, plan, columns, batch_size)
         temporal = plan.temporal_selection
         all_filters = (*_query_dataset_filters(plan), *filters)
         expression = _filter_expression(
@@ -379,21 +389,20 @@ class VerifiedDataset:
 
         def output_batches(rows: list[dict[str, object]]) -> Iterator[object]:
             nonlocal remaining
-            table = pa.Table.from_batches([self._record_batch(rows, scan_schema)])
-            if expression is not None:
-                table = ds.dataset(table).scanner(
-                    filter=expression,
-                    batch_size=batch_size,
-                    batch_readahead=0,
-                    fragment_readahead=1,
-                    use_threads=False,
+            batch = self._record_batch(rows, scan_schema)
+            batches = (batch,) if expression is None else ds.dataset(
+                pa.Table.from_batches([batch])).scanner(
+                    filter=expression, batch_size=batch_size, batch_readahead=0,
+                    fragment_readahead=1, use_threads=False,
                     fragment_scan_options=ds.ParquetFragmentScanOptions(pre_buffer=False),
-                ).to_table()
-            table = table.select(list(columns))
-            if remaining is not None:
-                table = table.slice(0, remaining)
-                remaining -= table.num_rows
-            yield from table.to_batches(max_chunksize=batch_size)
+                ).to_batches()
+            for selected in batches:
+                selected = selected.select(columns)
+                if remaining is not None:
+                    selected = selected.slice(0, remaining)
+                    remaining -= selected.num_rows
+                if selected.num_rows:
+                    yield selected
 
         output_rows: list[dict[str, object]] = []
         for row in selected_records:
@@ -557,12 +566,8 @@ class _TemporalBatch:
             yield batch
 
 
-def read_temporal_batch(dataset, *, plan, filters, max_bytes, batch_size):
-    """一次读取完整批内历史，随后复用正式时态选择与谓词处理。"""
-    import pyarrow as pa
-
-    if type(max_bytes) is not int or max_bytes <= 0:
-        raise SnapshotIntegrityError("批内时态历史内存预算必须为正整数")
+def iter_temporal_source_batches(dataset, *, plan, filters, batch_size):
+    """按已核验的修订实体顺序读取完整事实，选择前只下推稳定谓词。"""
     if dataset.manifest.get("temporal_source") is not True:
         raise SnapshotIntegrityError("批内历史要求正式时态来源")
     if dataset.manifest.get("admitted_plan_hash") != plan.plan_hash:
@@ -573,18 +578,30 @@ def read_temporal_batch(dataset, *, plan, filters, max_bytes, batch_size):
     # 证券列不一定属于修订实体键；沿用正式选择前可下推的字段集合。
     stable_filters = tuple(item for item in filters
                            if item.field in plan.temporal_selection.stable_filter_fields)
-    batches = []
-    total_bytes = 0
     for batch in dataset._iter_ordered_file_batches(
         columns=fields, filters=stable_filters, allowed_columns=fields, batch_size=batch_size,
     ):
         if batch.nbytes > dataset.max_batch_bytes:
             raise SnapshotIntegrityError("扫描 RecordBatch 超过批准内存上限")
+        yield batch
+
+
+def read_temporal_batch(dataset, *, plan, filters, max_bytes, batch_size):
+    """一次读取完整批内历史，随后复用正式时态选择与谓词处理。"""
+    import pyarrow as pa
+
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise SnapshotIntegrityError("批内时态历史内存预算必须为正整数")
+    batches = []
+    total_bytes = 0
+    for batch in iter_temporal_source_batches(
+        dataset, plan=plan, filters=filters, batch_size=batch_size,
+    ):
         total_bytes += batch.get_total_buffer_size()
         if total_bytes > max_bytes:
             raise SnapshotIntegrityError("批内完整时态历史超过节点分配的内存预算")
         batches.append(batch)
-    schema = pa.schema([dataset.schema.field(field) for field in fields])
+    schema = pa.schema([dataset.schema.field(field) for field in plan.temporal_selection.required_scan_fields])
     return _TemporalBatch(dataset, pa.Table.from_batches(batches, schema=schema))
 
 
@@ -612,9 +629,6 @@ class ParquetArtifactResolver:
         session = current_artifact_verification()
         if session is None:
             manifest, files, schema = self._resolve_reference(reference)
-
-            def file_resolver() -> tuple[Path, ...]:
-                return self._resolve_reference(reference)[1]
         else:
             identity = "|".join((
                 str(self.allowed_root),
@@ -631,9 +645,17 @@ class ParquetArtifactResolver:
                 lambda: self._resolve_reference(reference),
                 descriptor={"root": self.allowed_root, "reference": reference},
             )
+        snapshot = self._snapshot_path(reference)
+        if session is not None:
+            # Dataset 缓存本身可能已经命中，仍核对首次全量验收时冻结的文件。
+            verify_parquet_snapshot(snapshot)
+        stamps = snapshot_file_stamps(snapshot, manifest)
 
-            def file_resolver() -> tuple[Path, ...]:
-                return files
+        def file_resolver() -> tuple[Path, ...]:
+            if snapshot_file_stamps(snapshot, manifest) != stamps:
+                raise SnapshotIntegrityError("dataset artifact 文件在扫描会话内发生变化")
+            return files
+
         return VerifiedDataset(
             files=files,
             file_resolver=file_resolver,
@@ -645,19 +667,22 @@ class ParquetArtifactResolver:
             reference=reference,
         )
 
-    def _resolve_reference(
-        self,
-        reference: DatasetArtifactRef,
-    ) -> tuple[Mapping[str, object], tuple[Path, ...], object]:
-        import pyarrow.dataset as ds
-
-        snapshot = self.path_policy.resolve_contained_path(
+    def _snapshot_path(self, reference):
+        return self.path_policy.resolve_contained_path(
             allowed_root=self.allowed_root,
             candidate=reference.relative_path,
             root_role="dataset_artifact_allowed_root",
             path_role="dataset_snapshot_root",
             expected_kind="directory",
         )
+
+    def _resolve_reference(
+        self,
+        reference: DatasetArtifactRef,
+    ) -> tuple[Mapping[str, object], tuple[Path, ...], object]:
+        import pyarrow.dataset as ds
+
+        snapshot = self._snapshot_path(reference)
         manifest = verify_parquet_snapshot(snapshot)
         if manifest.get("physical_snapshot_id") != reference.physical_snapshot_id:
             raise SnapshotIntegrityError("dataset artifact physical identity 漂移")

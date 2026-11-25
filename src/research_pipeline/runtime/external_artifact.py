@@ -13,6 +13,9 @@ from typing import Callable, Mapping
 import uuid
 
 from research_pipeline.platform.atomic_directory import publish_directory
+from research_pipeline.platform.audit_mode import strict_audit_enabled
+from research_pipeline.platform.immutable_files import remove_tree
+from research_pipeline.platform.validation import file_sha256
 from research_pipeline.data_plane.path_policy import PathRolePolicy
 from research_pipeline.data_plane.errors import DataPlaneError
 from research_pipeline.data_plane.verification_lifecycle import (
@@ -22,8 +25,7 @@ from research_pipeline.platform import canonical_json, typed_canonical_hash
 from research_pipeline.platform.causal_time import (
     CORE_FEATURE_TIME_COLUMNS,
     CORE_LABEL_TIME_COLUMNS,
-    attach_core_feature_time_facts,
-    attach_core_label_time_facts,
+    attach_core_time_facts_arrow,
 )
 
 from .contracts import ArtifactRef
@@ -39,14 +41,6 @@ _FORMAL_CAUSAL_ARTIFACT_COLUMNS = {
 _CAUSAL_LINEAGE_METADATA_KEY = b"research_pipeline_causal_lineage"
 _CAUSAL_DATE_CONTRACT_METADATA_KEY = b"research_pipeline_causal_date_contract"
 _CAUSAL_DATE_CONTRACT_VERSION = b"project-causal-dates-v1"
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _require_commit_token(value: str) -> None:
@@ -67,6 +61,7 @@ def _digest_mapping(value: Mapping[str, str], field: str, *, allow_empty: bool =
         if (
             not isinstance(key, str)
             or not key
+            or not isinstance(digest, str)
             or len(digest) != 64
             or any(character not in "0123456789abcdef" for character in digest)
         ):
@@ -187,11 +182,13 @@ class ExternalArtifactCommit:
             "artifact_name", "artifact_type", "commit_token", "files", "schema_hashes",
             "row_counts", "semantic_hash", "manifest_hash", "contract_version",
         }
-        if set(payload) != expected:
+        if not isinstance(payload, Mapping) or set(payload) != expected:
             raise RuntimeIntegrityError("ExternalArtifactCommit schema 无效")
         mappings = tuple(payload[field] for field in ("files", "schema_hashes", "row_counts"))
         if any(not isinstance(item, Mapping) for item in mappings):
             raise RuntimeIntegrityError("ExternalArtifactCommit 映射字段无效")
+        if any(not isinstance(payload[field], str) for field in expected - {"files", "schema_hashes", "row_counts"}):
+            raise RuntimeIntegrityError("ExternalArtifactCommit 文本字段无效")
         return cls(
             str(payload["artifact_name"]),
             str(payload["artifact_type"]),
@@ -262,7 +259,7 @@ class ExternalArtifactStore:
                 artifact_type=commit.artifact_type,
             )
         except Exception:
-            shutil.rmtree(staging, ignore_errors=True)
+            remove_tree(staging, ignore_errors=True)
             raise
         if imported != commit:
             raise RuntimeIntegrityError("child external artifact 导入后身份漂移")
@@ -288,10 +285,12 @@ class ExternalArtifactStore:
         try:
             if producer_scope not in {"core", "project"}:
                 raise RuntimeIntegrityError("ExternalArtifactCommit producer_scope 无效")
-            self._materialize_staging_links(staging)
+            payload_paths = self._materialize_staging_links(staging)
+            if payload_paths is None:
+                payload_paths = tuple(self._iter_payload_paths(staging, exclude_root_control_files=True))
             if producer_scope == "project":
                 self._apply_project_causal_time_boundary(
-                    staging,
+                    payload_paths,
                     artifact_type,
                     core_time_facts=core_time_facts,
                     key_columns=causal_time_key_columns,
@@ -299,7 +298,9 @@ class ExternalArtifactStore:
                 )
             elif core_time_facts is not None or causal_time_key_columns or causal_lineage is not None:
                 raise RuntimeIntegrityError("只有项目扩展提交可以附加核心时间上下文")
-            files, schema_hashes, row_counts = self._inspect(staging, exclude_root_control_files=True)
+            files, schema_hashes, row_counts = self._inspect(
+                staging, exclude_root_control_files=True, payload_paths=payload_paths,
+            )
             manifest = ExternalArtifactCommit.build(
                 artifact_name=artifact_name,
                 artifact_type=artifact_type,
@@ -315,15 +316,22 @@ class ExternalArtifactStore:
             if phase_hook:
                 phase_hook("before_commit")
             target = self.objects_root / manifest.semantic_hash
-            if target.exists():
+            try:
+                if target.exists():
+                    raise FileExistsError(target)
+                publish_directory(staging, target)
+            except OSError:
+                if not target.is_dir():
+                    raise
                 existing = self.verify(manifest.semantic_hash)
-                shutil.rmtree(staging, ignore_errors=True)
+                remove_tree(staging, ignore_errors=True)
                 if existing.semantic_payload() != manifest.semantic_payload():
                     raise RuntimeIntegrityError("同 external artifact key 出现冲突内容")
                 return existing
-            publish_directory(staging, target)
+            if strict_audit_enabled():
+                manifest = self._verify_uncached(target, manifest.semantic_hash)
             if self.verification_session is None:
-                return self.verify(manifest.semantic_hash)
+                return manifest
             return self.verification_session.remember(
                 "external_artifact",
                 str(target),
@@ -334,20 +342,24 @@ class ExternalArtifactStore:
 
 
     @staticmethod
-    def _materialize_staging_links(staging: Path) -> None:
-        """把随 staging 移动会断开的链接项复制为普通内容，不处理 hardlink。"""
+    def _materialize_staging_links(staging: Path) -> tuple[tuple[str, Path], ...] | None:
+        """收集待验收文件，发布前实体化会随目录移动断开的链接。"""
         links: list[Path] = []
+        files: list[tuple[str, Path]] = []
         policy = PathRolePolicy()
-        for directory, directories, filenames in policy.walk(staging):
+        for directory, directories, filenames in policy._walk_resolved(staging):
             parent = Path(directory)
+            filename_set = set(filenames)
             for name in (*directories, *filenames):
                 path = parent / name
-                resolved = policy.resolve_contained_path(
-                    allowed_root=staging, candidate=path, root_role="external_staging",
+                resolved = policy._resolve_contained_path(
+                    root=staging, candidate=path, root_role="external_staging",
                     path_role="external_staging_item", expected_kind="any",
                 )
-                if resolved != parent.resolve() / name and not any(link in path.parents for link in links):
+                if resolved != path and not any(link in path.parents for link in links):
                     links.append(path)
+                if name in filename_set and not (parent == staging and name in {"manifest.json", "COMMITTED"}):
+                    files.append((path.relative_to(staging).as_posix(), resolved))
         for path in links:
             temporary = staging.parent / f".linked-content-{uuid.uuid4().hex}"
             try:
@@ -367,10 +379,12 @@ class ExternalArtifactStore:
                     shutil.rmtree(temporary)
                 elif temporary.exists():
                     temporary.unlink()
+        # 实体化后用新的真实路径重新枚举少数带目录链接的工件。
+        return None if links else tuple(files)
 
     @staticmethod
     def _apply_project_causal_time_boundary(
-        staging: Path,
+        payload_paths: tuple[tuple[str, Path], ...],
         artifact_type: str,
         *,
         core_time_facts: object | None,
@@ -384,65 +398,45 @@ class ExternalArtifactStore:
             return
         import pyarrow as pa
         import pyarrow.parquet as pq
-        import pandas as pd
 
-        parquet_paths = sorted(staging.rglob("*.parquet"))
+        parquet_paths = [path for _, path in payload_paths if path.suffix == ".parquet"]
         if len(parquet_paths) != 1:
             raise RuntimeIntegrityError("项目正式 Feature/Label 每次提交必须恰好一个 Parquet")
-        for path in parquet_paths:
-            try:
-                columns = set(pq.read_schema(path).names)
-            except (OSError, pa.ArrowException) as exc:
-                raise RuntimeIntegrityError("项目扩展正式时间工件 Parquet 无法读取") from exc
-            self_reported = sorted(columns.intersection(protected))
+        path = parquet_paths[0]
+        try:
+            original = pq.read_table(path)
+            self_reported = sorted(set(original.column_names).intersection(protected))
             if self_reported:
                 raise RuntimeIntegrityError(
                     f"项目扩展不得提交核心时间事实: {self_reported}"
                 )
-        if core_time_facts is None:
-            raise RuntimeIntegrityError(
-                "项目扩展缺少核心伴随时间上下文，不能直接提交正式 Feature/Label"
-            )
-        if not isinstance(core_time_facts, pd.DataFrame) or not key_columns:
-            raise RuntimeIntegrityError("项目扩展核心时间上下文无效")
-        path = parquet_paths[0]
-        try:
-            original = pq.read_table(path)
+            if core_time_facts is None:
+                raise RuntimeIntegrityError(
+                    "项目扩展缺少核心伴随时间上下文，不能直接提交正式 Feature/Label"
+                )
+            if not isinstance(core_time_facts, pa.Table) or not key_columns:
+                raise RuntimeIntegrityError("项目扩展核心时间上下文无效")
             metadata = dict(original.schema.metadata or {})
             if _CAUSAL_LINEAGE_METADATA_KEY in metadata:
                 raise RuntimeIntegrityError("项目扩展不得提交核心来源 lineage")
-            values = original.to_pandas()
-            if artifact_type == "research.feature-set.v1":
-                attached = attach_core_feature_time_facts(
-                    values,
-                    core_time_facts,
-                    key_columns=key_columns,
-                )
-            else:
-                attached = attach_core_label_time_facts(
-                    values,
-                    core_time_facts,
-                    key_columns=key_columns,
-                )
+            table = attach_core_time_facts_arrow(
+                original,
+                core_time_facts,
+                key_columns=key_columns,
+                is_feature=artifact_type == "research.feature-set.v1",
+            )
             if causal_lineage is not None:
                 if not isinstance(causal_lineage, (list, tuple)) or not causal_lineage:
                     raise RuntimeIntegrityError("项目扩展核心来源 lineage 无效")
                 metadata[_CAUSAL_LINEAGE_METADATA_KEY] = canonical_json(
                     list(causal_lineage)
                 ).encode("utf-8")
-            table = pa.Table.from_pandas(attached, preserve_index=False)
-            for field in original.schema:
-                index = table.schema.get_field_index(field.name)
-                if index >= 0 and field.metadata:
-                    schema = table.schema.set(index, table.schema.field(index).with_metadata(field.metadata))
-                    table = table.cast(schema)
-
             if causal_lineage and any(fact.get("daily_time") is not None for fact in causal_lineage):
                 index = table.schema.get_field_index("decision_time")
                 field = table.schema.field(index).with_metadata({
                     _CAUSAL_DATE_CONTRACT_METADATA_KEY: _CAUSAL_DATE_CONTRACT_VERSION,
                 })
-                table = table.cast(table.schema.set(index, field))
+                table = table.set_column(index, field, table.column(index))
             pq.write_table(table.replace_schema_metadata(metadata), path)
         except RuntimeIntegrityError:
             raise
@@ -464,7 +458,21 @@ class ExternalArtifactStore:
         target: Path,
         artifact_key: str,
     ) -> ExternalArtifactCommit:
-        if target.parent != self.objects_root or not target.is_dir():
+        manifest = self._read_commit(target, artifact_key)
+        files, schemas, rows = self._inspect(target, exclude_root_control_files=True)
+        if files != manifest.files or schemas != manifest.schema_hashes or rows != manifest.row_counts:
+            raise RuntimeIntegrityError("ExternalArtifactCommit 文件、schema 或行数漂移")
+        return manifest
+
+    def _read_commit(self, target: Path, artifact_key: str) -> ExternalArtifactCommit:
+        return self.read_manifest(self.objects_root, target, artifact_key)
+
+    @staticmethod
+    def read_manifest(objects_root: Path, target: Path, artifact_key: str) -> ExternalArtifactCommit:
+        """只读提交控制文件，载荷由实际消费者核验。"""
+        if (not isinstance(artifact_key, str) or len(artifact_key) != 64
+                or any(character not in "0123456789abcdef" for character in artifact_key)
+                or target.parent != objects_root or not target.is_dir()):
             raise RuntimeIntegrityError("ExternalArtifactCommit 对象路径越界或不存在")
         try:
             manifest_path, marker_path = PathRolePolicy().resolve_manifest_files(
@@ -478,10 +486,25 @@ class ExternalArtifactStore:
             raise RuntimeIntegrityError("ExternalArtifactCommit manifest 无法读取") from exc
         if manifest.semantic_hash != artifact_key or marker != manifest.manifest_hash:
             raise RuntimeIntegrityError("ExternalArtifactCommit 身份或 marker 漂移")
-        files, schemas, rows = self._inspect(target, exclude_root_control_files=True)
-        if files != manifest.files or schemas != manifest.schema_hashes or rows != manifest.row_counts:
-            raise RuntimeIntegrityError("ExternalArtifactCommit 文件、schema 或行数漂移")
         return manifest
+
+    def read_committed_json(self, reference: ArtifactRef, relative_path: str) -> object:
+        """核对已提交引用和所需 JSON 成员，其他成员由实际消费者验收。"""
+        target = (self.objects_root / reference.artifact_key).resolve()
+        manifest = self._read_commit(target, reference.artifact_key)
+        if manifest.artifact_ref != reference or relative_path not in manifest.files:
+            raise RuntimeIntegrityError("ExternalArtifactCommit 引用或所需 JSON 文件不一致")
+        try:
+            path, = PathRolePolicy().resolve_manifest_files(
+                allowed_root=target, relative_paths=(relative_path,), root_role="external_artifact",
+                file_role="external_artifact_payload",
+            )
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != manifest.files[relative_path]:
+                raise RuntimeIntegrityError("ExternalArtifactCommit 所需 JSON 文件内容漂移")
+            return json.loads(content)
+        except (DataPlaneError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeIntegrityError("ExternalArtifactCommit 所需 JSON 文件无法读取") from exc
 
     def verify_snapshot(
         self,
@@ -541,15 +564,38 @@ class ExternalArtifactStore:
         root: Path,
         *,
         exclude_root_control_files: bool,
+        payload_paths: tuple[tuple[str, Path], ...] | None = None,
     ) -> tuple[dict[str, str], dict[str, str], dict[str, int]]:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        policy = PathRolePolicy()
-        resolved_root = policy.resolve_root(root, role="external_artifact_root")
+        paths = payload_paths
+        if paths is None:
+            paths = ExternalArtifactStore._iter_payload_paths(
+                root, exclude_root_control_files=exclude_root_control_files,
+            )
         files: dict[str, str] = {}
         schemas: dict[str, str] = {}
         rows: dict[str, int] = {}
+        for relative, path in paths:
+            files[relative] = file_sha256(path)
+            if path.suffix.lower() == ".parquet":
+                try:
+                    metadata = pq.read_metadata(path)
+                except (OSError, pa.ArrowException) as exc:
+                    raise RuntimeIntegrityError(
+                        f"ExternalArtifactCommit Parquet 无法读取: {relative}"
+                    ) from exc
+                schemas[relative] = typed_canonical_hash({"schema": str(metadata.schema.to_arrow_schema())})
+                rows[relative] = metadata.num_rows
+        if not files:
+            raise RuntimeIntegrityError("ExternalArtifactCommit 不能提交空目录")
+        return dict(sorted(files.items())), dict(sorted(schemas.items())), dict(sorted(rows.items()))
+
+    @staticmethod
+    def _iter_payload_paths(root: Path, *, exclude_root_control_files: bool):
+        policy = PathRolePolicy()
+        resolved_root = policy.resolve_root(root, role="external_artifact_root")
         for directory, dirnames, filenames in policy._walk_resolved(resolved_root):
             directory_path = Path(directory)
             for name in sorted(filenames):
@@ -567,19 +613,7 @@ class ExternalArtifactStore:
                     expected_kind="file",
                 )
                 relative = (directory_path / name).relative_to(resolved_root).as_posix()
-                files[relative] = _sha256(path)
-                if path.suffix.lower() == ".parquet":
-                    try:
-                        metadata = pq.read_metadata(path)
-                    except (OSError, pa.ArrowException) as exc:
-                        raise RuntimeIntegrityError(
-                            f"ExternalArtifactCommit Parquet 无法读取: {relative}"
-                        ) from exc
-                    schemas[relative] = typed_canonical_hash({"schema": str(metadata.schema.to_arrow_schema())})
-                    rows[relative] = metadata.num_rows
-        if not files:
-            raise RuntimeIntegrityError("ExternalArtifactCommit 不能提交空目录")
-        return dict(sorted(files.items())), dict(sorted(schemas.items())), dict(sorted(rows.items()))
+                yield relative, path
 
 
 __all__ = [

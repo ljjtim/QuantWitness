@@ -61,12 +61,7 @@ Native $python @('-B','-m','pip','install','--no-deps',$wheel) 'install-project'
 Native $python @('-B','-m','pip','freeze','--all') 'python-packages'
 $stages.dependencies=$timer.Elapsed.TotalSeconds
 $leanSource=Join-Path $LeanHome "src/Lean-$revision"
-# Python.NET 关闭过程自行管理GIL，避免跨Shutdown保留线程锁。
 $initializer=Join-Path $leanSource 'Common/Python/PythonInitializer.cs'
-$text=[IO.File]::ReadAllText($initializer)
-$needle='                    var pyLock = Py.GIL();'
-if(!$text.Contains($needle)) { throw '固定LEAN版本的Python关闭补丁定位失败' }
-[IO.File]::WriteAllText($initializer,$text.Replace($needle,'                    // Python.NET关闭时管理GIL。'),[Text.UTF8Encoding]::new($false))
 $text=[IO.File]::ReadAllText($initializer)
 $needle=@'
                         var code = string.Join(";", toRemove.Select(s => $"sys.path.remove('{s}')"));
@@ -82,10 +77,11 @@ $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'; $env:DOTNET_CLI_TELEMETRY_OPTOUT='1'
 $env:NUGET_PACKAGES=if($NugetCache){[IO.Path]::GetFullPath($NugetCache)}else{Join-Path $LeanHome 'cache/nuget'}
 $env:NUGET_HTTP_CACHE_PATH=Join-Path $LeanHome 'cache/http'
 $dotnet=Join-Path $LeanHome 'sdk/dotnet.exe'
+Native $python @('-B','-X','utf8',(Join-Path $PSScriptRoot 'patch_native_lifecycle.py'),'--source',$leanSource) 'native-lifecycle-patch'
 Native $dotnet @('build',(Join-Path $leanSource 'Launcher/QuantConnect.Lean.Launcher.csproj'),'-c','Release','-m:2','--nologo','-v:minimal') 'launcher-build'
 $stages.launcher_build=$timer.Elapsed.TotalSeconds-$stages.dependencies
 Native $python @('-B','-X','utf8',(Join-Path $PSScriptRoot 'prepare_metadata.py'),'--package',$FromPackage,'--upstream',$leanSource,'--target',(Join-Path $LeanHome 'input-metadata')) 'metadata'
-& (Join-Path $PSScriptRoot 'engine/build.ps1') -LeanHome $LeanHome -MetadataSource (Join-Path $LeanHome 'input-metadata') -NugetCache $NugetCache -Install
+& (Join-Path $PSScriptRoot 'engine/build.ps1') -LeanHome $LeanHome -MetadataSource (Join-Path $LeanHome 'input-metadata') -NugetCache $NugetCache -DownloadCache $DownloadCache -Install
 if(!$?) { throw 'LEAN插件安装失败' }
 $stages.total=$timer.Elapsed.TotalSeconds
 $record=[ordered]@{status='pass';lean_home=$LeanHome;python=$python;upstream_revision=$revision;stage_seconds=$stages;project_wheel=$wheel;from_package=$FromPackage;upstream_compatibility_patches=@('pythonnet_shutdown_gil','windows_venv_site_packages_filter')}

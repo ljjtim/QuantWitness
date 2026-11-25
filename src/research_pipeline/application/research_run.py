@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+
+from research_pipeline.platform.directory_watch import project_bundle_check_scope
+
 from argparse import Namespace
 import json
 import hashlib
-import os
 from pathlib import Path
-from typing import Mapping
+from time import perf_counter
+from typing import TYPE_CHECKING, Callable, Mapping
 
 from research_pipeline.data_plane import PathRolePolicy
 from research_pipeline.data_plane.research_data_bundle import (
@@ -16,10 +19,11 @@ from research_pipeline.data_plane.research_data_bundle import (
 from research_pipeline.extensions import (
     AdmittedProjectOperatorRegistry,
 )
-from research_pipeline.platform import canonical_json, installed_distribution_digest, typed_canonical_hash
+from research_pipeline.platform import installed_distribution_digest, typed_canonical_hash
 from research_pipeline.platform.metric_contracts import (
     MetricDefinition, MetricReachabilityProof,
 )
+from research_pipeline.platform.validation import write_canonical_json_atomic
 from research_pipeline.research.semantics import ResearchSemantics
 from research_pipeline.results import ResultAssembler, ResultSpec
 from research_pipeline.runtime import (
@@ -29,12 +33,12 @@ from research_pipeline.runtime import (
     ExternalArtifactStore,
     ResourceCapacity,
     RuntimeExecutionService,
-    ResourceGovernor,
-    ResourceGovernorConfig,
     ResourceVector,
 )
 from research_pipeline.runtime.liveness import RuntimeLiveness
+from research_pipeline.runtime.state import RuntimeProjection
 from research_pipeline.runtime.scheduler import (
+    DEFAULT_RUNTIME_LOCAL_PROCESS_SLOTS,
     DEFAULT_RUNTIME_MEMORY_BYTES,
     DEFAULT_RUNTIME_SCRATCH_BYTES,
     DEFAULT_RUNTIME_CPU_SLOTS,
@@ -51,11 +55,14 @@ from research_pipeline.runtime.operator_registry import (
     admitted_implementation_manifest_hash,
     operator_process_slots_by_node,
 )
+if TYPE_CHECKING:
+    from research_pipeline.runtime.resource_pool import ResourceGovernor
+
 from research_pipeline.runtime.failed_run_reuse import prepare_failed_run_reuse
 from research_pipeline.runtime.required_run_reuse import prepare_required_run_reuse
 
 from .research_plan_store import (
-    load_operator_graph_research_plan,
+    load_operator_graph_research_plan, read_prepared_research_plan,
 )
 from .command_suggestion import command_suggestion
 
@@ -64,52 +71,56 @@ def _execute(args, *, prepared_plan=None) -> dict[str, object]:
     return _execute_operator_graph(args, prepared_plan=prepared_plan)
 
 
+@project_bundle_check_scope()
 def _execute_operator_graph(args, *, prepared_plan=None) -> dict[str, object]:
+    from research_pipeline.platform.audit_mode import strict_audit_scope
+    from research_pipeline.platform.lean_runtime import lean_runtime_check_scope
     _require_formal_execution_arguments(args)
     if getattr(args, "acceptance_proof", None) is not None:
         raise ValueError("acceptance-proof 已删除；研究复现请使用项目算法测试")
     _validate_run_paths(args)
     _validate_input_storage_reuse(args)
+    restore = getattr(args, "runtime_resume", False) and not getattr(args, "runtime_rerun_parent_root", None)
+    original_audit = getattr(args, "strict_audit", False)
     owner = RuntimeLiveness(args.run_root, run_id=None, phase="starting").start()
     try:
-        return _execute_owned_operator_graph(args, owner, prepared_plan=prepared_plan)
+        with strict_audit_scope(original_audit, frozen_cache_audit=original_audit if restore else None), lean_runtime_check_scope():
+            return _execute_owned_operator_graph(args, owner, prepared_plan=prepared_plan)
     finally:
         owner.stop()
 
 
 def _execute_owned_operator_graph(args, owner: RuntimeLiveness, *, prepared_plan=None) -> dict[str, object]:
+    started = perf_counter()
     if getattr(args, "execution_engine", "unified") != "unified":
         raise ValueError("execution_engine 迁移参数已删除；正式运行只使用统一 Runtime")
     _require_data_run_arguments(args)
-    minute_scope_inputs = {}
-    minute_scan_plans = {}
-    if prepared_plan is None:
-        manifest, admitted, dag, recipe, registry = load_operator_graph_research_plan(
-            target=args.plan, loaded_minute_scopes=minute_scope_inputs,
-            loaded_minute_scan_plans=minute_scan_plans,
-        )
-    else:
-        if (prepared_plan.directory != Path(args.plan).resolve()
-                or getattr(args, "runtime_resume", False)):
-            raise ValueError("同次准入对象只能用于其原计划的新运行")
-        manifest, admitted, dag, recipe, registry = (
-            prepared_plan.manifest, prepared_plan.admitted, prepared_plan.dag,
-            prepared_plan.recipe, prepared_plan.registry,
-        )
-        minute_scope_inputs.update(prepared_plan.minute_scope_inputs)
-        minute_scan_plans.update(prepared_plan.minute_scan_plans)
+    from_disk = prepared_plan is None
+    if from_disk:
+        prepared_plan = read_prepared_research_plan(target=args.plan)
+    elif prepared_plan.directory != Path(args.plan).resolve() or getattr(args, "runtime_resume", False):
+        raise ValueError("同次准入对象只能用于其原计划的新运行")
+    manifest, admitted, dag, recipe, registry = (
+        prepared_plan.manifest, prepared_plan.admitted, prepared_plan.dag,
+        prepared_plan.recipe, prepared_plan.registry,
+    )
+    minute_scope_inputs = prepared_plan.minute_scope_inputs
+    minute_scan_plans = prepared_plan.minute_scan_plans
+    plan_ready = perf_counter()
+    if args.root_seed != manifest["root_seed"] or args.clock != manifest["fixed_clock"]:
+        raise ValueError("run 的 clock/root_seed 必须与算子图计划完全一致")
     if minute_scan_plans:
         minute_root = getattr(args, "minute_data_root", None)
         if minute_root is None or Path(minute_root).resolve() != Path(manifest["minute_data_root"]).resolve():
             raise ValueError("运行 minute-data-root 必须与准入来源一致")
-        if prepared_plan is None:
+        if from_disk:
             from research_pipeline.data_plane.minute_scan import verify_minute_scan_source
             for scan_plan in minute_scan_plans.values():
                 verify_minute_scan_source(scan_plan, allowed_root=minute_root)
     _validate_frozen_input_source(args, manifest)
+    from .daily_schedule import verify_schedule_sources
+    verify_schedule_sources(recipe, args)
     implementation_manifest_hash = admitted_implementation_manifest_hash(registry)
-    if args.root_seed != manifest["root_seed"] or args.clock != manifest["fixed_clock"]:
-        raise ValueError("run 的 clock/root_seed 必须与算子图计划完全一致")
     resource_capacity = _runtime_resource_capacity(args)
     args.workers = _resolve_worker_count(
         requested=getattr(args, "workers", None),
@@ -160,8 +171,11 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness, *, prepared_plan
                 "effective_claim_level": manifest["effective_claim_level"],
             },
         )
+    inputs_ready = perf_counter()
+    runtime_projections: list[RuntimeProjection] = []
     runtime_result = _execute_unified_operator_runtime(
         args=args,
+        result_spec=prepared_plan.result_spec,
         minute_scope_inputs=minute_scope_inputs,
         minute_scan_plans=minute_scan_plans,
         manifest=manifest,
@@ -178,12 +192,17 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness, *, prepared_plan
         ),
         resource_capacity=resource_capacity,
         owner=owner,
+        projection_sink=runtime_projections.append,
     )
+    runtime_finished = perf_counter()
     result_payload = _finalize_operator_graph_result(
         args=args,
         manifest=manifest,
         admitted=admitted,
+        result_spec=prepared_plan.result_spec,
+        metric_proofs=prepared_plan.metric_proofs,
         runtime_result=runtime_result,
+        runtime_projection=runtime_projections[0] if runtime_projections else None,
         implementation_manifest_hash=implementation_manifest_hash,
         database=database,
         database_probe=database_probe,
@@ -191,6 +210,10 @@ def _execute_owned_operator_graph(args, owner: RuntimeLiveness, *, prepared_plan
         source_database_probes=source_database_probes,
         owner=owner,
     )
+    _write_json_atomic(run_root / "run-timing.json", {
+        "plan_load_seconds": plan_ready - started, "input_setup_seconds": inputs_ready - plan_ready,
+        "dag_seconds": runtime_finished - inputs_ready, "publish_seconds": perf_counter() - runtime_finished,
+    })
     completion = {
         **result_payload,
         "next_action": "运行 report 读取 Result；也可使用 compare、export-result 或 Dashboard 消费结果。",
@@ -211,6 +234,8 @@ def _finalize_operator_graph_result(
     manifest: Mapping[str, object],
     admitted: Mapping[str, object],
     runtime_result: Mapping[str, object],
+    runtime_projection: RuntimeProjection | None = None,
+    result_spec=None, metric_proofs=None,
     implementation_manifest_hash: str,
     database: Path | None,
     database_probe: tuple[int, int] | None,
@@ -260,20 +285,10 @@ def _finalize_operator_graph_result(
         claim_contract = manifest.get("claim_contract")
         if not isinstance(claim_contract, Mapping):
             raise ValueError("正式 Result 缺少 claim contract")
-        raw_result_spec = manifest.get("result_spec")
-        raw_metric_proofs = manifest.get("metric_proofs")
-        if not isinstance(raw_result_spec, Mapping) or not isinstance(
-            raw_metric_proofs, list
-        ):
-            raise ValueError("正式 run 缺少已编译 ResultSpec/metric proofs")
-        result_spec = ResultSpec.from_dict(raw_result_spec)
-        metric_proofs = tuple(
-            MetricReachabilityProof.from_dict(item)
-            for item in raw_metric_proofs
-            if isinstance(item, Mapping)
-        )
-        if len(metric_proofs) != len(raw_metric_proofs):
-            raise ValueError("正式 run metric proofs schema 无效")
+        if result_spec is None:
+            result_spec = ResultSpec.from_dict(manifest["result_spec"])
+        if metric_proofs is None:
+            metric_proofs = tuple(MetricReachabilityProof.from_dict(item) for item in manifest["metric_proofs"])
         effective_claim_level = str(
             manifest.get("effective_claim_level", claim_contract["max_claim_level"])
         )
@@ -299,7 +314,10 @@ def _finalize_operator_graph_result(
                 MetricDefinition.from_dict(item)
                 for item in manifest.get("metric_definitions", ())
             ),
+            research_cost_assumption=manifest.get("research_cost_assumption"),
             published_hook=capture_published_result,
+            runtime_record=runtime_result if runtime_projection is not None else None,
+            runtime_projection=runtime_projection,
         )
         result_payload = {
             "contract_version": "research-run-completion-v1",
@@ -364,8 +382,9 @@ def _execute_unified_operator_runtime(
     minute_data_root,
     resource_capacity,
     owner: RuntimeLiveness | None = None,
-    minute_scope_inputs=None,
+    result_spec=None, minute_scope_inputs=None,
     minute_scan_plans=None,
+    projection_sink: Callable[[RuntimeProjection], None] | None = None,
 ):
     """把现行算子实现交给唯一统一 Runtime。"""
     runtime_root = Path(args.run_root).resolve()
@@ -384,7 +403,9 @@ def _execute_unified_operator_runtime(
     }
     if len(strategy_spec_hashes) != len(registry.strategy_specs):
         raise ValueError("统一 Runtime StrategySpec ID 重复")
+    from .published_adjustment_snapshot import load_published_adjustment_snapshot
     environment = ResearchRunEnvironment(
+        load_published_snapshot=load_published_adjustment_snapshot,
         plan_root=Path(args.plan).resolve(),
         manifest={**manifest, "persist_inputs": bool(getattr(args, "persist_inputs", False))},
         admitted_plans=admitted,
@@ -401,10 +422,13 @@ def _execute_unified_operator_runtime(
         strategy_spec_hashes=strategy_spec_hashes,
         minute_scope_inputs=minute_scope_inputs or {},
         minute_scan_plans=minute_scan_plans or {},
+        research_cost_assumption=manifest.get("research_cost_assumption"),
     )
 
-    audit, dependencies = _build_runtime_audit_environment()
     resource_governor = _build_resource_governor(args, resource_capacity)
+    audit, dependencies = _build_runtime_audit_environment(
+        recipe, strict=getattr(args, "strict_audit", False), shared_resources=resource_governor is not None,
+    )
     service = RuntimeExecutionService(
         no_node_timeout=getattr(args, "no_node_timeout", False),
         no_temp_limit=getattr(args, "no_temp_limit", False),
@@ -412,13 +436,14 @@ def _execute_unified_operator_runtime(
         numerical_backend_names=tuple(sorted(dependencies)),
         resource_capacity=resource_capacity,
         resource_governor=resource_governor,
+        local_process_slots=_local_process_slots(args),
         resource_timeout_seconds=getattr(args, "resource_timeout_seconds", None),
         project_registry=(
             registry if isinstance(registry, AdmittedProjectOperatorRegistry) else None
         ),
         project_parameters_by_node=node_parameters,
         result_table_requirements_by_node=_result_table_requirements_by_node(
-            manifest
+            result_spec if result_spec is not None else ResultSpec.from_dict(manifest["result_spec"])
         ),
     )
     process_slots_by_node = operator_process_slots_by_node(
@@ -428,6 +453,7 @@ def _execute_unified_operator_runtime(
     )
     runtime_kwargs = {
         "owner": owner,
+        "projection_sink": projection_sink,
         "dag": dag,
         "environment": environment,
         "run_root": args.run_root,
@@ -501,14 +527,10 @@ def _execute_unified_operator_runtime(
 
 
 def _result_table_requirements_by_node(
-    manifest: Mapping[str, object],
+    result_spec: ResultSpec,
 ) -> dict[str, tuple[dict[str, str], ...]]:
     """把已编译 ResultSpec 投影为节点提交后的即时结构校验。"""
 
-    raw = manifest.get("result_spec")
-    if not isinstance(raw, Mapping):
-        raise ValueError("统一 Runtime 缺少已编译 ResultSpec")
-    result_spec = ResultSpec.from_dict(raw)
     grouped: dict[str, list[dict[str, str]]] = {}
     for table in result_spec.tables:
         grouped.setdefault(table.source_node_id, []).append(
@@ -525,12 +547,17 @@ def _result_table_requirements_by_node(
     }
 
 
-def _build_runtime_audit_environment(
-) -> tuple[AuditEnvironmentManifest, dict[str, str]]:
+def _build_runtime_audit_environment(recipe, *, strict=False, shared_resources=False) -> tuple[AuditEnvironmentManifest, dict[str, str]]:
+    from importlib.metadata import version
+    from research_pipeline.platform.audit_mode import strict_audit_enabled
+    strict = strict or strict_audit_enabled() or any("holdout" in node.operator_id for node in recipe.nodes)
     dependencies = {}
     for name in ("numpy", "pandas", "pyarrow", "duckdb"):
-        distribution_name, _, digest = installed_distribution_digest(name)
-        dependencies[distribution_name.lower()] = digest
+        if strict:
+            distribution_name, _, digest = installed_distribution_digest(name)
+            dependencies[distribution_name.lower()] = digest
+        else:
+            dependencies[name] = typed_canonical_hash({"name": name, "version": version(name)})
     operator_manifest = build_mainline_operator_manifest()
     build_digest = typed_canonical_hash(
         {
@@ -543,12 +570,11 @@ def _build_runtime_audit_environment(
                 ).read_bytes()
             ).hexdigest(),
             "resource_governor": hashlib.sha256(
-                (
-                    Path(__file__).resolve().parents[1]
-                    / "runtime"
-                    / "resource_governor.py"
-                ).read_bytes()
+                (Path(__file__).resolve().parents[1] / "runtime" / "resource_governor.py").read_bytes()
             ).hexdigest(),
+            **({"resource_pool": hashlib.sha256(
+                (Path(__file__).resolve().parents[1] / "runtime" / "resource_pool.py").read_bytes()
+            ).hexdigest()} if shared_resources else {}),
         }
     )
     return (
@@ -584,7 +610,7 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
     )
     resource_capacity = _runtime_resource_capacity(args)
     payload = {
-        "contract_version": "research-operator-dag-invocation-v16",
+        "contract_version": "research-operator-dag-invocation-v17",
         "plan": str(Path(args.plan).resolve()),
         "data_db": None if not args.data_db else str(Path(args.data_db).resolve()),
         "source_dbs": {
@@ -605,6 +631,7 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
         "clock": args.clock,
         "execution_engine": "unified",
         "resource_capacity": resource_capacity.to_dict(),
+        "local_process_slots": _local_process_slots(args),
         "reuse_run_roots": [
             str(Path(path).resolve())
             for path in getattr(args, "reuse_run_root", ())
@@ -635,6 +662,9 @@ def _write_or_verify_runtime_invocation(runtime_root: Path, args) -> None:
         payload["no_node_timeout"] = True
     if getattr(args, "persist_inputs", False):
         payload["persist_inputs"] = True
+    from research_pipeline.platform.audit_mode import strict_cache_identity
+    if strict_cache_identity():
+        payload["strict_audit"] = True
     document = {**payload, "invocation_hash": typed_canonical_hash(payload)}
     if target.exists():
         existing = json.loads(target.read_text(encoding="utf-8"))
@@ -657,13 +687,15 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
         "contract_version", "plan", "data_db", "source_dbs", "minute_data_root", "artifact_root", "holdout_ledger_anchor",
         "run_root", "result_store", "mode", "workers", "root_seed", "clock",
         "execution_engine", "resource_capacity",
-        "resource_governance",
+        "resource_governance", "local_process_slots",
     }
-    if version == "research-operator-dag-invocation-v16":
+    if version == "research-operator-dag-invocation-v17":
         expected.add("reuse_run_roots")
-        for optional in ("input_snapshot_manifest", "required_reused_nodes", "reuse_failed_run_root", "no_node_timeout", "no_temp_limit", "persist_inputs"):
+        for optional in ("input_snapshot_manifest", "required_reused_nodes", "reuse_failed_run_root", "no_node_timeout", "no_temp_limit", "persist_inputs", "strict_audit"):
             if optional in payload:
                 expected.add(optional)
+        if "strict_audit" in payload and payload["strict_audit"] is not True:
+            raise ValueError("冻结的严格审计声明无效")
         if "input_snapshot_manifest" in payload and (
             not payload["input_snapshot_manifest"] or payload.get("data_db") is not None or payload.get("source_dbs")
         ):
@@ -721,6 +753,11 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
         raise ValueError("正式 operator DAG resource_capacity 无效")
     capacity = ResourceCapacity(**capacity_payload)
     governance = payload.pop("resource_governance", None)
+    local_process_slots = payload.pop("local_process_slots")
+    if local_process_slots is not None and (
+        type(local_process_slots) is not int or local_process_slots <= 0 or governance is not None
+    ):
+        raise ValueError("正式 operator DAG local_process_slots 无效")
     if governance is not None and (
         not isinstance(governance, Mapping)
         or set(governance) != {
@@ -745,7 +782,7 @@ def _load_operator_invocation(run_root: str | Path) -> Namespace:
         resource_memory_bytes=capacity.memory_bytes,
         resource_cpu_slots=capacity.cpu_slots,
         resource_scratch_bytes=capacity.temp_bytes,
-        resource_process_slots=None if governance is None else governance["process_slots"],
+        resource_process_slots=local_process_slots if governance is None else governance["process_slots"],
         resource_timeout_seconds=None if governance is None else governance["timeout_seconds"],
         resource_stale_seconds=30.0 if governance is None else governance["stale_seconds"],
     )
@@ -760,16 +797,29 @@ def _require_original_research_identity(run_root: Path, manifest: Mapping[str, o
         raise ValueError("正式恢复的研究计划身份与首次运行不一致")
 
 
+def _load_invoked_operator_graph(args, *, strict: bool = False):
+    from research_pipeline.platform.audit_mode import strict_audit_scope
+
+    # 已冻结的调用决定 DAG 缓存身份，当前审计命令只决定校验强度。
+    with strict_audit_scope(strict, frozen_cache_audit=getattr(args, "strict_audit", False)):
+        return load_operator_graph_research_plan(target=args.plan)
+
+
+def verify_research_invocation(run_root: Path) -> None:
+    """按 invocation 的冻结缓存身份严格验收原始计划和运行绑定。"""
+    args = _load_operator_invocation(run_root)
+    manifest, *_ = _load_invoked_operator_graph(args, strict=True)
+    _require_original_research_identity(run_root, manifest)
+
+
 def inspect_operator_graph(run_root: str | Path) -> dict[str, object]:
     """只读取计划闭包和 run-root，按正式身份复验 checkpoint。"""
 
     args = _load_operator_invocation(run_root)
     _require_formal_execution_arguments(args)
-    _manifest, _admitted, dag, _recipe, registry = load_operator_graph_research_plan(
-        target=args.plan
-    )
+    _manifest, _admitted, dag, _recipe, registry = _load_invoked_operator_graph(args)
     _require_original_research_identity(Path(run_root).resolve(), _manifest)
-    audit, dependencies = _build_runtime_audit_environment()
+    audit, dependencies = _build_runtime_audit_environment(_recipe, strict=getattr(args, "strict_audit", False))
     service = RuntimeExecutionService(
         no_node_timeout=getattr(args, "no_node_timeout", False),
         no_temp_limit=getattr(args, "no_temp_limit", False),
@@ -897,9 +947,7 @@ def _runtime_data_bundle(
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(canonical_json(dict(payload)), encoding="utf-8")
-    os.replace(temporary, path)
+    write_canonical_json_atomic(path, payload, staging=path.with_suffix(f"{path.suffix}.tmp"))
 
 
 def _validate_run_paths(args) -> None:
@@ -1002,6 +1050,15 @@ def _require_data_run_arguments(args) -> None:
         raise ValueError(f"正式数据研究缺少必需参数: {', '.join(missing)}")
 
 
+def _local_process_slots(args) -> int | None:
+    if getattr(args, "resource_state_dir", None):
+        return None
+    slots = getattr(args, "resource_process_slots", None)
+    if slots is None and ExecutionMode(getattr(args, "mode", ExecutionMode.DETERMINISTIC_SERIAL.value)) == ExecutionMode.DETERMINISTIC_SERIAL:
+        return DEFAULT_RUNTIME_LOCAL_PROCESS_SLOTS
+    return slots
+
+
 def _validate_resource_governance_arguments(
     args,
     *,
@@ -1009,14 +1066,12 @@ def _validate_resource_governance_arguments(
 ) -> ResourceCapacity:
     capacity = _runtime_resource_capacity(args)
     state_dir = getattr(args, "resource_state_dir", None)
-    if state_dir is None:
-        if any(
-            getattr(args, name, None) is not None
-            for name in ("resource_process_slots", "resource_timeout_seconds")
-        ):
-            raise ValueError(
-                "resource-process-slots/timeout 只能与 --resource-state-dir 一起提供"
-            )
+    if not state_dir:
+        if getattr(args, "resource_timeout_seconds", None) is not None:
+            raise ValueError("resource-timeout-seconds 只能与 --resource-state-dir 一起提供")
+        slots = _local_process_slots(args)
+        if slots is not None and (type(slots) is not int or slots < required_process_slots):
+            raise ValueError("resource-process-slots 小于已准入算子的真实进程槽要求")
         return capacity
     shared_values = (
         getattr(args, "resource_process_slots", None),
@@ -1045,6 +1100,8 @@ def _build_resource_governor(
 ) -> ResourceGovernor | None:
     if not getattr(args, "resource_state_dir", None):
         return None
+    from research_pipeline.runtime.resource_pool import ResourceGovernor, ResourceGovernorConfig
+
     config = ResourceGovernorConfig(
         Path(args.resource_state_dir),
         ResourceVector(

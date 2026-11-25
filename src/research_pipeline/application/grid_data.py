@@ -159,16 +159,18 @@ def _materialize_or_load_data(
     }
     with ExitStack() as source_connections:
         connected_paths: set[Path] = set()
+        plan_hashes = {}
         for request_id, plan in sorted(columnar_plans.items()):
+            plan_hashes[request_id] = plan_hash = plan.plan_hash
             partial = partials.get(request_id)
-            if partial is not None and partial["admitted_plan_hash"] == plan.plan_hash:
+            if partial is not None and partial["admitted_plan_hash"] == plan_hash:
                 try:
                     reference = DatasetArtifactRef.from_dict(partial["reference"])
                     from research_pipeline.data_plane.direct_sources import DirectDatasetRef
                     if isinstance(reference, DirectDatasetRef) == persist_inputs:
                         raise SnapshotIntegrityError("partial 输入保存模式与当前请求不同")
                     dataset = resolver.resolve(reference)
-                    if dataset.manifest.get("admitted_plan_hash") != plan.plan_hash:
+                    if dataset.manifest.get("admitted_plan_hash") != plan_hash:
                         raise SnapshotIntegrityError(
                             "partial DatasetArtifactRef 与当前 plan 不一致"
                         )
@@ -203,10 +205,10 @@ def _materialize_or_load_data(
                     cause=ValueError("Catalog source_profile 未绑定只读数据库"),
                 )
             try:
-                # 只在实际取数时保活源实例；完整 partial 恢复不打开数据库。
+                # 同一批普通请求共用只读源实例，覆盖来源描述和交付验证。
                 # 因子源仍由单请求租约管理连接，不能在租约外延长其生命周期。
                 source_path = source_database.resolve()
-                if persist_inputs and source_path not in factor_source_paths:
+                if source_path not in factor_source_paths:
                     if source_path not in connected_paths:
                         source_connections.enter_context(
                             duckdb.connect(str(source_path), read_only=True)
@@ -235,28 +237,25 @@ def _materialize_or_load_data(
             completed_request_ids.append(request_id)
             partials[request_id] = {
                 "request_id": request_id,
-                "admitted_plan_hash": plan.plan_hash,
+                "admitted_plan_hash": plan_hash,
                 "reference": dict(result["reference"]),
                 "database_fingerprint": dict(result["database_fingerprint_after"]),
             }
             _save_request_partial_index(partial_index_path, partials)
-    from research_pipeline.data_plane.research_data_bundle import (
-        build_research_data_bundle,
-    )
+        from research_pipeline.data_plane.research_data_bundle import (
+            build_research_data_bundle,
+        )
 
-    payload = build_research_data_bundle(
-        admitted_plan_hashes={
-            request_id: plan.plan_hash
-            for request_id, plan in sorted(columnar_plans.items())
-        },
-        references=references,
-        database_fingerprints=fingerprints,
-    )
-    verified_manifests = _verify_data_bundle(
-        payload,
-        columnar_plans,
-        artifact_root,
-    )
+        payload = build_research_data_bundle(
+            admitted_plan_hashes=plan_hashes,
+            references=references,
+            database_fingerprints=fingerprints,
+        )
+        verified_manifests = _verify_data_bundle(
+            payload,
+            columnar_plans,
+            artifact_root,
+        )
     if verified_manifests_out is not None:
         verified_manifests_out.clear()
         verified_manifests_out.update(verified_manifests)

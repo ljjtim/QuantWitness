@@ -83,6 +83,8 @@ def execute_workspace(args, *, documents=None, allocation_handler=None) -> dict[
     """逐阶段委托主链服务，返回阶段事实及当前结果位置。"""
     if getattr(args, "execution_id", None):
         return _continue_workspace(args)
+    if not getattr(args, "catalog_lock", None):
+        raise WorkspaceError("workspace execute 新运行必须提供 --catalog-lock")
     stages = {name: "not_run" for name in ("prepare", "allocate", "admit", "run", "report")}
     outcome: dict[str, object] = {
         "stages": stages,
@@ -137,6 +139,7 @@ def execute_workspace(args, *, documents=None, allocation_handler=None) -> dict[
             args, command="package", package_command="admit", package=package_root,
             output=str(execution_root / "plan" / "admitted"),
         ), package=package)
+        del package, documents
         resource_summary = research_package._declared_resource_summary(prepared, prepared.registry)
         resource_facts = {"checks": {"resources": resource_summary}}
         outcome["resource_advice"] = _resource_advice(resource_facts, args)
@@ -337,11 +340,18 @@ def _continue_workspace(args, *, initial_outcome=None):
         outcome["failed_stage"] = stage
         outcome["stages"][stage] = "fail"
         outcome.update(getattr(exc, "failure_payload", {}) or {})
-        outcome.update(command_suggestion(
-            "python", "-m", "research_pipeline", "workspace", "execute",
-            "--workspace", str(args.workspace), "--execution-id", args.execution_id,
-            "--catalog-lock", str(args.catalog_lock), "--json",
-        ))
+        if stage == "report" and outcome.get("result_directory") and outcome.get("result_store"):
+            outcome.update(_continuation(outcome, args, execution_root))
+            outcome["next_action"] = "保留本次 Result，检查报告诊断或输出路径；不要重新运行研究。"
+        else:
+            argv = [
+                "python", "-m", "research_pipeline", "workspace", "execute",
+                "--workspace", str(args.workspace), "--execution-id", args.execution_id,
+            ]
+            if getattr(args, "catalog_lock", None):
+                argv.extend(("--catalog-lock", str(args.catalog_lock)))
+            argv.append("--json")
+            outcome.update(command_suggestion(*argv))
         exc.failure_payload = outcome
         raise
 
@@ -359,6 +369,7 @@ def _finish_execution(args, outcome, execution_root, *, continuing=False):
             report = result_delivery._execute(_arguments(
                 args, command="report", result=outcome["result_directory"],
                 result_store=outcome["result_store"], output=str(report_path), format="markdown",
+                package=None, source_archive_root=None, right_package=None, right_source_archive_root=None,
             ))
             outcome["report_path"] = report["output"]
             if "claim_level" in report:
@@ -385,7 +396,9 @@ def _resource_forecast(lint, args):
         "memory_bytes": capacity.memory_bytes,
         "temp_bytes": capacity.temp_bytes,
         "cpu_slots": capacity.cpu_slots,
-        "process_slots": getattr(args, "resource_process_slots", None),
+        "process_slots": (getattr(args, "resource_process_slots", None)
+                          if getattr(args, "resource_state_dir", None)
+                          else research_run._local_process_slots(args)),
     }
     shortages = []
     for node in nodes:
